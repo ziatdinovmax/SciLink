@@ -142,6 +142,34 @@ export interface TableData {
   truncated: boolean;
 }
 
+export interface UploadResult {
+  paths: string[];
+  series_dir: string | null;
+  global_metadata: string | null;
+  category: string;
+}
+
+/** One file of a folder upload with its path relative to the picked
+ * folder's parent (`<folder>/<sub>/<name>`, as `webkitRelativePath`). */
+export interface FolderEntry {
+  file: File;
+  relPath: string;
+}
+
+export interface FolderUploadResult extends UploadResult {
+  root: string; // absolute path of the saved top-level folder
+  dirs: { path: string; n_files: number }[]; // root + every subfolder that got a file
+  skipped: { path: string; reason: string }[];
+}
+
+export interface FolderCheck {
+  path: string;
+  is_dir: boolean;
+  data_files: string[];
+  json_files: string[];
+  subdirs: { path: string; n_files: number }[];
+}
+
 export interface CreateSessionBody {
   mode: string;
   model: string;
@@ -227,12 +255,24 @@ export const api = {
       body: form,
     });
     if (!r.ok) throw new Error((await r.json()).detail ?? r.statusText);
-    return r.json() as Promise<{
-      paths: string[];
-      series_dir: string | null;
-      global_metadata: string | null;
-      category: string;
-    }>;
+    return r.json() as Promise<UploadResult>;
+  },
+
+  // Folder upload: the relative paths ride in their own JSON field (browsers
+  // may strip directory parts from multipart filenames); the server keeps
+  // the layout under the category root and skips files the category does
+  // not accept instead of rejecting the whole folder.
+  uploadFolder: async (id: string, category: string, entries: FolderEntry[]) => {
+    const form = new FormData();
+    form.append("category", category);
+    for (const e of entries) form.append("files", e.file, e.file.name);
+    form.append("paths", JSON.stringify(entries.map((e) => e.relPath)));
+    const r = await fetch(`${BASE}/sessions/${id}/uploads`, {
+      method: "POST",
+      body: form,
+    });
+    if (!r.ok) throw new Error((await r.json()).detail ?? r.statusText);
+    return r.json() as Promise<FolderUploadResult>;
   },
 
   // `v` (a file mtime) is a cache-busting version token: a figure rewritten
@@ -260,14 +300,7 @@ export const api = {
     `${BASE}/sessions/${id}/zip?path=${encodeURIComponent(relPath)}`,
 
   checkFolders: (id: string, paths: string[]) =>
-    req<{
-      results: {
-        path: string;
-        is_dir: boolean;
-        data_files: string[];
-        json_files: string[];
-      }[];
-    }>(`/sessions/${id}/folders`, json({ paths })),
+    req<{ results: FolderCheck[] }>(`/sessions/${id}/folders`, json({ paths })),
 
   setPlanDirs: (
     id: string,

@@ -762,3 +762,123 @@ def test_stop_unblocks_pending_question(client, tmp_path):
     assert session.status == "idle"
     assert session.chat_messages[-1]["content"] == "Analysis stopped by user."
     session.turn.done.wait(5)
+
+
+# ── folder uploads (layout-preserving) ───────────────────────────
+
+def test_save_folder_upload_preserves_layout_and_skips_strays(tmp_path):
+    r = files_mod.save_uploads(str(tmp_path), "meta", [
+        ("run/README.md", b"#"),
+        ("run/sampleA/scan.npy", b"\x93NUMPY"),
+        ("run/sampleA/scan.json", b"{}"),
+        ("run/sampleB/deep/spec.csv", b"x,y"),
+        ("run/sampleB/vendor.bin", b"\x00"),      # unsupported → skipped
+        ("run/.DS_Store", b"\x00"),               # hidden → skipped
+    ], preserve_paths=True)
+    root = tmp_path / "uploads" / "run"
+    assert r["root"] == str(root)
+    assert (root / "sampleA" / "scan.npy").is_file()
+    assert (root / "sampleB" / "deep" / "spec.csv").is_file()
+    assert not (root / "sampleB" / "vendor.bin").exists()
+    assert not (root / ".DS_Store").exists()
+    assert {s["path"] for s in r["skipped"]} == {"run/sampleB/vendor.bin", "run/.DS_Store"}
+    # dirs: root first, then every subfolder that received a file (top-down)
+    assert [Path(d["path"]).relative_to(root).as_posix() for d in r["dirs"]] == \
+        [".", "sampleA", "sampleB/deep"]
+    assert [d["n_files"] for d in r["dirs"]] == [1, 2, 1]
+    assert r["series_dir"] is None                # nested → no single series
+    assert len(r["paths"]) == 4
+
+
+def test_save_folder_upload_flat_folder_is_a_series(tmp_path):
+    r = files_mod.save_uploads(str(tmp_path), "data", [
+        ("series/s1.csv", b"1"), ("series/s2.csv", b"2"),
+        ("series/s1.json", b"{}"),                # sidecar rides along
+    ], preserve_paths=True)
+    assert r["series_dir"] == str(tmp_path / "uploads" / "series")
+    assert (tmp_path / "uploads" / "series" / "s1.json").is_file()
+    # a single-file "folder" is not a series
+    one = files_mod.save_uploads(str(tmp_path), "data", [("solo/a.csv", b"1")],
+                                 preserve_paths=True)
+    assert one["series_dir"] is None and one["paths"] == [
+        str(tmp_path / "uploads" / "solo" / "a.csv")]
+    # plan categories keep their roots
+    k = files_mod.save_uploads(str(tmp_path), "knowledge",
+                               [("papers/2024/a.pdf", b"%")], preserve_paths=True)
+    assert k["root"] == str(tmp_path / "knowledge" / "papers")
+    d = files_mod.save_uploads(str(tmp_path), "planning_data",
+                               [("runs/r.csv", b"1")], preserve_paths=True)
+    assert d["root"] == str(tmp_path / "data" / "runs")
+
+
+def test_save_folder_upload_rejects_escapes_and_bad_shapes(tmp_path):
+    with pytest.raises(files_mod.UploadError):
+        files_mod.save_uploads(str(tmp_path), "meta", [("run/../../x.csv", b"")],
+                               preserve_paths=True)
+    with pytest.raises(files_mod.UploadError):
+        files_mod.save_uploads(str(tmp_path), "meta", [("/abs/x.csv", b"")],
+                               preserve_paths=True)
+    with pytest.raises(files_mod.UploadError):          # two top-level folders
+        files_mod.save_uploads(str(tmp_path), "meta",
+                               [("a/x.csv", b""), ("b/y.csv", b"")],
+                               preserve_paths=True)
+    with pytest.raises(files_mod.UploadError):          # bare file, no folder
+        files_mod.save_uploads(str(tmp_path), "meta", [("x.csv", b"")],
+                               preserve_paths=True)
+    with pytest.raises(files_mod.UploadError, match="No accepted"):
+        files_mod.save_uploads(str(tmp_path), "meta", [("run/x.exe", b"")],
+                               preserve_paths=True)
+    with pytest.raises(files_mod.UploadError, match="limit"):
+        files_mod.save_uploads(
+            str(tmp_path), "meta",
+            [(f"run/f{i}.csv", b"") for i in range(files_mod.MAX_FOLDER_FILES + 1)],
+            preserve_paths=True)
+    assert not (tmp_path / "uploads").exists()          # nothing leaked
+    # the flat path is untouched by the new flag
+    with pytest.raises(files_mod.UploadError):
+        files_mod.save_uploads(str(tmp_path), "data", [("evil.exe", b"")])
+
+
+def test_upload_endpoint_folder_paths_field(client, tmp_path):
+    _, sdir = _fake_session(client, tmp_path)
+    url = f"/api/v1/sessions/{sdir.name}/uploads"
+    r = client.post(url, data={
+        "category": "meta",
+        "paths": json.dumps(["drop/a/x.csv", "drop/b/y.txt", "drop/skip.bin"]),
+    }, files=[("files", ("x.csv", b"1")), ("files", ("y.txt", b"2")),
+              ("files", ("skip.bin", b"3"))])
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["root"] == str(sdir / "uploads" / "drop")
+    assert (sdir / "uploads" / "drop" / "a" / "x.csv").read_bytes() == b"1"
+    assert [Path(d["path"]).name for d in body["dirs"]] == ["drop", "a", "b"]
+    assert body["skipped"][0]["path"] == "drop/skip.bin"
+    # misaligned / malformed paths → 400, nothing written
+    r = client.post(url, data={"category": "meta", "paths": json.dumps(["only/one"])},
+                    files=[("files", ("x.csv", b"1")), ("files", ("y.csv", b"2"))])
+    assert r.status_code == 400
+    r = client.post(url, data={"category": "meta", "paths": "not json"},
+                    files=[("files", ("x.csv", b"1"))])
+    assert r.status_code == 400
+    # plain upload (no paths) behaves exactly as before
+    r = client.post(url, data={"category": "meta"},
+                    files=[("files", ("z.csv", b"1"))])
+    assert r.json()["paths"] == [str(sdir / "uploads" / "z.csv")]
+    assert "root" not in r.json()
+
+
+def test_check_folders_reports_subdirs(client, tmp_path):
+    _, sdir = _fake_session(client, tmp_path)
+    folder = tmp_path / "nested"
+    (folder / "s2").mkdir(parents=True)
+    (folder / "s10").mkdir()
+    (folder / ".git").mkdir()
+    (folder / "s2" / "a.csv").write_text("x")
+    (folder / "s2" / "b.csv").write_text("x")
+    (folder / "s10" / "c.csv").write_text("x")
+    r = client.post(f"/api/v1/sessions/{sdir.name}/folders",
+                    json={"paths": [str(folder)]})
+    good = r.json()["results"][0]
+    assert good["data_files"] == []                     # top level unchanged
+    assert [(Path(d["path"]).name, d["n_files"]) for d in good["subdirs"]] == \
+        [("s2", 2), ("s10", 1)]                          # natural order, .git skipped

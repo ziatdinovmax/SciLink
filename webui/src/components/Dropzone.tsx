@@ -1,22 +1,33 @@
 import { useRef, useState } from "react";
+import type { FolderEntry } from "../api";
+import { groupDirectoryInput, splitDrop } from "../folderfiles";
 
 /** Click-or-drop file picker that uploads immediately via the callback and
- * shows the accumulated file names as chips. */
+ * shows the accumulated file names as chips.
+ *
+ * With `onFolder` set, the zone also takes folders: a dropped directory is
+ * walked recursively (subfolders included) and a "choose a folder" link
+ * opens the browser's directory picker. Each top-level folder goes to
+ * `onFolder` as one batch; loose files keep going to `onFiles`. */
 export function Dropzone({
   label,
   accept,
   multiple = true,
   onFiles,
+  onFolder,
 }: {
   label: string;
   accept?: string;
   multiple?: boolean;
   onFiles: (files: File[]) => Promise<string[]>; // returns saved names
+  onFolder?: (name: string, entries: FolderEntry[]) => Promise<string[]>; // returns chip labels
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const dirRef = useRef<HTMLInputElement>(null);
   const [drag, setDrag] = useState(false);
   const [names, setNames] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   const handle = async (list: FileList | null) => {
     if (!list || list.length === 0) return;
@@ -27,6 +38,36 @@ export function Dropzone({
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
+  };
+
+  const handleFolders = async (folders: Map<string, FolderEntry[]>) => {
+    if (!onFolder || folders.size === 0) return;
+    setError(null);
+    setBusy(true);
+    try {
+      for (const [name, entries] of folders) {
+        const saved = await onFolder(name, entries);
+        setNames((prev) => [...prev, ...saved]);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onDrop = async (dt: DataTransfer) => {
+    if (!onFolder) {
+      void handle(dt.files);
+      return;
+    }
+    const split = await splitDrop(dt);
+    if (split.files.length) {
+      const list = new DataTransfer();
+      for (const f of split.files) list.items.add(f);
+      await handle(list.files);
+    }
+    await handleFolders(split.folders);
   };
 
   return (
@@ -42,10 +83,10 @@ export function Dropzone({
         onDrop={(e) => {
           e.preventDefault();
           setDrag(false);
-          void handle(e.dataTransfer.files);
+          void onDrop(e.dataTransfer);
         }}
       >
-        {label}
+        {busy ? "Uploading folder…" : label}
         <input
           ref={inputRef}
           type="file"
@@ -56,6 +97,20 @@ export function Dropzone({
             e.target.value = "";
           }}
         />
+        {onFolder && (
+          <input
+            ref={dirRef}
+            type="file"
+            // Non-standard attribute (all major browsers honor it); not in
+            // React's typed props, hence the spread.
+            {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+            multiple
+            onChange={(e) => {
+              void handleFolders(groupDirectoryInput(e.target.files));
+              e.target.value = "";
+            }}
+          />
+        )}
         {names.length > 0 && (
           <div className="file-chips">
             {names.map((n, i) => (
@@ -66,6 +121,16 @@ export function Dropzone({
           </div>
         )}
       </div>
+      {onFolder && (
+        <button
+          type="button"
+          className="link-btn folder-pick"
+          disabled={busy}
+          onClick={() => dirRef.current?.click()}
+        >
+          or choose a folder (subfolders included)
+        </button>
+      )}
       {error && <p className="caption" style={{ color: "var(--danger)" }}>{error}</p>}
     </div>
   );

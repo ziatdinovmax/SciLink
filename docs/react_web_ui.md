@@ -59,6 +59,17 @@ authenticating reverse proxy.
   validated server-side and enumerated into the dispatch prompt, with the
   plan agent's resource dirs repointed at the stable folders so KB indexes
   are reused across sessions.
+- **Folder uploads** (beyond Streamlit): every dropzone takes a dropped
+  directory (walked recursively via the FileSystem entry API) or a
+  "choose a folder" picker, and the chat input has a folder button beside
+  the paperclip. The layout is preserved under the category root
+  (`uploads/<folder>/<sub>/…`, `knowledge/<folder>/…`), files the category
+  does not accept are skipped and reported rather than failing the drop,
+  hidden entries are dropped, and a 2000-file cap applies. A flat folder
+  is a series (same as a multi-file drop); a nested one is described to
+  the agent subfolder by subfolder with absolute paths, since the agents'
+  own directory listings are one level deep. The meta's `inspect_uploads`
+  now reports subfolders and takes `recursive=true`.
 - **Sessions**: the server holds many live sessions; the sidebar lists the
   others with one-click switching, Detach leaves a session running while
   you start or join another, and the welcome screen offers reattach when
@@ -127,8 +138,8 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
 | GET | `/sessions/{id}/events` | SSE: `log`, `status`, `question`, `question_cleared`, `assistant_message`, `session_named`, `files_changed`, `analysis_image`, `error` |
 | POST | `/sessions/{id}/feedback` | answer the parked HITL question |
 | POST | `/sessions/{id}/stop` | stop the running turn |
-| POST | `/sessions/{id}/uploads` | multipart, `category` = data/metadata/knowledge/code/planning_data/meta |
-| POST | `/sessions/{id}/folders` | validate pasted local folder paths + enumerate tabular contents |
+| POST | `/sessions/{id}/uploads` | multipart, `category` = data/metadata/knowledge/code/planning_data/meta; optional `paths` (JSON list of relative paths, one per file) makes it a layout-preserving folder upload |
+| POST | `/sessions/{id}/folders` | validate pasted local folder paths + enumerate tabular contents and immediate subfolders |
 | POST | `/sessions/{id}/plan_dirs` | repoint the plan agent's knowledge/code/data dirs at stable folders |
 | GET | `/sessions/{id}/files?path=` | serve a session file (traversal-fenced) |
 | GET | `/sessions/{id}/tree` | recursive listing with sizes/mtimes and per-file "new" flags |

@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { api } from "../api";
+import { api, type FolderUploadResult } from "../api";
 import { Dropzone } from "./Dropzone";
+import { describeFolder, folderPromptLines } from "../folderfiles";
 
 /** Pre-chat start forms — ports of chat_uploads.py's three hero zones,
  * composing the same dispatch prompts from the server-side saved paths.
@@ -44,11 +45,21 @@ function AnalyzeHero({
   const [isSeries, setIsSeries] = useState(false);
   const [metaPath, setMetaPath] = useState<string | null>(null);
   const [hasSidecars, setHasSidecars] = useState(false);
+  // A NESTED data folder: no single series dir, so the prompt spells out
+  // the subfolders (the analyze agent lists a directory one level deep).
+  const [dataFolder, setDataFolder] = useState<FolderUploadResult | null>(null);
 
   const start = () => {
     // Port of chat_uploads.py:83-100.
     let prompt: string;
-    if (dataPath && metaPath) {
+    if (dataFolder) {
+      prompt =
+        `I uploaded a data folder with subfolders.\n${folderPromptLines(dataFolder)}\n\n` +
+        "Examine the data: treat each subfolder as its own dataset (a " +
+        "series when it holds several files) unless the contents show they " +
+        "belong together" +
+        (metaPath ? `. Metadata is at \`${metaPath}\`.` : ".");
+    } else if (dataPath && metaPath) {
       prompt =
         `I uploaded a data file at \`${dataPath}\` and a metadata file at ` +
         `\`${metaPath}\`. Please examine the data and load the metadata.`;
@@ -78,6 +89,25 @@ function AnalyzeHero({
             setIsSeries(Boolean(r.series_dir));
             return files.map((f) => f.name);
           }}
+          onFolder={async (_name, entries) => {
+            const r = await api.uploadFolder(sessionId, "data", entries);
+            if (r.series_dir) {
+              // Flat folder = a series, exactly like a multi-file drop.
+              setDataPath(r.series_dir);
+              setIsSeries(true);
+              setDataFolder(null);
+              if (r.paths.some((p) => p.endsWith(".json"))) setHasSidecars(true);
+            } else if (r.dirs.length > 1) {
+              setDataPath(r.root);
+              setIsSeries(false);
+              setDataFolder(r);
+            } else {
+              setDataPath(r.paths[0]);
+              setIsSeries(false);
+              setDataFolder(null);
+            }
+            return [describeFolder(r.root, r.paths.length, r.dirs.length)];
+          }}
         />
         <Dropzone
           label="Metadata (optional)"
@@ -96,6 +126,12 @@ function AnalyzeHero({
       {isSeries && (
         <p className="caption">
           Multiple files were saved as a series and will be analyzed together.
+        </p>
+      )}
+      {dataFolder && (
+        <p className="caption">
+          Nested folder: {dataFolder.dirs.length - 1} subfolder(s) will be
+          described to the agent so each can be examined.
         </p>
       )}
       <button
@@ -124,6 +160,10 @@ function PlanHero({
   const [kFolder, setKFolder] = useState("");
   const [cFolder, setCFolder] = useState("");
   const [dFolder, setDFolder] = useState("");
+  // Uploaded folders (saved under the session) — handled like pasted folder
+  // paths from here on: validated + enumerated server-side, plan dirs
+  // repointed, subfolders described in the prompt.
+  const [uploadedFolders, setUploadedFolders] = useState<[string, string][]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
 
   const canStart =
@@ -131,6 +171,7 @@ function PlanHero({
     knowledge.length > 0 ||
     code.length > 0 ||
     data.length > 0 ||
+    uploadedFolders.length > 0 ||
     Boolean(kFolder.trim() || cFolder.trim() || dFolder.trim());
 
   const start = async () => {
@@ -143,12 +184,22 @@ function PlanHero({
 
     // Validate pasted folders server-side; warn on the missing ones and
     // proceed with the valid ones (Streamlit behavior).
-    const wanted = [
-      ["knowledge", kFolder.trim()],
-      ["code", cFolder.trim()],
-      ["data", dFolder.trim()],
-    ].filter(([, p]) => p) as [string, string][];
+    // Pasted paths first (they win the plan-dir repoint: stable external
+    // folders let KB indexes be reused), then uploaded folders.
+    const wanted = (
+      [
+        ["knowledge", kFolder.trim()],
+        ["code", cFolder.trim()],
+        ["data", dFolder.trim()],
+      ] as [string, string][]
+    )
+      .filter(([, p]) => p)
+      .concat(uploadedFolders);
+    // First valid folder per label (for the plan-dir repoint) + all of them
+    // (for the prompt).
     const valid: Record<string, string> = {};
+    const validAll: Record<string, string[]> = {};
+    const subdirNote: Record<string, string> = {};
     let dataInfo: { data_files: string[]; json_files: string[] } | null = null;
     if (wanted.length) {
       try {
@@ -158,8 +209,19 @@ function PlanHero({
           const [label, p] = wanted[i];
           const r = res.results[i];
           if (r?.is_dir) {
-            valid[label] = p;
-            if (label === "data") dataInfo = r;
+            if (!valid[label]) valid[label] = p;
+            validAll[label] = [...(validAll[label] ?? []), p];
+            if (label === "data" && !dataInfo) dataInfo = r;
+            if (r.subdirs?.length) {
+              subdirNote[p] =
+                ` (has ${r.subdirs.length} subfolder(s): ` +
+                r.subdirs
+                  .slice(0, 20)
+                  .map((d) => `\`${d.path}\` [${d.n_files}]`)
+                  .join(", ") +
+                (r.subdirs.length > 20 ? ", …" : "") +
+                ")";
+            }
           } else warn.push(`Folder not found: ${p}`);
         }
         setWarnings(warn);
@@ -176,8 +238,17 @@ function PlanHero({
         }
       }
     }
-    if (valid.knowledge) parts.push(`Knowledge folder: \`${valid.knowledge}\``);
-    if (valid.code) parts.push(`Code folder: \`${valid.code}\``);
+    const withSubs = (p: string) => `\`${p}\`${subdirNote[p] ?? ""}`;
+    if (validAll.knowledge)
+      parts.push(
+        `Knowledge folder${validAll.knowledge.length > 1 ? "s" : ""}: ` +
+          validAll.knowledge.map(withSubs).join(", "),
+      );
+    if (validAll.code)
+      parts.push(
+        `Code folder${validAll.code.length > 1 ? "s" : ""}: ` +
+          validAll.code.map(withSubs).join(", "),
+      );
     if (data.length) {
       const dataPaths = data.filter((p) => !p.endsWith(".json"));
       const jsonPaths = data.filter((p) => p.endsWith(".json"));
@@ -223,9 +294,13 @@ function PlanHero({
       } else if (data_files.length === 1) {
         parts.push(`Data file: \`${data_files[0]}\``);
       } else {
-        parts.push(`Data folder: \`${valid.data}\``);
+        parts.push(`Data folder: ${withSubs(valid.data)}`);
       }
+      if (subdirNote[valid.data] && data_files.length)
+        parts.push(`The data folder is nested${subdirNote[valid.data]}`);
     }
+    for (const extra of (validAll.data ?? []).slice(1))
+      parts.push(`Additional data folder: ${withSubs(extra)}`);
     onStart(parts.length ? parts.join("\n\n") : "Please help me plan my experiment.");
   };
 
@@ -235,6 +310,16 @@ function PlanHero({
       const r = await api.upload(sessionId, category, files);
       setter((prev) => [...prev, ...r.paths]);
       return files.map((f) => f.name);
+    };
+
+  // Folder uploads land under the session and then flow through the same
+  // pasted-folder path (validate → enumerate → repoint → prompt).
+  const folderUploader =
+    (category: string, label: "knowledge" | "code" | "data") =>
+    async (_name: string, entries: Parameters<typeof api.uploadFolder>[2]) => {
+      const r = await api.uploadFolder(sessionId, category, entries);
+      setUploadedFolders((prev) => [...prev, [label, r.root]]);
+      return [describeFolder(r.root, r.paths.length, r.dirs.length)];
     };
 
   return (
@@ -254,7 +339,8 @@ function PlanHero({
         <summary>Knowledge (papers, images)</summary>
         <div className="card-body">
           <Dropzone label="Drop files here or click to browse" accept={KNOWLEDGE_ACCEPT}
-            onFiles={uploader("knowledge", setKnowledge)} />
+            onFiles={uploader("knowledge", setKnowledge)}
+            onFolder={folderUploader("knowledge", "knowledge")} />
           <input
             type="text"
             className="folder-input"
@@ -268,7 +354,8 @@ function PlanHero({
         <summary>Code (scripts, API docs)</summary>
         <div className="card-body">
           <Dropzone label="Drop files here or click to browse" accept={CODE_ACCEPT}
-            onFiles={uploader("code", setCode)} />
+            onFiles={uploader("code", setCode)}
+            onFolder={folderUploader("code", "code")} />
           <input
             type="text"
             className="folder-input"
@@ -282,7 +369,8 @@ function PlanHero({
         <summary>Data (experimental results)</summary>
         <div className="card-body">
           <Dropzone label="Drop files here or click to browse" accept={PLANNING_DATA_ACCEPT}
-            onFiles={uploader("planning_data", setData)} />
+            onFiles={uploader("planning_data", setData)}
+            onFolder={folderUploader("planning_data", "data")} />
           <input
             type="text"
             className="folder-input"
@@ -321,10 +409,14 @@ function MetaHero({
 }) {
   const [goal, setGoal] = useState("");
   const [uploads, setUploads] = useState<string[]>([]);
+  const [uploadedFolders, setUploadedFolders] = useState<FolderUploadResult[]>([]);
   const [folders, setFolders] = useState("");
   const [warnings, setWarnings] = useState<string[]>([]);
   const canStart =
-    goal.trim().length > 0 || uploads.length > 0 || folders.trim().length > 0;
+    goal.trim().length > 0 ||
+    uploads.length > 0 ||
+    uploadedFolders.length > 0 ||
+    folders.trim().length > 0;
 
   const start = async () => {
     // Port of chat_uploads.py:339-380 (comma-separated folder paths).
@@ -338,6 +430,21 @@ function MetaHero({
           "the right specialist.",
       );
     }
+    if (uploadedFolders.length) {
+      const nested = uploadedFolders.some((r) => r.dirs.length > 1);
+      const listed = uploadedFolders.map((r) => folderPromptLines(r)).join("\n\n");
+      parts.push(
+        `I uploaded ${uploadedFolders.length} folder(s):\n\n${listed}\n\n` +
+          "Inspect the folder" +
+          (uploadedFolders.length > 1 ? "s" : "") +
+          (nested ? " (recursively — it has subfolders)" : "") +
+          " to determine what the files are, then route them to the right " +
+          "specialist" +
+          (nested
+            ? "; treat each subfolder as its own dataset unless the contents show they belong together."
+            : "."),
+      );
+    }
     const candidates = folders
       .split(",")
       .map((p) => p.trim())
@@ -345,17 +452,24 @@ function MetaHero({
     if (candidates.length) {
       try {
         const res = await api.checkFolders(sessionId, candidates);
-        const valid = res.results.filter((r) => r.is_dir).map((r) => r.path);
+        const validRes = res.results.filter((r) => r.is_dir);
+        const valid = validRes.map((r) => r.path);
         setWarnings(
           res.results.filter((r) => !r.is_dir).map((r) => `Folder not found: ${r.path}`),
         );
+        // Say when a pasted folder is nested: the agent's listing is one
+        // level deep, so it must know to inspect recursively.
+        const subs = (r: (typeof validRes)[number]) =>
+          r.subdirs?.length
+            ? ` (nested: ${r.subdirs.length} subfolder(s) — inspect recursively)`
+            : "";
         if (valid.length === 1) {
           parts.push(
-            `Additional resources are in the folder \`${valid[0]}\` — ` +
+            `Additional resources are in the folder \`${valid[0]}\`${subs(validRes[0])} — ` +
               "inspect it as well.",
           );
         } else if (valid.length > 1) {
-          const listed = valid.map((p) => `  - \`${p}\``).join("\n");
+          const listed = validRes.map((r) => `  - \`${r.path}\`${subs(r)}`).join("\n");
           parts.push(
             `Additional resources are in ${valid.length} folders — ` +
               `inspect them as well:\n${listed}`,
@@ -393,6 +507,11 @@ function MetaHero({
               const r = await api.upload(sessionId, "meta", files);
               setUploads((prev) => [...prev, ...r.paths]);
               return files.map((f) => f.name);
+            }}
+            onFolder={async (_name, entries) => {
+              const r = await api.uploadFolder(sessionId, "meta", entries);
+              setUploadedFolders((prev) => [...prev, r]);
+              return [describeFolder(r.root, r.paths.length, r.dirs.length)];
             }}
           />
           <input

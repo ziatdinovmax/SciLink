@@ -12,10 +12,11 @@ refactor".
 """
 
 import json
+import os
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, List
 
 
 def _handoff(text: str) -> str:
@@ -88,6 +89,74 @@ def _probe_delimited_text(path: Path, max_rows: int = 200):
             return {"n_columns": ncols, "sampled_rows": int(df.shape[0]),
                     "dtypes": {str(i): "float64" for i in range(ncols)}}
     return None
+
+
+_SUBDIR_LIST_MAX = 50       # immediate subfolders reported per listing
+_WALK_FILES_MAX = 2000      # recursive walk stops collecting past this
+
+
+def _visible_files(directory: Path) -> List[Path]:
+    """Immediate non-hidden files of ``directory``, name-sorted."""
+    try:
+        return sorted(f for f in directory.iterdir()
+                      if f.is_file() and not f.name.startswith("."))
+    except OSError:
+        return []
+
+
+def _summarize_subdirs(directory: Path) -> List[Dict[str, Any]]:
+    """One entry per immediate non-hidden subfolder: path, file count,
+    extension histogram, and whether it nests further — enough for the model
+    to see the layout (per-sample folders, a series per condition, ...)
+    without probing every file."""
+    try:
+        subdirs = sorted(d for d in directory.iterdir()
+                         if d.is_dir() and not d.name.startswith("."))
+    except OSError:
+        return []
+    out: List[Dict[str, Any]] = []
+    for d in subdirs[:_SUBDIR_LIST_MAX]:
+        files = _visible_files(d)
+        exts: Dict[str, int] = {}
+        for f in files:
+            ext = f.suffix.lower() or "(none)"
+            exts[ext] = exts.get(ext, 0) + 1
+        try:
+            n_sub = sum(1 for x in d.iterdir()
+                        if x.is_dir() and not x.name.startswith("."))
+        except OSError:
+            n_sub = 0
+        out.append({"path": str(d), "n_files": len(files),
+                    "extensions": dict(sorted(exts.items())),
+                    "n_subdirs": n_sub})
+    return out
+
+
+def _walk_files(directory: Path, max_depth: int) -> Dict[str, Any]:
+    """Non-hidden files under ``directory`` down to ``max_depth`` levels
+    (1 = the directory's own subfolders), top-down and name-sorted so the
+    top-level files come first and each subfolder's files stay together."""
+    files: List[Path] = []
+    n_dirs = 0
+    depth_truncated = False
+    root_depth = len(directory.parts)
+    for root, dirs, names in os.walk(directory):
+        rp = Path(root)
+        depth = len(rp.parts) - root_depth
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        if depth >= max_depth and dirs:
+            depth_truncated = True
+            dirs[:] = []
+        n_dirs += 1
+        for name in sorted(names):
+            if name.startswith("."):
+                continue
+            files.append(rp / name)
+            if len(files) >= _WALK_FILES_MAX:
+                return {"files": files, "n_dirs": n_dirs, "max_depth": max_depth,
+                        "depth_truncated": True}
+    return {"files": files, "n_dirs": n_dirs, "max_depth": max_depth,
+            "depth_truncated": depth_truncated}
 
 
 def _probe_file(path: Path) -> Dict[str, Any]:
@@ -1277,31 +1346,61 @@ class MetaOrchestratorTools:
         )
 
         # -- inspect_uploads ------------------------------------------------
-        def inspect_uploads(path: str = None) -> str:
+        def inspect_uploads(path: str = None, recursive: bool = False,
+                            max_depth: int = 3) -> str:
             base = Path(path) if path else (self.orch.base_dir / "uploads")
-            print(f"  🔍 Inspecting uploads at {base} ...")
+            print(f"  🔍 Inspecting uploads at {base}"
+                  f"{' (recursive)' if recursive else ''} ...")
             if not base.exists():
                 return json.dumps({
                     "status": "error",
                     "message": f"Path not found: {base}",
                 })
             if base.is_file():
-                files = [base]
-                directory = str(base.parent)
-            else:
-                files = sorted(
-                    f for f in base.iterdir()
-                    if f.is_file() and not f.name.startswith(".")
-                )
-                directory = str(base)
-            probes = [_probe_file(f) for f in files[:_PROBE_MAX_FILES]]
-            return json.dumps({
+                probes = [_probe_file(base)]
+                return json.dumps({
+                    "status": "success",
+                    "directory": str(base.parent),
+                    "n_files": 1,
+                    "truncated": False,
+                    "files": probes,
+                    "subdirectories": [],
+                }, default=str)
+
+            directory = str(base)
+            files = _visible_files(base)
+            subdirs = _summarize_subdirs(base)
+            result: Dict[str, Any] = {
                 "status": "success",
                 "directory": directory,
+                # Immediate subfolders, each with a file count and extension
+                # histogram: nested drops (one folder per sample / condition)
+                # are otherwise invisible to a one-level listing, and the
+                # model cannot route what it cannot see.
+                "subdirectories": subdirs,
+            }
+            if recursive and subdirs:
+                walked = _walk_files(base, max_depth=max(1, int(max_depth or 1)))
+                files = walked["files"]
+                result["recursive"] = True
+                result["max_depth"] = walked["max_depth"]
+                result["n_dirs_walked"] = walked["n_dirs"]
+                result["depth_truncated"] = walked["depth_truncated"]
+            probes = [_probe_file(f) for f in files[:_PROBE_MAX_FILES]]
+            result.update({
                 "n_files": len(files),
                 "truncated": len(files) > _PROBE_MAX_FILES,
                 "files": probes,
-            }, default=str)
+            })
+            if subdirs and not recursive:
+                n_nested = sum(d["n_files"] for d in subdirs)
+                result["hint"] = (
+                    f"{len(subdirs)} subfolder(s) hold {n_nested}+ file(s) not "
+                    "listed here. Call inspect_uploads(path, recursive=true) "
+                    "to probe them, or inspect a subfolder path directly; "
+                    "delegate per subfolder when each is its own dataset."
+                )
+            return json.dumps(result, default=str)
 
         self._register_tool(
             func=inspect_uploads,
@@ -1315,7 +1414,10 @@ class MetaOrchestratorTools:
                 "folder. With no argument it inspects the meta session's "
                 "uploads/ directory; pass `path` for a specific file or folder. "
                 "Read-only — use the result only to choose a specialist, never "
-                "to interpret the data yourself."
+                "to interpret the data yourself. A directory listing is ONE "
+                "level deep but always reports its `subdirectories` (file "
+                "counts + extensions); pass `recursive=true` to probe files "
+                "inside nested folders as well."
             ),
             parameters={
                 "path": {
@@ -1323,6 +1425,21 @@ class MetaOrchestratorTools:
                     "description": (
                         "Optional file or directory to inspect. Defaults to "
                         "the meta session's uploads/ directory."
+                    ),
+                },
+                "recursive": {
+                    "type": "boolean",
+                    "description": (
+                        "Walk subfolders too (depth-limited by `max_depth`, "
+                        "probe count capped). Use when the listing reports "
+                        "subdirectories, or the user dropped a nested folder."
+                    ),
+                },
+                "max_depth": {
+                    "type": "integer",
+                    "description": (
+                        "Recursion depth for `recursive` (default 3; 1 = "
+                        "immediate subfolders only)."
                     ),
                 },
             },

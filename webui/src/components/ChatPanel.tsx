@@ -2,9 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   type ChatMessage as Msg,
+  type FolderEntry,
   type PresentedQuestion,
   type SessionSnapshot,
 } from "../api";
+import { describeFolder, folderPromptLines, groupDirectoryInput } from "../folderfiles";
 import { ChatMessage } from "./ChatMessage";
 import { FeedbackPanel } from "./FeedbackPanel";
 import { currentActivity, LogView } from "./LogView";
@@ -44,6 +46,7 @@ export function ChatPanel({
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const dirRef = useRef<HTMLInputElement>(null);
 
   // Mid-chat uploads: route each file to the mode's save convention (the
   // same categories the pre-chat heroes use), then drop the saved paths
@@ -84,6 +87,51 @@ export function ChatPanel({
         paths.length === 1 && mode === "analyze" && !d
           ? `I uploaded a data file at ${quoted}. Please examine it.`
           : `I uploaded ${paths.length} file(s): ${quoted}.`;
+      return d ? `${d.trimEnd()}\n\n${mention} ` : `${mention} `;
+    });
+    inputRef.current?.focus();
+    setTimeout(autosize, 0);
+  };
+
+  // Mid-chat FOLDER upload: one category per folder (a tree split across
+  // categories would scatter it), chosen by the majority of its files in
+  // plan mode; the layout is preserved server-side and described in the
+  // draft — subfolders spelled out, since the agents list one level deep.
+  const folderCategory = (entries: FolderEntry[]): string => {
+    if (mode !== "plan") return mode === "meta" ? "meta" : "data";
+    const votes = new Map<string, number>();
+    for (const e of entries) {
+      const c = categoryFor(e.file.name);
+      votes.set(c, (votes.get(c) ?? 0) + 1);
+    }
+    return [...votes.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "knowledge";
+  };
+
+  const handleFolderUploads = async (list: FileList | null) => {
+    const folders = groupDirectoryInput(list);
+    if (folders.size === 0) return;
+    setUploadNote("Uploading folder…");
+    const mentions: string[] = [];
+    try {
+      for (const [, entries] of folders) {
+        const r = await api.uploadFolder(session.id, folderCategory(entries), entries);
+        const nested = r.dirs.length > 1;
+        mentions.push(
+          `I uploaded a folder: ${folderPromptLines(r)}` +
+            (nested
+              ? "\nInspect it recursively; treat each subfolder as its own dataset unless the contents show they belong together."
+              : "") +
+            (r.skipped.length ? `\n(${r.skipped.length} unsupported file(s) were skipped.)` : ""),
+        );
+        setUploadNote(`Uploaded ${describeFolder(r.root, r.paths.length, r.dirs.length)}`);
+      }
+    } catch (e) {
+      setUploadNote(e instanceof Error ? e.message : String(e));
+      return;
+    }
+    setUploadNote(null);
+    setDraft((d) => {
+      const mention = mentions.join("\n\n");
       return d ? `${d.trimEnd()}\n\n${mention} ` : `${mention} `;
     });
     inputRef.current?.focus();
@@ -212,6 +260,30 @@ export function ChatPanel({
             e.target.value = "";
           }}
         />
+        <input
+          ref={dirRef}
+          type="file"
+          multiple
+          hidden
+          {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+          onChange={(e) => {
+            void handleFolderUploads(e.target.files);
+            e.target.value = "";
+          }}
+        />
+        <button
+          className="attach"
+          title="Upload a folder (subfolders included) into this session"
+          disabled={running}
+          onClick={() => dirRef.current?.click()}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+            strokeLinejoin="round" aria-hidden="true">
+            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+            <path d="M12 11v6M9 14h6" />
+          </svg>
+        </button>
         <button
           className="attach"
           title="Upload files into this session"

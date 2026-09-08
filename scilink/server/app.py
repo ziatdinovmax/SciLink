@@ -232,10 +232,23 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
         for raw in body.paths[:20]:
             p = Path(raw.strip()).expanduser()
             entry: dict = {"path": str(p), "is_dir": p.is_dir(),
-                           "data_files": [], "json_files": []}
+                           "data_files": [], "json_files": [],
+                           "subdirs": []}
             if entry["is_dir"]:
                 try:
                     files = [f for f in p.iterdir() if f.is_file()]
+                    # Subfolders (name + file count) so the prompt can say
+                    # the folder is nested — the agents' directory listings
+                    # are one level deep, so the model must be told.
+                    subdirs = sorted(
+                        (d for d in p.iterdir()
+                         if d.is_dir() and not d.name.startswith(".")),
+                        key=_nat)[:50]
+                    entry["subdirs"] = [{
+                        "path": str(d),
+                        "n_files": sum(1 for f in d.iterdir() if f.is_file()
+                                       and not f.name.startswith(".")),
+                    } for d in subdirs]
                     entry["data_files"] = [
                         str(f) for f in sorted(
                             (f for f in files if f.suffix.lower() in _DATA_EXTS),
@@ -276,9 +289,27 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
 
     @app.post("/api/v1/sessions/{session_id}/uploads")
     def upload(session_id: str, category: str = Form(...),
-               files: list[UploadFile] = File(...)):
+               files: list[UploadFile] = File(...),
+               paths: str = Form("")):
+        """Multipart upload. ``paths`` (optional) is a JSON list of relative
+        paths aligned with ``files`` — a FOLDER upload, saved with its layout
+        preserved. It travels as its own field rather than in the part
+        filenames because browsers are free to strip directory components
+        from a Content-Disposition filename."""
         session = _session_or_404(session_id)
         try:
+            if paths:
+                import json as _json
+                try:
+                    rels = _json.loads(paths)
+                except ValueError:
+                    raise files_mod.UploadError("`paths` must be a JSON list.")
+                if not isinstance(rels, list) or len(rels) != len(files):
+                    raise files_mod.UploadError(
+                        "`paths` must list one relative path per file.")
+                payload = [(str(r), f.file.read()) for r, f in zip(rels, files)]
+                return files_mod.save_uploads(session.session_dir, category,
+                                              payload, preserve_paths=True)
             payload = [(f.filename or "", f.file.read()) for f in files]
             return files_mod.save_uploads(session.session_dir, category,
                                           payload)
