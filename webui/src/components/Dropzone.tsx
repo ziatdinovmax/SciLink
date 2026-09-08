@@ -17,12 +17,14 @@ export function Dropzone({
   multiple = true,
   onFiles,
   onFolder,
+  onLocalPath,
 }: {
   label: string;
   accept?: string;
   multiple?: boolean;
   onFiles: (files: File[]) => Promise<string[]>; // returns saved names
   onFolder?: (name: string, entries: FolderEntry[]) => Promise<string[]>; // returns chip labels
+  onLocalPath?: () => void; // reveal the host's pasted-path input (menu item)
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const dirRef = useRef<HTMLInputElement>(null);
@@ -128,6 +130,7 @@ export function Dropzone({
         <UploadMenu
           onFiles={() => inputRef.current?.click()}
           onFolder={() => dirRef.current?.click()}
+          onLocalPath={onLocalPath}
           onClose={() => setMenu(false)}
         />
       )}

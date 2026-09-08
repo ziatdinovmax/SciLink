@@ -63,7 +63,11 @@ authenticating reverse proxy.
   directory (walked recursively via the FileSystem entry API), and a click
   on the dropzone or the chat paperclip opens a two-item menu, "Upload
   files" / "Upload folder" — one control, two hidden inputs, because no
-  native dialog picks both. The layout is preserved under the category root
+  native dialog picks both. On the plan and meta heroes the menu has a third
+  item, "Use a folder on this machine…", which reveals the pasted-path input
+  (the folder is used in place, nothing copied — the route for large or
+  shared data and for plan-mode KB reuse; only meaningful on a local bind).
+  The layout is preserved under the category root
   (`uploads/<folder>/<sub>/…`, `knowledge/<folder>/…`), files the category
   does not accept are skipped and reported rather than failing the drop,
   hidden entries are dropped, and a 2000-file cap applies. A flat folder

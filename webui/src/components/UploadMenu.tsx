@@ -8,11 +8,16 @@ import { useEffect, useRef } from "react";
 export function UploadMenu({
   onFiles,
   onFolder,
+  onLocalPath,
   onClose,
   placement = "below",
 }: {
   onFiles: () => void;
   onFolder: () => void;
+  /** Third item: point at a folder already on the server's machine (used
+   * in place, nothing copied) — the pasted-path route the heroes had as a
+   * separate field. Only meaningful on a local bind. */
+  onLocalPath?: () => void;
   onClose: () => void;
   placement?: "below" | "above";
 }) {
@@ -62,6 +67,18 @@ export function UploadMenu({
         Upload folder
         <span className="upload-menu-hint">subfolders included</span>
       </button>
+      {onLocalPath && (
+        <button type="button" role="menuitem" onClick={() => { onClose(); onLocalPath(); }}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+            strokeLinejoin="round" aria-hidden="true">
+            <rect x="2" y="4" width="20" height="14" rx="2" />
+            <path d="M8 21h8M12 18v3" />
+          </svg>
+          Use a folder on this machine…
+          <span className="upload-menu-hint">no copy</span>
+        </button>
+      )}
     </div>
   );
 }

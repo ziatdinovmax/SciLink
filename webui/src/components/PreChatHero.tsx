@@ -164,6 +164,10 @@ function PlanHero({
   // paths from here on: validated + enumerated server-side, plan dirs
   // repointed, subfolders described in the prompt.
   const [uploadedFolders, setUploadedFolders] = useState<[string, string][]>([]);
+  // The pasted-path inputs stay hidden until "Use a folder on this machine…"
+  // is picked from a dropzone's menu (or a value is already set): the
+  // in-place route is the local power-user path, not a peer of upload.
+  const [showPath, setShowPath] = useState({ k: false, c: false, d: false });
   const [warnings, setWarnings] = useState<string[]>([]);
 
   const canStart =
@@ -340,14 +344,18 @@ function PlanHero({
         <div className="card-body">
           <Dropzone label="Drop files here or click to browse" accept={KNOWLEDGE_ACCEPT}
             onFiles={uploader("knowledge", setKnowledge)}
-            onFolder={folderUploader("knowledge", "knowledge")} />
-          <input
-            type="text"
-            className="folder-input"
-            placeholder="or paste folder path — /path/to/papers/"
-            value={kFolder}
-            onChange={(e) => setKFolder(e.target.value)}
-          />
+            onFolder={folderUploader("knowledge", "knowledge")}
+            onLocalPath={() => setShowPath((p) => ({ ...p, k: true }))} />
+          {(showPath.k || kFolder) && (
+            <input
+              type="text"
+              className="folder-input"
+              autoFocus={showPath.k}
+              placeholder="Folder on this machine (used in place) — /path/to/papers/"
+              value={kFolder}
+              onChange={(e) => setKFolder(e.target.value)}
+            />
+          )}
         </div>
       </details>
       <details className="card hero-accordion">
@@ -355,14 +363,18 @@ function PlanHero({
         <div className="card-body">
           <Dropzone label="Drop files here or click to browse" accept={CODE_ACCEPT}
             onFiles={uploader("code", setCode)}
-            onFolder={folderUploader("code", "code")} />
-          <input
-            type="text"
-            className="folder-input"
-            placeholder="or paste folder path — /path/to/code/"
-            value={cFolder}
-            onChange={(e) => setCFolder(e.target.value)}
-          />
+            onFolder={folderUploader("code", "code")}
+            onLocalPath={() => setShowPath((p) => ({ ...p, c: true }))} />
+          {(showPath.c || cFolder) && (
+            <input
+              type="text"
+              className="folder-input"
+              autoFocus={showPath.c}
+              placeholder="Folder on this machine (used in place) — /path/to/code/"
+              value={cFolder}
+              onChange={(e) => setCFolder(e.target.value)}
+            />
+          )}
         </div>
       </details>
       <details className="card hero-accordion">
@@ -370,14 +382,18 @@ function PlanHero({
         <div className="card-body">
           <Dropzone label="Drop files here or click to browse" accept={PLANNING_DATA_ACCEPT}
             onFiles={uploader("planning_data", setData)}
-            onFolder={folderUploader("planning_data", "data")} />
-          <input
-            type="text"
-            className="folder-input"
-            placeholder="or paste folder path — /path/to/data/"
-            value={dFolder}
-            onChange={(e) => setDFolder(e.target.value)}
-          />
+            onFolder={folderUploader("planning_data", "data")}
+            onLocalPath={() => setShowPath((p) => ({ ...p, d: true }))} />
+          {(showPath.d || dFolder) && (
+            <input
+              type="text"
+              className="folder-input"
+              autoFocus={showPath.d}
+              placeholder="Folder on this machine (used in place) — /path/to/data/"
+              value={dFolder}
+              onChange={(e) => setDFolder(e.target.value)}
+            />
+          )}
         </div>
       </details>
       {warnings.map((w) => (
@@ -411,6 +427,7 @@ function MetaHero({
   const [uploads, setUploads] = useState<string[]>([]);
   const [uploadedFolders, setUploadedFolders] = useState<FolderUploadResult[]>([]);
   const [folders, setFolders] = useState("");
+  const [showPath, setShowPath] = useState(false);
   const [warnings, setWarnings] = useState<string[]>([]);
   const canStart =
     goal.trim().length > 0 ||
@@ -513,14 +530,18 @@ function MetaHero({
               setUploadedFolders((prev) => [...prev, r]);
               return [describeFolder(r.root, r.paths.length, r.dirs.length)];
             }}
+            onLocalPath={() => setShowPath(true)}
           />
-          <input
-            type="text"
-            className="folder-input"
-            placeholder="or paste folder path(s) — separate multiple with ','"
-            value={folders}
-            onChange={(e) => setFolders(e.target.value)}
-          />
+          {(showPath || folders) && (
+            <input
+              type="text"
+              className="folder-input"
+              autoFocus={showPath}
+              placeholder="Folder(s) on this machine (used in place) — separate multiple with ','"
+              value={folders}
+              onChange={(e) => setFolders(e.target.value)}
+            />
+          )}
         </div>
       </details>
       {warnings.map((w) => (
