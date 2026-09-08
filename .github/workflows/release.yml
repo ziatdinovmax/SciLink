@@ -1,0 +1,76 @@
+name: Release
+
+# Builds the React web UI, then the sdist + wheel with the bundle inside, and
+# attaches them to the GitHub release for the tag. Publishing to PyPI is an
+# opt-in second job: set the repository variable PYPI_PUBLISH=true and
+# configure PyPI trusted publishing for this repo/workflow. Until then the
+# artifacts are downloadable from the run and the release page, and can be
+# uploaded manually with twine.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      - name: Build the web UI bundle
+        run: bash scripts/build_webui.sh
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist and wheel
+        run: |
+          pip install build
+          python -m build
+
+      - name: Check the bundle is inside the wheel
+        run: |
+          python - <<'EOF'
+          import glob, sys, zipfile
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          ok = any(n.endswith("scilink/server/static/index.html") for n in names)
+          print(("OK" if ok else "MISSING") + ": web UI bundle in " + wheel)
+          sys.exit(0 if ok else 1)
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Attach to the GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') && vars.PYPI_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

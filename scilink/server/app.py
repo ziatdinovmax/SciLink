@@ -38,6 +38,13 @@ from .schemas import (
 )
 from .session_manager import SessionError, SessionManager, WebSession
 
+NO_BUNDLE_MESSAGE = (
+    "SciLink web UI bundle not found.\n\n"
+    "The API is up (see /api/docs), but the React bundle is built at release "
+    "time and is not in git. From a repository checkout, build it once:\n\n"
+    "    scripts/build_webui.sh        # or: cd webui && npm run build\n\n"
+    "Release wheels (pip install scilink) ship the bundle already.\n")
+
 # Consent text mirrored from the Streamlit sidebar checkbox (sidebar.py:382).
 CONSENT_TEXT = ("I understand that the agent will execute generated "
                 "Python code on my machine")
@@ -413,6 +420,16 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
         ]
         dist = next((d for d in candidates if (d / "index.html").is_file()),
                     None)
+        app.state.frontend_dir = str(dist) if dist is not None else None
+        if dist is None:
+            # The bundle is built at release time (release wheels carry it)
+            # and is not in git — a checkout must build it once. Say so at
+            # "/" instead of serving a bare 404 next to a working API.
+            from fastapi.responses import PlainTextResponse
+
+            @app.get("/", include_in_schema=False)
+            def _no_frontend():
+                return PlainTextResponse(NO_BUNDLE_MESSAGE, status_code=503)
         if dist is not None:
             from fastapi.staticfiles import StaticFiles
 
