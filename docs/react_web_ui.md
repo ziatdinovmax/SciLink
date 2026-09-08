@@ -170,6 +170,12 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   `delegations` SSE events as the ledger changes mid-turn, and survive
   refresh and resume. The per-agent tool sequence and worker action
   histories (already served by `/telemetry`) are the tab's next content.
+- **Skills tab** (all modes): upload custom skill `.md` files (saved under
+  the session's `custom_skills/`, registered with the agent for this
+  session, auto-selectable like built-ins) and browse the catalog — every
+  built-in bundle by domain with its one-line description, plus a
+  markdown viewer (frontmatter shown as a caption). Persistent memory
+  (graduated / auto-distilled skills under `~/.scilink`) is not here yet.
 - **MCP tab** (all modes): connect MCP servers — a `stdio` command, an
   SSE URL, or a streamable-HTTP URL with optional JSON headers — and
   disconnect them; each server card lists the tools it registered. The
@@ -210,8 +216,8 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   - deep links: the tab and selected file live in the URL hash, so a
     refresh (or shared link) lands on the same file.
 
-Not yet ported: simulate mode, the Skills tab, the Telemetry tab's per-agent
-tool sequence (the `/telemetry` endpoint already serves it), vibes.
+Not yet ported: simulate mode, the Skills tab's persistent-memory section, the
+Telemetry tab's per-agent tool sequence (the `/telemetry` endpoint already serves it), vibes.
 
 ## Architecture
 
@@ -262,6 +268,9 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
 | GET | `/sessions/{id}/thumb?path=&size=&cmap=` | PNG thumbnail; NPY/TIFF rendered as normalized heatmaps |
 | GET | `/sessions/{id}/table?path=&limit=` | CSV/TSV/XLSX head as JSON columns+rows |
 | GET | `/sessions/{id}/zip?path=` | zip a session subdirectory (or the whole session) |
+| GET | `/sessions/{id}/skills` | catalog: built-in bundles by domain with descriptions, the session's custom skills |
+| GET | `/sessions/{id}/skills/{domain}/{name}` | a skill's markdown (`domain` = catalog domain or `custom`) |
+| POST | `/sessions/{id}/skills` | multipart `.md` uploads → `custom_skills/`, registered with the agent |
 | GET | `/sessions/{id}/tools` | connected MCP servers with their tools, other external tools, `mcp_supported` |
 | POST | `/sessions/{id}/mcp` | connect an MCP server (`name`, `transport` stdio/sse/http, `command` or `url`, `headers`) |
 | DELETE | `/sessions/{id}/mcp/{name}` | disconnect it |

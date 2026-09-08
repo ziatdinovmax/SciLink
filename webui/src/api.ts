@@ -208,6 +208,12 @@ export interface FolderCheck {
   subdirs: { path: string; n_files: number }[];
 }
 
+export interface SkillCatalog {
+  builtin: { domain: string; label: string; skills: { name: string; description: string }[] }[];
+  custom: { name: string; path: string }[];
+  skills_supported: boolean;
+}
+
 export interface ToolInventory {
   external: { name: string; description: string }[];
   mcp_servers: { name: string; transport: string; tools: string[] }[];
@@ -339,6 +345,26 @@ export const api = {
     req<{ entries: TreeEntry[]; truncated: boolean }>(`/sessions/${id}/tree`),
 
   delegations: (id: string) => req<DelegationView>(`/sessions/${id}/delegations`),
+
+  skills: (id: string) => req<SkillCatalog>(`/sessions/${id}/skills`),
+  skillMarkdown: async (id: string, domain: string, name: string) => {
+    const r = await fetch(
+      `${BASE}/sessions/${id}/skills/${encodeURIComponent(domain)}/${encodeURIComponent(name)}`,
+    );
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail ?? r.statusText);
+    return r.text();
+  },
+  uploadSkills: async (id: string, files: File[]) => {
+    const form = new FormData();
+    for (const f of files) form.append("files", f);
+    const r = await fetch(`${BASE}/sessions/${id}/skills`, { method: "POST", body: form });
+    if (!r.ok) throw new Error((await r.json()).detail ?? r.statusText);
+    return r.json() as Promise<{
+      registered: string[];
+      errors: { file: string; error: string }[];
+      catalog: SkillCatalog;
+    }>;
+  },
 
   tools: (id: string) => req<ToolInventory>(`/sessions/${id}/tools`),
   connectMcp: (
