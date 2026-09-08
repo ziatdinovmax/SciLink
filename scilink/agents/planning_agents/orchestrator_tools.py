@@ -3580,13 +3580,19 @@ class OrchestratorTools:
                 print(f"    📌 Continuation: schema armed from the campaign "
                       f"(inputs={_table_inputs}, targets={_known_targets})")
 
+            # The scalarizer's per-file "confirm these columns" prompt is off
+            # in every mode: it sat behind four automated checks (runtime,
+            # row-count trap, plot self-check, schema verification), fired
+            # only on the codegen path, and blocked a delegated meta turn on
+            # a terminal keypress. The user's review of inputs/targets
+            # belongs at the campaign schema, not per extraction.
             try:
                 res = self.orch.scalarizer.scalarize(
                     data_path=file_path,
                     objective_query=enhanced_objective,
                     reuse_script_path=script_to_use,
                     experiment_context=exp_context,
-                    enable_human_review=self._get_human_feedback_enabled(),
+                    enable_human_review=False,
                     column_role_hints=role_hints
                 )
 
@@ -3633,7 +3639,7 @@ class OrchestratorTools:
                                     objective_query=enhanced_objective,
                                     reuse_script_path=None,
                                     experiment_context=exp_context,
-                                    enable_human_review=self._get_human_feedback_enabled(),
+                                    enable_human_review=False,
                                     column_role_hints=role_hints
                                 )
                                 if res["status"] != "success":

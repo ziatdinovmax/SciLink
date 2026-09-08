@@ -432,7 +432,7 @@ class ScalarizerAgent(BaseAgent):
                  reuse_script_path: str = None,
                  experiment_context: Optional[Dict[str, Any]] = None,
                  metadata_path: Optional[str] = None,
-                 enable_human_review: bool = True,
+                 enable_human_review: bool = False,
                  column_role_hints: Optional[Dict] = None) -> Dict[str, Any]:
         """
         Main entry point. Converts raw data -> Scalar Metrics.
@@ -456,7 +456,11 @@ class ScalarizerAgent(BaseAgent):
             objective_query: Natural language instruction (e.g. "Calculate yield").
             experiment_context: Dict of high-level plan info (Hypothesis, etc).
             metadata_path: Path to sidecar JSON describing the data file (Units, Columns).
-            enable_human_review: Pause for human check of the plot/logic.
+            enable_human_review: Pause for a terminal confirmation of the
+                extracted columns after the automated checks pass. Off by
+                default (and off at every orchestrator call site): the
+                automated checks cover it, and the prompt blocks headless
+                and delegated runs.
 
         Returns:
             Dict containing:
