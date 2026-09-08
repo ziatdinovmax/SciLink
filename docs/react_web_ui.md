@@ -186,8 +186,10 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   edges, blue context edges; boxes are layered by context depth, a layer
   wider than six wraps into rows, the parallel branches of one fan-out
   collapse into a single stacked box with their outcome counts (30
-  branches are one node, not 30 boxes and 60 edges), edges that skip a
-  layer bow around the boxes between, and clicking a box expands its
+  branches are one node, not 30 boxes and 60 edges), every edge is routed
+  around the boxes it does not connect (the smallest sideways bow that
+  clears them; sources in a wrapped layer sit in its last row so their
+  edges never cross a sibling row), and clicking a box expands its
   ledger row (a fan-out box opens its first failed branch). Checked at 45
   delegations.
 - **MCP tab** (all modes): connect MCP servers — a `stdio` command, an

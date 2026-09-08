@@ -87,17 +87,60 @@ function groupStatus(rows: DelegationRow[]): string {
   return "success";
 }
 
-/** An edge that skips layers would run straight through the boxes in
- * between (nodes alone in a layer sit on the same centre line), so it is
- * bowed sideways by one step per skipped layer — right for context
- * edges, left for dispatch edges — the way a layout engine routes
- * around obstacles. */
-function bowedPath(x1: number, y1: number, x2: number, y2: number, bow: number): string {
-  if (!bow) return `M ${x1} ${y1} L ${x2} ${y2}`;
-  const my = (y1 + y2) / 2;
-  return `M ${x1} ${y1} C ${x1 + bow} ${my}, ${x2 + bow} ${my}, ${x2} ${y2}`;
-}
+/** Edge routing. A straight edge between rows would run through any box
+ * that lies between its ends (a wrapped row of the same layer, a node
+ * alone on the centre line), so every edge is tested against the boxes it
+ * does not connect and, if it hits one, bowed sideways — the smallest bow
+ * that clears everything wins, nearer side first. Cheap: a few dozen
+ * nodes, a handful of candidate bows, twenty samples per candidate. */
 const BOW = 70;
+const BOWS = [0, -1, 1, -2, 2, -3, 3];
+const HIT_MARGIN = 6;
+
+interface Rect { x: number; y: number; w: number; h: number }
+
+function cubic(x1: number, y1: number, x2: number, y2: number, bow: number) {
+  const my = (y1 + y2) / 2;
+  const cx1 = x1 + bow, cx2 = x2 + bow;
+  return {
+    d: bow
+      ? `M ${x1} ${y1} C ${cx1} ${my}, ${cx2} ${my}, ${x2} ${y2}`
+      : `M ${x1} ${y1} L ${x2} ${y2}`,
+    at: (t: number) => {
+      const u = 1 - t;
+      return {
+        x: u * u * u * x1 + 3 * u * u * t * cx1 + 3 * u * t * t * cx2 + t * t * t * x2,
+        y: u * u * u * y1 + 3 * u * u * t * my + 3 * u * t * t * my + t * t * t * y2,
+      };
+    },
+  };
+}
+
+function hits(curve: { at: (t: number) => { x: number; y: number } }, rects: Rect[]): boolean {
+  for (let i = 1; i < 20; i++) {
+    const { x, y } = curve.at(i / 20);
+    for (const r of rects) {
+      if (x >= r.x - HIT_MARGIN && x <= r.x + r.w + HIT_MARGIN &&
+          y >= r.y - HIT_MARGIN && y <= r.y + r.h + HIT_MARGIN) return true;
+    }
+  }
+  return false;
+}
+
+/** Path for an edge from (x1,y1) down to (x2,y2) avoiding `obstacles`
+ * (every box except the two it connects), plus the point to label. Prefers
+ * a straight line, then the side with more room. */
+function route(x1: number, y1: number, x2: number, y2: number, obstacles: Rect[],
+               preferLeft: boolean) {
+  const order = preferLeft ? BOWS : BOWS.map((b) => -b);
+  let fallback = cubic(x1, y1, x2, y2, 0);
+  for (const k of order) {
+    const c = cubic(x1, y1, x2, y2, k * BOW);
+    if (!hits(c, obstacles)) return { d: c.d, mid: c.at(0.5) };
+    if (k === 0) fallback = c;
+  }
+  return { d: fallback.d, mid: fallback.at(0.5) };
+}
 const MAX_PER_ROW = 6;   // a wider layer wraps into several rows
 const LABEL_MAX_SOURCES = 3; // "ctx" labels only where they stay legible
 
@@ -139,10 +182,16 @@ export function DelegationGraph({
     // A layer wider than MAX_PER_ROW wraps into several visual rows (a
     // 40-branch fan-out would otherwise be one 7000 px line). `layer` on
     // a placed node is its visual row, which is what edge bowing needs.
+    const isSource = new Set(nodes.flatMap((n) => n.sources));
     const visualRows: GNode[][] = [];
     for (const layer of layers) {
-      for (let i = 0; i < layer.length; i += MAX_PER_ROW) {
-        visualRows.push(layer.slice(i, i + MAX_PER_ROW));
+      // In a wrapped layer, nodes that feed later layers go to its last
+      // row so their outgoing edges never cross a sibling row.
+      const ordered = layer.length > MAX_PER_ROW
+        ? [...layer.filter((n) => !isSource.has(n.id)), ...layer.filter((n) => isSource.has(n.id))]
+        : layer;
+      for (let i = 0; i < ordered.length; i += MAX_PER_ROW) {
+        visualRows.push(ordered.slice(i, i + MAX_PER_ROW));
       }
     }
     const widest = Math.max(1, ...visualRows.map((l) => l.length));
@@ -162,8 +211,8 @@ export function DelegationGraph({
       });
     });
     const height = PAD * 2 + (visualRows.length + 1) * NODE_H + visualRows.length * GAP_Y;
-    // Bows are capped (see below), so the side margin is bounded too.
-    const margin = Math.min(2, Math.max(0, visualRows.length - 1)) * BOW;
+    // Room for the widest bow an edge may take (see route()).
+    const margin = visualRows.length > 1 ? 3 * BOW * 0.75 : 0;
     for (const p of placed) p.x += margin;
     root.x += margin;
     return { placed, width: width + 2 * margin, height, root };
@@ -174,6 +223,10 @@ export function DelegationGraph({
   const nodeOfIndex = new Map<number, string>();
   for (const p of placed) for (const r of p.node.rows) nodeOfIndex.set(r.index, p.node.id);
   const selectedId = selected == null ? null : nodeOfIndex.get(selected) ?? null;
+  const rectOf = (p: Placed): Rect => ({ x: p.x, y: p.y, w: NODE_W, h: NODE_H });
+  const rootRect: Rect = { x: root.x, y: root.y, w: NODE_W, h: NODE_H };
+  const obstaclesExcept = (...ids: string[]) =>
+    placed.filter((q) => !ids.includes(q.node.id)).map(rectOf);
   const modeLabel = metaMode
     ? metaMode.charAt(0).toUpperCase() + metaMode.slice(1).toLowerCase()
     : "";
@@ -203,8 +256,8 @@ export function DelegationGraph({
         {placed.map((p) => (
           <path
             key={`d${p.node.id}`}
-            d={bowedPath(root.x + NODE_W / 2, root.y + NODE_H,
-                         p.x + NODE_W / 2, p.y, -Math.min(2, p.layer) * BOW)}
+            d={route(root.x + NODE_W / 2, root.y + NODE_H, p.x + NODE_W / 2, p.y,
+                     obstaclesExcept(p.node.id), p.x + NODE_W / 2 <= width / 2).d}
             fill="none"
             stroke="#8893a5"
             strokeWidth={p.layer === 0 ? 1.2 : 0.8}
@@ -221,15 +274,14 @@ export function DelegationGraph({
             const y1 = s.y + NODE_H;
             const x2 = p.x + NODE_W / 2;
             const y2 = p.y;
-            const my = (y1 + y2) / 2;
-            // Collinear nodes need the bow; a source off to the side does not.
-            const skipped = p.layer - s.layer - 1;
-            const bow = Math.abs(x1 - x2) < NODE_W / 2 ? BOW * Math.min(2, skipped) : 0;
+            const r = route(x1, y1, x2, y2,
+                            [rootRect, ...obstaclesExcept(s.node.id, p.node.id)],
+                            (x1 + x2) / 2 <= width / 2);
             const many = p.node.sources.length > LABEL_MAX_SOURCES;
             return (
               <g key={`c${src}-${p.node.id}`}>
                 <path
-                  d={bowedPath(x1, y1, x2, y2, bow)}
+                  d={r.d}
                   fill="none"
                   stroke="#58a6ff"
                   strokeWidth={many ? 1.2 : 2}
@@ -237,9 +289,13 @@ export function DelegationGraph({
                   markerEnd="url(#dg-arrow-blue)"
                 />
                 {!many && (
-                  <text x={(x1 + x2) / 2 + bow * 0.75 + 4} y={my - 2} fontSize={10} fill="#58a6ff">
-                    ctx
-                  </text>
+                  <g>
+                    <rect x={r.mid.x + 3} y={r.mid.y - 12} width={22} height={13} rx={3}
+                          className="deleg-graph-halo" />
+                    <text x={r.mid.x + 5} y={r.mid.y - 2} fontSize={10} fill="#58a6ff">
+                      ctx
+                    </text>
+                  </g>
                 )}
               </g>
             );
