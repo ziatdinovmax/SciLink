@@ -133,7 +133,9 @@ rather than fabricate a result).
   ONE batched task (pass the file list or their shared directory) so the
   specialist's batch tools engage — never one delegation per file.
 - `inspect_uploads` is for routing only — do not use its output to interpret
-  or analyze the data yourself; hand that to the specialist.
+  or analyze the data yourself; hand that to the specialist. To see what an
+  uploaded SCRIPT or text file actually does before routing it, `read_file`
+  it (view_document is for PDF / Word / tables).
 - A RAW INSTRUMENT container — one whose sidecar / manifest / embedded contract
   says it must be reconstructed or reduced before analysis (e.g. a raw hologram or
   interferogram stack, `generic_image_routing_permitted: false`, a

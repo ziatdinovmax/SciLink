@@ -114,3 +114,26 @@ def test_walk_file_cap(tmp_path, monkeypatch):
         (d / "s" / f"f{i}.txt").write_text("x")
     walked = _walk_files(d, max_depth=3)
     assert len(walked["files"]) == 3 and walked["depth_truncated"] is True
+
+
+def test_meta_read_file_is_the_shared_reader(tmp_path):
+    """The meta's plain reader (#397's last phase) — a wrapper over the
+    shared engine, so an attached script reads like it does in any mode."""
+    cap = _tools(tmp_path)
+    assert "read_file" in cap
+    read, params = cap["read_file"]
+    assert {"file_path", "max_lines", "tail", "search", "offset"} <= set(params)
+    (tmp_path / "uploads").mkdir(exist_ok=True)
+    script = tmp_path / "uploads" / "user_edge_fit.py"
+    script.write_text("".join(f"def f{i}(): pass\n" for i in range(300)) + "MARKER_END = 1\n")
+    out = json.loads(read(file_path="uploads/user_edge_fit.py"))      # relative to the session
+    assert out["status"] == "success" and out["truncated"] is True and "def f0" in out["content"]
+    assert json.loads(read(file_path=str(script), search="MARKER_END"))["match_lines"] == [301]
+    assert "MARKER_END" in json.loads(read(file_path=str(script), tail=True, max_lines=2))["content"]
+    rep = tmp_path / "analysis_report.md"; rep.write_text("x\n" * 400)
+    assert json.loads(read(file_path=str(rep)))["truncated"] is False   # whole-read stem
+    assert json.loads(read(file_path="nope.py"))["status"] == "error"
+    # view_document still refuses code, but now says where to go
+    view, _ = cap["view_document"]
+    out = json.loads(view(paths=[str(script)]))
+    assert any("use read_file" in e for e in (out.get("errors") or [str(out)]))
