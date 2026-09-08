@@ -49,6 +49,20 @@ function typeSummary(obj: unknown, limit = 160): string {
   return s.length <= limit ? s : s.slice(0, limit - 1) + "…";
 }
 
+/** The error message a failed tool result carries, if any: tools return
+ * `{status: "error", error | message | detail: "..."}`; the executor wraps
+ * an exception and a bad-argument call the same way. */
+function errorText(result: unknown): string | null {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return null;
+  const r = result as Record<string, unknown>;
+  for (const k of ["error", "message", "detail", "reason"]) {
+    const v = r[k];
+    if (typeof v === "string" && v.trim()) return v;
+    if (v && typeof v === "object") return asJson(v);
+  }
+  return null;
+}
+
 function asJson(v: unknown): string {
   let s: string;
   try {
@@ -259,7 +273,11 @@ function ToolSequence({
                 <td className="caption">{i + 1}</td>
                 <td><code>{c.tool}</code></td>
                 <td className="tel-shape">{typeSummary(c.args)}</td>
-                <td className="tel-shape">{typeSummary(c.result)}</td>
+                <td className={`tel-shape${c.status === "error" ? " tel-err" : ""}`}>
+                  {c.status === "error"
+                    ? (errorText(c.result) ?? typeSummary(c.result))
+                    : typeSummary(c.result)}
+                </td>
                 <td><span className={`tel-status status-${c.status}`}>{c.status}</span></td>
               </tr>,
               isOpen && (
@@ -328,7 +346,9 @@ function WorkerRow({ agent }: { agent: WorkerAgent }) {
                       <td className="caption">{shortTime(a.timestamp)}</td>
                       <td><code>{a.action}</code></td>
                       <td><span className={`tel-status status-${a.status}`}>{a.status}</span></td>
-                      <td className="tel-shape">{a.rationale ?? ""}</td>
+                      <td className={`tel-shape${a.status === "error" ? " tel-err" : ""}`}>
+                        {a.status === "error" ? (errorText(a.result) ?? a.rationale ?? "") : (a.rationale ?? "")}
+                      </td>
                     </tr>,
                     isOpen && (
                       <tr key={`${i}-d`} className="tel-row-detail">

@@ -171,8 +171,9 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   refresh and resume. Below the ledger, from the `/telemetry` snapshot:
   the **tool sequence** (every tool call each layer's LLM made — meta,
   analysis specialist, planning specialist — with the input/output shape
-  in the table and the actual arguments and result on click, plus a link
-  to the full chat history in Files), the **worker agents** (each
+  in the table and the actual arguments and result on click — a failed
+  call shows its error message inline in red instead of the shape — plus
+  a link to the full chat history in Files), the **worker agents** (each
   sub-agent's action history with outcomes; a row expands to its actions,
   an action to its input, result and rationale) and the **analysis
   reports** (each analysis's claims and reasoning). Polled every 3 s while

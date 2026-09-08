@@ -785,4 +785,4 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .deleg-graph { display: block; max-width: 100%; height: auto; }
 .deleg-graph-node:hover rect { filter: brightness(1.12); }
 .link-btn[download] { text-decoration: none; }
-
+.tel-err { color: #f85149; font-family: inherit; font-size: 13px; white-space: pre-wrap; }
