@@ -2,7 +2,7 @@
 
 State and forward plan for the `scilink-web` React UI. Companion to
 `react_web_ui.md` (architecture + usage, kept current); this file is
-about *what's next and why*. Updated 2026-09-07.
+about *what's next and why*. Updated 2026-09-08.
 
 ## Where things stand
 
@@ -54,16 +54,36 @@ restart, resume).
    non-loopback bind (it cannot work for a remote user). Per-session
    isolation is already done; only authn/authz is missing. Until then:
    SSH tunnel.
-4. **Remaining panels, on demand** — Telemetry (the `/telemetry` endpoint
-   already serves the full reader; the Delegations tab covers the ledger,
-   so what is left is the per-agent tool sequence and worker action
-   histories), Skills (browse/upload first; the persistent-memory
-   pipeline UI is a separate, bigger design) and Tools/MCP (connect
-   servers, list registered tools). Build when actually missed.
-5. **Parity for the switch to default** (see "Standing decisions"):
+4. **Shared file I/O + analysis-mode adoption (#481, on #397).** Extract
+   `read_file` / `save_file` / `append_file` / `read_document` into one
+   engine in `scilink/utils` (the `file_edit.py` pattern), land the JSON
+   cap and backup-on-overwrite once, and give analysis mode the full
+   read / edit / write surface it lacks. Prerequisite for anything
+   script-shaped in analyze mode (next item) and it folds three
+   diverging copies back onto one.
+5. **Attach a script in chat.** Accept `.py` through the paperclip in
+   every mode. Plan mode then already closes the loop (read → edit →
+   `generate_implementation_code`). Analyze mode gets a
+   `reference_script` argument on `run_analysis` that injects the file's
+   content into the codegen's implementation slot — the code-in-markdown
+   rung: the agent adapts the script, the sandbox + verification loop
+   backstops it. Draft text and narration say "adapted from your script";
+   no skill object, no user-facing format. Verbatim execution of a user
+   script in analyze mode is a separate decision (it would change the
+   foundation agents' generate-verify-lock contract); until then the
+   verbatim routes are MCP or a package `TOOL_SPEC` contribution.
+6. **Remaining panels, on demand** — Tools = MCP connect + the read-only
+   tool inventory, **without** the Streamlit tool-file uploader (its
+   `tool_schemas` / `create_tool_functions` contract is dropped: the
+   attach-a-script path replaces it for adaptation, MCP for verbatim);
+   Telemetry (the `/telemetry` endpoint already serves the full reader;
+   what is left is the per-agent tool sequence and worker action
+   histories); Skills (browse/upload first; the persistent-memory
+   pipeline UI is a separate, bigger design). Build when actually missed.
+7. **Parity for the switch to default** (see "Standing decisions"):
    simulate mode in the web UI (HPC connection, wizards) is the largest
    gap; after it the web UI covers everything Streamlit does.
-6. **Big rocks** (each needs its own design pass; they touch agent
+8. **Big rocks** (each needs its own design pass; they touch agent
    internals, not just the web layer):
    - True token streaming (agents expose blocking `chat()` only — the
      live stream is console narration by design until this changes).
@@ -87,6 +107,10 @@ restart, resume).
   verifies it is inside; CI builds the frontend on every push. A checkout
   builds once. Rationale: two open frontend PRs always conflicted on the
   same hashed asset.
+- **No bespoke tool format.** Users hand the agents code as ordinary
+  scripts attached in chat (adapted by codegen) or as MCP servers (run
+  verbatim, any language). The Streamlit tool-file contract is not
+  ported to the web UI.
 - **One upload control.** Files, folders and "use a folder on this
   machine" live behind a single menu; the pasted-path route is the local
   power-user path (no copy, plan-mode KB index reuse), upload is the
