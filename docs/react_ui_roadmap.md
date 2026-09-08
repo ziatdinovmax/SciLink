@@ -72,13 +72,14 @@ restart, resume).
    script in analyze mode is a separate decision (it would change the
    foundation agents' generate-verify-lock contract); until then the
    verbatim routes are MCP or a package `TOOL_SPEC` contribution.
-6. **Remaining panels, on demand** — Tools = MCP connect + the read-only
-   tool inventory, **without** the Streamlit tool-file uploader (its
-   `tool_schemas` / `create_tool_functions` contract is dropped: the
-   attach-a-script path replaces it for adaptation, MCP for verbatim);
-   Telemetry (the `/telemetry` endpoint already serves the full reader;
-   what is left is the per-agent tool sequence and worker action
-   histories); Skills (browse/upload first; the persistent-memory
+6. **Remaining panels, on demand** — ~~Tools~~ DONE 2026-09-08 (MCP
+   connect + the read-only tool inventory, without the Streamlit
+   tool-file uploader, whose `tool_schemas` / `create_tool_functions`
+   contract is dropped: the attach-a-script path replaces it for
+   adaptation, MCP for verbatim); Telemetry (the tab exists with the
+   per-delegation detail; the `/telemetry` endpoint already serves the
+   full reader, so what is left is the per-agent tool sequence and worker
+   action histories); Skills (browse/upload first; the persistent-memory
    pipeline UI is a separate, bigger design). Build when actually missed.
 7. **Parity for the switch to default** (see "Standing decisions"):
    simulate mode in the web UI (HPC connection, wizards) is the largest
