@@ -76,3 +76,25 @@ def test_cache_bounded(tmp_path):
     cached = json.loads(meta._CAPABILITIES_CACHE.read_text())
     assert len(cached) <= MetaOrchestratorAgent._CAPABILITIES_CACHE_MAX
     assert "block" in cached.values()
+
+
+def test_key_moves_when_a_tool_module_changes(tmp_path, monkeypatch):
+    """A new tool in any specialist must miss the cache without a version
+    bump: the registration modules' source is part of the key."""
+    import sys
+    pkg = tmp_path / "fake_tools_mod.py"
+    pkg.write_text("TOOLS = ['save_file']\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setattr(MetaOrchestratorAgent, "_TOOL_SOURCE_MODULES",
+                        ("fake_tools_mod",))
+    sys.modules.pop("fake_tools_mod", None)
+    meta = _bare_meta(tmp_path, [])
+    k1 = meta._capabilities_cache_key()
+    pkg.write_text("TOOLS = ['save_file', 'read_file']\n")
+    k2 = meta._capabilities_cache_key()
+    assert k1 != k2
+    assert meta._capabilities_cache_key() == k2       # deterministic
+    # a module that cannot be found contributes nothing, never raises
+    monkeypatch.setattr(MetaOrchestratorAgent, "_TOOL_SOURCE_MODULES",
+                        ("no_such_module_xyz",))
+    assert isinstance(meta._capabilities_cache_key(), str)

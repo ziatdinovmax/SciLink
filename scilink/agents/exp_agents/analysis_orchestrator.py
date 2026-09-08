@@ -258,6 +258,16 @@ If you actually run DFT, prefer `vasp_generator_method="llm"` unless the user as
    - Use when: new knowledge has been synthesized and a linked graduated skill should be updated.
    - Input: skill_name, knowledge_ids (optional — auto-detects if omitted)
 
+**SESSION FILES:**
+19. `read_file` / `save_file` / `append_file` / `edit_file` / `rename_file` / `read_document`:
+   inspect and maintain session artifacts (analysis_results.json, features.csv, generated
+   scripts, metadata.json, logs, reports) without running any analysis. Read with read_file
+   (offset / tail / search navigate a long file — never re-read it hoping to see more);
+   change an existing file with edit_file (exact snippet swap, keeps a backup) rather than
+   rewriting it with save_file; write long content in chunks (save_file then append_file).
+   read_document is for documents the USER provided (papers, protocols): it also saves a
+   literature file for run_analysis. Data files still go to examine_data / run_analysis.
+
 **AGENT SELECTION DECISION TREE:**
 
 ```

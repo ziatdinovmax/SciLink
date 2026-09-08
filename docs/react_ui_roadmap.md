@@ -54,7 +54,12 @@ restart, resume).
    route hidden and refused on a remote bind, quit disabled on a shared
    server, reverse-proxy docs. The single-user default is unchanged.
    Remaining, on demand: per-user LLM credentials, sign-in rate limiting.
-4. **Shared file I/O + analysis-mode adoption (#481, on #397).** Extract
+4. ~~**Shared file I/O + analysis-mode adoption (#481)**~~ — DONE
+   2026-09-08: `scilink/utils/file_io.py` is the one reader / writer; the
+   three modes are thin wrappers; analysis mode has the full read / append
+   / edit / rename surface; JSON cap and backup-on-overwrite landed once;
+   the meta's capability cache now keys on the tool modules' source. Was:
+   Extract
    `read_file` / `save_file` / `append_file` / `read_document` into one
    engine in `scilink/utils` (the `file_edit.py` pattern), land the JSON
    cap and backup-on-overwrite once, and give analysis mode the full

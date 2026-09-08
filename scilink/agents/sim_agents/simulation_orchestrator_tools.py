@@ -30,26 +30,10 @@ _READ_DOC_MAX_CHARS = 200_000
 
 
 def _extract_document_text(path: Path, ocr_model: Any = None) -> Dict[str, Any]:
-    """Extract plain text from a PDF / DOCX / Markdown / text file.
-
-    Thin wrapper over the shared ``scilink.parsers.extract_text`` (which adds
-    table-aware PDF extraction); it applies read_document's character cap.
-    When ``ocr_model`` is supplied, scanned/sparse PDF pages are transcribed
-    via the vision-OCR fallback. Returns a dict with ``text`` plus metadata
-    (page/paragraph count, ``n_chars``, ``truncated``, ``n_ocr_pages``).
-    Raises ValueError for an unsupported extension; reader errors propagate
-    to the caller.
-    """
-    from ...parsers import extract_text
-
-    info = extract_text(path, ocr_model=ocr_model)
-    text = info.get("text", "")
-    info["truncated"] = len(text) > _READ_DOC_MAX_CHARS
-    if info["truncated"]:
-        text = text[:_READ_DOC_MAX_CHARS]
-        info["text"] = text
-        info["n_chars"] = len(text)
-    return info
+    """Kept as a name for callers; the implementation is the shared engine's."""
+    from ...utils.file_io import extract_document_text
+    return extract_document_text(path, ocr_model=ocr_model,
+                                 max_chars=_READ_DOC_MAX_CHARS)
 
 
 class SimulationOrchestratorTools:
@@ -1848,27 +1832,17 @@ class SimulationOrchestratorTools:
                     "message": "Invalid filename.",
                 })
 
-            target_dir = Path(self.orch.base_dir)
-            if subfolder:
-                safe_sub = Path(subfolder).name
-                target_dir = target_dir / safe_sub
-            target_dir.mkdir(parents=True, exist_ok=True)
-            dest = target_dir / safe_name
-
-            try:
-                dest.write_text(content, encoding="utf-8")
-                print(f"    💾 Saved: {dest}")
-                return json.dumps({
-                    "status": "success",
-                    "path": str(dest),
-                    "size_bytes": dest.stat().st_size,
-                })
-            except Exception as e:
-                logging.error(f"save_file failed: {e}")
-                return json.dumps({
-                    "status": "error",
-                    "message": str(e),
-                })
+            # Shared engine (#481): traversal-proofing, subfolder, and the
+            # backup-on-overwrite #480 asked for (a generated INCAR can no
+            # longer be silently clobbered).
+            from ...utils.file_io import write_text_file
+            out = write_text_file(Path(self.orch.base_dir), safe_name, content,
+                                  subfolder=subfolder)
+            if out["status"] == "success":
+                print(f"    💾 Saved: {out['path']}"
+                      + (f" (previous version kept: {Path(out['backup']).name})"
+                         if out.get("backup") else ""))
+            return json.dumps(out)
 
         self._register_tool(
             func=save_file,
@@ -1922,28 +1896,12 @@ class SimulationOrchestratorTools:
                     "message": "Invalid filename.",
                 })
 
-            target_dir = Path(self.orch.base_dir)
-            if subfolder:
-                safe_sub = Path(subfolder).name
-                target_dir = target_dir / safe_sub
-            target_dir.mkdir(parents=True, exist_ok=True)
-            dest = target_dir / safe_name
-
-            try:
-                with open(dest, "a", encoding="utf-8") as f:
-                    f.write(content)
-                print(f"    💾 Appended: {dest}")
-                return json.dumps({
-                    "status": "success",
-                    "path": str(dest),
-                    "size_bytes": dest.stat().st_size,
-                })
-            except Exception as e:
-                logging.error(f"append_file failed: {e}")
-                return json.dumps({
-                    "status": "error",
-                    "message": str(e),
-                })
+            from ...utils.file_io import write_text_file
+            out = write_text_file(Path(self.orch.base_dir), safe_name, content,
+                                  subfolder=subfolder, append=True)
+            if out["status"] == "success":
+                print(f"    💾 Appended: {out['path']}")
+            return json.dumps(out)
 
         self._register_tool(
             func=append_file,
@@ -1998,201 +1956,15 @@ class SimulationOrchestratorTools:
             path = Path(file_path)
             if not path.is_absolute():
                 path = Path(self.orch.base_dir) / path
-            if not path.is_file():
-                return json.dumps({
-                    "status": "error",
-                    "message": f"Not a file: {file_path}",
-                })
-
-            try:
-                ext = path.suffix.lower()
-
-                # Size guard — skip for Excel/CSV since we cap at 100 rows × 40
-                # cols. Documents get more headroom: extraction is page-based
-                # and a figure-heavy PDF is megabytes of images, not of text.
-                if ext not in ('.xlsx', '.xls', '.csv'):
-                    size_mb = path.stat().st_size / (1024 * 1024)
-                    cap_mb = 25 if ext in ('.pdf', '.docx') else 5
-                    if size_mb > cap_mb:
-                        return json.dumps({
-                            "status": "error",
-                            "message": f"File too large ({size_mb:.1f} MB).",
-                        })
-
-                if ext == ".json":
-                    with open(path, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                    content = json.dumps(data, indent=2)
-                    return json.dumps({
-                        "status": "success",
-                        "file_path": str(path),
-                        "content": content,
-                    })
-
-                if ext in ('.xlsx', '.xls', '.csv'):
-                    MAX_PREVIEW_ROWS = 100
-                    MAX_PREVIEW_COLS = 40
-                    MAX_PREVIEW_CHARS = 30000
-                    if ext == '.csv':
-                        df_preview = pd.read_csv(path, nrows=MAX_PREVIEW_ROWS)
-                        with open(path) as _f:
-                            total_rows = sum(1 for _ in _f) - 1
-                    else:
-                        df_preview = pd.read_excel(path, nrows=MAX_PREVIEW_ROWS)
-                        try:
-                            import openpyxl
-                            _wb = openpyxl.load_workbook(path, read_only=True)
-                            total_rows = _wb.active.max_row - 1
-                            _wb.close()
-                        except Exception:
-                            total_rows = len(df_preview)
-                    total_cols = len(df_preview.columns)
-                    display_df = df_preview.iloc[:, :MAX_PREVIEW_COLS]
-                    preview_text = display_df.to_string()
-                    if len(preview_text) > MAX_PREVIEW_CHARS and len(display_df) > 5:
-                        ratio = MAX_PREVIEW_CHARS / len(preview_text)
-                        fewer_rows = max(5, int(len(display_df) * ratio))
-                        display_df = display_df.iloc[:fewer_rows]
-                        preview_text = display_df.to_string()
-                        if len(preview_text) > MAX_PREVIEW_CHARS:
-                            preview_text = preview_text[:MAX_PREVIEW_CHARS] + "\n... (truncated)"
-                    shown_rows = len(display_df)
-                    shown_cols = len(display_df.columns)
-                    trunc_parts = []
-                    if shown_rows < total_rows:
-                        trunc_parts.append(f"first {shown_rows} rows")
-                    if shown_cols < total_cols:
-                        trunc_parts.append(f"first {shown_cols} columns")
-                    trunc = f" (showing {', '.join(trunc_parts)})" if trunc_parts else ""
-                    content = f"Shape: {total_rows} rows × {total_cols} columns{trunc}\n\n{preview_text}"
-                    return json.dumps({
-                        "status": "success",
-                        "file_path": str(path),
-                        "content": content,
-                    })
-
-                doc_meta = {}
-                if ext in ('.pdf', '.docx'):
-                    # Opened as text a PDF returns its compressed byte streams;
-                    # route through the shared extractor instead (table-aware,
-                    # OCR fallback via the session model).
-                    from ...parsers.extract import extract_text
-                    info = extract_text(
-                        str(path), ocr_model=getattr(self.orch, "model", None))
-                    raw = info.get("text") or ""
-                    if not raw.strip():
-                        return json.dumps({
-                            "status": "error",
-                            "message": (
-                                f"No extractable text in {path.name} "
-                                "(empty or image-only document)."),
-                        })
-                    lines = raw.splitlines(keepends=True)
-                    doc_meta = {k: info[k] for k in
-                                ("n_pages", "n_ocr_pages", "n_paragraphs")
-                                if info.get(k) is not None}
-                    doc_meta["extracted"] = ext.lstrip(".")
-                else:
-                    with open(path, 'r', encoding='utf-8',
-                              errors='replace') as f:
-                        lines = f.readlines()
-                total = len(lines)
-
-                if search:
-                    # The real question behind most repeat reads is "is X in
-                    # here, and where" — a search, not a read. Answer it
-                    # directly, cheaply, however long the file is.
-                    try:
-                        rx = re.compile(search, re.I)
-                    except re.error as e:
-                        return json.dumps({
-                            "status": "error",
-                            "message": f"Invalid search pattern: {e}"})
-                    hits = [i for i, ln in enumerate(lines) if rx.search(ln)]
-                    CAP = 40
-                    shown, out = hits[:CAP], []
-                    for i in shown:
-                        lo, hi = max(0, i - 1), min(total, i + 2)
-                        out.append(f"@@ line {i + 1}\n"
-                                   + "".join(lines[lo:hi]).rstrip("\n"))
-                    body = "\n\n".join(out) if out else "(no matches)"
-                    note = (f"{len(hits)} matching line(s) in {total} total"
-                            + (f"; showing the first {CAP}" if len(hits) > CAP
-                               else ""))
-                    return json.dumps({
-                        "status": "success",
-                        "file_path": str(path),
-                        "mode": "search",
-                        "pattern": search,
-                        "matches": len(hits),
-                        "match_lines": [i + 1 for i in shown],
-                        "total_lines": total,
-                        "content": f"{note}\n\n{body}",
-                        **doc_meta,
-                    })
-
-                # A truncated read must say what it is missing and where, or the
-                # agent cannot tell a short file from a short read.
-                def _outline():
-                    heads = [(i + 1, ln.strip()) for i, ln in
-                             enumerate(lines) if ln.startswith('#')]
-                    if len(heads) < 2:
-                        return ""
-                    return "\nSections: " + " · ".join(
-                        f"{h.lstrip('# ')[:44]} @ line {n}"
-                        for n, h in heads[:12]) + (
-                        " …" if len(heads) > 12 else "")
-
-                # Files read for their whole content, not their head.
-                whole = (any(s in path.name.lower()
-                             for s in _FULL_READ_STEMS)
-                         and offset is None and not tail
-                         and len("".join(lines)) <= _FULL_READ_MAX_CHARS)
-
-                truncated = True
-                if whole or total <= max_lines:
-                    first, last, content = 1, total, "".join(lines)
-                    truncated = False
-                elif offset is not None:
-                    start = max(0, offset - 1)
-                    shown = lines[start:start + max_lines]
-                    first, last = start + 1, min(total, start + max_lines)
-                    content = "".join(shown) + (
-                        f"\n... (showing lines {first}-{last} of {total}."
-                        f"{_outline()})")
-                elif tail:
-                    shown = lines[-max_lines:]
-                    first, last = total - max_lines + 1, total
-                    more = (f"... ({first - 1} earlier lines not shown; "
-                            f"omit tail to read from the top)")
-                    content = more + "\n" + "".join(shown)
-                else:
-                    shown = lines[:max_lines]
-                    first, last = 1, max_lines
-                    content = "".join(shown) + (
-                        f"\n... ({total - max_lines} more lines not "
-                        f"shown — this is a TRUNCATED READ, not the whole "
-                        f"file. Jump to any part with offset=<line>; read "
-                        f"the END with tail=true; find something with "
-                        f"search='<pattern>'; or raise max_lines."
-                        f"{_outline()})")
-
-                return json.dumps({
-                    "status": "success",
-                    "file_path": str(path),
-                    "mode": "tail" if tail else "head",
-                    "total_lines": total,
-                    "shown_lines": f"{first}-{last}",
-                    "truncated": truncated,
-                    "content": content,
-                    **doc_meta,
-                })
-
-            except Exception as e:
-                return json.dumps({
-                    "status": "error",
-                    "message": f"Failed to read file: {e}",
-                })
+            # Shared engine (#481); simulation keeps its whole-read stems
+            # (reports and summaries) and session-relative resolution.
+            from ...utils.file_io import read_file_content
+            return json.dumps(read_file_content(
+                path, max_lines=max_lines, tail=tail, search=search,
+                offset=offset, full_read_stems=_FULL_READ_STEMS,
+                full_read_max_chars=_FULL_READ_MAX_CHARS,
+                ocr_model=getattr(self.orch, "model", None),
+                display_path=file_path))
 
         self._register_tool(
             func=read_file,
@@ -2262,58 +2034,13 @@ class SimulationOrchestratorTools:
             the user provided."""
             if isinstance(paths, str):
                 paths = [paths]
-            if not paths:
-                return json.dumps({
-                    "status": "error",
-                    "message": "No document path provided.",
-                })
-            print(f"  📄 Tool: Reading {len(paths)} document(s)...")
-            docs, errors = [], []
-            for p in paths:
-                dp = Path(p)
-                if not dp.is_absolute():
-                    dp = Path(self.orch.base_dir) / dp
-                if not dp.is_file():
-                    errors.append(f"Not a file: {p}")
-                    continue
-                try:
-                    docs.append((dp, _extract_document_text(
-                        dp, ocr_model=getattr(self.orch, "model", None))))
-                except ValueError as e:
-                    errors.append(str(e))
-                except Exception as e:
-                    logging.error(f"read_document failed for {p}: {e}")
-                    errors.append(f"Could not read {dp.name}: {e}")
-            if not docs:
-                return json.dumps({
-                    "status": "error",
-                    "message": "No documents could be read.",
-                    "errors": errors,
-                })
-            combined = "\n\n---\n\n".join(
-                f"## {dp.name}\n\n{info['text']}" for dp, info in docs
-            )
-            combined_truncated = len(combined) > _READ_DOC_MAX_CHARS
-            if combined_truncated:
-                combined = combined[:_READ_DOC_MAX_CHARS]
-            n_ocr = sum(info.get("n_ocr_pages", 0) for _, info in docs)
-            return json.dumps({
-                "status": "success",
-                "n_documents": len(docs),
-                "n_ocr_pages": n_ocr,
-                "ocr_note": (
-                    f"{n_ocr} scanned page(s) had no text layer and were "
-                    "transcribed by vision-OCR — verify any figures/numerics."
-                ) if n_ocr else None,
-                "documents": [
-                    {"name": dp.name,
-                     **{k: v for k, v in info.items() if k != "text"}}
-                    for dp, info in docs
-                ],
-                "errors": errors or None,
-                "combined_truncated": combined_truncated,
-                "text": combined,
-            })
+            if paths:
+                print(f"  📄 Tool: Reading {len(paths)} document(s)...")
+            from ...utils.file_io import read_documents_combined
+            return json.dumps(read_documents_combined(
+                paths, base_dir=Path(self.orch.base_dir),
+                ocr_model=getattr(self.orch, "model", None),
+                max_chars=_READ_DOC_MAX_CHARS))
 
         self._register_tool(
             func=read_document,

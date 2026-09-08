@@ -5539,32 +5539,36 @@ class OrchestratorTools:
             # scattered LLM-saved files OUTSIDE the delegation directory —
             # live, a white paper landed in planning/<slug>/ as a sibling of
             # delegations/, duplicating the copy already written inside it.
-            target_dir = self._output_dir()
-            if subfolder:
-                safe_sub = Path(subfolder).name
-                target_dir = target_dir / safe_sub
-            target_dir.mkdir(parents=True, exist_ok=True)
-            dest = target_dir / safe_name
-
             try:
-                dest.write_text(content, encoding="utf-8")
+                # Shared engine (#481): traversal-proofing, subfolder,
+                # backup-on-overwrite. Planning layers deliverable recording
+                # and the PDF-twin invariant on top.
+                from ...utils.file_io import write_text_file
+                out = write_text_file(self._output_dir(), safe_name, content,
+                                      subfolder=subfolder)
+                if out["status"] != "success":
+                    return json.dumps(out)
+                dest = Path(out["path"])
                 from .user_interface import format_path, record_deliverable
                 record_deliverable(self.orch.base_dir, dest, title,
                                    deliverable)
+                # The overwrite backup is a produced file like edit_file's
+                # pre-edit copy: recorded (not as a deliverable) so the UI
+                # lists it and a forgotten flag can never hide it.
+                if out.get("backup"):
+                    record_deliverable(self.orch.base_dir, Path(out["backup"]),
+                                       f"Pre-overwrite copy of {dest.name}")
                 print(f"    💾 Saved{' (deliverable)' if deliverable else ''}: "
-                      f"{format_path(dest)}")
+                      f"{format_path(dest)}"
+                      + (f" (previous version kept: {Path(out['backup']).name})"
+                         if out.get("backup") else ""))
                 # Same invariant as edit_file and the revision branch: a
                 # markdown write never leaves a stale PDF twin beside it
                 # (live, an agent rewrote a document via save_file and its
                 # forwarded PDF kept serving the old content).
-                pdf_refreshed = self._refresh_pdf_twin(dest)
-                return json.dumps({
-                    "status": "success",
-                    "path": str(dest),
-                    "size_bytes": dest.stat().st_size,
-                    "deliverable": bool(deliverable),
-                    "pdf_refreshed": pdf_refreshed,
-                })
+                out["deliverable"] = bool(deliverable)
+                out["pdf_refreshed"] = self._refresh_pdf_twin(dest)
+                return json.dumps(out)
             except Exception as e:
                 logging.error(f"save_file failed: {e}")
                 return json.dumps({
@@ -5655,28 +5659,12 @@ class OrchestratorTools:
             # scattered LLM-saved files OUTSIDE the delegation directory —
             # live, a white paper landed in planning/<slug>/ as a sibling of
             # delegations/, duplicating the copy already written inside it.
-            target_dir = self._output_dir()
-            if subfolder:
-                safe_sub = Path(subfolder).name
-                target_dir = target_dir / safe_sub
-            target_dir.mkdir(parents=True, exist_ok=True)
-            dest = target_dir / safe_name
-
-            try:
-                with open(dest, "a", encoding="utf-8") as f:
-                    f.write(content)
-                print(f"    💾 Appended: {dest}")
-                return json.dumps({
-                    "status": "success",
-                    "path": str(dest),
-                    "size_bytes": dest.stat().st_size,
-                })
-            except Exception as e:
-                logging.error(f"append_file failed: {e}")
-                return json.dumps({
-                    "status": "error",
-                    "message": str(e),
-                })
+            from ...utils.file_io import write_text_file
+            out = write_text_file(self._output_dir(), safe_name, content,
+                                  subfolder=subfolder, append=True)
+            if out["status"] == "success":
+                print(f"    💾 Appended: {out['path']}")
+            return json.dumps(out)
 
         self._register_tool(
             func=append_file,
@@ -6280,203 +6268,17 @@ class OrchestratorTools:
             if error:
                 return error
 
-            path = Path(resolved)
-            if not path.is_file():
-                return json.dumps({
-                    "status": "error",
-                    "message": f"Not a file: {file_path}"
-                })
-
-            try:
-                ext = path.suffix.lower()
-
-                # Size guard — skip for Excel/CSV since we cap at 50 rows × 40 cols.
-                # Documents get more headroom: extraction is page-based and a
-                # figure-heavy PDF is megabytes of images, not of text.
-                if ext not in ('.xlsx', '.xls', '.csv'):
-                    size_mb = path.stat().st_size / (1024 * 1024)
-                    cap_mb = 25 if ext in ('.pdf', '.docx') else 5
-                    if size_mb > cap_mb:
-                        return json.dumps({
-                            "status": "error",
-                            "message": f"File too large ({size_mb:.1f} MB)."
-                        })
-
-                if ext == ".json":
-                    with open(path, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                    content = json.dumps(data, indent=2)
-                elif ext in ('.xlsx', '.xls', '.csv'):
-                    MAX_PREVIEW_ROWS = 100
-                    MAX_PREVIEW_COLS = 40
-                    MAX_PREVIEW_CHARS = 30000
-                    if ext == '.csv':
-                        df_preview = pd.read_csv(path, nrows=MAX_PREVIEW_ROWS)
-                        with open(path) as _f:
-                            total_rows = sum(1 for _ in _f) - 1
-                    else:
-                        df_preview = pd.read_excel(path, nrows=MAX_PREVIEW_ROWS)
-                        try:
-                            import openpyxl
-                            _wb = openpyxl.load_workbook(path, read_only=True)
-                            total_rows = _wb.active.max_row - 1
-                            _wb.close()
-                        except Exception:
-                            total_rows = len(df_preview)
-                    total_cols = len(df_preview.columns)
-                    display_df = df_preview.iloc[:, :MAX_PREVIEW_COLS]
-                    preview_text = display_df.to_string()
-                    # Adaptive row reduction if output exceeds char budget
-                    if len(preview_text) > MAX_PREVIEW_CHARS and len(display_df) > 5:
-                        ratio = MAX_PREVIEW_CHARS / len(preview_text)
-                        fewer_rows = max(5, int(len(display_df) * ratio))
-                        display_df = display_df.iloc[:fewer_rows]
-                        preview_text = display_df.to_string()
-                        if len(preview_text) > MAX_PREVIEW_CHARS:
-                            preview_text = preview_text[:MAX_PREVIEW_CHARS] + "\n... (truncated)"
-                    shown_rows = len(display_df)
-                    shown_cols = len(display_df.columns)
-                    trunc_parts = []
-                    if shown_rows < total_rows:
-                        trunc_parts.append(f"first {shown_rows} rows")
-                    if shown_cols < total_cols:
-                        trunc_parts.append(f"first {shown_cols} columns")
-                    trunc = f" (showing {', '.join(trunc_parts)})" if trunc_parts else ""
-                    content = f"Shape: {total_rows} rows × {total_cols} columns{trunc}\n\n{preview_text}"
-                else:
-                    doc_meta = {}
-                    if ext in ('.pdf', '.docx'):
-                        # #397 phase 0: opened as text, a PDF returns its
-                        # compressed byte streams — live, a delegation handed
-                        # a proposal PDF could not ground on it (one run
-                        # proceeded from the caller's paraphrase; another
-                        # refused an adversarial review outright). Extraction
-                        # is ALREADY shared infrastructure; route through it.
-                        from ...parsers.extract import extract_text
-                        info = extract_text(
-                            str(path),
-                            ocr_model=getattr(self.orch.planner, "model",
-                                              None))
-                        raw = info.get("text") or ""
-                        if not raw.strip():
-                            return json.dumps({
-                                "status": "error",
-                                "message": (
-                                    f"No extractable text in {path.name} "
-                                    "(empty or image-only document).")})
-                        lines = raw.splitlines(keepends=True)
-                        doc_meta = {k: info[k] for k in
-                                    ("n_pages", "n_ocr_pages", "n_paragraphs")
-                                    if info.get(k) is not None}
-                        doc_meta["extracted"] = ext.lstrip(".")
-                    else:
-                        with open(path, 'r', encoding='utf-8',
-                                  errors='replace') as f:
-                            lines = f.readlines()
-                    total = len(lines)
-
-                    if search:
-                        # The real question behind most repeat reads is "is X
-                        # in here, and where" — a search, not a read. Answering
-                        # it directly costs one call and stays cheap however
-                        # long the file is.
-                        try:
-                            rx = re.compile(search, re.I)
-                        except re.error as e:
-                            return json.dumps({
-                                "status": "error",
-                                "message": f"Invalid search pattern: {e}"})
-                        hits = [i for i, ln in enumerate(lines) if rx.search(ln)]
-                        CAP = 40
-                        shown, out = hits[:CAP], []
-                        for i in shown:
-                            lo, hi = max(0, i - 1), min(total, i + 2)
-                            out.append(f"@@ line {i + 1}\n"
-                                       + "".join(lines[lo:hi]).rstrip("\n"))
-                        body = "\n\n".join(out) if out else "(no matches)"
-                        note = (f"{len(hits)} matching line(s) in {total} total"
-                                + (f"; showing the first {CAP}" if len(hits) > CAP
-                                   else ""))
-                        return json.dumps({
-                            "status": "success",
-                            "file_path": str(path),
-                            "mode": "search",
-                            "pattern": search,
-                            "matches": len(hits),
-                            "match_lines": [i + 1 for i in shown],
-                            "total_lines": total,
-                            "content": f"{note}\n\n{body}",
-                            **doc_meta,
-                        })
-
-                    # A truncated read must say what it is missing and where,
-                    # or the agent cannot tell a short file from a short read.
-                    def _outline():
-                        heads = [(i + 1, ln.strip()) for i, ln in
-                                 enumerate(lines) if ln.startswith('#')]
-                        if len(heads) < 2:
-                            return ""
-                        return "\nSections: " + " · ".join(
-                            f"{h.lstrip('# ')[:44]} @ line {n}"
-                            for n, h in heads[:12]) + (
-                            " …" if len(heads) > 12 else "")
-
-                    # Files read for their whole content, not their head.
-                    whole = (any(s in path.name.lower()
-                                 for s in _FULL_READ_STEMS)
-                             and offset is None and not tail
-                             and len("".join(lines)) <= _FULL_READ_MAX_CHARS)
-
-                    truncated = True
-                    if whole or total <= max_lines:
-                        first, last, content = 1, total, "".join(lines)
-                        truncated = False
-                    elif offset is not None:
-                        start = max(0, offset - 1)
-                        shown = lines[start:start + max_lines]
-                        first, last = start + 1, min(total, start + max_lines)
-                        content = "".join(shown) + (
-                            f"\n... (showing lines {first}-{last} of {total}."
-                            f"{_outline()})")
-                    elif tail:
-                        shown = lines[-max_lines:]
-                        first, last = total - max_lines + 1, total
-                        more = (f"... ({first - 1} earlier lines not shown; "
-                                f"omit tail to read from the top)")
-                        content = more + "\n" + "".join(shown)
-                    else:
-                        shown = lines[:max_lines]
-                        first, last = 1, max_lines
-                        content = "".join(shown) + (
-                            f"\n... ({total - max_lines} more lines not "
-                            f"shown — this is a TRUNCATED READ, not the whole "
-                            f"file. Jump to any part with offset=<line>; read "
-                            f"the END with tail=true; find something with "
-                            f"search='<pattern>'; or raise max_lines."
-                            f"{_outline()})")
-
-                    return json.dumps({
-                        "status": "success",
-                        "file_path": str(path),
-                        "mode": "tail" if tail else "head",
-                        "total_lines": total,
-                        "shown_lines": f"{first}-{last}",
-                        "truncated": truncated,
-                        "content": content,
-                        **doc_meta,
-                    })
-
-                return json.dumps({
-                    "status": "success",
-                    "file_path": str(path),
-                    "content": content
-                })
-
-            except Exception as e:
-                return json.dumps({
-                    "status": "error",
-                    "message": f"Failed to read file: {e}"
-                })
+            # Shared engine (#481): windowing (head / offset / tail /
+            # search), tabular preview, PDF / DOCX extraction, JSON cap.
+            # Planning keeps its path resolution and its whole-read stems.
+            from ...utils.file_io import read_file_content
+            return json.dumps(read_file_content(
+                Path(resolved), max_lines=max_lines, tail=tail,
+                search=search, offset=offset,
+                full_read_stems=_FULL_READ_STEMS,
+                full_read_max_chars=_FULL_READ_MAX_CHARS,
+                ocr_model=getattr(self.orch.planner, "model", None),
+                display_path=file_path))
 
         self._register_tool(
             func=read_file,

@@ -1162,11 +1162,43 @@ class MetaOrchestratorAgent:
     # hits keep child creation truly lazy (first delegation).
     _CAPABILITIES_CACHE = Path.home() / ".scilink" / "capabilities_cache.json"
     _CAPABILITIES_CACHE_MAX = 8
+    # The modules whose registration code defines each specialist's tool
+    # surface. Their CONTENT is part of the cache key: the package version
+    # alone does not move between releases, so a checkout / editable install
+    # served a stale inventory after a tool was added (observed live: the
+    # analysis specialist's new read_file / edit_file were invisible to the
+    # meta until the next version bump).
+    _TOOL_SOURCE_MODULES = (
+        "scilink.agents.exp_agents.analysis_orchestrator_tools",
+        "scilink.agents.planning_agents.orchestrator_tools",
+        "scilink.agents.sim_agents.simulation_orchestrator_tools",
+    )
+
+    @classmethod
+    def _tool_source_fingerprint(cls) -> str:
+        """Short hash of the tool-registration modules' source bytes; found
+        via the import system without importing them (the sim module pulls
+        in ``ase``, which may be absent)."""
+        import hashlib
+        from importlib.util import find_spec
+
+        h = hashlib.sha256()
+        for name in cls._TOOL_SOURCE_MODULES:
+            try:
+                spec = find_spec(name)
+                origin = getattr(spec, "origin", None)
+                if origin and Path(origin).is_file():
+                    h.update(name.encode())
+                    h.update(Path(origin).read_bytes())
+            except Exception:  # noqa: BLE001 - a missing module just adds nothing
+                continue
+        return h.hexdigest()[:16]
 
     def _capabilities_cache_key(self) -> str:
         """Fingerprint of everything the inventory can depend on: package
-        version, third-party agent entry points, sim-extra availability, and
-        the registered extensions (skills / tools / MCP servers)."""
+        version, the tool-registration modules' source, third-party agent
+        entry points, sim-extra availability, and the registered extensions
+        (skills / tools / MCP servers)."""
         import hashlib
 
         try:
@@ -1174,6 +1206,7 @@ class MetaOrchestratorAgent:
             ver = version("scilink")
         except Exception:
             ver = "unknown"
+        src = self._tool_source_fingerprint()
         try:
             from importlib.metadata import entry_points
             eps = sorted(ep.name for ep in entry_points(group="scilink.agents"))
@@ -1191,7 +1224,7 @@ class MetaOrchestratorAgent:
                        for s in (e.get("schemas") or []))))
             for e in self._shared_extensions
         )
-        payload = json.dumps([ver, eps, has_sim, ext])
+        payload = json.dumps([ver, src, eps, has_sim, ext])
         return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
     def _build_capabilities_block(self) -> str:
