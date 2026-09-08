@@ -166,8 +166,10 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null); // init overlay text
   const [startError, setStartError] = useState<string | null>(null);
   const [serverStopped, setServerStopped] = useState(false);
-  const [tab, setTab] = useState<"chat" | "files" | "delegations">("chat");
+  const [tab, setTab] = useState<"chat" | "files" | "telemetry">("chat");
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  // Delegation the sidebar tree asked the Telemetry tab to expand.
+  const [focusDelegation, setFocusDelegation] = useState<number | null>(null);
   const [attachRequest, setAttachRequest] = useState<string | null>(null);
   const [liveSessions, setLiveSessions] = useState<LiveSession[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(() => {
@@ -391,6 +393,11 @@ export default function App() {
         onReset={resetSession}
         onQuit={quitApp}
         liveSessions={liveSessions}
+        delegations={state.delegations}
+        onSelectDelegation={(i) => {
+          setFocusDelegation(i);
+          setTab("telemetry");
+        }}
         onAttachSession={(id) => void attachSession(id)}
         onCloseSession={(id) => {
           void api
@@ -439,15 +446,11 @@ export default function App() {
               </button>
               {mode === "meta" && (
                 <button
-                  className={tab === "delegations" ? "active" : ""}
-                  onClick={() => setTab("delegations")}
+                  className={tab === "telemetry" ? "active" : ""}
+                  onClick={() => setTab("telemetry")}
+                  title="Delegation details (the sidebar tree is the live overview)"
                 >
-                  Delegations
-                  {state.delegations?.delegations.length ? (
-                    <span className="tab-count">
-                      {state.delegations.delegations.length}
-                    </span>
-                  ) : null}
+                  Telemetry
                 </button>
               )}
             </div>
@@ -464,10 +467,11 @@ export default function App() {
               />
             </div>
             {mode === "meta" && (
-              <div className="tab-body" hidden={tab !== "delegations"}>
+              <div className="tab-body" hidden={tab !== "telemetry"}>
                 <DelegationsPanel
                   view={state.delegations}
                   running={state.status === "running"}
+                  focus={focusDelegation}
                 />
               </div>
             )}

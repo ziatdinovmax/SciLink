@@ -5,7 +5,9 @@ import {
   type LiveSession,
   type ResumableSession,
   type SessionSnapshot,
+  type DelegationView,
 } from "../api";
+import { DelegationTree } from "./DelegationTree";
 import logoDark from "../assets/scilink_logo_dark_animated.svg";
 import logoLight from "../assets/scilink_logo_light_animated.svg";
 
@@ -36,6 +38,8 @@ export function Sidebar({
   onReset,
   onQuit,
   liveSessions,
+  delegations = null,
+  onSelectDelegation,
   onAttachSession,
   onCloseSession,
   onDetach,
@@ -55,6 +59,8 @@ export function Sidebar({
   onReset: () => void;
   onQuit: () => void;
   liveSessions: LiveSession[];
+  delegations?: DelegationView | null; // meta: live ledger for the tree
+  onSelectDelegation?: (index: number) => void;
   onAttachSession: (id: string) => void;
   onCloseSession: (id: string) => void;
   onDetach: () => void;
@@ -411,6 +417,16 @@ export function Sidebar({
               Reset Session
             </button>
           </div>
+        </div>
+      )}
+
+      {session && session.mode === "meta" && (
+        <div className="sidebar-section">
+          <DelegationTree
+            view={delegations}
+            running={status === "running"}
+            onSelect={(i) => onSelectDelegation?.(i)}
+          />
         </div>
       )}
 

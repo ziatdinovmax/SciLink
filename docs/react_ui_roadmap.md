@@ -28,9 +28,9 @@ about *what's next and why*. Updated 2026-09-07.
   recurse; resume card ranks the headline deliverable over a late-refined
   ideation report (#533); activity line narrates plan refinement instead
   of "-"; locked sidebar fields greyed and showing the live session's
-  model/autonomy; Files-tab documents newest-first; **Delegations tab**
-  (live mission-control view of the meta ledger, the last high-value
-  Streamlit panel); bundle no longer committed — built at release by
+  model/autonomy; Files-tab documents newest-first; **mission-control
+  tree** in the sidebar (live, as in Streamlit) with a Telemetry tab for
+  the per-delegation detail (the last high-value Streamlit panel); bundle no longer committed — built at release by
   `release.yml` (see "Standing decisions").
 
 Validation posture: ~60 offline tests across
