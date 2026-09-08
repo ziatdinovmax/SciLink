@@ -160,11 +160,11 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   `delegations` SSE events as the ledger changes mid-turn, and survive
   refresh and resume. The per-agent tool sequence and worker action
   histories (already served by `/telemetry`) are the tab's next content.
-- **Tools tab** (all modes): connect MCP servers — a `stdio` command, an
-  SSE URL, or a streamable-HTTP URL with optional JSON headers — and see
-  what the session's agent can call: each server's tools, other registered
-  external tools, and the built-in orchestrator tools with a filter.
-  Disconnect from the same panel. There is deliberately no tool-file
+- **MCP tab** (all modes): connect MCP servers — a `stdio` command, an
+  SSE URL, or a streamable-HTTP URL with optional JSON headers — and
+  disconnect them. Below, collapsed as a reference, what the session's
+  agent can already call: each server's tools, other registered external
+  tools, and the built-in orchestrator tools with a filter. There is deliberately no tool-file
   uploader (the Streamlit `tool_schemas` / `create_tool_functions` contract
   is not ported): users hand code to the agents as scripts attached in
   chat, adapted by codegen, or as MCP servers, run verbatim in any

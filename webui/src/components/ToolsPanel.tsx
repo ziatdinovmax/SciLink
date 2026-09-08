@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, type ToolInventory } from "../api";
 
-/** Tools tab — connect MCP servers and see what the session's agent can
- * call: the servers' tools, other registered external tools, and the
- * built-in orchestrator tools. Read-only apart from MCP connect /
- * disconnect. There is deliberately no tool-file uploader: users hand
+/** MCP tab — connect MCP servers to the session's agent, and (collapsed,
+ * as a reference) see what the agent can already call: the servers'
+ * tools, other registered external tools, and the built-in orchestrator
+ * tools. Read-only apart from MCP connect / disconnect. There is deliberately no tool-file uploader: users hand
  * code to the agents as scripts attached in chat (adapted by codegen) or
  * as MCP servers (run verbatim, any language). */
 
@@ -227,7 +227,7 @@ export function ToolsPanel({
       <section className="tools-section">
         <h3>
           <button type="button" className="link-btn tools-toggle" onClick={() => setShowBuiltin((v) => !v)}>
-            {showBuiltin ? "▾" : "▸"} Built-in tools
+            {showBuiltin ? "▾" : "▸"} What the agent can already call
           </button>
           <span className="caption"> ({inv?.builtin.length ?? 0})</span>
         </h3>

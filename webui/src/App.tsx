@@ -531,9 +531,9 @@ export default function App() {
               <button
                 className={tab === "tools" ? "active" : ""}
                 onClick={() => setTab("tools")}
-                title="MCP servers and the agent's tool inventory"
+                title="Connect MCP servers; see what the agent can call"
               >
-                Tools
+                MCP
               </button>
               {mode === "meta" && (
                 <button
