@@ -182,9 +182,13 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   the ledger sits the **dependency graph** from the Streamlit tab, drawn
   as plain SVG (no graphviz): the meta-agent root, one box per delegation
   colored by status and annotated with its sub-agents, grey dispatch
-  edges, blue context edges; boxes are layered by context depth, edges
-  that skip a layer bow around the boxes between, and clicking a box
-  expands its ledger row.
+  edges, blue context edges; boxes are layered by context depth, a layer
+  wider than six wraps into rows, the parallel branches of one fan-out
+  collapse into a single stacked box with their outcome counts (30
+  branches are one node, not 30 boxes and 60 edges), edges that skip a
+  layer bow around the boxes between, and clicking a box expands its
+  ledger row (a fan-out box opens its first failed branch). Checked at 45
+  delegations.
 - **MCP tab** (all modes): connect MCP servers — a `stdio` command, an
   SSE URL, or a streamable-HTTP URL with optional JSON headers — and
   disconnect them; each server card lists the tools it registered. The

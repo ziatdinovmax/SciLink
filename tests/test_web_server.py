@@ -923,10 +923,15 @@ def test_delegation_view_shapes_the_ledger(tmp_path):
                       completed_at="2026-09-07T10:03:30", feature_tables=["ft"]),
         _ledger_entry(2, "planning", "running", context_from=[1, "x"]),
         _ledger_entry(3, "fusion", "success", labels=["a", "b"], context_from=[1]),
+        # a run_fanout branch is stamped fanout=True + parallel_group
+        dict(_ledger_entry(4, "analysis", "success", context_from=[1]),
+             fanout=True, parallel_group="fanout_4"),
     ])
     view = delegation_view(agent, str(tmp_path))
     rows = view["delegations"]
-    assert [r["index"] for r in rows] == [1, 2, 3]
+    assert [r["index"] for r in rows] == [1, 2, 3, 4]
+    assert rows[3]["fanout"] is True and rows[3]["fanout_group"] == "fanout_4"
+    assert rows[0]["fanout"] is False and rows[0]["fanout_group"] is None
     assert rows[0]["files_produced"] == ["analysis/results/fit.png", "/elsewhere/x.csv"]
     assert rows[0]["n_feature_tables"] == 1
     assert len(rows[0]["summary"]) <= 1200 and rows[0]["summary"].endswith("…")
