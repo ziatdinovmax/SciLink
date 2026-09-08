@@ -3283,6 +3283,12 @@ class AnalysisOrchestratorTools:
                             response["feature_rows"] = _desc["n_rows"]
                             if _desc["missing"]:
                                 response["feature_missing"] = _desc["missing"]
+                            # #534: a column empty for SOME units, or one
+                            # quantity split across two sibling columns,
+                            # silently drops units from a BO keyed on it —
+                            # say so here, where inputs/targets get chosen.
+                            if _desc.get("warnings"):
+                                response["feature_warnings"] = _desc["warnings"]
                     # #172: surface the locked-script reuse verdict so the
                     # orchestrator can act on a non-`good` outcome (a poorly
                     # fitting reused recipe, or a re-derived schema).

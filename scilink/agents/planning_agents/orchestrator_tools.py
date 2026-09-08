@@ -349,6 +349,22 @@ class OrchestratorTools:
         else:
             self.orch.fidelity_spec = None
 
+    @staticmethod
+    def _sidecar_scalar_keys(file_path: str) -> set:
+        """Scalar keys of the data file's sidecar JSON (``x.csv`` -> ``x.json``)
+        — the conditions analyze_file merges into the scalarizer output, so a
+        campaign input living there need not be a column of the table."""
+        try:
+            sidecar = Path(file_path).with_suffix(".json")
+            if not sidecar.is_file():
+                return set()
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return set()
+            return {k for k, v in data.items() if isinstance(v, (int, float, str))}
+        except Exception:  # noqa: BLE001 - a bad sidecar must not block ingestion
+            return set()
+
     def _compute_file_hash(self, file_path: str) -> str:
         """Compute MD5 hash of file content for deduplication."""
         hasher = hashlib.md5()
@@ -3455,9 +3471,11 @@ class OrchestratorTools:
             _exps = (current_plan or {}).get("proposed_experiments") or [{}]
             exp_context = _exps[0]
 
-            # Inject schema requirements into context (only when generating new script)
+            # Inject schema requirements into context (only when generating a
+            # new script — a locked script ignores it; force_regenerate must
+            # still see it).
             role_hints = None
-            if inputs and targets and not has_locked_script:
+            if inputs and targets and script_to_use is None:
                 exp_context = exp_context.copy() if exp_context else {}
                 exp_context["_schema_requirements"] = {
                     "input_columns": inputs,
@@ -3465,6 +3483,32 @@ class OrchestratorTools:
                     "optimization_type": "multi-objective" if len(targets) > 1 else "single-objective"
                 }
                 role_hints = {"inputs": inputs, "targets": targets}
+            elif (script_to_use is None
+                    and self.orch.expected_input_columns
+                    and self.orch.expected_target_columns):
+                # #535: a continuation on an established campaign repeats the
+                # prior ingestion decision. The campaign's schema is known and
+                # checkpointed; arming it here makes the explicit table
+                # pass-through fire for a same-schema file (and gives codegen
+                # the required schema when the file is not a flat table)
+                # instead of rediscovering via codegen. Inputs that ride the
+                # file's sidecar JSON are merged after scalarization, so they
+                # are not demanded from the table itself.
+                _known_targets = list(self.orch.expected_target_columns)
+                _sidecar_keys = self._sidecar_scalar_keys(file_path)
+                _table_inputs = [c for c in self.orch.expected_input_columns
+                                 if c not in _sidecar_keys]
+                exp_context = exp_context.copy() if exp_context else {}
+                exp_context["_schema_requirements"] = {
+                    "input_columns": _table_inputs,
+                    "target_columns": _known_targets,
+                    "optimization_type": ("multi-objective"
+                                          if len(_known_targets) > 1
+                                          else "single-objective"),
+                }
+                role_hints = {"inputs": _table_inputs, "targets": _known_targets}
+                print(f"    📌 Continuation: schema armed from the campaign "
+                      f"(inputs={_table_inputs}, targets={_known_targets})")
 
             try:
                 res = self.orch.scalarizer.scalarize(
@@ -3589,7 +3633,19 @@ class OrchestratorTools:
                         "status": "error",
                         "message": f"Unexpected metrics format: {type(metrics)}"
                     })
-                
+
+                # Unit labels aligned to df_new's index, so a row skipped later
+                # (empty target) can be named (#534). A feature-table
+                # pass-through carries them as res["units"] (it returns only
+                # the requested columns); a codegen script may emit 'unit'.
+                _unit_series = None
+                if "unit" in df_new.columns:
+                    _unit_series = df_new["unit"].astype(str)
+                elif (isinstance(res.get("units"), list)
+                        and len(res["units"]) == len(df_new)):
+                    _unit_series = pd.Series([str(u) for u in res["units"]],
+                                             index=df_new.index)
+
                 # DEDUPLICATION - Content-based tracking
                 # Compute current file hash
                 current_hash = self._compute_file_hash(file_path)
@@ -3903,6 +3959,11 @@ class OrchestratorTools:
                     else:
                         ref_cols = None
 
+                # df_to_append is a row-subset of df_new (index preserved), so
+                # the unit labels realign by index; 'unit' itself is not a
+                # schema column and is dropped just below.
+                _unit_labels = (_unit_series.reindex(df_to_append.index).tolist()
+                                if _unit_series is not None else None)
                 if ref_cols:
                     available = [c for c in ref_cols if c in df_to_append.columns]
                     extra = [c for c in df_to_append.columns if c not in ref_cols]
@@ -3927,13 +3988,18 @@ class OrchestratorTools:
                 _n_before = len(df_to_append)
                 _keep = df_to_append[_schema_cols].notna().all(axis=1)
                 rows_skipped_missing = int((~_keep).sum())
+                _skipped_units: List[str] = []
                 if rows_skipped_missing:
                     _bad_cols = [c for c in _schema_cols
                                  if df_to_append.loc[~_keep, c].isna().any()]
+                    if _unit_labels is not None:
+                        _skipped_units = [u for u, k in zip(_unit_labels, _keep.tolist())
+                                          if not k]
                     df_to_append = df_to_append[_keep]
                     num_new = len(df_to_append)
                     print(f"    ⚠️  Skipping {rows_skipped_missing}/{_n_before} row(s) "
-                          f"with missing values in {_bad_cols}")
+                          f"with missing values in {_bad_cols}"
+                          + (f" (units: {_skipped_units})" if _skipped_units else ""))
                     if df_to_append.empty:
                         return json.dumps({
                             "status": "error",
@@ -3996,11 +4062,15 @@ class OrchestratorTools:
                     _resp["direction_warnings"] = _dir_warn
                 if rows_skipped_missing:
                     _resp["rows_skipped_missing"] = rows_skipped_missing
+                    if _skipped_units:
+                        _resp["rows_skipped_units"] = _skipped_units
                     _resp["warning"] = (
                         f"{rows_skipped_missing} row(s) skipped: missing values in "
-                        f"{_bad_cols}. If those units report the quantity under a "
-                        f"different column, re-ingest a table where it is filled in "
-                        f"under the target name.")
+                        f"{_bad_cols}"
+                        + (f" (units: {_skipped_units})" if _skipped_units else "")
+                        + ". The optimizer will NOT see these units. If they "
+                        f"report the quantity under a different column, re-ingest "
+                        f"a table where it is filled in under the target name.")
                 return json.dumps(_resp)
                 
             except Exception as e:

@@ -1587,6 +1587,10 @@ class AnalysisOrchestratorAgent:
                     if _d:
                         feature_tables_schema.append(
                             {"path": str(ft.resolve()), **_d})
+                        # #534: partial / split columns must reach the caller
+                        # that picks BO inputs and targets, not just the schema.
+                        for _w in _d.get("warnings") or []:
+                            warnings.append(f"Feature table {ft.name}: {_w}")
 
         # staged_solutions: raw T=2 (hot-annealing) solutions filed in the
         # staging buffer during this run. Surfaced so the meta agent can offer
