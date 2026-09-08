@@ -78,26 +78,11 @@ _READ_DOC_MAX_CHARS = 200_000  # ~50k tokens; longer documents are truncated
 
 
 def _extract_document_text(path: Path, ocr_model: Any = None) -> Dict[str, Any]:
-    """Extract plain text from a PDF / DOCX / Markdown / text file.
-
-    Thin wrapper over the shared ``scilink.parsers.extract_text`` (which adds
-    table-aware PDF extraction); it applies read_document's character cap.
-    When ``ocr_model`` is supplied, scanned/sparse PDF pages are transcribed
-    via the vision-OCR fallback. Returns a dict with ``text`` plus metadata
-    (page/paragraph count, ``n_chars``, ``truncated``, ``n_ocr_pages``).
-    Raises ValueError for an unsupported extension; reader errors propagate
-    to the caller.
-    """
-    from scilink.parsers import extract_text
-
-    info = extract_text(path, ocr_model=ocr_model)
-    text = info.get("text", "")
-    info["truncated"] = len(text) > _READ_DOC_MAX_CHARS
-    if info["truncated"]:
-        text = text[:_READ_DOC_MAX_CHARS]
-        info["text"] = text
-        info["n_chars"] = len(text)
-    return info
+    """Kept as a name for callers; the implementation is the shared engine's
+    (``scilink.utils.file_io.extract_document_text``, #481)."""
+    from ...utils.file_io import extract_document_text
+    return extract_document_text(path, ocr_model=ocr_model,
+                                 max_chars=_READ_DOC_MAX_CHARS)
 
 
 def _build_skill_description(agent_registry: dict = None,
@@ -5974,36 +5959,30 @@ class AnalysisOrchestratorTools:
                     "message": "Invalid filename.",
                 })
 
-            target_dir = self.orch.base_dir
-            if subfolder:
-                safe_sub = Path(subfolder).name
-                target_dir = target_dir / safe_sub
-            target_dir.mkdir(parents=True, exist_ok=True)
-            dest = target_dir / safe_name
-
-            try:
-                dest.write_text(content, encoding="utf-8")
-                print(f"    💾 Saved: {dest}")
-                return json.dumps({
-                    "status": "success",
-                    "path": str(dest),
-                    "size_bytes": dest.stat().st_size,
-                })
-            except Exception as e:
-                logging.error(f"save_file failed: {e}")
-                return json.dumps({
-                    "status": "error",
-                    "message": str(e),
-                })
+            # Shared engine (#481): traversal-proofing, subfolder, and a
+            # backup before overwriting an existing file.
+            from ...utils.file_io import write_text_file
+            out = write_text_file(Path(self.orch.base_dir), safe_name, content,
+                                  subfolder=subfolder)
+            if out["status"] == "success":
+                print(f"    💾 Saved: {out['path']}"
+                      + (f" (previous version kept: {Path(out['backup']).name})"
+                         if out.get("backup") else ""))
+            return json.dumps(out)
 
         self._register_tool(
             func=save_file,
             name="save_file",
             description=(
                 "Save text content (reports, summaries, tables, scripts, notes) "
-                "to a file in the session directory. Use this to persist "
-                "synthesized knowledge summaries, analysis reports, exported "
-                "results, or any text artifact the user requests."
+                "to a NEW file in the session directory — synthesized knowledge "
+                "summaries, analysis reports, exported results, any text "
+                "artifact the user requests. To change an EXISTING file use "
+                "edit_file (snippet swap, byte-safe) or rename_file; "
+                "overwriting with save_file keeps a .before_overwrite backup. "
+                "Large content may not survive the trip as a single tool-call "
+                "argument — for anything long (roughly >100 lines), save the "
+                "first chunk with save_file and the rest with append_file."
             ),
             parameters={
                 "filename": {
@@ -6029,6 +6008,241 @@ class AnalysisOrchestratorTools:
         )
 
         # =====================================================================
+        # 18b. APPEND / READ / EDIT / RENAME FILE — the generic file surface
+        # planning and simulation already had (#481: adopted as thin
+        # wrappers over the shared engine, not as third copies).
+        # =====================================================================
+        def append_file(filename: str, content: str, subfolder: str = "") -> str:
+            """Append text to a file in the session directory (created if
+            missing). Companion to save_file for chunked writes."""
+            print(f"  ⚡ Tool: Appending to file '{filename}'...")
+            safe_name = Path(filename).name
+            if not safe_name:
+                return json.dumps({"status": "error",
+                                   "message": "Invalid filename."})
+            from ...utils.file_io import write_text_file
+            out = write_text_file(Path(self.orch.base_dir), safe_name, content,
+                                  subfolder=subfolder, append=True)
+            if out["status"] == "success":
+                print(f"    💾 Appended: {out['path']}")
+            return json.dumps(out)
+
+        self._register_tool(
+            func=append_file,
+            name="append_file",
+            description=(
+                "Append text content to a file in the session directory "
+                "(created if it doesn't exist). Use together with save_file "
+                "to write large files in chunks — save_file for the first "
+                "chunk, then append_file for each subsequent chunk — keeping "
+                "every chunk small enough to pass reliably as a tool argument."
+            ),
+            parameters={
+                "filename": {"type": "string",
+                             "description": "Name of the file to append to."},
+                "content": {"type": "string",
+                            "description": "The text content to append."},
+                "subfolder": {"type": "string", "description": (
+                    "Optional subfolder within the session directory, e.g. "
+                    "'reports' or 'exports'. Created if it doesn't exist.")},
+            },
+            required=["filename", "content"],
+        )
+
+        # Files read for their whole content, never their head: an analysis
+        # report's sections sit in sequence, so a head-only read hides all but
+        # the first. Whole up to a cap; past it the read truncates but emits
+        # the section outline so offset= reaches the rest.
+        _FULL_READ_STEMS = ("report", "summary", "literature")
+        _FULL_READ_MAX_CHARS = 250_000
+
+        def read_file(file_path: str, max_lines: int = 200,
+                      tail: bool = False, search: str = None,
+                      offset: int = None) -> str:
+            """Read a text / JSON / CSV / log file — analysis_results.json,
+            features.csv, a generated script, metadata.json, a run log, a
+            report — without triggering any analysis. PDF/DOCX are extracted
+            to text. Reads from the top; offset / tail / search navigate."""
+            print(f"  ⚡ Tool: Reading file '{file_path}'...")
+            path = Path(file_path)
+            if not path.is_absolute():
+                path = Path(self.orch.base_dir) / path
+            from ...utils.file_io import read_file_content
+            return json.dumps(read_file_content(
+                path, max_lines=max_lines, tail=tail, search=search,
+                offset=offset, full_read_stems=_FULL_READ_STEMS,
+                full_read_max_chars=_FULL_READ_MAX_CHARS,
+                ocr_model=getattr(self.orch, "model", None),
+                display_path=file_path))
+
+        self._register_tool(
+            func=read_file,
+            name="read_file",
+            description=(
+                "Read a text, JSON, CSV, or log file from the session — an "
+                "analysis_results.json, a features.csv, a generated analysis "
+                "script, metadata.json, a run log, or a report — without "
+                "triggering any analysis (examine_data / run_analysis are for "
+                "DATA; this is for inspecting artifacts). PDF and Word "
+                "documents are extracted to text automatically (tables "
+                "preserved, scanned pages OCR'd). Reads from the TOP by "
+                "default; reports and summaries are returned WHOLE. For a "
+                "long file do not read it repeatedly hoping to see more — you "
+                "will get the same lines back. A truncated read lists the "
+                "section headings and their line numbers: use offset=<line> "
+                "to jump to one, search='<pattern>' to find where something "
+                "is (and whether it is there at all), or tail=true to read the "
+                "END. Path is absolute or relative to the session directory."
+            ),
+            parameters={
+                "file_path": {"type": "string",
+                              "description": "Path to the file to read."},
+                "max_lines": {"type": "integer",
+                              "description": "Maximum lines to return (default: 200)."},
+                "tail": {"type": "boolean", "description": (
+                    "Read the LAST max_lines lines instead of the first — how "
+                    "a long log or report ENDS.")},
+                "search": {"type": "string", "description": (
+                    "Case-insensitive regex. Returns every matching line with "
+                    "its line number and one line of context either side, "
+                    "plus the total match count — instead of the file body. "
+                    "Far cheaper than reading a long file; answers "
+                    "presence/absence definitively.")},
+                "offset": {"type": "integer", "description": (
+                    "1-based line to start reading from — the way to read the "
+                    "MIDDLE of a file. A truncated read lists section headings "
+                    "with line numbers; pass one here to jump straight there.")},
+            },
+            required=["file_path"],
+        )
+
+        def edit_file(path: str, old_text: str = None, new_text: str = None,
+                      replace_all: bool = False, edits: list = None) -> str:
+            """Surgical in-place edit: replace exact text snippets — one
+            old/new pair, or a batched `edits` list applied atomically."""
+            print(f"  ⚡ Tool: Editing file '{path}'...")
+            try:
+                from ...utils.file_edit import apply_surgical_edits
+                if not edits:
+                    if old_text is None or new_text is None:
+                        return json.dumps({"status": "error", "message": (
+                            "Provide old_text+new_text or a non-empty edits "
+                            "list.")})
+                    edits = [{"old_text": old_text, "new_text": new_text,
+                              "replace_all": replace_all}]
+                root = Path(self.orch.base_dir).resolve()
+                rp = Path(path)
+                if not rp.is_absolute():
+                    rp = root / rp
+                rp = rp.resolve()
+                # Guards + backup live in the shared core; this wrapper owns
+                # path resolution and the analysis-flavored routing text.
+                out = apply_surgical_edits(
+                    rp, edits, root=root, backup_dir=rp.parent,
+                    not_found_message=(
+                        "read_file the file and copy the snippet verbatim, "
+                        "whitespace included."),
+                    too_large_message=(
+                        "Edit too large for edit_file. For a content rewrite "
+                        "use save_file (it keeps a .before_overwrite backup). "
+                        "For a VERBATIM insertion, split the text at unique "
+                        "boundaries into snippets under the cap and pass them "
+                        "TOGETHER as one `edits` list in a single call — not "
+                        "a chain of one-edit calls."),
+                )
+                if out["status"] == "success":
+                    n = out.get("n_edits", 1)
+                    print(f"    ✏️  Edited in place"
+                          f"{f' ({n} edits)' if n > 1 else ''}: {rp.name}")
+                return json.dumps(out)
+            except Exception as e:
+                logging.error(f"edit_file failed: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=edit_file,
+            name="edit_file",
+            description=(
+                "Surgically edit an existing session file IN PLACE by "
+                "replacing exact text snippets — a value in a script, a line "
+                "in a report, a key in metadata.json — one old_text/new_text "
+                "pair, or several as an `edits` list applied atomically in one "
+                "call. The old snippet must match byte for byte and be unique "
+                "(or set replace_all). Keeps a .before_edit backup. Do NOT "
+                "rewrite a whole file with save_file when a snippet swap will "
+                "do. Path is absolute or relative to the session directory."
+            ),
+            parameters={
+                "path": {"type": "string",
+                         "description": "Path of the file to edit."},
+                "old_text": {"type": "string", "description": (
+                    "Exact text to replace (verbatim, whitespace included).")},
+                "new_text": {"type": "string",
+                             "description": "Replacement text."},
+                "replace_all": {"type": "boolean", "description": (
+                    "Replace every occurrence (default false: the snippet "
+                    "must be unique).")},
+                "edits": {"type": "array", "items": {"type": "object"},
+                          "description": (
+                    "Batched edits: a list of {old_text, new_text, "
+                    "replace_all?} applied in order, atomically.")},
+            },
+            required=["path"],
+        )
+
+        def rename_file(path: str, new_name: str, copy: bool = False) -> str:
+            """Rename or copy a session file byte-exactly within its own
+            directory — the content never passes through the model."""
+            print(f"  ⚡ Tool: {'Copying' if copy else 'Renaming'} "
+                  f"'{path}' → '{new_name}'...")
+            try:
+                from ...utils.file_edit import rename_or_copy_file
+                root = Path(self.orch.base_dir).resolve()
+                rp = Path(path)
+                if not rp.is_absolute():
+                    rp = root / rp
+                rp = rp.resolve()
+                safe = Path(new_name).name
+                if not safe:
+                    return json.dumps({"status": "error",
+                                       "message": "Invalid new_name."})
+                dest = (rp.parent / safe).resolve()
+                if dest == rp:
+                    return json.dumps({"status": "error", "message": (
+                        f"'{safe}' is already this file's name — nothing to "
+                        f"do.")})
+                out = rename_or_copy_file(rp, dest, root=root, copy=copy)
+                if out["status"] == "success":
+                    print(f"    📛 {'Copied' if copy else 'Renamed'}: "
+                          f"{Path(out['path']).name}")
+                return json.dumps(out)
+            except Exception as e:
+                logging.error(f"rename_file failed: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=rename_file,
+            name="rename_file",
+            description=(
+                "Rename or copy a session file BYTE-EXACTLY within its own "
+                "directory — the content never passes through the model. Use "
+                "for a byte-exact rename (copy=false) or an exact duplicate "
+                "(copy=true); never reconstruct a file by regenerating it to "
+                "rename it."
+            ),
+            parameters={
+                "path": {"type": "string", "description": (
+                    "Path of the file — absolute or relative to the session "
+                    "directory.")},
+                "new_name": {"type": "string", "description": (
+                    "The new bare filename (kept in the file's own directory).")},
+                "copy": {"type": "boolean",
+                         "description": "Copy instead of rename (default false)."},
+            },
+            required=["path", "new_name"],
+        )
+
+        # =====================================================================
         # READ DOCUMENT
         # =====================================================================
         def read_document(paths) -> str:
@@ -6036,67 +6250,32 @@ class AnalysisOrchestratorTools:
             text and persist a literature_file for run_analysis."""
             if isinstance(paths, str):
                 paths = [paths]
-            if not paths:
-                return json.dumps({
-                    "status": "error",
-                    "message": "No document path provided.",
-                })
-            print(f"  📄 Tool: Reading {len(paths)} document(s)...")
-            docs, errors = [], []
-            for p in paths:
-                dp = Path(p)
-                if not dp.is_file():
-                    errors.append(f"Not a file: {p}")
-                    continue
-                try:
-                    docs.append((dp, _extract_document_text(
-                        dp, ocr_model=self.orch.model)))
-                except ValueError as e:
-                    errors.append(str(e))
-                except Exception as e:
-                    logging.error(f"read_document failed for {p}: {e}")
-                    errors.append(f"Could not read {dp.name}: {e}")
-            if not docs:
-                return json.dumps({
-                    "status": "error",
-                    "message": "No documents could be read.",
-                    "errors": errors,
-                })
-            combined = "\n\n---\n\n".join(
-                f"## {dp.name}\n\n{info['text']}" for dp, info in docs
-            )
-            combined_truncated = len(combined) > _READ_DOC_MAX_CHARS
-            if combined_truncated:
-                combined = combined[:_READ_DOC_MAX_CHARS]
-            # Persist as a literature_file so run_analysis can ground its plan
-            # in these documents — the same channel search_literature uses.
+            if paths:
+                print(f"  📄 Tool: Reading {len(paths)} document(s)...")
+            # Shared engine (#481) does the extraction, combine and cap;
+            # analysis adds the literature-file persistence so run_analysis
+            # can ground its plan in these documents (the channel
+            # search_literature uses). Relative paths resolve against the
+            # session directory.
+            from ...utils.file_io import read_documents_combined
+            out = read_documents_combined(
+                paths, base_dir=Path(self.orch.base_dir),
+                ocr_model=self.orch.model, max_chars=_READ_DOC_MAX_CHARS)
+            if out["status"] != "success":
+                return json.dumps(out)
             lit_path = None
             try:
                 lit_dir = self.orch.base_dir / "literature"
                 lit_dir.mkdir(parents=True, exist_ok=True)
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 lit_path = lit_dir / f"provided_documents_{ts}.md"
-                write_text_utf8(lit_path, combined)
+                write_text_utf8(lit_path, out["text"])
             except Exception as e:
                 logging.error(f"read_document: could not save literature file: {e}")
-            n_ocr = sum(info.get("n_ocr_pages", 0) for _, info in docs)
             return json.dumps({
                 "status": "success",
                 "file_path": str(lit_path) if lit_path else None,
-                "n_documents": len(docs),
-                "n_ocr_pages": n_ocr,
-                "ocr_note": (
-                    f"{n_ocr} scanned page(s) had no text layer and were "
-                    "transcribed by vision-OCR — verify any figures/numerics."
-                ) if n_ocr else None,
-                "documents": [
-                    {"name": dp.name,
-                     **{k: v for k, v in info.items() if k != "text"}}
-                    for dp, info in docs
-                ],
-                "errors": errors or None,
-                "combined_truncated": combined_truncated,
-                "text": combined,
+                **{k: v for k, v in out.items() if k != "status"},
                 "hint": (
                     "Pass file_path as `literature_file` to the next "
                     "run_analysis() call so the planner produces a "
