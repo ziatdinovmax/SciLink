@@ -174,6 +174,76 @@ def resolve_n_candidates(requested, planner_state, new_campaign: bool = False) -
 
 
 
+# Unit / statistic tokens that carry no identity when matching a plan
+# parameter name to a data column ('Temperature' <-> 'temperature_C',
+# 'Time (min)' <-> 'time_min'). Kept to unambiguous unit words; a plan
+# parameter that is ONLY a unit token ('C') reduces to nothing and never
+# matches by tokens (an exact column name still does).
+_PLAN_UNIT_TOKENS = frozenset({
+    "c", "k", "f", "s", "sec", "min", "mins", "h", "hr", "hrs", "ms",
+    "nm", "um", "mm", "cm", "m", "ev", "mev", "kev", "deg", "degc", "degrees",
+    "pct", "percent", "mol", "mmol", "molar", "ul", "ml", "l", "mg", "g", "kg",
+    "w", "mw", "kw", "v", "mv", "kv", "a", "ma", "torr", "bar", "mbar", "pa",
+    "kpa", "psi", "rpm", "wt", "vol", "ratio_pct",
+})
+
+
+def _plan_param_tokens(name) -> set:
+    toks = {t for t in re.split(r"[^a-z0-9]+", str(name).lower()) if t}
+    return toks - _PLAN_UNIT_TOKENS
+
+
+def _resolve_plan_params(plan_names, columns):
+    """Map the plan's ``optimization_params`` names onto the campaign's input
+    columns (issue #67). The plan names knobs in its own words
+    ('Temperature', 'Reaction time (min)'); the data names them as columns
+    ('temperature_C', 'time_min'), and an exact lookup silently fell to
+    data-derived bounds.
+
+    Four rungs, each applied only to names and columns not yet claimed:
+    exact name; exact case-insensitive name; equal token sets with unit
+    words dropped; token subset in either direction. A rung accepts a pair
+    only when it is unambiguous BOTH ways (the name has one candidate column
+    and that column is wanted by one name) — an ambiguous name stays
+    unmatched rather than guessing. Returns ``({plan_name: column},
+    [unmatched plan names], {unmatched name: [candidate columns]})`` — the
+    candidates are the columns an unmatched name could have meant (empty
+    when it resembles none), so the caller can say which ones to choose
+    between instead of just "no match"."""
+    columns = [str(c) for c in columns]
+    resolved: dict = {}
+    pending = [str(n) for n in plan_names]
+    claimed: set = set()
+    col_toks = {c: _plan_param_tokens(c) for c in columns}
+    candidates: dict = {}
+
+    def _rung(candidates_of):
+        nonlocal pending
+        cands = {n: [c for c in candidates_of(n) if c not in claimed]
+                 for n in pending}
+        wanted: dict = {}
+        for n, cs in cands.items():
+            for c in cs:
+                wanted.setdefault(c, []).append(n)
+        for n, cs in cands.items():
+            if len(cs) == 1 and len(wanted[cs[0]]) == 1:
+                resolved[n] = cs[0]
+                claimed.add(cs[0])
+            elif cs:
+                candidates[n] = cs
+        pending = [n for n in pending if n not in resolved]
+
+    _rung(lambda n: [c for c in columns if c == n])
+    _rung(lambda n: [c for c in columns if c.lower() == n.lower()])
+    _rung(lambda n: [c for c in columns
+                     if _plan_param_tokens(n) and col_toks[c] == _plan_param_tokens(n)])
+    _rung(lambda n: [c for c in columns
+                     if _plan_param_tokens(n) and col_toks[c]
+                     and (_plan_param_tokens(n) <= col_toks[c]
+                          or col_toks[c] <= _plan_param_tokens(n))])
+    return resolved, pending, {n: candidates[n] for n in pending if n in candidates}
+
+
 def _norm_level(v) -> str:
     """Canonical label for a categorical level: numeric-looking values compare
     as numbers ('3', '3.0', 3 -> '3'; '2.5' -> '2.5'), everything else as the
@@ -4696,12 +4766,56 @@ class OrchestratorTools:
                             scientific_bounds[name] = (float(min_v), float(max_v))
                             print(f"  🔬 Scientific Constraint Found: {name} must be between {min_v} and {max_v}")
 
+            # #67: re-key the plan's constraints onto the actual input
+            # columns ('Temperature' -> 'temperature_C'). Before this an
+            # exact lookup missed them and the box silently came from the
+            # data. Unresolved plan parameters are reported (with their
+            # ranges) so the caller can pass them as input_bounds.
+            bounds_warnings: List[str] = []
+            plan_param_matches: Dict[str, str] = {}   # column -> plan name
+            _plan_names = list(scientific_bounds) + [
+                n for n in planner_levels if n not in scientific_bounds]
+            if _plan_names:
+                _resolved, _plan_unmatched, _plan_cands = _resolve_plan_params(
+                    _plan_names, list(self.orch.expected_input_columns or []))
+                plan_param_matches = {c: n for n, c in _resolved.items() if c != n}
+                for c, n in plan_param_matches.items():
+                    print(f"  🔗 Plan parameter '{n}' -> input column '{c}'")
+                _inputs_now = list(self.orch.expected_input_columns or [])
+                for n in _plan_unmatched:
+                    _cands = _plan_cands.get(n) or []
+                    if n in scientific_bounds:
+                        _lo, _hi = scientific_bounds[n]
+                        if _cands:
+                            _ex = ", ".join(f"'{c}': [{_lo:g}, {_hi:g}]" for c in _cands)
+                            bounds_warnings.append(
+                                f"Plan parameter '{n}' (range [{_lo:g}, {_hi:g}]) is "
+                                f"ambiguous between input columns {_cands}, so its "
+                                f"range was NOT applied and those columns are bounded "
+                                f"from the data. Pass input_bounds={{{_ex}}} for each "
+                                f"one it applies to.")
+                        else:
+                            bounds_warnings.append(
+                                f"Plan parameter '{n}' (range [{_lo:g}, {_hi:g}]) matched "
+                                f"no input column (inputs: {_inputs_now}); if it is one "
+                                f"of them, pass input_bounds={{'<column>': "
+                                f"[{_lo:g}, {_hi:g}]}}.")
+                    else:
+                        bounds_warnings.append(
+                            f"Plan parameter '{n}' (levels {planner_levels[n]}) matched "
+                            f"no input column (inputs: {_inputs_now}); its level "
+                            f"universe is unused — declare that column categorical "
+                            f"under a matching name to use it.")
+                scientific_bounds = {_resolved[n]: v for n, v in scientific_bounds.items()
+                                     if n in _resolved}
+                planner_levels = {_resolved[n]: v for n, v in planner_levels.items()
+                                  if n in _resolved}
+
             # Caller-stated ranges (instrument limits, safe operating window,
             # allowed concentration range) — the strongest source: whoever
             # runs the instrument knows what it can actually reach. Sticky:
             # remembered on the orchestrator (and checkpointed) so later
             # rounds inherit them until a call overrides them.
-            bounds_warnings: List[str] = []
             if input_bounds:
                 cleaned: Dict[str, tuple] = {}
                 if not isinstance(input_bounds, dict):
@@ -4858,7 +4972,9 @@ class OrchestratorTools:
                     sci_min, sci_max = scientific_bounds[col]
                     input_bounds.append([sci_min, sci_max])
                     bounds_sources[col] = "planner"
-                    print(f"     -> Bound for '{col}': [{sci_min}, {sci_max}] (Source: PLANNER)")
+                    _via = (f", plan parameter '{plan_param_matches[col]}'"
+                            if col in plan_param_matches else "")
+                    print(f"     -> Bound for '{col}': [{sci_min}, {sci_max}] (Source: PLANNER{_via})")
                 else:
                     data_min = float(df[col].min())
                     data_max = float(df[col].max())
@@ -5129,6 +5245,8 @@ class OrchestratorTools:
                     col: [float(lo), float(hi)]
                     for col, (lo, hi) in zip(optimization_inputs, input_bounds)}
                 response["input_bounds_source"] = bounds_sources
+                if plan_param_matches:
+                    response["plan_param_matches"] = plan_param_matches
                 response["input_types"] = {
                     c: ("categorical" if c in level_maps else "continuous")
                     for c in optimization_inputs}

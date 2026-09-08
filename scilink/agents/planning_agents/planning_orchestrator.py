@@ -93,6 +93,10 @@ Only call `generate_implementation_code` when BOTH conditions are true:
 - When the user specifies a single optimization objective (e.g., "maximize peak area") but
   multiple targets were auto-detected, pass `targets=["Peak_Area"]` directly to
   `run_optimization` instead of re-calling `analyze_file`/`analyze_batch`.
+- If `run_optimization` reports in `input_bounds_warnings` that a plan parameter's range
+  was NOT applied (no matching column, or ambiguous between columns), a constraint the
+  plan set has been dropped: state that plainly to the user, and re-run with
+  `input_bounds` when the plan makes the mapping clear, otherwise ask which column it is.
 
 **RESPONSE STYLE:**
 - After each tool call, summarize the result and wait for user direction.
