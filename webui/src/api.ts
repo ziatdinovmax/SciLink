@@ -16,7 +16,16 @@ export interface ProviderField {
   help: string;
 }
 
+export interface AuthInfo {
+  auth_required: boolean;
+  user: string | null; // null = not signed in
+  multi_user: boolean;
+  local_files: boolean; // server shares the browser's machine (loopback bind)
+}
+
 export interface AppConfig {
+  auth: { required: boolean; user: string | null; multi_user: boolean };
+  local_files: boolean;
   modes: ModeInfo[];
   models: string[];
   embedding_models: string[];
@@ -217,6 +226,10 @@ export interface CreateSessionBody {
 
 const BASE = "/api/v1";
 
+/** Thrown on a 401 so the app can drop to the sign-in screen (a cookie
+ * session ends when the server restarts). */
+export class UnauthorizedError extends Error {}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(`${BASE}${path}`, init);
   if (!r.ok) {
@@ -226,6 +239,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       /* not json */
     }
+    if (r.status === 401) throw new UnauthorizedError(detail);
     throw new Error(detail);
   }
   return r.json() as Promise<T>;
@@ -238,6 +252,10 @@ const json = (body: unknown): RequestInit => ({
 });
 
 export const api = {
+  authMe: () => req<AuthInfo>(`/auth/me`),
+  login: (token: string) => req<{ user: string }>(`/auth/login`, json({ token })),
+  logout: () => req<{ ok: boolean }>(`/auth/logout`, { method: "POST" }),
+
   config: (model?: string, baseUrl?: string) =>
     req<AppConfig>(
       `/config?model=${encodeURIComponent(model ?? "")}&base_url=${encodeURIComponent(baseUrl ?? "")}`,

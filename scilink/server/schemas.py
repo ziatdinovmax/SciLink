@@ -51,3 +51,9 @@ class PlanDirsRequest(BaseModel):
     knowledge: Optional[str] = None
     code: Optional[str] = None
     data: Optional[str] = None
+
+
+class LoginRequest(BaseModel):
+    """Access token → session cookie (POST /auth/login)."""
+
+    token: str

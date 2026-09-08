@@ -46,6 +46,8 @@ export function Sidebar({
   onCollapse,
   theme,
   onToggleTheme,
+  authUser = null,
+  onLogout,
 }: {
   config: AppConfig | null;
   mode: string;
@@ -67,6 +69,8 @@ export function Sidebar({
   onCollapse: () => void;
   theme: "dark" | "light";
   onToggleTheme: () => void;
+  authUser?: string | null; // set when the server requires sign-in
+  onLogout?: () => void;
 }) {
   const models = config?.models ?? [];
   const [model, setModel] = useState("");
@@ -177,6 +181,19 @@ export function Sidebar({
           {theme === "dark" ? "☀️" : "🌙"}
         </button>
       </div>
+      {authUser && (
+        <p className="caption signed-in">
+          Signed in as <strong>{authUser}</strong>
+          {onLogout && (
+            <>
+              {" · "}
+              <button type="button" className="link-btn" onClick={onLogout}>
+                Sign out
+              </button>
+            </>
+          )}
+        </p>
+      )}
       {session ? (
         <img
           className="logo"

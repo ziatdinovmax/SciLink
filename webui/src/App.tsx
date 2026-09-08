@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useReducer, useState } from "react";
 import {
   api,
+  UnauthorizedError,
   type AppConfig,
+  type AuthInfo,
   type ChatMessage,
   type DelegationView,
   type LiveSession,
@@ -17,6 +19,7 @@ import { FilesPanel } from "./components/FilesPanel";
 import { PreChatHero } from "./components/PreChatHero";
 import { AnalysisInset } from "./components/AnalysisInset";
 import { DelegationsPanel } from "./components/DelegationsPanel";
+import { LoginScreen } from "./components/LoginScreen";
 
 interface SessionState {
   snapshot: SessionSnapshot | null;
@@ -161,6 +164,12 @@ function reducer(state: SessionState, action: Action): SessionState {
 
 export default function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
+  // Auth gate: null = still asking the server; then either signed in (or
+  // auth off) or waiting for a token. A `?token=` link signs in silently.
+  const [auth, setAuth] = useState<AuthInfo | null>(null);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [loginBusy, setLoginBusy] = useState(false);
+  const signedIn = auth !== null && (!auth.auth_required || auth.user !== null);
   const [mode, setMode] = useState("meta");
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [busy, setBusy] = useState<string | null>(null); // init overlay text
@@ -223,8 +232,68 @@ export default function App() {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
 
+  // Step 1: who am I (public endpoint). A `?token=…` in the URL is a
+  // sign-in link: exchange it for the cookie and scrub it from the URL so
+  // it is not left in history or shared by accident.
   useEffect(() => {
-    api.config().then(setConfig).catch((e) => setStartError(String(e)));
+    const url = new URL(window.location.href);
+    const linkToken = url.searchParams.get("token");
+    const finish = (info: AuthInfo) => setAuth(info);
+    (async () => {
+      try {
+        let info = await api.authMe();
+        if (info.auth_required && !info.user && linkToken) {
+          try {
+            await api.login(linkToken);
+            info = await api.authMe();
+          } catch (e) {
+            setLoginError(e instanceof Error ? e.message : String(e));
+          }
+        }
+        if (linkToken) {
+          url.searchParams.delete("token");
+          window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+        }
+        finish(info);
+      } catch (e) {
+        setStartError(e instanceof Error ? e.message : String(e));
+      }
+    })();
+  }, []);
+
+  const login = async (token: string) => {
+    setLoginBusy(true);
+    setLoginError(null);
+    try {
+      await api.login(token);
+      setAuth(await api.authMe());
+    } catch (e) {
+      setLoginError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoginBusy(false);
+    }
+  };
+
+  const logout = async () => {
+    try {
+      await api.logout();
+    } catch {
+      /* cookie may already be gone */
+    }
+    dispatch({ type: "session_closed" });
+    setConfig(null);
+    setAuth(await api.authMe().catch(() => ({
+      auth_required: true, user: null, multi_user: false, local_files: false,
+    })));
+  };
+
+  // Step 2 (signed in, or auth off): config + live sessions.
+  useEffect(() => {
+    if (!signedIn) return;
+    api.config().then(setConfig).catch((e) => {
+      if (e instanceof UnauthorizedError) setAuth((a) => (a ? { ...a, user: null } : a));
+      else setStartError(String(e));
+    });
     // Reattach on page load: exactly ONE live session (browser refresh,
     // second tab) rejoins it; several live sessions show a picker on the
     // welcome screen instead of guessing.
@@ -244,7 +313,8 @@ export default function App() {
         }
       })
       .catch(() => {});
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signedIn]);
 
   // Keep the live-session list current: refresh on session/status changes
   // and on a slow poll, so the sidebar's detached-session statuses (running
@@ -366,6 +436,17 @@ export default function App() {
     );
   }
 
+  if (auth === null) {
+    return (
+      <div className="welcome">
+        <p className="tagline">{startError ?? "Connecting…"}</p>
+      </div>
+    );
+  }
+  if (!signedIn) {
+    return <LoginScreen onLogin={(t) => void login(t)} error={loginError} busy={loginBusy} />;
+  }
+
   return (
     <div className="layout">
       {!sidebarOpen && (
@@ -407,6 +488,8 @@ export default function App() {
         }}
         onDetach={detachSession}
         onCollapse={() => toggleSidebar(false)}
+        authUser={auth.auth_required ? auth.user : null}
+        onLogout={auth.auth_required ? () => void logout() : undefined}
         theme={theme}
         onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
       />
@@ -480,6 +563,7 @@ export default function App() {
                 <PreChatHero
                   mode={mode}
                   sessionId={session.id}
+                  localFiles={auth.local_files}
                   onStart={sendMessage}
                 />
               ) : (

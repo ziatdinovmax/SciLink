@@ -21,17 +21,21 @@ const PLANNING_DATA_ACCEPT = ".csv,.xlsx,.tsv,.txt,.npy,.json";
 export function PreChatHero({
   mode,
   sessionId,
+  localFiles = true,
   onStart,
 }: {
   mode: string;
   sessionId: string;
+  /** Server shares the browser's machine: pasted server-side folder paths
+   * are offered. False on a remote deployment (the endpoint refuses too). */
+  localFiles?: boolean;
   onStart: (prompt: string) => void;
 }) {
   if (mode === "analyze")
     return <AnalyzeHero sessionId={sessionId} onStart={onStart} />;
   if (mode === "plan")
-    return <PlanHero sessionId={sessionId} onStart={onStart} />;
-  return <MetaHero sessionId={sessionId} onStart={onStart} />;
+    return <PlanHero sessionId={sessionId} localFiles={localFiles} onStart={onStart} />;
+  return <MetaHero sessionId={sessionId} localFiles={localFiles} onStart={onStart} />;
 }
 
 function AnalyzeHero({
@@ -148,9 +152,11 @@ function AnalyzeHero({
 
 function PlanHero({
   sessionId,
+  localFiles,
   onStart,
 }: {
   sessionId: string;
+  localFiles: boolean;
   onStart: (prompt: string) => void;
 }) {
   const [objective, setObjective] = useState("");
@@ -345,7 +351,7 @@ function PlanHero({
           <Dropzone label="Drop files here or click to browse" accept={KNOWLEDGE_ACCEPT}
             onFiles={uploader("knowledge", setKnowledge)}
             onFolder={folderUploader("knowledge", "knowledge")}
-            onLocalPath={() => setShowPath((p) => ({ ...p, k: true }))} />
+            onLocalPath={localFiles ? () => setShowPath((p) => ({ ...p, k: true })) : undefined} />
           {(showPath.k || kFolder) && (
             <input
               type="text"
@@ -364,7 +370,7 @@ function PlanHero({
           <Dropzone label="Drop files here or click to browse" accept={CODE_ACCEPT}
             onFiles={uploader("code", setCode)}
             onFolder={folderUploader("code", "code")}
-            onLocalPath={() => setShowPath((p) => ({ ...p, c: true }))} />
+            onLocalPath={localFiles ? () => setShowPath((p) => ({ ...p, c: true })) : undefined} />
           {(showPath.c || cFolder) && (
             <input
               type="text"
@@ -383,7 +389,7 @@ function PlanHero({
           <Dropzone label="Drop files here or click to browse" accept={PLANNING_DATA_ACCEPT}
             onFiles={uploader("planning_data", setData)}
             onFolder={folderUploader("planning_data", "data")}
-            onLocalPath={() => setShowPath((p) => ({ ...p, d: true }))} />
+            onLocalPath={localFiles ? () => setShowPath((p) => ({ ...p, d: true })) : undefined} />
           {(showPath.d || dFolder) && (
             <input
               type="text"
@@ -418,9 +424,11 @@ function PlanHero({
 
 function MetaHero({
   sessionId,
+  localFiles,
   onStart,
 }: {
   sessionId: string;
+  localFiles: boolean;
   onStart: (prompt: string) => void;
 }) {
   const [goal, setGoal] = useState("");
@@ -530,7 +538,7 @@ function MetaHero({
               setUploadedFolders((prev) => [...prev, r]);
               return [describeFolder(r.root, r.paths.length, r.dirs.length)];
             }}
-            onLocalPath={() => setShowPath(true)}
+            onLocalPath={localFiles ? () => setShowPath(true) : undefined}
           />
           {(showPath || folders) && (
             <input
