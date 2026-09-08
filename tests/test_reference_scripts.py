@@ -75,3 +75,23 @@ def test_scripts_upload_category(tmp_path):
         files_mod.save_uploads(str(tmp_path), "scripts", [("data.npy", b"")])
     with pytest.raises(files_mod.UploadError):          # still rejected by the data category
         files_mod.save_uploads(str(tmp_path), "data", [("user_edge_fit.py", b"")])
+
+
+def test_multiple_scripts_guidance_and_total_budget(tmp_path):
+    a = tmp_path / "preprocess.py"; a.write_text("def smooth(y): return y\n")
+    b = tmp_path / "fit.py"; b.write_text("def fit(y): return y\n")
+    c = tmp_path / "third.py"; c.write_text("x = 1\n" * 50)
+    state = {"reference_scripts": load_reference_scripts([str(a), str(b)])}
+    block = reference_script_block(state)
+    assert block.startswith("\n## User-Provided Reference Scripts\n")
+    assert "compose them in pipeline order" in block and "do not blend competing methods" in block
+    assert "### preprocess.py" in block and "### fit.py" in block
+    # a single script gets no multi-script paragraph
+    assert "compose them" not in reference_script_block({"reference_scripts": load_reference_scripts([str(a)])})
+    # total budget: later scripts are listed by name only, never dropped silently
+    out = load_reference_scripts([str(a), str(b), str(c)], max_total_bytes=40)
+    assert [s["label"] for s in out] == ["preprocess.py", "fit.py", "third.py"]
+    assert out[0]["truncated"] is False and out[1]["truncated"] is True
+    assert out[2].get("omitted") is True and out[2]["text"] == ""
+    block = reference_script_block({"reference_scripts": out})
+    assert "third.py — attached, but omitted here" in block and "read_file" in block
