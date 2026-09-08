@@ -1,14 +1,16 @@
 import { useRef, useState } from "react";
 import type { FolderEntry } from "../api";
 import { groupDirectoryInput, splitDrop } from "../folderfiles";
+import { UploadMenu } from "./UploadMenu";
 
 /** Click-or-drop file picker that uploads immediately via the callback and
  * shows the accumulated file names as chips.
  *
  * With `onFolder` set, the zone also takes folders: a dropped directory is
- * walked recursively (subfolders included) and a "choose a folder" link
- * opens the browser's directory picker. Each top-level folder goes to
- * `onFolder` as one batch; loose files keep going to `onFiles`. */
+ * walked recursively (subfolders included), and a click opens a files /
+ * folder menu instead of the file dialog directly (the browser has no
+ * single dialog for both). Each top-level folder goes to `onFolder` as
+ * one batch; loose files keep going to `onFiles`. */
 export function Dropzone({
   label,
   accept,
@@ -28,6 +30,7 @@ export function Dropzone({
   const [names, setNames] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [menu, setMenu] = useState(false);
 
   const handle = async (list: FileList | null) => {
     if (!list || list.length === 0) return;
@@ -71,10 +74,10 @@ export function Dropzone({
   };
 
   return (
-    <div>
+    <div className="dropzone-wrap">
       <div
         className={`dropzone${drag ? " drag" : ""}`}
-        onClick={() => inputRef.current?.click()}
+        onClick={() => (onFolder ? setMenu((m) => !m) : inputRef.current?.click())}
         onDragOver={(e) => {
           e.preventDefault();
           setDrag(true);
@@ -121,15 +124,12 @@ export function Dropzone({
           </div>
         )}
       </div>
-      {onFolder && (
-        <button
-          type="button"
-          className="link-btn folder-pick"
-          disabled={busy}
-          onClick={() => dirRef.current?.click()}
-        >
-          or choose a folder (subfolders included)
-        </button>
+      {menu && onFolder && (
+        <UploadMenu
+          onFiles={() => inputRef.current?.click()}
+          onFolder={() => dirRef.current?.click()}
+          onClose={() => setMenu(false)}
+        />
       )}
       {error && <p className="caption" style={{ color: "var(--danger)" }}>{error}</p>}
     </div>

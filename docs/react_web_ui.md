@@ -60,9 +60,10 @@ authenticating reverse proxy.
   plan agent's resource dirs repointed at the stable folders so KB indexes
   are reused across sessions.
 - **Folder uploads** (beyond Streamlit): every dropzone takes a dropped
-  directory (walked recursively via the FileSystem entry API) or a
-  "choose a folder" picker, and the chat input has a folder button beside
-  the paperclip. The layout is preserved under the category root
+  directory (walked recursively via the FileSystem entry API), and a click
+  on the dropzone or the chat paperclip opens a two-item menu, "Upload
+  files" / "Upload folder" — one control, two hidden inputs, because no
+  native dialog picks both. The layout is preserved under the category root
   (`uploads/<folder>/<sub>/…`, `knowledge/<folder>/…`), files the category
   does not accept are skipped and reported rather than failing the drop,
   hidden entries are dropped, and a 2000-file cap applies. A flat folder
