@@ -743,7 +743,6 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .tools-panel { flex: 1; overflow: auto; padding: 16px 8%; }
 .tools-section { margin-bottom: 22px; }
 .tools-section h3 { font-size: 15px; margin: 0 0 6px; }
-.tools-toggle { font-size: 15px; font-weight: 600; color: var(--text); }
 .mcp-form { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
 .mcp-transport { display: flex; gap: 14px; align-items: center; font-size: 13px; }
 .mcp-row { display: flex; gap: 8px; }
