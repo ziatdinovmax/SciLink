@@ -96,6 +96,13 @@ def test_stated_recommendation_closes_the_loop_without_a_bo_history():
     vals = {(v["value"], "temperature" in v["context"]) for v in p["recommended_values"]}
     assert (27.5, True) in vals
     assert not any(v["value"] in (5.0, 50.0) for v in p["recommended_values"])  # range endpoints excluded
+    # counts are not values: "3 points" / "3-point floor" never become a recommendation
+    q = m._open_delegation("planning", "recommend", None, [1], "bo")
+    m._close_delegation(q, {"status": "success", "key_findings": [],
+                            "summary": "The recommended step needs at least 3 points; the 3-point floor "
+                                       "cannot be lowered. Recommended: measure at 34.2 K next.",
+                            "files_produced": []})
+    assert [v["value"] for v in q["recommended_values"]] == [34.2]
     e = m._open_delegation("analysis", "A new spectrum was measured at temperature = 27.5 K: uploads/spectrum_27p5K.csv",
                            None, None, "27.5 K point")
     assert e["context_from"] == [1] and e["context_from_inferred"] == [1]

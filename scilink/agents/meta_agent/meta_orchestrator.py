@@ -1645,9 +1645,17 @@ class MetaOrchestratorAgent:
                 # Range endpoints ("5–50 K range") frame a recommendation but
                 # are not recommended values themselves.
                 low = re.sub(r"-?\d+(?:\.\d+)?\s*(?:–|-|to|and)\s*-?\d+(?:\.\d+)?", " ", low)
+                # A recommended VALUE reads like one: "27.5 K", "= 27.5",
+                # "≈ 27.5", "at 27.5". A count ("3 points", "3-point floor",
+                # "4 experiments") does not, and is skipped.
+                valueish = set()
+                for m in re.finditer(r"(?P<pre>[=:≈~]\s*|\bat\s+)?(?P<num>-?\d+(?:\.\d+)?)"
+                                     r"(?P<unit>\s*(?:°\s*)?[a-zµ%]{1,3}\b)?", low):
+                    if m.group("pre") or m.group("unit"):
+                        valueish.add(m.group("num"))
                 words = re.findall(r"[a-z_][a-z0-9_]{2,}|-?\d+(?:\.\d+)?", low)
                 for i, w in enumerate(words):
-                    if not re.fullmatch(r"-?\d+(?:\.\d+)?", w):
+                    if not re.fullmatch(r"-?\d+(?:\.\d+)?", w) or w not in valueish:
                         continue
                     try:
                         val = float(w)
