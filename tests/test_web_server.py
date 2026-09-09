@@ -487,8 +487,18 @@ def test_scan_new_images(tmp_path):
     (root / "elbow_plot_k.png").write_bytes(b"x")      # skip token in name
     (root / "previews").mkdir()
     (root / "previews" / "p.png").write_bytes(b"x")    # skip dir, top-level
+    # best-of-N: a candidate's canonical figure streams (labeled by
+    # candidate), its other artifacts do not (#565)
+    cand = root / "results" / "img" / "_candidates" / "cand_02"
+    cand.mkdir(parents=True)
+    (cand / "visualization.png").write_bytes(b"x")
+    (cand / "debug_masks.png").write_bytes(b"x")
     out = _scan_new_images(str(root), seen)
-    assert [rel for rel, _label, _branch, _v in out] == ["fit_overlay.png"]
+    rels = {rel: label for rel, label, _branch, _v in out}
+    assert set(rels) == {"fit_overlay.png", "results/img/_candidates/cand_02/visualization.png"}
+    assert rels["results/img/_candidates/cand_02/visualization.png"] == "candidate 2"
+    assert rels["fit_overlay.png"] == "fit overlay"
+    out = [o for o in out if o[0] == "fit_overlay.png"]
     # the version token is the file mtime (nanoseconds), carried to the client
     assert out[0][3] == (root / "fit_overlay.png").stat().st_mtime_ns
     # already-seen files are not re-emitted
