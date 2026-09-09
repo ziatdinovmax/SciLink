@@ -5870,6 +5870,9 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
                 "summary": first_result.get("summary"),
                 "saved_arrays": first_result.get("saved_arrays", {}),
                 "quality_history": first_result.get("quality_history"),
+                # A prescription the loop gave up on (#568) is part of the
+                # verdict the caller sees, not only of the persisted item.
+                "stalled_prescriptions": first_result.get("stalled_prescriptions"),
             }
             state["final_script"] = first_result.get("script")
             state["final_viz_bytes"] = first_result.get("visualization_bytes")
