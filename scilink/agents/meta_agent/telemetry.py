@@ -23,6 +23,8 @@ _DETAILED_MAX = 2000  # cap on the analysis detailed_analysis reasoning text
 # a title-cased form of the file stem (so a new agent still shows up sanely).
 _AGENT_LABELS = {
     "curve_fitting": "Curve Fitting",
+    "image_analysis": "Image Analysis",
+    "hyperspectral": "Hyperspectral Analysis",
     "bo": "Bayesian Optimization",
     "scalarizer": "Scalarizer",
 }

@@ -393,6 +393,9 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         
         # Initialize and Run Pipeline
         self._init_state(data_path=data_path, metadata=system_info)
+        # State file from the start, for the Worker-agents panel (#566).
+        self._log_action("analysis_started", {"data_path": data_path},
+                         {"status": "running"})
 
         # Load skill(s) if provided. Accepts a single name/path or a list
         # — see PR 3 multi-skill support.
