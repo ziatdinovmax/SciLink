@@ -112,3 +112,18 @@ def test_stated_recommendation_closes_the_loop_without_a_bo_history():
     # the same number without any framing word is not a match
     e = m._open_delegation("analysis", "Segment 27.5 percent of the images.", None, None, "x")
     assert e["context_from"] == []
+
+
+def test_inferred_fusion_edge_does_not_trigger_the_fusion_feedback_stamp():
+    """Provenance only: an analysis that quotes a fusion's finding gets the
+    fusion in context_from (inferred), but the independence stamp — which
+    appends the ADDITIVE-ONLY note to the task — still follows what the
+    LLM declared, so an inferred edge never changes a specialist's task."""
+    m = _meta()
+    finding = "Both datasets show the same 0.3 eV blue shift of the plasmon peak at the interface."
+    m._delegation_ledger = [_entry(1, "fusion", key_findings=[finding], labels=["a", "b"])]
+    e = m._open_delegation("analysis", "Re-check this: " + finding, None, None, "recheck")
+    assert e["context_from"] == [1] and e["context_from_inferred"] == [1]
+    assert e.get("informed_via") is None and "informed_by" not in e
+    e = m._open_delegation("analysis", "Re-check this: " + finding, None, [1], "recheck")
+    assert e["informed_via"] == "fusion_feedback" and e["informed_by"] == ["a", "b"]

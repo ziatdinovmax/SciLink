@@ -1489,10 +1489,13 @@ class MetaOrchestratorAgent:
         # context from a FUSION entry has effectively seen every fused
         # branch's findings — its later agreement with them is partly by
         # construction. Stamp it mechanically so the next fusion discounts it.
-        if mode == "analysis" and sources:
+        # The independence stamp keeps reading what the LLM DECLARED: an
+        # inferred edge (#571) records provenance for the ledger and the
+        # graph but does not change the task the specialist receives.
+        if mode == "analysis" and declared:
             by_index = {e["index"]: e for e in self._delegation_ledger}
             fused_labels: list = []
-            for s in sources:
+            for s in sorted(declared):
                 src = by_index.get(s)
                 if src and src.get("mode") == "fusion":
                     fused_labels += [str(l) for l in (src.get("labels")
