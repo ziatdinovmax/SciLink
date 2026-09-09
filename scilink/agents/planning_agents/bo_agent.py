@@ -241,6 +241,37 @@ class OptimizationAgent(BaseAgent):
         history.append(entry)
         with open(self.history_file, 'w', encoding="utf-8") as f: json.dump(history, f, indent=2)
 
+    def _backup_history_files(self) -> List[Path]:
+        """Every ``bo_history.json.backup*`` next to the live history —
+        the histories a reset set aside (#593)."""
+        return sorted(self.output_dir.glob(self.history_file.name + ".backup*"))
+
+    @staticmethod
+    def _last_step_in(history) -> int:
+        steps = [h.get("step") for h in (history or []) if isinstance(h, dict)]
+        steps = [int(x) for x in steps if isinstance(x, (int, float))]
+        return max(steps) if steps else len(history or [])
+
+    def _next_step_number(self, history: List[Dict]) -> int:
+        """Campaign-level monotonic step index (#593).
+
+        The next step continues from the highest step recorded in the live
+        history, or — when the history was set aside by a reset — from the
+        highest step in any ``bo_history.json.backup*``. A step therefore
+        never restarts at 1 while earlier ``step_N.*`` artifacts exist, so an
+        iteration cannot overwrite the previous iteration's plots.
+        """
+        if history:
+            return self._last_step_in(history) + 1
+        last = 0
+        for path in self._backup_history_files():
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    last = max(last, self._last_step_in(json.load(f)))
+            except Exception:  # noqa: BLE001 - an unreadable backup is ignored
+                continue
+        return last + 1
+
     def _validate_config(self, config: Dict, fidelity_declared: bool = False,
                          extra_surrogates: Optional[set] = None,
                          extra_acquisitions: Optional[set] = None) -> Dict:
@@ -1295,9 +1326,13 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         history = self._load_history()
 
         is_retry = history and history[-1].get("data_points") == len(df)
+        c.step_override = None
         if is_retry:
             print(f"  - 🔄 Re-run detected (same {len(df)} data points). Replacing previous step.")
-            history.pop()
+            replaced = history.pop()
+            # The replacement keeps the replaced step's number (#593): its
+            # artifacts are overwritten on purpose, nothing else's.
+            c.step_override = replaced.get("step") if isinstance(replaced, dict) else None
             with open(self.history_file, 'w', encoding="utf-8") as f:
                 json.dump(history, f, indent=2)
 
@@ -1597,7 +1632,7 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         optimizer = c.optimizer
         output_dir = c.output_dir
 
-        step_num = len(history) + 1
+        step_num = getattr(c, "step_override", None) or self._next_step_number(history)
         n_initial = history[0]["data_points"] if history and "data_points" in history[0] else len(df)
         plot_path = f"{output_dir}/step_{step_num}.png"
         sensitivity_data = {}

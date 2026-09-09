@@ -4666,22 +4666,41 @@ class OrchestratorTools:
                 except Exception as e:
                     logging.warning(f"Could not delete analyzed_files.json: {e}")
             
+            def _set_aside(path: Path) -> Path:
+                """``<name>.backup``, then ``.backup.2``, ``.3`` … — a reset
+                never clobbers the backup an earlier reset made (#593)."""
+                dest = path.with_name(path.name + ".backup")
+                n = 2
+                while dest.exists():
+                    dest = path.with_name(f"{path.name}.backup.{n}")
+                    n += 1
+                path.rename(dest)
+                return dest
+
             if self.orch.bo_data_path.exists():
-                backup_path = self.orch.bo_data_path.with_suffix('.csv.backup')
-                self.orch.bo_data_path.rename(backup_path)
+                backup_path = _set_aside(self.orch.bo_data_path)
                 print(f"    ⚠️  Old data backed up to: {backup_path.name}")
 
             bo_history = self.orch.bo.history_file
+            next_step = None
             if bo_history.exists():
-                backup = bo_history.with_suffix('.json.backup')
-                bo_history.rename(backup)
+                backup = _set_aside(bo_history)
                 print(f"    ⚠️  BO history backed up to: {backup.name}")
+                # The campaign step index is monotonic across resets: the
+                # next run_optimization_loop continues the numbering, so
+                # its step_N artifacts do not overwrite earlier iterations.
+                next_step = self.orch.bo._next_step_number([])
+                print(f"    ℹ️  BO step numbering continues at step {next_step}")
 
-            return json.dumps({
+            out = {
                 "status": "success",
                 "message": "Analysis logic reset. All files will be reprocessed fresh on next analyze_file call.",
                 "hint": "Previous optimization data was backed up"
-            })
+            }
+            if next_step is not None:
+                out["next_bo_step"] = next_step
+                out["hint"] += f"; the next BO step is numbered {next_step} (earlier step artifacts are kept)"
+            return json.dumps(out)
         
         self._register_tool(
             func=reset_analysis_logic,
