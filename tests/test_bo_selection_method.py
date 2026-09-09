@@ -3,6 +3,7 @@
 deliberate, constraint-aware deviation chosen by the LLM planner), and a
 planner-chosen point carries the optimum it deviated from. Exercises the
 two stages directly with a stub agent, no LLM."""
+import types
 from types import SimpleNamespace
 
 import numpy as np
@@ -10,9 +11,9 @@ import numpy as np
 from scilink.agents.planning_agents.bo_agent import BOAgent
 
 
-class _Frame:
-    def describe(self):
-        return SimpleNamespace(to_markdown=lambda: "| stats |")
+def _Frame():
+    import pandas as pd
+    return pd.DataFrame({"T": [1.0, 3.0], "pH": [2.0, 4.0], "yield": [0.5, 0.9]})
 
 
 def _ctx(batch_size=1, constraints=None):
@@ -40,6 +41,9 @@ def _agent(planner):
         _log_action=lambda **kw: None,
         _run_seed=None,
     )
+    # the stage renders the planner's inputs in physical terms (#579)
+    a._physical_frame = types.MethodType(BOAgent._physical_frame, a)
+    a._decode_point = types.MethodType(BOAgent._decode_point, a)
     return a
 
 

@@ -303,6 +303,79 @@ class OptimizationAgent(BaseAgent):
     # Acquisition Landscape Summarization (for constrained batch planning)
     # =====================================================================
 
+    # ── categorical inputs in the constrained planner (#579) ─────────
+    # An index-encoded categorical column reaches the optimizer as codes
+    # 0..n-1, but the constrained planner is an LLM reasoning over physical
+    # constraints and a physical-unit data summary. Mixing the two spaces
+    # let it "exclude the 5.0 mM stock because the bound is 4.0" and return
+    # a physical value that was then decoded as a level index. Everything
+    # the planner reads is therefore rendered in level names, and every
+    # value it returns is mapped back to a code here.
+
+    @staticmethod
+    def _norm_level_label(v) -> str:
+        sv = str(v).strip()
+        try:
+            f = float(sv)
+            return str(int(f)) if f == int(f) else repr(f)
+        except (TypeError, ValueError):
+            return sv
+
+    @classmethod
+    def _level_of(cls, levels: List[str], code) -> str:
+        """Level name for a (possibly fractional) code — nearest index."""
+        try:
+            i = int(round(float(code)))
+        except (TypeError, ValueError):
+            return str(code)
+        return str(levels[max(0, min(len(levels) - 1, i))])
+
+    @classmethod
+    def _code_of(cls, levels: List[str], value) -> Optional[int]:
+        """Code for a planner-returned value: an exact level name (numeric-
+        looking values compare as numbers), else the nearest numeric level
+        within 1 % of the level spacing, else None (a validation error)."""
+        norm = cls._norm_level_label(value)
+        labels = [cls._norm_level_label(l) for l in levels]
+        if norm in labels:
+            return labels.index(norm)
+        try:
+            fv = float(str(value).strip())
+            nums = [float(l) for l in labels]
+        except (TypeError, ValueError):
+            return None
+        i = int(np.argmin([abs(n - fv) for n in nums]))
+        spacing = (max(nums) - min(nums)) / max(1, len(nums) - 1)
+        return i if abs(nums[i] - fv) <= max(1e-9, 0.01 * spacing) else None
+
+    def _decode_point(self, point: Dict[str, Any], input_levels) -> Dict[str, Any]:
+        """A code-space point rendered in level names (numeric levels as numbers)."""
+        if not input_levels or not point:
+            return point
+        out = dict(point)
+        for col, levels in input_levels.items():
+            if col in out:
+                lv = self._level_of(levels, out[col])
+                try:
+                    out[col] = float(lv)
+                except (TypeError, ValueError):
+                    out[col] = lv
+        return out
+
+    def _physical_frame(self, df, input_levels):
+        """The data frame with categorical codes replaced by level names."""
+        if not input_levels:
+            return df
+        out = df.copy()
+        for col, levels in input_levels.items():
+            if col in out.columns:
+                mapped = out[col].map(lambda v, L=levels: self._level_of(L, v))
+                try:
+                    out[col] = mapped.astype(float)
+                except (TypeError, ValueError):
+                    out[col] = mapped
+        return out
+
     def _summarize_acquisition_landscape(
         self,
         optimizer,
@@ -310,7 +383,8 @@ class OptimizationAgent(BaseAgent):
         input_bounds: List[List[float]],
         is_moo: bool = False,
         n_regions: int = 15,
-        grid_resolution: int = 40
+        grid_resolution: int = 40,
+        input_levels: Optional[Dict[str, List[str]]] = None,
     ) -> str:
         """
         Evaluate the acquisition function on a dense grid, cluster high-value 
@@ -379,7 +453,10 @@ class OptimizationAgent(BaseAgent):
         rows = []
         for i, region in enumerate(regions):
             param_strs = " | ".join(
-                f"{region['center'][j]:.4f}" for j in range(len(input_cols))
+                (self._level_of(input_levels[col], region['center'][j])
+                 if input_levels and col in input_levels
+                 else f"{region['center'][j]:.4f}")
+                for j, col in enumerate(input_cols)
             )
             spread_str = ", ".join(
                 f"{s:.3f}" for s in region.get('spread', [0.0] * len(input_cols))
@@ -523,7 +600,8 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         current_best_value: Dict[str, float],
         budget_ctx: Dict[str, Any],
         is_moo: bool = False,
-        pareto_front: Optional[List[Dict]] = None
+        pareto_front: Optional[List[Dict]] = None,
+        input_levels: Optional[Dict[str, List[str]]] = None,
     ) -> Tuple[Optional[List[Dict[str, float]]], Optional[Dict[str, Any]], Optional[str]]:
         """
         Use LLM to design a physically constrained experiment batch informed by 
@@ -558,7 +636,10 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             f"Every experiment in the batch must have ALL of these keys in its \"params\" dict. "
             f"Use these exact strings — do not rename, abbreviate, or expand them.",
             f"\n## Parameter Bounds\n" + "\n".join(
-                f"- {col}: [{bounds[0]}, {bounds[1]}]" 
+                (f"- {col}: CATEGORICAL — one of {json.dumps([str(l) for l in input_levels[col]])} "
+                 f"(use one of these exact values)")
+                if input_levels and col in input_levels
+                else f"- {col}: [{bounds[0]}, {bounds[1]}]"
                 for col, bounds in zip(input_cols, input_bounds)
             ),
             f"\n## Acquisition Landscape\n{acq_summary}",
@@ -687,10 +768,30 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                         )
                         continue
                     
-                    # Check values within bounds (with tolerance for constraint snapping)
+                    # Check values within bounds (with tolerance for constraint snapping);
+                    # a categorical value must be one of its levels and is
+                    # stored as its code so downstream stays in the
+                    # optimizer's space (the orchestrator decodes it once).
                     tolerance = 0.01
+                    rec: Dict[str, float] = {}
+                    bad = False
                     for col, bounds in zip(input_cols, input_bounds):
-                        val = float(params[col])
+                        if input_levels and col in input_levels:
+                            code = self._code_of(input_levels[col], params[col])
+                            if code is None:
+                                validation_errors.append(
+                                    f"Experiment {i+1}: {col}={params[col]!r} is not one of "
+                                    f"the levels {[str(l) for l in input_levels[col]]}")
+                                bad = True
+                                continue
+                            rec[col] = float(code)
+                            continue
+                        try:
+                            val = float(params[col])
+                        except (TypeError, ValueError):
+                            validation_errors.append(f"Experiment {i+1}: {col}={params[col]!r} is not numeric")
+                            bad = True
+                            continue
                         param_range = bounds[1] - bounds[0]
                         tol = param_range * tolerance if param_range > 0 else 0.01
                         if val < bounds[0] - tol or val > bounds[1] + tol:
@@ -698,8 +799,9 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                                 f"Experiment {i+1}: {col}={val} outside bounds "
                                 f"[{bounds[0]}, {bounds[1]}]"
                             )
-                    
-                    rec = {col: float(params[col]) for col in input_cols}
+                        rec[col] = val
+                    if bad:
+                        continue
                     recommendations.append(rec)
                 
                 if validation_errors:
@@ -989,7 +1091,8 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                              fidelity_config: Optional[Dict[str, Any]] = None,
                              skill: Union[str, List[str], None] = None,
                              candidate_pool: Union[str, List[List[float]], np.ndarray, None] = None,
-                             seed: Optional[int] = None) -> Dict[str, Any]:
+                             seed: Optional[int] = None,
+                             input_levels: Optional[Dict[str, List[str]]] = None) -> Dict[str, Any]:
         """
         Run one iteration of the Bayesian Optimization loop.
         
@@ -1106,6 +1209,10 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             save_acq=save_acq, plot_acq=plot_acq, fixed_noise_std=fixed_noise_std,
             cat_dims=cat_dims, dkl_config=dkl_config, fidelity_config=fidelity_config,
             candidate_pool=candidate_pool,
+            # Level names of index-encoded categorical inputs (#579): the
+            # constrained planner reasons in physical terms, so it sees these
+            # instead of code-space bounds and its answers are mapped back.
+            input_levels=dict(input_levels) if input_levels else None,
             minimize_mask=[], constrained_metadata=None,
             acq_plot_path=None, acq_data_path=None,
         )
@@ -1392,11 +1499,13 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         if c.physical_constraints:
             print(f"  - 📐 Physical constraints detected. Generating acquisition landscape...")
 
+            levels = getattr(c, "input_levels", None) or None
             acq_summary = self._summarize_acquisition_landscape(
                 optimizer=optimizer,
                 input_cols=input_cols,
                 input_bounds=c.input_bounds,
-                is_moo=c.is_moo
+                is_moo=c.is_moo,
+                input_levels=levels,
             )
 
             # Get current best for context (un-negate for display)
@@ -1427,9 +1536,18 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                 }
                 pareto_front = None
 
-            # df still has original values (only y array was negated),
-            # so df.describe() shows natural units for LLM display
-            data_summary_str = c.df.describe().to_markdown()
+            # The planner reads physical units: categorical codes are
+            # rendered as their level names in the data summary, the
+            # current best / Pareto points and the unconstrained picks.
+            _phys = self._physical_frame(c.df, levels)
+            try:
+                data_summary_str = _phys.describe(include="all").to_markdown()
+            except Exception:  # noqa: BLE001 - tabulate / mixed dtypes
+                data_summary_str = _phys.describe().to_string()
+            if levels:
+                current_best = self._decode_point(current_best, levels) if current_best else current_best
+                if pareto_front:
+                    pareto_front = [self._decode_point(p, levels) for p in pareto_front]
 
             constrained_recs, constrained_metadata, constraint_error = self._plan_constrained_batch(
                 objective_text=c.objective_text,
@@ -1438,7 +1556,9 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                 batch_size=c.batch_size,
                 acq_summary=acq_summary,
                 physical_constraints=c.physical_constraints,
-                unconstrained_recommendations=c.unconstrained_recommendations,
+                unconstrained_recommendations=[self._decode_point(r, levels)
+                                               for r in c.unconstrained_recommendations],
+                input_levels=levels,
                 data_summary_str=data_summary_str,
                 current_best=current_best,
                 current_best_value=current_best_value,
