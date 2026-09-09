@@ -148,9 +148,23 @@ def run_sam_analysis(
             - rgb_image: RGB version of the image
             - parameters: Parameters used for this analysis
     """
-    # Get or create analyzer (uses cache if analyzer not provided)
+    # Get or create analyzer (uses cache if analyzer not provided). A missing
+    # optional dependency or checkpoint is reported as structured
+    # unavailability (#569) — the generated script can branch on it and the
+    # verifier can read it — instead of a raw ImportError traceback.
     if analyzer is None:
-        analyzer = get_or_create_sam_model(params)
+        try:
+            analyzer = get_or_create_sam_model(params)
+        except (ImportError, FileNotFoundError, OSError, RuntimeError) as exc:
+            logger.warning(f"SAM unavailable in this environment: {exc}")
+            return {
+                "status": "unavailable",
+                "capability": "segment_anything",
+                "reason": str(exc)[:500],
+                "particles": [], "masks": [], "areas": [],
+                "total_count": 0, "raw_mask_count": 0,
+                "parameters": params,
+            }
     
     # Run the analysis using atomai's ParticleAnalyzer
     # This handles preprocessing, SAM inference, filtering, and property extraction
@@ -505,7 +519,10 @@ TOOL_SPEC = ToolSpec(
     required=["image_array", "params"],
     returns=(
         "dict with 'particles' (list with 'mask' and 'area' per particle), "
-        "'total_count' (int), 'masks' (list of binary arrays), 'areas' (list of ints)."
+        "'total_count' (int), 'masks' (list of binary arrays), 'areas' (list of ints). "
+        "When SAM cannot run in this environment (package or checkpoint missing) the "
+        "dict has status='unavailable', 'capability' and 'reason' with empty results — "
+        "check result.get('status') and keep a non-SAM fallback path."
     ),
     example=(
         "result = run_sam_analysis(image_array, params={\n"
