@@ -2,11 +2,11 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type SkillCatalog } from "../api";
 import { Dropzone } from "./Dropzone";
 import { MarkdownBody } from "./MarkdownBody";
+import { MemoryPanel } from "./MemoryPanel";
 
 /** Skills tab — upload custom skills for this session and browse the
  * catalog (built-in bundles by domain, plus what you uploaded), with a
- * markdown viewer. Persistent memory (graduated / auto-distilled skills
- * under ~/.scilink) is a separate surface, not this panel. */
+ * markdown viewer, then the persistent-memory pipeline (MemoryPanel). */
 
 export function SkillsPanel({
   sessionId,
@@ -145,6 +145,8 @@ export function SkillsPanel({
           );
         })}
       </section>
+
+      <MemoryPanel sessionId={sessionId} active={active} />
 
       {viewing && (
         <div className="skill-viewer" role="dialog" aria-label={viewing.title}>

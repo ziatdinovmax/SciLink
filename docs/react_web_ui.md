@@ -208,8 +208,29 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   the session's `custom_skills/`, registered with the agent for this
   session, auto-selectable like built-ins) and browse the catalog — every
   built-in bundle by domain with its one-line description, plus a
-  markdown viewer (frontmatter shown as a caption). Persistent memory
-  (graduated / auto-distilled skills under `~/.scilink`) is not here yet.
+  markdown viewer (frontmatter shown as a caption). Below it, **Persistent
+  memory** — the port of the Streamlit memory panel over one store per
+  server host (`$SCILINK_HOME` or `~/.scilink`, the same store `scilink
+  memory` manages): the on/off switch (persisted to the store's
+  `config.json`; the `SCILINK_MEMORY` env var overrides it and the switch
+  says so), the pipeline strip, and the three stages in the order knowledge
+  flows. **1 · Script bank** — banked scripts by domain with proven (★)
+  badges, cross-session stats and a lazy record inspector (fields + the
+  working script); nominate one for review, or nominate a same-system
+  variant group under one technique label; delete. **2 · Review inbox** —
+  staged records by domain / technique (📜 nominations, 🐛 error lessons,
+  💬 your feedback; same-session records from other labels offered as
+  related), a record inspector with its bank link, discard, and the distill
+  flow: select records, distill into a **new** skill (consolidate; refuses a
+  label that would sweep in unselected records) or into an **existing** one
+  (targets ordered by a technique-match check, built-ins fork on upgrade,
+  mismatches flagged; preview → review the diff and additivity warnings,
+  optionally edit the proposal → apply with a `.md.bak` backup). The two
+  LLM calls (1–3 min) run as background jobs polled every 2 s, using the
+  current session's model. **3 · Skills** — provisional vs approved, with
+  view (frontmatter as caption), validated edit with backup, approve /
+  suspend, delete, and a diff against the shipped built-in for a fork.
+  Destructive actions are two-click confirms (no browser dialogs).
 - **MCP tab** (all modes): connect MCP servers — a `stdio` command, an
   SSE URL, or a streamable-HTTP URL with optional JSON headers — and
   disconnect them; each server card lists the tools it registered. The
@@ -250,7 +271,7 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   - deep links: the tab and selected file live in the URL hash, so a
     refresh (or shared link) lands on the same file.
 
-Not yet ported: simulate mode, the Skills tab's persistent-memory section, vibes.
+Not yet ported: simulate mode, vibes.
 
 ## Architecture
 
@@ -304,6 +325,17 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
 | GET | `/sessions/{id}/skills` | catalog: built-in bundles by domain with descriptions, the session's custom skills |
 | GET | `/sessions/{id}/skills/{domain}/{name}` | a skill's markdown (`domain` = catalog domain or `custom`) |
 | POST | `/sessions/{id}/skills` | multipart `.md` uploads → `custom_skills/`, registered with the agent |
+| GET | `/memory` | the store: switch, pipeline counts, bank by domain (+ variant groups), inbox by domain/technique, skills |
+| POST | `/memory/enabled` | `{enabled}` → persisted to the store's `config.json` |
+| GET/PUT | `/memory/skills/{domain}/{name}` | a persistent skill's markdown / validated edit with `.md.bak` backup |
+| POST | `/memory/skills/{domain}/{name}/{action}` | `promote` · `demote` · `prune` · `diff` (fork vs built-in) · `fork` (copy a built-in into the store) |
+| GET/DELETE | `/memory/bank/{domain}/{id}` | a bank record (fields + script) / delete it |
+| POST | `/memory/bank/{domain}/{id}/nominate`, `/memory/bank/{domain}/nominate-group` | send a record, or a variant group under one label, to the review inbox |
+| GET/DELETE | `/memory/inbox/{domain}/{id}` | a staged record (fields, script, bank link) / discard it |
+| POST | `/memory/inbox/{domain}/targets` | upgrade targets for a selection, with the technique-match verdict |
+| POST | `/memory/inbox/{domain}/consolidate`, `/propose-upgrade` | start an LLM job (`{session_id}` names the model) → `{job_id}` |
+| GET | `/memory/jobs/{id}` | job status → `result` (consolidate: the new skill; upgrade: the proposal with diff + warnings) |
+| POST | `/memory/inbox/{domain}/apply-upgrade`, `/memory/check-upgrade` | write a reviewed proposal (forking a built-in first) / re-check an edited one |
 | GET | `/sessions/{id}/tools` | connected MCP servers with their tools, other external tools, `mcp_supported` |
 | POST | `/sessions/{id}/mcp` | connect an MCP server (`name`, `transport` stdio/sse/http, `command` or `url`, `headers`) |
 | DELETE | `/sessions/{id}/mcp/{name}` | disconnect it |

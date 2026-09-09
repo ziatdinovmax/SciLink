@@ -3,7 +3,7 @@ their endpoints); requests get pydantic validation."""
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel
 
@@ -68,3 +68,44 @@ class MCPConnectRequest(BaseModel):
     command: str = ""                   # stdio: "npx -y @scope/server /path"
     url: str = ""                       # sse / http
     headers: Optional[Dict[str, str]] = None
+
+
+# ── persistent memory ────────────────────────────────────────────────
+
+class MemoryEnabledRequest(BaseModel):
+    enabled: bool
+
+
+class MemoryEditRequest(BaseModel):
+    content: str
+
+
+class MemoryIdsRequest(BaseModel):
+    ids: List[str]
+    technique: Optional[str] = None
+
+
+class MemoryConsolidateRequest(BaseModel):
+    ids: List[str]
+    label: str
+    session_id: str                 # the live session whose model distills
+
+
+class MemoryUpgradeRequest(BaseModel):
+    ids: List[str]
+    target_domain: str
+    target_name: str
+    session_id: str
+
+
+class MemoryApplyRequest(BaseModel):
+    ids: List[str]
+    target_domain: str
+    target_name: str
+    content: str
+    fork_builtin: bool = False
+
+
+class MemoryCheckRequest(BaseModel):
+    existing: str
+    proposed: str

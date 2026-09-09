@@ -165,6 +165,48 @@ export interface TelemetrySnapshot {
   tool_sequence: Record<string, { calls: ToolCall[]; source: string }>;
 }
 
+
+/** Persistent memory (GET /memory and friends — scilink/server/memory_api.py). */
+export interface MemoryBankRow {
+  id: string; label: string; n_successes: number; n_retrievals: number;
+  sessions: string[]; metric: unknown; created_at: string | null;
+  proven: boolean; promoted_to_staging: string | null;
+}
+export interface MemoryVariantGroup {
+  ids: string[]; min_similarity: number | null; suggested_technique: string | null; n_unpromoted: number;
+}
+export interface MemoryInboxRow {
+  id: string; domain: string; technique: string; provenance: string; provenance_label: string;
+  metric: string; session: string | null; bank_id: string | null; model: string | null; has_script: boolean;
+}
+export interface MemoryInboxGroup {
+  domain: string; technique: string; ready: boolean;
+  records: MemoryInboxRow[]; related: MemoryInboxRow[];
+}
+export interface MemorySkill {
+  name: string; domain: string; path: string; provisional: boolean; provenance: string | null;
+  session: string | null; description: string; metric: string; shadows_builtin: boolean;
+}
+export interface MemoryOverview {
+  enabled: boolean; env_override: string | null; home: string;
+  consolidate_min_n: number; proven_n: number;
+  pipeline: { bank_total: number; bank_proven: number; inbox_total: number; inbox_ready: number;
+              skills_total: number; skills_provisional: number };
+  bank: { domain: string; n_proven: number; records: MemoryBankRow[]; variant_groups: MemoryVariantGroup[] }[];
+  inbox: MemoryInboxGroup[];
+  skills: MemorySkill[];
+}
+export interface MemoryBankRecord { id: string; domain: string; fields: Record<string, unknown>; script: string }
+export interface MemoryInboxRecord extends MemoryInboxRow {
+  fields: Record<string, unknown>; script: string; bank: { bank_id: string; n_successes: number | null } | null;
+}
+export interface MemoryTarget { domain: string; name: string; builtin: boolean; match: boolean | null }
+export interface MemoryJob { id: string; kind: string; label: string; status: "running" | "done" | "error"; result: unknown; error: string | null }
+export interface MemoryProposal {
+  status: string; domain: string; staged_ids: string[]; target_domain: string; target_name: string;
+  builtin_target: boolean; existing_content: string; proposed_content: string; warnings: string[]; diff: string;
+}
+
 export interface SessionSnapshot {
   id: string;
   mode: string;
@@ -420,6 +462,57 @@ export const api = {
       catalog: SkillCatalog;
     }>;
   },
+
+  // persistent memory (one store per server host, not per session)
+  memory: () => req<MemoryOverview>("/memory"),
+  setMemoryEnabled: (enabled: boolean) =>
+    req<{ enabled: boolean }>("/memory/enabled", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }) }),
+  memorySkillText: async (domain: string, name: string) => {
+    const r = await fetch(`${BASE}/memory/skills/${encodeURIComponent(domain)}/${encodeURIComponent(name)}`);
+    if (!r.ok) throw new Error((await r.json()).detail ?? r.statusText);
+    return r.text();
+  },
+  memorySkillEdit: (domain: string, name: string, content: string) =>
+    req<{ status: string; backup_path: string }>(
+      `/memory/skills/${encodeURIComponent(domain)}/${encodeURIComponent(name)}`,
+      { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content }) }),
+  memorySkillAction: (domain: string, name: string, action: "promote" | "demote" | "prune" | "diff" | "fork") =>
+    req<Record<string, unknown>>(
+      `/memory/skills/${encodeURIComponent(domain)}/${encodeURIComponent(name)}/${action}`, { method: "POST" }),
+  memoryBankRecord: (domain: string, id: string) =>
+    req<MemoryBankRecord>(`/memory/bank/${encodeURIComponent(domain)}/${encodeURIComponent(id)}`),
+  memoryBankDelete: (domain: string, id: string) =>
+    req<{ removed: number }>(`/memory/bank/${encodeURIComponent(domain)}/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  memoryBankNominate: (domain: string, id: string) =>
+    req<{ status: string; staged_id: string; technique: string }>(
+      `/memory/bank/${encodeURIComponent(domain)}/${encodeURIComponent(id)}/nominate`, { method: "POST" }),
+  memoryBankNominateGroup: (domain: string, ids: string[], technique: string | null) =>
+    req<{ status: string; staged_ids: string[]; technique: string; ready_to_consolidate?: boolean; n_staged_total?: number }>(
+      `/memory/bank/${encodeURIComponent(domain)}/nominate-group`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids, technique }) }),
+  memoryInboxRecord: (domain: string, id: string) =>
+    req<MemoryInboxRecord>(`/memory/inbox/${encodeURIComponent(domain)}/${encodeURIComponent(id)}`),
+  memoryInboxDiscard: (domain: string, id: string) =>
+    req<{ removed: number }>(`/memory/inbox/${encodeURIComponent(domain)}/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  memoryTargets: async (domain: string, ids: string[]) =>
+    (await req<{ targets: MemoryTarget[] }>(`/memory/inbox/${encodeURIComponent(domain)}/targets`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }) })).targets,
+  memoryConsolidate: (domain: string, ids: string[], label: string, session_id: string) =>
+    req<{ job_id: string; label: string }>(`/memory/inbox/${encodeURIComponent(domain)}/consolidate`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids, label, session_id }) }),
+  memoryProposeUpgrade: (domain: string, ids: string[], target_domain: string, target_name: string, session_id: string) =>
+    req<{ job_id: string; label: string }>(`/memory/inbox/${encodeURIComponent(domain)}/propose-upgrade`,
+      { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids, target_domain, target_name, session_id }) }),
+  memoryApplyUpgrade: (domain: string, ids: string[], target_domain: string, target_name: string, content: string, fork_builtin: boolean) =>
+    req<{ status: string; backup_path: string; n_consumed: number }>(`/memory/inbox/${encodeURIComponent(domain)}/apply-upgrade`,
+      { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids, target_domain, target_name, content, fork_builtin }) }),
+  memoryCheckUpgrade: (existing: string, proposed: string) =>
+    req<{ warnings: string[]; diff: string }>("/memory/check-upgrade",
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ existing, proposed }) }),
+  memoryJob: (id: string) => req<MemoryJob>(`/memory/jobs/${id}`),
 
   tools: (id: string) => req<ToolInventory>(`/sessions/${id}/tools`),
   connectMcp: (
