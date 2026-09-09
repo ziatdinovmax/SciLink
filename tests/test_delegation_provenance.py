@@ -79,3 +79,29 @@ def test_single_parameter_point_needs_its_name():
     m._delegation_ledger = [_entry(1, "planning", recommended_parameters=[{"dose": 20.0}])]
     assert m._open_delegation("analysis", "20 images to segment", None, None, "x")["context_from"] == []
     assert m._open_delegation("analysis", "Analyze the sample irradiated at dose 20", None, None, "x")["context_from"] == [1]
+
+
+def test_stated_recommendation_closes_the_loop_without_a_bo_history():
+    """The live case: the BO tool declined to fit on two points, the planning
+    specialist stated "Next temperature to measure: ≈ 27.5 K" in prose, and
+    the later analysis of that point must still be recorded as depending on
+    it — while a bare "27.5" elsewhere must not."""
+    m = _meta()
+    p = m._open_delegation("planning", "recommend", None, [1], "bo")
+    m._close_delegation(p, {"status": "success", "key_findings": ["Optimization target: peak_1_fwhm (maximize)."],
+                            "summary": "The optimizer will not run on 2 points.\n\n## Recommendation\n\n"
+                                       "**Next temperature to measure: ≈ 27.5 K** (the midpoint of the 5–50 K range).\n",
+                            "files_produced": []})
+    assert p["recommended_parameters"] == []
+    vals = {(v["value"], "temperature" in v["context"]) for v in p["recommended_values"]}
+    assert (27.5, True) in vals
+    assert not any(v["value"] in (5.0, 50.0) for v in p["recommended_values"])  # range endpoints excluded
+    e = m._open_delegation("analysis", "A new spectrum was measured at temperature = 27.5 K: uploads/spectrum_27p5K.csv",
+                           None, None, "27.5 K point")
+    assert e["context_from"] == [1] and e["context_from_inferred"] == [1]
+    e = m._open_delegation("planning", "The 27.5 K point you recommended has now been measured; re-run the BO "
+                           "step over temperature with all three points.", None, None, "bo 3 points")
+    assert 1 in e["context_from"]
+    # the same number without any framing word is not a match
+    e = m._open_delegation("analysis", "Segment 27.5 percent of the images.", None, None, "x")
+    assert e["context_from"] == []

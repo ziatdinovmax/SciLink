@@ -1597,7 +1597,65 @@ class MetaOrchestratorAgent:
                 recs = [recs]
             if any(isinstance(r, dict) and self._point_in_text(r, text, numbers) for r in recs):
                 found.add(i)
+                continue
+            # (c') loop closure on a STATED recommendation: the task carries
+            # the recommended number and one of the words that framed it
+            low = text.lower()
+            for rv in e.get("recommended_values") or []:
+                v = rv.get("value")
+                if not isinstance(v, (int, float)):
+                    continue
+                if not any(abs(n - float(v)) <= max(1e-6, 1e-3 * abs(float(v))) for n in numbers):
+                    continue
+                if any(w in low for w in rv.get("context") or []):
+                    found.add(i)
+                    break
         return found
+
+    # Words that surround a recommended number in almost any planning
+    # summary and therefore prove nothing on their own.
+    _RECOMMEND_GENERIC = frozenset(
+        "recommend recommended recommendation recommends next measure measured "
+        "measuring measurement point value values step experiment experiments "
+        "single following suggest suggested proposed midpoint range within".split())
+
+    @classmethod
+    def _recommended_values_of(cls, result: dict) -> List[Dict[str, Any]]:
+        """Recommendations a planning delegation STATED rather than produced
+        through the BO engine — e.g. a heuristic "next temperature to
+        measure: 27.5 K" when the optimizer declined to fit. Each value is
+        kept with the specific words around it (parameter names, units), so
+        a later task matches only when it carries the number AND one of
+        those words; a bare number never matches."""
+        texts = [str(result.get("summary") or "")]
+        texts += [str(k) for k in (result.get("key_findings") or [])]
+        texts += [str(k) for k in (result.get("suggested_followups") or [])]
+        out: List[Dict[str, Any]] = []
+        seen = set()
+        for text in texts:
+            for sentence in re.split(r"(?<=[.!?\n])\s+|\n", text):
+                low = sentence.lower()
+                if "recommend" not in low and not ("next" in low and "measur" in low):
+                    continue
+                # Range endpoints ("5–50 K range") frame a recommendation but
+                # are not recommended values themselves.
+                low = re.sub(r"-?\d+(?:\.\d+)?\s*(?:–|-|to)\s*-?\d+(?:\.\d+)?", " ", low)
+                words = re.findall(r"[a-z_][a-z0-9_]{2,}|-?\d+(?:\.\d+)?", low)
+                for i, w in enumerate(words):
+                    if not re.fullmatch(r"-?\d+(?:\.\d+)?", w):
+                        continue
+                    try:
+                        val = float(w)
+                    except ValueError:
+                        continue
+                    ctx = {x for x in words[max(0, i - 6): i + 7]
+                           if not re.fullmatch(r"-?\d+(?:\.\d+)?", x)
+                           and len(x) >= 4 and x not in cls._RECOMMEND_GENERIC}
+                    if not ctx or (val, tuple(sorted(ctx))) in seen:
+                        continue
+                    seen.add((val, tuple(sorted(ctx))))
+                    out.append({"value": val, "context": sorted(ctx)})
+        return out[:12]
 
     @staticmethod
     def _recommended_points_of(result: dict) -> List[Dict[str, Any]]:
@@ -1647,6 +1705,8 @@ class MetaOrchestratorAgent:
                              if isinstance(a, dict) and a.get("analysis_id")],
             "recommended_parameters": (self._recommended_points_of(result)
                                        if entry.get("mode") == "planning" else []),
+            "recommended_values": (self._recommended_values_of(result)
+                                   if entry.get("mode") == "planning" else []),
         })
         # A completed delegation is the ledger state worth preserving — the
         # every-N-messages auto-save left short sessions (fewer than
