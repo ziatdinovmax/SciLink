@@ -448,6 +448,18 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         is_single_image = num_images == 1
 
+        # Persist the worker's state file the moment the run starts (#566):
+        # the web UI's Worker-agents panel reads <agent_type>_state.json and
+        # showed image analysis only after — and only if — the run completed.
+        self._init_state(input_type=input_type, num_images=num_images)
+        self._log_action(
+            action="analysis_started",
+            input_ctx={"num_images": num_images, "input_type": input_type,
+                       "analysis_depth": self.analysis_depth,
+                       "output_directory": str(self.output_dir)},
+            result={"status": "running"},
+        )
+
         self.logger.info("")
         self.logger.info(f"🖼️  IMAGE ANALYSIS - {num_images} image{'s' if num_images > 1 else ''}")
         self.logger.info(f"   Quality: depth={self.analysis_depth}")
@@ -463,6 +475,8 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 first_image = load_image_data(image_paths[0])
                 first_image_name = Path(image_paths[0]).stem
             except Exception as e:
+                self._log_action("image_analysis", {"input_type": input_type},
+                                 {"status": "error", "error": f"Failed to load image: {e}"})
                 return {
                     "status": "error",
                     "error": {"error": "Failed to load image", "details": str(e)},

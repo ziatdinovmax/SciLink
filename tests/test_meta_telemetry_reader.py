@@ -34,3 +34,27 @@ def test_tool_sequence_keeps_error_messages_and_reads_multimodal_results():
     assert seq[1]["status"] == "error" and seq[1]["result"] == {"status": "error", "error": "unreadable image"}
     assert seq[2]["status"] == "error" and seq[2]["result"]["message"] == bad_args["message"]
     assert seq[3]["status"] == "pending" and seq[3]["result"] is None
+
+
+def test_worker_rows_for_image_and_hyperspectral_state_files(tmp_path):
+    """The foundation agents that log their run into <agent_type>_state.json
+    show up as worker rows with friendly names, including a run that is
+    still in progress (only its analysis_started action recorded) — #566."""
+    from scilink.agents.meta_agent.telemetry import _worker_telemetry
+    d = tmp_path / "analysis" / "results" / "img_001"
+    d.mkdir(parents=True)
+    (d / "image_analysis_state.json").write_text(json.dumps({
+        "agent_type": "image_analysis", "status": "active",
+        "action_history": [{"timestamp": "2026-09-08T10:00:00", "action": "analysis_started",
+                            "input": {"num_images": 1}, "result": {"status": "running"}}]}))
+    (d / "hyperspectral_state.json").write_text(json.dumps({
+        "agent_type": "hyperspectral",
+        "action_history": [{"timestamp": "2026-09-08T10:00:00", "action": "analysis_started",
+                            "input": {}, "result": {"status": "running"}},
+                           {"timestamp": "2026-09-08T10:05:00", "action": "analyze",
+                            "input": {}, "result": {"status": "success"}}]}))
+    img = _worker_telemetry(d / "image_analysis_state.json")
+    hs = _worker_telemetry(d / "hyperspectral_state.json")
+    assert (img["specialist"], img["name"], img["action_count"]) == ("analysis", "Image Analysis", 1)
+    assert img["actions"][0]["status"] == "running"
+    assert (hs["name"], hs["action_count"], hs["outcomes"]["success"]) == ("Hyperspectral Analysis", 2, 1)

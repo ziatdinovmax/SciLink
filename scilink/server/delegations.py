@@ -66,7 +66,8 @@ def _sub_agents(session_dir: Optional[str]) -> Dict[str, List[str]]:
     base = Path(session_dir)
     if not base.is_dir():
         return out
-    labels = {"curve_fitting": "Curve Fitting", "bo": "Bayesian Optimization",
+    labels = {"curve_fitting": "Curve Fitting", "image_analysis": "Image Analysis",
+              "hyperspectral": "Hyperspectral Analysis", "bo": "Bayesian Optimization",
               "scalarizer": "Scalarizer"}
     try:
         for sp in sorted(base.rglob("*_state.json")):
