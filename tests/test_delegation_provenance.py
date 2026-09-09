@@ -100,7 +100,7 @@ def test_stated_recommendation_closes_the_loop_without_a_bo_history():
     q = m._open_delegation("planning", "recommend", None, [1], "bo")
     m._close_delegation(q, {"status": "success", "key_findings": [],
                             "summary": "The recommended step needs at least 3 points; the 3-point floor "
-                                       "cannot be lowered. Recommended: measure at 34.2 K next.",
+                                       "cannot be lowered. Recommended: set the temperature at 34.2 K next.",
                             "files_produced": []})
     assert [v["value"] for v in q["recommended_values"]] == [34.2]
     e = m._open_delegation("analysis", "A new spectrum was measured at temperature = 27.5 K: uploads/spectrum_27p5K.csv",
