@@ -129,7 +129,7 @@ label.field > span { display: block; margin-bottom: 4px; }
   font-size: 15px; padding: 8px 16px; min-width: 260px;
   border-radius: 10px;
 }
-.mode-trigger .mode-name { flex: 1; text-align: left; }
+.mode-trigger .mode-name { flex: 1; text-align: center; }
 .mode-caret {
   color: var(--text-dim); font-size: 13px;
   transform: rotate(90deg); transition: transform 0.15s;
@@ -148,8 +148,8 @@ label.field > span { display: block; margin-bottom: 4px; }
   display: flex; flex-direction: column; gap: 2px;
 }
 .mode-option {
-  display: flex; align-items: center; gap: 12px;
-  text-align: left; padding: 8px 12px; border: 1px solid transparent;
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  text-align: center; padding: 8px 12px; border: 1px solid transparent;
   background: none; border-radius: 8px; font-size: 14px;
 }
 .mode-option:hover:not(:disabled) { background: var(--bg-panel); border-color: var(--border); }
