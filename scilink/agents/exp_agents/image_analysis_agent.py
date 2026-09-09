@@ -676,8 +676,20 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         tier1_results = self._compile_results(state)
         tier1_state = state
 
-        # Save Tier 1 results
-        self._save_analysis_scripts(state)
+        # Save the scripts and advertise them in the manifest (#591).
+        saved_scripts = self._save_analysis_scripts(state)
+        if saved_scripts:
+            names = [Path(p).name for p in saved_scripts]
+            tier1_results["analysis_scripts"] = {
+                "dir": str(self.output_dir / "scripts"), "files": names,
+                "representative": names[0],
+                "note": ("The analysis script(s) that produced this result"
+                         + ("" if state.get("is_single_image", True) else
+                            f" (the locked pipeline, saved once per image: {len(names)} copies)")
+                         + ". To re-run this exact pipeline, pass this output directory as "
+                           "prior_analysis_paths with reuse_locked_script=true; use "
+                           "script_edits for a surgical change."),
+            }
 
         # ================================================================
         # TIER 2: Evaluate and optionally run
@@ -907,8 +919,9 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         return result
 
-    def _save_analysis_scripts(self, state: dict) -> None:
-        """Save LLM-generated analysis scripts to disk for reproducibility."""
+    def _save_analysis_scripts(self, state: dict) -> List[str]:
+        """Save LLM-generated analysis scripts to disk for reproducibility.
+        Returns the saved paths."""
         scripts_dir = self.output_dir / "scripts"
         saved = []
 
@@ -935,6 +948,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         if saved:
             self.logger.info(f"   📝 Scripts: {scripts_dir} ({len(saved)} file(s))")
+        return saved
 
     def _maybe_stage_t2_solutions(self, state: dict) -> List[str]:
         """Stage novel T=2 (hot-annealing) image-analysis successes for later distillation.

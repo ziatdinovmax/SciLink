@@ -169,6 +169,58 @@ def window_lines(lines: List[str], *, max_lines: int = 200,
             "content": content}
 
 
+DIRECTORY_LISTING_MAX_ENTRIES = 300
+
+
+def list_directory(path: Path, *, display_path: Optional[str] = None,
+                   max_entries: int = DIRECTORY_LISTING_MAX_ENTRIES) -> Dict[str, Any]:
+    """What ``read_file`` returns for a directory (#591): its contents, so an
+    agent holding a folder path can reach the file inside instead of
+    concluding the file is elsewhere. Sub-directories come first (with their
+    file counts), then files with sizes; ``scripts/*.py`` and other saved
+    scripts are called out because they are the artifact most often looked
+    for in an analysis output directory.
+    """
+    path = Path(path)
+    try:
+        children = sorted(path.iterdir(), key=lambda c: (c.is_file(), c.name.lower()))
+    except OSError as e:
+        return {"status": "error", "message": f"Cannot list {display_path or path}: {e}"}
+    entries: List[Dict[str, Any]] = []
+    for child in children:
+        if child.name.startswith("."):
+            continue
+        if child.is_dir():
+            try:
+                n = sum(1 for c in child.iterdir() if not c.name.startswith("."))
+            except OSError:
+                n = None
+            entries.append({"name": child.name + "/", "type": "directory", "entries": n})
+        else:
+            try:
+                size = child.stat().st_size
+            except OSError:
+                size = None
+            entries.append({"name": child.name, "type": "file", "size_bytes": size})
+    truncated = len(entries) > max_entries
+    entries = entries[:max_entries]
+    scripts = [e["name"] for e in entries if e["name"].endswith(".py")]
+    scripts_dir = path / "scripts"
+    if scripts_dir.is_dir():
+        scripts += sorted(f"scripts/{c.name}" for c in scripts_dir.iterdir() if c.suffix == ".py")
+    out: Dict[str, Any] = {
+        "status": "success", "file_path": str(path), "is_directory": True,
+        "entries": entries, "truncated": truncated,
+        "hint": (f"'{display_path or path}' is a directory, not a file. Call read_file on one "
+                 "of the entries above (a file's path is this directory joined with its name)."),
+    }
+    if scripts:
+        out["scripts"] = scripts
+        out["hint"] += (" Saved scripts: " + ", ".join(scripts[:8])
+                        + (" …" if len(scripts) > 8 else "") + ".")
+    return out
+
+
 def read_file_content(path: Path, *, max_lines: int = 200,
                       tail: bool = False, search: Optional[str] = None,
                       offset: Optional[int] = None,
@@ -189,6 +241,8 @@ def read_file_content(path: Path, *, max_lines: int = 200,
     the name) that are returned whole up to ``full_read_max_chars``.
     """
     path = Path(path)
+    if path.is_dir():
+        return list_directory(path, display_path=display_path)
     if not path.is_file():
         return {"status": "error",
                 "message": f"Not a file: {display_path or path}"}
