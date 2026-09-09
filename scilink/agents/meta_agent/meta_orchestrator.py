@@ -15,6 +15,7 @@ this development stage — see CLAUDE.md "Why no BaseChatOrchestrator refactor".
 """
 
 import json
+import re
 import logging
 import os
 import time
@@ -299,7 +300,11 @@ rather than fabricate a result).
   next `delegate_to_*` call. That is how analysis findings inform planning.
 - When the `context` you pass draws on earlier delegations, also list those
   delegations' `delegation_index` numbers in the `context_from` argument —
-  this records the provenance of the threaded findings.
+  this records the provenance of the threaded findings. A delegation that
+  analyzes the point a planning delegation recommended, or continues a prior
+  analysis (cites its id, reuses its locked model), depends on it just the
+  same — list it, even when the user measured and uploaded the data in
+  between.
 - `summarize_session_state` reports what each specialist has done so far.
 
 **ANALYSIS RESULTS -> PLANNING / BO:**
@@ -1452,10 +1457,16 @@ class MetaOrchestratorAgent:
             raw = [raw]
         elif not isinstance(raw, (list, tuple)):
             raw = []
-        sources = sorted({
+        declared = {
             int(s) for s in (str(v).strip().lstrip("#") for v in raw)
             if s.isdigit() and 0 < int(s) < index
-        })
+        }
+        # Provenance the ledger can prove from the task itself (#571): a
+        # cited prior analysis id, a threaded finding, or a task that sits at
+        # the point a planning delegation recommended — dependencies the
+        # LLM under-declares when a human courier mediates the step.
+        inferred = self._infer_context_sources(index, task, context) - declared
+        sources = sorted(declared | inferred)
         entry = {
             "index": index,
             "timestamp": datetime.now().isoformat(),
@@ -1464,6 +1475,7 @@ class MetaOrchestratorAgent:
             "label": (label or "").strip(),
             "context_keys": sorted(context.keys()) if isinstance(context, dict) else [],
             "context_from": sources,
+            "context_from_inferred": sorted(inferred),
             "status": "running",
             "summary": "",
             "key_findings": [],
@@ -1521,6 +1533,92 @@ class MetaOrchestratorAgent:
                                  "re-delegate if still needed"],
                 })
 
+    # Delegation provenance that can be read off the ledger (#571). Each
+    # rule is a *proof* of dependence, not a guess: the text names a prior
+    # analysis by id, carries one of its findings verbatim, or fixes every
+    # parameter of a point a prior planning delegation recommended.
+    _NUM_RE = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
+    _FINDING_MIN_CHARS = 40
+
+    @staticmethod
+    def _analysis_ids_of(entry: Dict[str, Any]) -> List[str]:
+        ids = [str(a) for a in (entry.get("analysis_ids") or []) if a]
+        for f in entry.get("files_produced") or []:
+            for part in str(f).replace("\\", "/").split("/"):
+                if part.startswith("analysis_") and len(part) >= 12 and part not in ids:
+                    ids.append(part)
+        return ids
+
+    @classmethod
+    def _point_in_text(cls, point: Dict[str, Any], text: str, numbers: List[float]) -> bool:
+        """Every parameter of ``point`` appears in ``text`` as a number (to
+        0.1 % / 1e-6) AND at least one parameter is named in the text — so
+        a task that merely mentions the same bare numbers ("3.0 things at
+        20 degrees") cannot match a (temperature=20, pressure=3.0) point."""
+        vals = {k: v for k, v in point.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        if not vals:
+            return False
+        for v in vals.values():
+            if not any(abs(n - float(v)) <= max(1e-6, 1e-3 * abs(float(v))) for n in numbers):
+                return False
+        low = text.lower()
+        return any(str(k).lower().replace("_", " ") in low.replace("_", " ") for k in vals)
+
+    def _infer_context_sources(self, index: int, task: str, context: Any) -> set:
+        text = str(task or "")
+        if context:
+            try:
+                text += "\n" + json.dumps(context, default=str)
+            except Exception:  # noqa: BLE001
+                text += "\n" + str(context)
+        numbers = []
+        for m in self._NUM_RE.findall(text):
+            try:
+                numbers.append(float(m))
+            except ValueError:
+                pass
+        found = set()
+        for e in self._delegation_ledger:
+            i = e.get("index")
+            if not isinstance(i, int) or not 0 < i < index:
+                continue
+            # (a) continues / reuses a prior analysis: its id is cited
+            if any(aid in text for aid in self._analysis_ids_of(e)):
+                found.add(i)
+                continue
+            # (b) a finding of it is threaded verbatim
+            if any(isinstance(k, str) and len(k) >= self._FINDING_MIN_CHARS and k in text
+                   for k in e.get("key_findings") or []):
+                found.add(i)
+                continue
+            # (c) loop closure: the task sits at a point it recommended
+            recs = e.get("recommended_parameters") or []
+            if isinstance(recs, dict):
+                recs = [recs]
+            if any(isinstance(r, dict) and self._point_in_text(r, text, numbers) for r in recs):
+                found.add(i)
+        return found
+
+    @staticmethod
+    def _recommended_points_of(result: dict) -> List[Dict[str, Any]]:
+        """The points a planning delegation recommended, from the child's
+        BO history (its last step's batch) — what a later analysis of "the
+        recommended point" is matched against."""
+        for f in result.get("files_produced") or []:
+            if not str(f).endswith("bo_history.json"):
+                continue
+            try:
+                hist = json.loads(Path(f).read_text())
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(hist, list) and hist:
+                batch = hist[-1].get("recommendation_batch") if isinstance(hist[-1], dict) else None
+                if isinstance(batch, dict):
+                    return [batch]
+                if isinstance(batch, list):
+                    return [b for b in batch if isinstance(b, dict)]
+        return []
+
     def _close_delegation(self, entry: Dict[str, Any], result: dict) -> None:
         """Finalize a provisional ledger entry with the child's result."""
         # Derive status from the actual outcome rather than trusting the
@@ -1544,6 +1642,11 @@ class MetaOrchestratorAgent:
             "warnings": result.get("warnings", []),
             "error": result.get("error"),
             "completed_at": datetime.now().isoformat(),
+            # What later delegations can be matched against (#571).
+            "analysis_ids": [str(a.get("analysis_id")) for a in (result.get("analyses") or [])
+                             if isinstance(a, dict) and a.get("analysis_id")],
+            "recommended_parameters": (self._recommended_points_of(result)
+                                       if entry.get("mode") == "planning" else []),
         })
         # A completed delegation is the ledger state worth preserving — the
         # every-N-messages auto-save left short sessions (fewer than
