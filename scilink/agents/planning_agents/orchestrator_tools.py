@@ -5299,6 +5299,26 @@ class OrchestratorTools:
                 if res.get("inspection"):
                     response["inspection"] = res["inspection"]
 
+                # How the point was selected (#564): pass the stamp through
+                # and, for a planner-chosen point, the acquisition optimum it
+                # deviates from plus a sentence the narration must carry —
+                # so a recommendation sitting away from the plotted
+                # acquisition peak reads as deliberate, not as an optimizer bug.
+                response["selection_method"] = res.get("selection_method", "acqf_optimizer")
+                if response["selection_method"] == "constrained_planner":
+                    optimum = res.get("acqf_optimum")
+                    if level_maps and optimum is not None:
+                        optimum = self._decode_categorical_recs(optimum, level_maps)
+                    response["acqf_optimum"] = optimum
+                    if res.get("deviation_from_acqf_optimum"):
+                        response["deviation_from_acqf_optimum"] = res["deviation_from_acqf_optimum"]
+                    response["selection_note"] = (
+                        "SELECTED BY THE CONSTRAINT-AWARE PLANNER, not the acquisition "
+                        "optimizer: the recommended point was chosen by LLM reasoning over "
+                        "the acquisition landscape under the stated physical constraints "
+                        "and is not necessarily the acquisition-function maximum "
+                        f"(acquisition optimum: {optimum}). State this plainly when "
+                        "reporting the recommendation.")
                 # Include constrained planning metadata
                 if res.get("constrained_planning"):
                     cp = res["constrained_planning"]
@@ -5412,10 +5432,17 @@ class OrchestratorTools:
                 "physical_constraints": {
                     "type": "string",
                     "description": (
-                        "Natural language description of physical experimental constraints that "
-                        "prevent arbitrary parameter combinations. When provided, the optimizer "
-                        "evaluates the full acquisition landscape and uses LLM reasoning to design "
-                        "a realizable batch. Examples:\n"
+                        "Natural language description of STRUCTURAL FEASIBILITY constraints — "
+                        "which parameter combinations can physically be realized (discrete "
+                        "allowed levels, plate / coupled-equipment layouts, shared-zone "
+                        "couplings). When provided, the recommendation is chosen by an "
+                        "LLM constrained-batch planner reasoning over the acquisition "
+                        "landscape, NOT taken from the acquisition-function maximum; the "
+                        "response says so (selection_method) and carries the acqf_optimum. "
+                        "Do NOT pass modeling caveats, interpretation notes or soft "
+                        "preferences here — put those in strategy_hint or the objective; "
+                        "passing them here diverts the recommendation off the acquisition "
+                        "optimizer for no structural reason. Examples:\n"
                         "- '96-well plate: rows share temperature (8 values), columns share pH (12 values)'\n"
                         "- 'Only 5 catalyst concentrations available: 0.1, 0.5, 1.0, 2.0, 5.0 mM'\n"
                         "- 'Reactor has 4 zones with independent temp but shared pressure'\n"
