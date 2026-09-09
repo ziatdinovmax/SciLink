@@ -137,7 +137,6 @@ label.field > span { display: block; margin-bottom: 4px; }
 .mode-trigger[aria-expanded="true"] .mode-caret { transform: rotate(-90deg); }
 .mode-emoji { font-size: 22px; line-height: 1; flex: none; }
 .mode-name { font-weight: 600; white-space: nowrap; }
-.mode-name .beta-pill { margin-left: 8px; }
 
 .mode-menu {
   position: absolute; top: calc(100% + 6px); left: 50%;
@@ -157,11 +156,6 @@ label.field > span { display: block; margin-bottom: 4px; }
 .mode-option.selected { border-color: var(--accent); }
 .welcome .tagline { color: var(--text-muted); font-size: 19px; margin: 0; }
 .welcome .hint { font-size: 14px; color: var(--text-dim); }
-.beta-pill {
-  font-size: 0.55em; vertical-align: middle;
-  background: #8893a5; color: #fff; padding: 2px 8px;
-  border-radius: 9px; letter-spacing: 1px; font-weight: 600;
-}
 
 /* ── chat ───────────────────────────────────────────────────── */
 

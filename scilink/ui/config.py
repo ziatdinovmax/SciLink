@@ -25,7 +25,7 @@ EMBEDDING_MODEL_OPTIONS = [
 
 # ── Mode registry ────────────────────────────────────────────────
 APP_MODES = [
-    {"key": "meta",    "label": "🧪 📋 ⚛️",  "beta": True, "description": "Routes your research goal to the Analyze & Plan specialists"},
+    {"key": "meta",    "label": "🧪 📋 ⚛️",  "description": "Routes your research goal to the Analyze & Plan specialists"},
     {"key": "analyze", "label": "Analyze", "description": "Multi-modal data analysis"},
     {"key": "plan",    "label": "Plan",    "description": "Experimental design & optimization"},
     {"key": "simulate", "label": "Simulate", "description": "Submit and monitor DFT/MD simulations"},

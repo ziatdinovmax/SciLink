@@ -3,7 +3,6 @@
 export interface ModeInfo {
   key: string;
   label: string;
-  beta?: boolean;
   description: string;
 }
 
