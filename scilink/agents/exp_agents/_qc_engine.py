@@ -277,6 +277,11 @@ class QCItemContext:
         self.stall_count: int = 0
         self.prev_best_score: float = -1.0
         self.iteration: int = 0
+        # A host's reason to stop the loop early with the best result so
+        # far (#568: a prescribed fix that will not take) — checked after
+        # each refinement, logged, then the final-verify path runs as for
+        # the wall-clock budget.
+        self.stop_reason: Optional[str] = None
 
 
 class CodegenQCEngine:
@@ -413,6 +418,11 @@ class CodegenQCEngine:
             refinement_error = refined_config.pop("_refinement_error", None)
             if refinement_error:
                 ctx.verification_history[-1]["refinement_error"] = refinement_error
+
+            if ctx.stop_reason:
+                logger.warning(f"   Stopping verification: {ctx.stop_reason}")
+                host.qc_final_verify(ctx)
+                return
 
             if (spec.config_key is not None
                     and refined_config == ctx.state.get(spec.config_key, {})):

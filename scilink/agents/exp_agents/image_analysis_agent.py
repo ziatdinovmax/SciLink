@@ -1604,6 +1604,10 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 results["quality_warning"] = series_results[0]["quality_warning"]
             if series_results and series_results[0].get("quality_history"):
                 results["quality_history"] = series_results[0]["quality_history"]
+            # A prescription the verification loop gave up on (#568) is part
+            # of the verdict the caller sees.
+            if series_results and series_results[0].get("stalled_prescriptions"):
+                results["stalled_prescriptions"] = series_results[0]["stalled_prescriptions"]
 
             # #172: surface the locked-script reuse verdict for the orchestrator
             if series_results and series_results[0].get("reuse_validity"):
