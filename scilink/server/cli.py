@@ -19,7 +19,25 @@ import sys
 from pathlib import Path
 
 
+def _headless_matplotlib() -> None:
+    """Force a non-interactive backend before any agent imports pyplot.
+
+    The agents draw diagnostics on the server's worker threads; on macOS
+    matplotlib's default GUI backend refuses that ("Cannot create a GUI
+    FigureManager outside the main thread"), so a plan session's BO step
+    failed at its plot unless something else had switched to Agg first.
+    """
+    import os
+    os.environ.setdefault("MPLBACKEND", "Agg")
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+    except Exception:  # noqa: BLE001 - matplotlib absent or already locked
+        pass
+
+
 def main(argv=None) -> int:
+    _headless_matplotlib()
     parser = argparse.ArgumentParser(
         prog="scilink-web",
         description="SciLink web backend (REST + SSE) for the React UI.")

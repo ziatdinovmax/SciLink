@@ -5253,6 +5253,9 @@ class OrchestratorTools:
                     plot_acq=True,
                     save_acq=True,
                     cat_dims=cat_dims if cat_dims else None,
+                    # Level names for the constrained planner (#579): it
+                    # reasons in physical terms; codes stay the optimizer's.
+                    input_levels=level_maps if level_maps else None,
                     skill=skill,
                     fidelity_config=fidelity_config,
                     candidate_pool=resolved_pool,
