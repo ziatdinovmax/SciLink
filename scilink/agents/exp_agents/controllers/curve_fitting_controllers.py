@@ -3064,6 +3064,10 @@ class UnifiedSeriesProcessingController:
     """
     
     MAX_ATTEMPTS = 5
+    # Bound-relaxation refits per spectrum (#592): one relaxation is the
+    # remedy; a fit that still pins afterwards is kept, stamped and flagged
+    # rather than fed back through the whole ladder.
+    MAX_PINNED_RETRIES = 1
     DEFAULT_R2_THRESHOLD = 0.95
     DEFAULT_MAX_MODEL_RETRIES = 1
     DEFAULT_OUTLIER_SIGMA = 2.0
@@ -3775,6 +3779,7 @@ Your guidance: '''
         script_errors: list[dict] = []
         consecutive_timeouts = 0
         used_timeout_escalation = False
+        pinned_retries = 0
 
         for attempt in range(1, self.MAX_ATTEMPTS + 1):
             try:
@@ -3858,6 +3863,28 @@ Your guidance: '''
                         if has_fit_results else False
 
                     if has_fit_results and has_parameters and has_visualization:
+                        # A fit with a parameter pinned at a bound (#592) is
+                        # degenerate even when R² clears the gate: another
+                        # parameter absorbs the misfit and the extracted value
+                        # is wrong. Route it through the correction ladder,
+                        # which relaxes exactly those bounds; if the last
+                        # attempt still pins, the result is kept but stamped
+                        # and flagged rather than silently accepted.
+                        from ...skills._shared.curve_fitting_tools import (
+                            validate_bound_pinning, describe_pinned, PINNED_BOUND_FIX)
+                        _fr = _parse_script_markers(run["stdout"])
+                        _pins = validate_bound_pinning(_fr.get("parameters"), _fr.get("bounds"))
+                        if (_pins and attempt < self.MAX_ATTEMPTS
+                                and pinned_retries < self.MAX_PINNED_RETRIES):
+                            pinned_retries += 1
+                            last_error = (
+                                "DEGENERATE FIT — parameter(s) pinned at a bound: "
+                                + describe_pinned(_pins) + ". " + PINNED_BOUND_FIX)
+                            self.logger.warning(
+                                f"    ⚠️ Attempt {attempt}: pinned at bound — "
+                                f"{describe_pinned(_pins)}; relaxing bounds and refitting")
+                            consecutive_timeouts = 0
+                            continue
                         break
                     else:
                         missing = []
@@ -3937,11 +3964,31 @@ Your guidance: '''
             self.logger.warning(
                 "    ⚠️ Absence contract: %s", "; ".join(_acv))
 
+        # Pinned-at-bound degeneracy that survived the correction ladder
+        # (#592): stamp it so the series flags the spectrum and the verifier
+        # / synthesis see it, independent of R².
+        from ...skills._shared.curve_fitting_tools import (
+            validate_bound_pinning, describe_pinned, PINNED_BOUND_FIX)
+        pinned = validate_bound_pinning(
+            fit_results.get("parameters"), fit_results.get("bounds"))
+        if pinned:
+            script_errors.append({
+                "error": "degenerate fit — parameter(s) pinned at a bound: "
+                         + describe_pinned(pinned),
+                "diagnosis": PINNED_BOUND_FIX,
+                "kind": "pinned_bound",
+            })
+            self.logger.warning(
+                "    ⚠️ Pinned at bound after relaxation — kept and flagged: %s",
+                describe_pinned(pinned))
+
         # Best-effort residual diagnostics from the saved fitted curve (vision aid):
         # reliable per-region structure metrics the verifier can reason over instead
         # of eyeballing a dynamic-range-crushed plot. Skipped silently if fit.npy
         # is absent (older/refit scripts) so this never breaks the fit path.
         fit_quality = dict(fit_results.get("fit_quality", {}) or {})
+        if pinned:
+            fit_quality["pinned_at_bound"] = pinned
         residual_diag = None
         residual_zoom_panels = []
         try:
@@ -4025,6 +4072,14 @@ Your guidance: '''
             "script": script,
             "script_errors": script_errors,
         }
+        if fit_results.get("bounds"):
+            result["bounds"] = fit_results["bounds"]
+        if pinned:
+            result["pinned_at_bound"] = pinned
+            result["quality_warning"] = (
+                "Degenerate fit: " + describe_pinned(pinned)
+                + " — the extracted value is not trustworthy; the bound must "
+                  "be made data-relative and the spectrum refitted.")
         if used_timeout_escalation:
             # Provenance: this fit came from the last-resort model
             # restructure after persistent timeouts — the executed script,
@@ -6352,6 +6407,17 @@ Return JSON with:
             state["locked_fitting_config"] = original_config
             return best_result, best_r2
 
+    @staticmethod
+    def _reuse_blocked_by_regimes(state: dict) -> bool:
+        """Locked-script reuse is incompatible with a series plan that splits
+        the run into MORE THAN ONE regime (each regime derives its own model).
+        A single-regime plan is the normal case and must not block reuse —
+        it did, because the guard tested for the presence of per-spectrum
+        regime configs, which every planned series has (#592)."""
+        plan = state.get("series_analysis_plan") or {}
+        regimes = plan.get("regimes") or []
+        return len(regimes) > 1
+
     def _detect_outliers(self, series_results: List[dict], gate=None) -> List[dict]:
         # Score each fit by the GATE's metric, not always global R². For a
         # non-R² goodness-of-fit gate (e.g. peak_region_r2) a correct low-SNR
@@ -6402,6 +6468,23 @@ Return JSON with:
                 continue
 
             r2 = self._score_fn(r)
+            # A pinned-at-bound fit is flagged regardless of its R² (#592):
+            # the gate metric can stay high while the extracted value is
+            # wrong, which is exactly how the degeneracy hid before.
+            pins = (r.get("fit_quality") or {}).get("pinned_at_bound")
+            if pins:
+                from ...skills._shared.curve_fitting_tools import describe_pinned
+                flagged.append({
+                    "index": r["index"], "name": r["name"], "reason": "pinned_at_bound",
+                    "r_squared": float(r2) if r2 is not None else None,
+                    "series_mean": median_r2, "series_std": robust_scale,
+                    "deviation_sigma": None,
+                    "recommendation": ("Degenerate fit: " + describe_pinned(pins)
+                                       + ". R² is not evidence here — another parameter absorbed "
+                                         "the misfit. Refit with that bound made data-relative "
+                                         "(e.g. 2 × max(y)) before trusting the extracted values."),
+                })
+                continue
             if r2 is None:
                 continue
 
@@ -6609,7 +6692,7 @@ Return JSON with:
             cs = state["_cold_start_reuse"]
             reuse_script = cs.get("script")
             reuse_source = f"script_bank:{cs.get('id')}"
-        if reuse_script and regime_configs:
+        if reuse_script and self._reuse_blocked_by_regimes(state):
             # script_edits made it past entry validation, but the series
             # plan split this run into regimes, which disables reuse — the
             # caller's explicitly requested edits would be silently dropped
