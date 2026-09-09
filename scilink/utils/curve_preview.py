@@ -50,9 +50,11 @@ def render_curve_overlay(
         color = cmap(i / max(n - 1, 1))
         ax.plot(x, y, color=color, linewidth=1.2, label=entry["label"])
 
-    ax.set_xlabel(system_info.get("xlabel", "X"))
-    ax.set_ylabel(system_info.get("ylabel", "Y"))
-    ax.set_title(system_info.get("title", "Data") + title_suffix)
+    # `or`, not a .get default: metadata often carries the key with a None
+    # value, and None + title_suffix was a TypeError that cost the overlay.
+    ax.set_xlabel(system_info.get("xlabel") or "X")
+    ax.set_ylabel(system_info.get("ylabel") or "Y")
+    ax.set_title(str(system_info.get("title") or "Data") + title_suffix)
     ax.legend(fontsize=8, loc="best")
     fig.tight_layout()
 
@@ -72,9 +74,9 @@ def render_curve_single(curve_data: np.ndarray, system_info: dict | None = None)
 
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.plot(x, y, color="steelblue", linewidth=1.4)
-    ax.set_xlabel(system_info.get("xlabel", "X"))
-    ax.set_ylabel(system_info.get("ylabel", "Y"))
-    ax.set_title(system_info.get("title", "Data"))
+    ax.set_xlabel(system_info.get("xlabel") or "X")
+    ax.set_ylabel(system_info.get("ylabel") or "Y")
+    ax.set_title(str(system_info.get("title") or "Data"))
     fig.tight_layout()
 
     buf = io.BytesIO()
