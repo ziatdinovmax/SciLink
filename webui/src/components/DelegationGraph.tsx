@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { DelegationRow } from "../api";
 import { computeGraph, groupStatus, NODE_H, NODE_W } from "../delegationGraph";
 
@@ -42,7 +42,11 @@ export function DelegationGraph({
   onSelect: (index: number) => void;
 }) {
   const g = useMemo(() => computeGraph(rows), [rows]);
+  // A wide ledger scaled to the panel became unreadable; past this width
+  // the graph keeps its natural size and scrolls, with a fit toggle.
+  const [fit, setFit] = useState<boolean | null>(null);
   if (rows.length === 0) return null;
+  const fitted = fit ?? g.width <= 1100;
   const { placed, root, width, height, edges, nodeOfIndex } = g;
   const selectedId = selected == null ? null : nodeOfIndex.get(selected) ?? null;
   const modeLabel = metaMode
@@ -52,8 +56,13 @@ export function DelegationGraph({
 
   return (
     <div className="deleg-graph-wrap">
+      {g.width > 1100 && (
+        <button type="button" className="link-btn deleg-graph-fit" onClick={() => setFit(!fitted)}>
+          {fitted ? "Actual size" : "Fit to width"}
+        </button>
+      )}
       <svg
-        className="deleg-graph"
+        className={`deleg-graph${fitted ? " fit" : ""}`}
         viewBox={`0 0 ${width} ${height}`}
         width={width}
         height={height}

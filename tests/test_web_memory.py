@@ -113,6 +113,7 @@ def test_memory_overview_switch_and_records(mem_client, tmp_path):
     c = mem_client
     ov = c.get("/api/v1/memory").json()
     assert ov["enabled"] is False and ov["env_override"] is None
+    assert not ov["home"].startswith(str(Path.home())) or ov["home"].startswith("~")
     assert ov["pipeline"] == {"bank_total": 2, "bank_proven": 1, "inbox_total": 3,
                               "inbox_ready": 1, "skills_total": 1, "skills_provisional": 1}
     bank = {d["domain"]: d for d in ov["bank"]}["curve_fitting"]

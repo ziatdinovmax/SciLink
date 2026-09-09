@@ -138,6 +138,12 @@ export function MemoryPanel({ sessionId, active }: { sessionId: string; active: 
   const notify = useCallback((kind: "ok" | "warn", text: string) => {
     setNotice({ kind, text });
   }, []);
+  // A success notice fades on its own; a warning stays until dismissed.
+  useEffect(() => {
+    if (!notice || notice.kind !== "ok") return;
+    const t = setTimeout(() => setNotice(null), 6000);
+    return () => clearTimeout(t);
+  }, [notice]);
 
   if (error) {
     return (
@@ -210,8 +216,16 @@ export function MemoryPanel({ sessionId, active }: { sessionId: string; active: 
         </p>
       )}
 
-      <BankSection ov={ov} onChange={refresh} notify={notify} />
-      <InboxSection ov={ov} sessionId={sessionId} onChange={refresh} notify={notify} />
+      {/* Stages 1 and 2 are the working area only while something waits
+          for review; with an empty inbox they start collapsed. */}
+      <details className="mem-stage-fold" open={p.inbox_total > 0}>
+        <summary>1 · Script bank <span className="caption">({p.bank_total}{p.bank_proven ? `, ★${p.bank_proven} proven` : ""})</span></summary>
+        <BankSection ov={ov} onChange={refresh} notify={notify} />
+      </details>
+      <details className="mem-stage-fold" open={p.inbox_total > 0}>
+        <summary>2 · Review inbox <span className="caption">({p.inbox_total}{p.inbox_ready ? `, ${p.inbox_ready} ready` : ""})</span></summary>
+        <InboxSection ov={ov} sessionId={sessionId} onChange={refresh} notify={notify} />
+      </details>
       <SkillsSection ov={ov} onChange={refresh} notify={notify} />
     </section>
   );
@@ -249,7 +263,7 @@ function BankSection({
 
   return (
     <div className="mem-stage">
-      <h4>1 · Script bank <span className="caption">— every success, recorded automatically</span></h4>
+      <p className="mem-stage-lead">Every success, recorded automatically.</p>
       <p className="caption">
         Each approved analysis banks its working script with a fingerprint of the data it solved;
         later runs retrieve the closest match as a starting point. Records that keep succeeding
@@ -400,7 +414,7 @@ function InboxSection({
 }) {
   return (
     <div className="mem-stage">
-      <h4>2 · Review inbox <span className="caption">— lessons awaiting your call</span></h4>
+      <p className="mem-stage-lead">Lessons awaiting your call.</p>
       <p className="caption">
         Three knowledge streams converge here: 📜 script nominations, 🐛 error lessons, 💬 your
         feedback. Select records and distill them into a <strong>new</strong> skill or into an{" "}

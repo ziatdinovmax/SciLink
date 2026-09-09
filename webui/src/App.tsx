@@ -29,6 +29,9 @@ interface SessionState {
   status: "idle" | "running" | "awaiting_input";
   messages: ChatMessage[];
   liveLog: string;
+  // The turn's answer has arrived: log chunks that trail it (the capture
+  // buffer's final flush) are dropped instead of showing under the reply.
+  answered: boolean;
   pendingQuestion: PresentedQuestion | null;
   name: string | null;
   lastError: string | null;
@@ -51,6 +54,7 @@ const emptyState: SessionState = {
   status: "idle",
   messages: [],
   liveLog: "",
+  answered: false,
   pendingQuestion: null,
   name: null,
   lastError: null,
@@ -87,6 +91,7 @@ function reducer(state: SessionState, action: Action): SessionState {
         ...state,
         status: "running",
         liveLog: "",
+        answered: false,
         lastError: null,
         liveImages: [], // fresh turn → fresh filmstrip
         messages: [...state.messages, { role: "user", content: action.content }],
@@ -97,6 +102,7 @@ function reducer(state: SessionState, action: Action): SessionState {
       const ev = action.event;
       switch (ev.type) {
         case "log":
+          if (state.answered) return state;
           return { ...state, liveLog: state.liveLog + ev.chunk };
         case "status":
           return {
@@ -105,6 +111,7 @@ function reducer(state: SessionState, action: Action): SessionState {
             // Turn over: the completion message carries the figures/report,
             // so the live log and the figure inset both stand down.
             ...(ev.status === "idle" ? { liveLog: "", liveImages: [] } : {}),
+            ...(ev.status === "running" ? { answered: false } : {}),
           };
         case "question":
           return { ...state, pendingQuestion: ev.question };
@@ -115,7 +122,8 @@ function reducer(state: SessionState, action: Action): SessionState {
           // Reconnect replay can re-deliver the last message; de-dup on content.
           if (last?.role === "assistant" && last.content === ev.message.content)
             return state;
-          return { ...state, messages: [...state.messages, ev.message] };
+          return { ...state, messages: [...state.messages, ev.message],
+                   liveLog: "", answered: true };
         }
         case "session_named":
           return { ...state, name: ev.name };
@@ -530,6 +538,15 @@ export default function App() {
               >
                 Files
               </button>
+              {mode === "meta" && (
+                <button
+                  className={tab === "telemetry" ? "active" : ""}
+                  onClick={() => setTab("telemetry")}
+                  title="Delegation details, tool sequence, worker agents (the sidebar tree is the live overview)"
+                >
+                  Telemetry
+                </button>
+              )}
               <button
                 className={tab === "skills" ? "active" : ""}
                 onClick={() => setTab("skills")}
@@ -544,15 +561,6 @@ export default function App() {
               >
                 MCP
               </button>
-              {mode === "meta" && (
-                <button
-                  className={tab === "telemetry" ? "active" : ""}
-                  onClick={() => setTab("telemetry")}
-                  title="Delegation details, tool sequence, worker agents (the sidebar tree is the live overview)"
-                >
-                  Telemetry
-                </button>
-              )}
             </div>
             {/* Both tab bodies stay MOUNTED and toggle visibility: switching
                 tabs must not destroy the hero's upload/objective state, a

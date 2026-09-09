@@ -157,6 +157,23 @@ def _analysis_reports(base_dir: Path) -> List[Dict[str, Any]]:
     return reports
 
 
+def relativize(obj: Any, root: Optional[str]) -> Any:
+    """Strings (recursively, through dicts and lists) with the session root
+    prefix removed — a tool argument or result that names
+    ``<root>/analysis/results/x.png`` reads ``analysis/results/x.png``.
+    The root itself becomes ``.``. Anything else is returned unchanged."""
+    if not root:
+        return obj
+    root = str(root).rstrip("/")
+    if isinstance(obj, str):
+        return obj.replace(root + "/", "").replace(root, ".")
+    if isinstance(obj, list):
+        return [relativize(v, root) for v in obj]
+    if isinstance(obj, dict):
+        return {k: relativize(v, root) for k, v in obj.items()}
+    return obj
+
+
 def _maybe_json(value: Any) -> Any:
     """Parse a JSON string into a dict/list; leave anything else as-is.
 
@@ -346,6 +363,7 @@ def collect_session_telemetry(meta_agent: Any) -> Dict[str, Any]:
             if a["name"] not in names:
                 names.append(a["name"])
 
+        root = str(base_dir_raw) if base_dir_raw else None
         return {
             "meta": {
                 "meta_mode": meta_mode_str,
@@ -354,10 +372,12 @@ def collect_session_telemetry(meta_agent: Any) -> Dict[str, Any]:
                 "delegations": delegations,
             },
             "specialists": _specialists(meta_agent),
-            "agents": agents,
+            # Session-relative paths throughout: absolute roots tripled the
+            # width of every argument / result row in the Telemetry tab.
+            "agents": relativize(agents, root),
             "sub_agents": sub_agents,
-            "analysis_reports": analysis_reports,
-            "tool_sequence": tool_sequence,
+            "analysis_reports": relativize(analysis_reports, root),
+            "tool_sequence": relativize(tool_sequence, root),
         }
     except Exception as e:  # noqa: BLE001 - telemetry must never break the UI
         logger.warning(f"telemetry collection failed: {e}")

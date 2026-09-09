@@ -144,7 +144,7 @@ def memory_overview() -> Dict[str, Any]:
     return {
         "enabled": enabled,
         "env_override": env or None,
-        "home": str(loader.scilink_home()),
+        "home": _tilde(loader.scilink_home()),
         "consolidate_min_n": need,
         "proven_n": proven_n,
         "pipeline": {
@@ -165,6 +165,13 @@ def memory_overview() -> Dict[str, Any]:
             "shadows_builtin": _shadows_builtin(s.get("domain"), s.get("name")),
         } for s in skills],
     }
+
+
+def _tilde(path) -> str:
+    """``~/.scilink`` rather than the absolute home path, for display."""
+    s = str(path)
+    home = str(Path.home())
+    return "~" + s[len(home):] if s.startswith(home) else s
 
 
 def _shadows_builtin(domain: Optional[str], name: Optional[str]) -> bool:

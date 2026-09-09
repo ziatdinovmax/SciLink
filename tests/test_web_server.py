@@ -937,9 +937,14 @@ def test_delegation_view_shapes_the_ledger(tmp_path):
         dict(_ledger_entry(4, "analysis", "success", context_from=[1]),
              fanout=True, parallel_group="fanout_4"),
     ])
+    agent._delegation_ledger[0]["task"] = f"Analyze {tmp_path}/uploads/spectra (two files)"
+    agent._delegation_ledger[0]["key_findings"].append(f"see {tmp_path}/analysis/results/fit.png")
     view = delegation_view(agent, str(tmp_path))
     rows = view["delegations"]
     assert [r["index"] for r in rows] == [1, 2, 3, 4]
+    # paths under the session root read session-relative in task and findings
+    assert rows[0]["task"] == "Analyze uploads/spectra (two files)"
+    assert rows[0]["key_findings"][-1] == "see analysis/results/fit.png"
     assert rows[3]["fanout"] is True and rows[3]["fanout_group"] == "fanout_4"
     assert rows[0]["fanout"] is False and rows[0]["fanout_group"] is None
     assert rows[0]["files_produced"] == ["analysis/results/fit.png", "/elsewhere/x.csv"]

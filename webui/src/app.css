@@ -776,7 +776,9 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 
 /* Delegation dependency graph (SVG twin of the Streamlit graphviz chart) */
 .deleg-graph-wrap { margin: 4px 0 18px; overflow-x: auto; }
-.deleg-graph { display: block; max-width: 100%; height: auto; }
+.deleg-graph { display: block; }
+.deleg-graph.fit { max-width: 100%; height: auto; }
+.deleg-graph-fit { display: block; margin: 0 0 4px auto; }
 .deleg-graph-node:hover rect { filter: brightness(1.12); }
 .deleg-graph-halo { fill: var(--bg-app); opacity: 0.85; }
 .link-btn[download] { text-decoration: none; }
@@ -802,7 +804,7 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .mem-panel h4 { font-size: 14px; margin: 18px 0 4px; }
 .mem-switch { display: flex; align-items: center; gap: 8px; margin: 8px 0; font-size: 13px; flex-wrap: wrap; }
 .mem-info { padding: 8px 10px; border-left: 3px solid var(--border-strong); background: var(--bg-panel); border-radius: 4px; }
-.mem-pipeline { font-size: 13px; margin: 8px 0 4px; color: var(--text); }
+.mem-pipeline { font-size: 14px; font-weight: 600; margin: 10px 0 6px; color: var(--text); }
 .mem-notice { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); margin: 8px 0; }
 .mem-notice.ok { border-color: #3fb95055; color: #3fb950; }
 .mem-notice.warn { border-color: #d2992255; color: #d29922; }
@@ -842,4 +844,12 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .link-btn.danger { color: var(--danger); }
 .link-btn.armed { font-weight: 600; text-decoration: underline; }
 button.primary.small { padding: 4px 10px; font-size: 13px; width: auto; }
+
+/* UI polish batch: sidebar credential hint, memory stage folds */
+.cred-hint { display: block; margin-top: 4px; }
+.cred-hint code { display: block; font-size: 11px; word-break: break-all; margin-top: 2px; }
+.mem-stage-fold { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
+.mem-stage-fold > summary { cursor: pointer; font-size: 14px; font-weight: 600; margin: 6px 0 2px; }
+.mem-stage-fold > .mem-stage { border-top: none; margin-top: 0; padding-top: 0; }
+.mem-stage-lead { margin: 2px 0 6px; font-size: 12px; color: var(--text-dim); }
 
