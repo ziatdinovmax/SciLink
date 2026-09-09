@@ -1016,10 +1016,20 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                 Note: this counts optimization iterations (calls to this method), 
                 not individual experiments. A batch_size=10 call with 
                 experimental_budget=2 means 2 more calls (up to 20 experiments).
-            physical_constraints: Optional natural language description of physical 
-                experimental constraints. When provided, the agent evaluates the 
-                acquisition landscape and uses LLM reasoning to design a batch that 
-                maximizes information gain while respecting the constraints. Examples:
+            physical_constraints: Optional natural language description of
+                STRUCTURAL FEASIBILITY constraints — which parameter combinations
+                can physically be realized (discrete allowed levels, plate /
+                coupled-equipment layouts, shared-zone couplings). When provided,
+                the agent evaluates the acquisition landscape and uses LLM
+                reasoning to design a batch that maximizes information gain
+                while respecting the constraints — i.e. the recommendation is
+                chosen by the constrained planner and is NOT necessarily the
+                acquisition-function maximum (the result says so in
+                ``selection_method`` and carries the ``acqf_optimum``). Do not
+                pass modeling caveats, interpretation notes or soft preferences
+                here — they belong in ``strategy_hint`` / the objective; passing
+                them diverts the recommendation off the acquisition optimizer for
+                no structural reason. Examples:
                 - "96-well plate: rows share temperature (8 values), columns share pH (12 values)"
                 - "Only 5 catalyst concentrations available: 0.1, 0.5, 1.0, 2.0, 5.0 mM"
                 - "Reactor zones A,B share cooling; C,D share heating. Max 4 temps total."
@@ -1441,16 +1451,21 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                 print(f"  - ⚠️  Constrained planning failed: {constraint_error}")
                 print(f"  - ↩️  Falling back to unconstrained recommendations")
                 recommendations = c.unconstrained_recommendations
+                c.selection_method = "acqf_optimizer"
             else:
                 recommendations = constrained_recs
                 c.next_x_batch = np.array([
                     [rec[col] for col in input_cols]
                     for rec in recommendations
                 ])
-                print(f"  - ✅ Using constrained batch ({len(recommendations)} experiments)")
+                c.selection_method = "constrained_planner"
+                print(f"  - ✅ Using constrained batch ({len(recommendations)} experiments) — "
+                      "chosen by the constraint-aware planner, not necessarily the "
+                      "acquisition optimum")
             c.constrained_metadata = constrained_metadata
         else:
             recommendations = c.unconstrained_recommendations
+            c.selection_method = "acqf_optimizer"
 
         c.recommendations = recommendations
 
@@ -1541,6 +1556,7 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                 "plot_path": c.acq_plot_path,
                 "data_path": c.acq_data_path,
             }
+        log_entry["selection_method"] = getattr(c, "selection_method", "acqf_optimizer")
         # Include constrained planning metadata in history
         if c.constrained_metadata:
             log_entry["constrained_planning"] = c.constrained_metadata
@@ -1575,6 +1591,23 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             result["constrained_planning"] = c.constrained_metadata
         if c.physical_constraints:
             result["constraint_aware"] = True
+        # How the recommendation was selected (#564): every result says
+        # whether it is the acquisition optimum or a deliberate,
+        # constraint-aware deviation chosen by the LLM planner — and in the
+        # latter case carries the optimum it deviated from, so downstream
+        # narration and the UI can label the point faithfully instead of
+        # presenting an LLM-chosen point as the acquisition maximum.
+        result["selection_method"] = getattr(c, "selection_method", "acqf_optimizer")
+        if result["selection_method"] == "constrained_planner":
+            unconstrained = c.unconstrained_recommendations or []
+            result["acqf_optimum"] = (unconstrained[0] if c.batch_size == 1 and unconstrained
+                                      else unconstrained)
+            if c.batch_size == 1 and unconstrained and isinstance(c.recommendations[0], dict):
+                result["deviation_from_acqf_optimum"] = {
+                    k: float(c.recommendations[0][k]) - float(v)
+                    for k, v in unconstrained[0].items()
+                    if k in c.recommendations[0]
+                }
 
         if getattr(c, "candidate_pool_info", None):
             result["candidate_pool"] = c.candidate_pool_info
