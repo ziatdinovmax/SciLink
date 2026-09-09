@@ -260,6 +260,8 @@ class ParticleAnalyzer:
         sam_params = self._SAM_PRESETS.get(preset_name, {})
         logger.info(f"Running SAM with preset: '{preset_name}' on {self.device}")
         generator = SamAutomaticMaskGenerator(self.sam_model, **sam_params)
+        if str(self.device).startswith("mps"):
+            self._mps_float32_coords(generator)
         try:
             return generator.generate(image_rgb)
         except (RuntimeError, NotImplementedError, TypeError) as exc:
@@ -276,6 +278,24 @@ class ParticleAnalyzer:
             self.sam_model.to(device="cpu")
             generator = SamAutomaticMaskGenerator(self.sam_model, **sam_params)
             return generator.generate(image_rgb)
+
+    @staticmethod
+    def _mps_float32_coords(generator) -> None:
+        """MPS has no float64. The automatic mask generator builds its point
+        grids in float64 (numpy) and hands them to ``torch.as_tensor`` on the
+        model's device, which fails on MPS with "Cannot convert a MPS Tensor
+        to float64". Casting the transformed coordinates to float32 is
+        lossless for pixel coordinates and lets the whole generator run on
+        the GPU."""
+        transform = getattr(getattr(generator, "predictor", None), "transform", None)
+        if transform is None or getattr(transform, "_scilink_float32", False):
+            return
+        original = transform.apply_coords
+
+        def apply_coords(coords, original_size, _f=original):
+            return np.asarray(_f(coords, original_size), dtype=np.float32)
+        transform.apply_coords = apply_coords
+        transform._scilink_float32 = True
 
     # ------------------------------------------------------------------
     # Filtering / pruning

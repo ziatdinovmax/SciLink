@@ -104,3 +104,24 @@ def test_inference_failure_on_accelerator_retries_on_cpu(monkeypatch, caplog):
     calls.clear()
     an._run_sam(np.zeros((8, 8, 3), dtype=np.uint8), "default")
     assert calls == ["cpu"]
+
+
+def test_mps_float32_coords_casts_the_generator_points():
+    """MPS has no float64: the generator's point coordinates are cast to
+    float32 on MPS (the live failure was 'Cannot convert a MPS Tensor to
+    float64'), once, and not on other devices."""
+    calls = []
+
+    class _Transform:
+        def apply_coords(self, coords, original_size):
+            calls.append(original_size)
+            return np.asarray(coords, dtype=np.float64) * 2
+
+    gen = SimpleNamespace(predictor=SimpleNamespace(transform=_Transform()))
+    pa.ParticleAnalyzer._mps_float32_coords(gen)
+    out = gen.predictor.transform.apply_coords(np.array([[1.0, 2.0]]), (8, 8))
+    assert out.dtype == np.float32 and out.tolist() == [[2.0, 4.0]] and calls == [(8, 8)]
+    pa.ParticleAnalyzer._mps_float32_coords(gen)  # idempotent: not wrapped twice
+    gen.predictor.transform.apply_coords(np.array([[1.0, 2.0]]), (8, 8))
+    assert len(calls) == 2
+    pa.ParticleAnalyzer._mps_float32_coords(SimpleNamespace())  # no predictor: no-op
