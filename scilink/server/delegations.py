@@ -56,6 +56,16 @@ def _rel(path: Any, session_dir: Optional[str]) -> str:
         return p
 
 
+def _rel_text(text: Any, session_dir: Optional[str]) -> str:
+    """Text with absolute session-root paths shortened to session-relative
+    ones (the ledger records the ACTUAL task sent, full paths included)."""
+    s = "" if text is None else str(text)
+    if not session_dir:
+        return s
+    root = str(Path(session_dir).resolve()).rstrip("/")
+    return s.replace(root + "/", "").replace(root, ".")
+
+
 def _sub_agents(session_dir: Optional[str]) -> Dict[str, List[str]]:
     """Which worker agents each specialist used, from the ``*_state.json``
     files the workers persist (same source as the telemetry reader, but
@@ -108,7 +118,7 @@ def delegation_view(agent: Any, session_dir: Optional[str] = None
                 "mode": e.get("mode") or "?",
                 "label": (e.get("label") or "").strip()
                 or _clip(e.get("task"), 60),
-                "task": _clip(e.get("task"), _TASK_MAX),
+                "task": _clip(_rel_text(e.get("task"), session_dir), _TASK_MAX),
                 "status": e.get("status") or "running",
                 "context_from": [int(x) for x in (e.get("context_from") or [])
                                  if str(x).isdigit()],
@@ -122,13 +132,13 @@ def delegation_view(agent: Any, session_dir: Optional[str] = None
                 "labels": list(e.get("labels") or []),   # fusion inputs
                 "timestamp": e.get("timestamp"),
                 "completed_at": e.get("completed_at"),
-                "summary": _clip(e.get("summary"), _SUMMARY_MAX),
-                "key_findings": [str(k) for k in
+                "summary": _clip(_rel_text(e.get("summary"), session_dir), _SUMMARY_MAX),
+                "key_findings": [_rel_text(k, session_dir) for k in
                                  (e.get("key_findings") or [])[:_FINDINGS_MAX]],
                 "files_produced": [_rel(p, session_dir) for p in
                                    (e.get("files_produced") or [])[:_FILES_MAX]],
                 "n_feature_tables": len(e.get("feature_tables") or []),
-                "warnings": [str(w) for w in
+                "warnings": [_rel_text(w, session_dir) for w in
                              (e.get("warnings") or [])[:_WARNINGS_MAX]],
                 "error": (str(e.get("error")) if e.get("error") else None),
                 "timed_out": bool(e.get("timed_out")),

@@ -159,7 +159,7 @@ export function Sidebar({
   const envCaption = (field: string) => {
     const c = cred(field);
     return c?.is_set && c.env_var ? (
-      <span className="caption">✓ available from {c.env_var}</span>
+      <span className="caption cred-hint">✓ available from <code>{c.env_var}</code></span>
     ) : null;
   };
 

@@ -58,3 +58,13 @@ def test_worker_rows_for_image_and_hyperspectral_state_files(tmp_path):
     assert (img["specialist"], img["name"], img["action_count"]) == ("analysis", "Image Analysis", 1)
     assert img["actions"][0]["status"] == "running"
     assert (hs["name"], hs["action_count"], hs["outcomes"]["success"]) == ("Hyperspectral Analysis", 2, 1)
+
+
+def test_relativize_strips_the_session_root_everywhere():
+    from scilink.agents.meta_agent.telemetry import relativize
+    root = "/tmp/sess"
+    obj = {"path": "/tmp/sess/analysis/results/x.png", "dir": "/tmp/sess",
+           "nested": [{"f": "/tmp/sess/uploads/a.csv"}, "plain", 3]}
+    assert relativize(obj, root) == {"path": "analysis/results/x.png", "dir": ".",
+                                     "nested": [{"f": "uploads/a.csv"}, "plain", 3]}
+    assert relativize(obj, None) == obj
