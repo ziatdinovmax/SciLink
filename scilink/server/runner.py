@@ -39,12 +39,24 @@ _LOG_POLL_S = 0.5
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg"}
 _IMAGE_SKIP = ("testloop", "elbow_plot", "summary_grid", "_candidates",
                "/previews/", "/.")
+# The one exception to the `_candidates` skip (#565): best-of-N attempts run
+# in `<item>/_candidates/cand_NN/` and only the winner is promoted up — at
+# the END of the item. A single-item run with best-of-N therefore showed
+# nothing in the inset during the whole escalation. The canonical
+# `visualization.png` each candidate writes streams as it appears, labeled
+# by candidate; the losers' other artifacts stay skipped.
+_CANDIDATE_VIZ = re.compile(r"/_candidates/cand_(\d+)/visualization\.png$")
 _TS_SUFFIX = re.compile(r"_\d{8}_\d{6}$")
 _IMAGE_EMIT_CAP = 4          # newest N per fs tick — avoid a flood on a dir dump
 
 
 def _image_label(rel_path: str) -> str:
-    """A short human label from an artifact filename."""
+    """A short human label from an artifact filename; a best-of-N candidate
+    figure is labeled by its candidate number (the promoted winner, written
+    at the item's top level, supersedes it under the plain label)."""
+    m = _CANDIDATE_VIZ.search("/" + rel_path.replace(os.sep, "/").lower())
+    if m:
+        return f"candidate {int(m.group(1))}"
     stem = os.path.splitext(os.path.basename(rel_path))[0]
     stem = _TS_SUFFIX.sub("", stem)
     stem = re.sub(r"^Global_Analysis_", "", stem)
@@ -83,7 +95,7 @@ def _scan_new_images(session_dir: str, seen: dict) -> list:
             # whose absolute path contains a skip token must not silently
             # filter every figure.
             low = "/" + rel.replace(os.sep, "/").lower()
-            if any(s in low for s in _IMAGE_SKIP):
+            if any(s in low for s in _IMAGE_SKIP) and not _CANDIDATE_VIZ.search(low):
                 continue
             try:
                 m = os.stat(ap).st_mtime_ns
