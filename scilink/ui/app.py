@@ -780,7 +780,7 @@ if not st.session_state.agent_initialized:
                     st.rerun()
         _cur_mode = _mode_map[st.session_state.app_mode]
         _cur_desc = _cur_mode["description"]
-        if _cur_mode.get("beta"):
+        if _cur_mode["key"] == "meta":
             _cur_desc = f"Mission Control · {_cur_desc}"
         st.markdown(
             f'<p style="text-align:center;color:#6B7A8C;font-size:0.85em;'

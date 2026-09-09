@@ -72,7 +72,6 @@ function ModeSelect({
         <span className="mode-emoji">{cur.emoji}</span>
         <span className="mode-name">
           {cur.name}
-          {current?.beta && <span className="beta-pill">BETA</span>}
         </span>
         <span className="mode-caret">❯</span>
       </button>
@@ -94,7 +93,6 @@ function ModeSelect({
                 <span className="mode-emoji">{mi.emoji}</span>
                 <span className="mode-name">
                   {mi.name}
-                  {m.beta && <span className="beta-pill">BETA</span>}
                 </span>
               </button>
             );

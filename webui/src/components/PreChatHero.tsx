@@ -510,7 +510,7 @@ function MetaHero({
   return (
     <div className="hero-wrap">
       <h2 className="hero-title">
-        What would you like to do? <span className="beta-pill">BETA</span>
+        What would you like to do?
       </h2>
       <p className="hero-sub">
         Mission control routes your goal — and any files — to the analysis
