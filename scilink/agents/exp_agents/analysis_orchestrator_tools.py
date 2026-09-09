@@ -265,6 +265,36 @@ def _is_glob(data_path) -> bool:
     return any(c in data_path for c in _GLOB_MAGIC)
 
 
+def _analysis_output_dir_summary(path: Path) -> Optional[dict]:
+    """``examine_data`` keys for a prior analysis output directory (#591):
+    the manifest, the saved scripts under ``scripts/`` (a series keeps one
+    copy of its locked script per unit) and the reuse route. None when the
+    directory is not an analysis output."""
+    manifest = path / "analysis_results.json"
+    scripts_dir = path / "scripts"
+    scripts = sorted(f"scripts/{c.name}" for c in scripts_dir.iterdir()
+                     if c.suffix == ".py") if scripts_dir.is_dir() else []
+    if not manifest.is_file() and not scripts:
+        return None
+    out: dict = {"analysis_output_dir": True}
+    if manifest.is_file():
+        out["analysis_results"] = manifest.name
+    if scripts:
+        out["saved_scripts"] = scripts
+    out["prior_run_hint"] = (
+        "This is a prior analysis OUTPUT directory, not raw data. "
+        + (f"Its saved script(s): {', '.join(scripts[:6])}"
+           + (" …" if len(scripts) > 6 else "")
+           + " (a series saves the same locked script once per unit; any one is the "
+             "reusable fit script — read_file it to inspect). "
+           if scripts else "")
+        + "To re-run the locked model on data, pass this directory as "
+          "prior_analysis_paths with reuse_locked_script=true (script_edits for a "
+          "surgical change); read_file analysis_results.json for the results."
+    )
+    return out
+
+
 def _resolve_glob_files(pattern: str) -> tuple[list[Path], list[Path]]:
     """Expand a glob into (data_files, all_files).
 
@@ -1302,6 +1332,14 @@ class AnalysisOrchestratorTools:
 
                     result["is_directory"] = True
                     result["file_count"] = len(files)
+
+                    # An analysis OUTPUT directory (#591): say so, and name the
+                    # saved scripts — the artifact a re-fit looks for and used
+                    # to miss because only the data files were surfaced.
+                    if not is_glob_input:
+                        _prior = _analysis_output_dir_summary(path)
+                        if _prior:
+                            result.update(_prior)
 
                     if not files:
                         result["status"] = "error"

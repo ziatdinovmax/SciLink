@@ -1021,8 +1021,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Compile results
         final_results = self._compile_results(state)
 
-        # Save fitting scripts for reproducibility
-        self._save_fitting_scripts(state)
+        # Save fitting scripts for reproducibility, and advertise them in the
+        # manifest (#591): a re-fit that wants the locked model must be able
+        # to find scripts/ from analysis_results.json, not only trend_analysis.
+        saved_scripts = self._save_fitting_scripts(state)
+        if saved_scripts:
+            final_results["fitting_scripts"] = self._fitting_scripts_record(saved_scripts, state)
 
         # Bank every approved working script as episodic memory (script bank,
         # #346) — deterministic, no LLM, failure-isolated. Runs BEFORE T=2
@@ -1310,8 +1314,31 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         return result
 
-    def _save_fitting_scripts(self, state: dict) -> None:
-        """Save LLM-generated fitting scripts to disk for reproducibility."""
+    def _fitting_scripts_record(self, saved: List[str], state: dict) -> dict:
+        """The manifest entry for the saved scripts (#591). A series saves one
+        copy per fitted spectrum, all the SAME locked model, so any one is the
+        reusable fit script; the record names a representative and the route
+        to reuse it (prior_analysis_paths + reuse_locked_script, script_edits
+        for a surgical change)."""
+        names = [Path(p).name for p in saved]
+        is_single = state.get("is_single_spectrum", True)
+        return {
+            "dir": str(self.output_dir / "scripts"),
+            "files": names,
+            "representative": names[0],
+            "note": (
+                ("The fitting script that produced this result." if is_single else
+                 f"The locked series model, saved once per fitted spectrum ({len(names)} "
+                 "copies of the same script); any one is the reusable fit script.")
+                + " To re-fit with this exact model, pass this output directory as "
+                  "prior_analysis_paths with reuse_locked_script=true; use script_edits "
+                  "for a surgical change (a bound, a window) instead of re-deriving."
+            ),
+        }
+
+    def _save_fitting_scripts(self, state: dict) -> List[str]:
+        """Save LLM-generated fitting scripts to disk for reproducibility.
+        Returns the saved paths."""
         scripts_dir = self.output_dir / "scripts"
         saved = []
 
@@ -1338,6 +1365,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         if saved:
             self.logger.info(f"   Scripts: {scripts_dir} ({len(saved)} file(s))")
+        return saved
 
     def _maybe_stage_t2_solutions(self, state: dict) -> List[str]:
         """Stage novel T=2 (hot-annealing) successes for later distillation.
