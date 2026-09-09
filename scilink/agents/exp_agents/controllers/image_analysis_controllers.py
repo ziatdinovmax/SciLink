@@ -44,6 +44,7 @@ from .base_controllers import run_plan_refinement_gate
 from ....utils.codegen_parse import parse_codegen_response
 from ....utils.synthesis_parse import salvage_synthesis_from_response
 from ....hitl import request_human_feedback
+from .._exec_env import exec_env_block
 
 
 # Anthropic's API rejects images over 5 MB. Cap below that with headroom
@@ -1240,6 +1241,9 @@ class ImagePlanningController:
 
         _append_auxiliary_context(prompt, state)
         _append_tool_inventory(prompt, agent="image_analysis", active_skills=_active_skill_names(state))
+        # The planner sees what the execution interpreter can run (#569),
+        # right after the tool inventory it may draw from.
+        prompt.append(exec_env_block(executor=getattr(self, "executor", None)))
         _append_skill_context(prompt, state, "planning")
         _append_prior_knowledge_context(prompt, state)
         _append_prior_analysis_state(prompt, state)
@@ -1627,6 +1631,9 @@ class ImagePlanningController:
 
         _append_auxiliary_context(prompt, state)
         _append_tool_inventory(prompt, agent="image_analysis", active_skills=_active_skill_names(state))
+        # The planner sees what the execution interpreter can run (#569),
+        # right after the tool inventory it may draw from.
+        prompt.append(exec_env_block(executor=getattr(self, "executor", None)))
         _append_skill_context(prompt, state, "planning")
         _append_prior_knowledge_context(prompt, state)
         _append_prior_analysis_state(prompt, state)
@@ -2126,6 +2133,10 @@ Your guidance: '''
             )
         if state.get("literature_context"):
             context_parts.append(state["literature_context"])
+        # What the script-execution interpreter can actually run (#569):
+        # optional packages, checkpoints, GPU — so the generator never
+        # builds on a capability the subprocess lacks.
+        context_parts.append(exec_env_block(executor=getattr(self, "executor", None)))
         # Codegen recipe from ALL co-active skills (not just the top-ranked):
         # with several skills active each may own a different pipeline stage
         # (e.g. flattening vs segmentation), so none is dropped. Single-skill
@@ -2954,6 +2965,8 @@ Return JSON:
 
         prompt_text += self._stalled_prescriptions_block(
             state.get("_stalled_prescriptions"))
+        prompt_text += exec_env_block(executor=getattr(self, "executor", None),
+                                      for_verifier=True)
 
         # Add history context
         history_context = build_verification_prompt_with_history(
@@ -3224,6 +3237,7 @@ Return JSON:
 
 **RECOMMENDED ACTION:** {recommended_action}
 {self._stalled_prescriptions_block(stalled)}
+{exec_env_block(executor=getattr(self, "executor", None), for_verifier=True)}
 Return JSON with the refined analysis approach:
 {{
     "processing_pipeline": "updated pipeline description",
