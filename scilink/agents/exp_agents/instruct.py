@@ -2543,6 +2543,11 @@ plan as specified and let the retry pipeline handle actual runtime failures.
    (e.g. fitting one peak while ignoring real signal elsewhere) unless there is a
    clear physics reason or the user explicitly requested it; report R² over the
    full domain you are modelling, not a hand-picked sub-region.
+   **Bounds are data-relative, never constants read off this spectrum.** The
+   script is reused VERBATIM on other spectra whose features may be larger, so an
+   amplitude / intensity / area / scale bound must be an expression of the loaded
+   data (e.g. `2 * np.max(y)`, `np.ptp(y)`) or unbounded. A parameter that ends at
+   its bound is a degenerate fit, not a converged one, and is rejected downstream.
 4. Compute R² and RMSE
 5. Save `visualization.png` (in the current working directory): data + fit + residuals (show individual components if multiple peaks).
    **Make the residual diagnosable** (the reviewer reads this plot): put residuals
@@ -2593,6 +2598,7 @@ instead of losing exactly the points that prove the transition completed.
 results = {{
     "model_type": "description",
     "parameters": {{"peak_1": {{"center": val, "center_err": err, ...}}, ...}},
+    "bounds": {{"peak_1": {{"amplitude": [lo, hi], "center": [lo, hi], ...}}, ...}},  # the bounds actually used, mirroring `parameters` (null for an unbounded side); omit a parameter you did not bound
     "fit_quality": {{"r_squared": val, "rmse": val}},
     "deviation_note": ""  # empty if plan was followed; else one line on process-level deviations only
 }}
@@ -2629,6 +2635,7 @@ never as missing keys.
 
 **CRITICAL:** Fix only the execution error. Do NOT change the fitting model, its parameters, the fit domain/window, or the overall analysis approach — and never narrow the window or truncate the data to raise R². The model is locked for series consistency.
 **Narrow exception — timeout errors ONLY:** if the error says the script timed out, the script is too slow, not wrong. You may change the COMPUTATIONAL strategy — vectorize loops, reduce optimizer restarts/iterations, replace brute-force search with an efficient optimizer — but every rule above still holds: same model, same parameters, same fit domain/window, and ALL of the data.
+**Narrow exception — a parameter PINNED AT ITS BOUND:** if the error names parameters that ended at a bound, the fit is degenerate (the optimizer wanted to go further). You MUST widen exactly those bounds — an amplitude/scale ceiling to a data-relative expression (e.g. `2 * np.max(y)`) or unbounded, a position/width window far enough to contain the feature — and keep everything else (model, components, fit domain, initial-guess logic) unchanged. Report the bounds you use in the results' `"bounds"` field.
 
 **I/O contract (do not deviate):** the data is `data.npy` in the current working directory — load it with `np.load` (do NOT look for .csv/.txt/.dat or glob for other files); save the plot to `visualization.png`; print one line `FIT_RESULTS_JSON:{{...}}` with the fit results. Missing any of these fails the run. Also keep saving `fit.npy` (1-D fitted curve at the `data.npy` x-points, length N) if the script you are fixing already did — it feeds the reviewer's residual diagnostics.
 

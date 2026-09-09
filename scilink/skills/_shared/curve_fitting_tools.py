@@ -64,6 +64,78 @@ ABSENT_COMPONENT_FIX = (
 )
 
 
+_FRACTION_KEYS = ("eta", "fraction", "mixing", "weight", "ratio")
+
+PINNED_BOUND_FIX = (
+    "A parameter that ends at its bound is a degenerate fit, not a converged "
+    "one: the bound was a constant baked from the anchor spectrum and this "
+    "spectrum's feature is larger. Widen exactly the named bounds to "
+    "data-relative expressions (e.g. an amplitude ceiling of 2 * np.max(y), "
+    "or unbounded), keep the model, components and fit domain unchanged, "
+    "and report the bounds used in the results' 'bounds' field."
+)
+
+
+def validate_bound_pinning(parameters, bounds, rel_tol: float = 0.01) -> list:
+    """Deterministic pinned-at-bound check (#592).
+
+    ``bounds`` mirrors ``parameters``: ``{component: {param: [lo, hi]}}`` with
+    ``None`` / non-finite for an unbounded side. A parameter is pinned when
+    it sits within ``rel_tol`` of the bound span (or of the bound's own
+    magnitude when the other side is open) of a finite bound.
+
+    Deliberately narrow, so a parameter that legitimately rests on a bound
+    is never called degenerate: a lower bound of ZERO is a physical floor
+    (a vanished component, a zero slope or offset) and is not reported;
+    a fraction-like parameter (eta, fraction, mixing, weight, ratio) is
+    exempt on both sides — a pseudo-Voigt at eta = 1 is a Lorentzian, not
+    a failed fit. What remains is the failure mode this guards against: a
+    feature larger than a ceiling baked from another spectrum, or a
+    position / width driven to the edge of its window.
+    Returns ``[{component, parameter, value, bound, side}]``; empty when
+    compliant or when no bounds were reported. Never raises.
+    """
+    import math
+    out = []
+    if not isinstance(parameters, dict) or not isinstance(bounds, dict):
+        return out
+
+    def _num(v):
+        return v if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+
+    for comp, pb in bounds.items():
+        pv = parameters.get(comp)
+        if not isinstance(pb, dict) or not isinstance(pv, dict):
+            continue
+        for name, lohi in pb.items():
+            if not isinstance(lohi, (list, tuple)) or len(lohi) != 2:
+                continue
+            v = _num(pv.get(name))
+            if v is None:
+                continue
+            lo, hi = _num(lohi[0]), _num(lohi[1])
+            if lo is None and hi is None:
+                continue
+            if lo is not None and hi is not None:
+                tol = rel_tol * abs(hi - lo)
+            else:
+                tol = rel_tol * abs(lo if hi is None else hi)
+            tol = max(tol, 1e-12)
+            if any(f in str(name).lower() for f in _FRACTION_KEYS):
+                continue
+            if hi is not None and v >= hi - tol:
+                out.append({"component": comp, "parameter": name, "value": v, "bound": hi, "side": "upper"})
+            elif lo is not None and lo != 0 and v <= lo + tol:
+                out.append({"component": comp, "parameter": name, "value": v, "bound": lo, "side": "lower"})
+    return out
+
+
+def describe_pinned(pins) -> str:
+    """``peak_2.amplitude = 0.45 at its upper bound 0.45; ...``"""
+    return "; ".join(f"{p['component']}.{p['parameter']} = {p['value']:.6g} at its "
+                     f"{p['side']} bound {p['bound']:.6g}" for p in pins)
+
+
 def validate_absent_component_contract(parameters) -> list:
     """Deterministic check of the absence-as-value results contract.
 
