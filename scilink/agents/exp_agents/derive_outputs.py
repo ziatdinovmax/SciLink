@@ -291,6 +291,45 @@ def check_products(result: dict, out_dir: Path, started_at: float) -> tuple[list
     return problems, clean
 
 
+def _snapshot_sources(sources: list[str]) -> dict[str, tuple[int, int]]:
+    """``{path: (size, mtime_ns)}`` of every file under the sources — the
+    state a derivation must leave untouched."""
+    snap: dict[str, tuple[int, int]] = {}
+    for src in sources:
+        sp = Path(src)
+        for f in ([sp] if sp.is_file() else sp.rglob("*")):
+            if f.is_file():
+                try:
+                    st = f.stat(); snap[str(f)] = (st.st_size, st.st_mtime_ns)
+                except OSError:
+                    continue
+    return snap
+
+
+def source_violations(sources: list[str], before: dict[str, tuple[int, int]], out_dir: Path,
+                      remove_created: bool = True) -> list[str]:
+    """Files the script created or modified under a SOURCE (read-only by
+    contract). Created files are removed — they did not exist before this
+    attempt — so a rejected attempt leaves the prior run as it found it;
+    a modified file is reported (its old content cannot be restored)."""
+    problems: list[str] = []
+    out_res = out_dir.resolve()
+    after = _snapshot_sources(sources)
+    for path, stamp in after.items():
+        if Path(path).resolve().is_relative_to(out_res):
+            continue
+        if path not in before:
+            problems.append(f"wrote a new file into a source directory: {path}")
+            if remove_created:
+                try:
+                    Path(path).unlink()
+                except OSError:
+                    pass
+        elif before[path] != stamp:
+            problems.append(f"modified a source file: {path}")
+    return problems
+
+
 def _tail(s: str, n: int = 2500) -> str:
     return s if len(s) <= n else "...\n" + s[-n:]
 
@@ -348,8 +387,15 @@ def run_derivation(*, model, executor, sources: list[str], task: str, out_dir: P
         spath = out_dir / "scripts" / f"derive_script_attempt{attempt}.py"
         spath.write_text(_header(paths) + script, encoding="utf-8")
         started = time.time()
+        before = _snapshot_sources(sources)
         exec_res = executor.execute_script(_header(paths) + script, working_dir=str(scratch_dir))
         stdout = exec_res.get("stdout", "") or ""
+        touched = source_violations(sources, before, out_dir)
+        if touched:
+            feedback = ("the sources are READ-ONLY; the script " + "; ".join(touched)
+                        + ". Write only under _DERIVE['out_dir'].")
+            attempts.append({"attempt": attempt, "error": "wrote into a source", "detail": touched[:4]})
+            log.warning(f"🧮 source violation: {touched[0][:200]}"); continue
         if exec_res.get("status") != "success":
             msg = exec_res.get("message", "") or ""
             if "stopped by the user" in msg:

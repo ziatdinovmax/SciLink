@@ -152,13 +152,21 @@ def test_engine_gives_up_after_max_attempts_and_reports_the_last_failure(tmp_pat
     assert res["status"] == "error" and "forbidden module" in res["message"] and res["attempts"] == 2
 
 
-def test_engine_rejects_a_product_written_outside_out_dir(tmp_path):
+def test_engine_rejects_a_script_that_writes_into_a_source_and_restores_it(tmp_path):
+    """Sources are read-only by contract: a file the script created there is
+    reported and removed (the prior run is left as it was found); a
+    modified source file is reported."""
     run = _prior_run(tmp_path)
     leak = TABLE_SCRIPT.replace('os.path.join(_DERIVE["out_dir"], "per_cell_polarization.csv")',
                                 'os.path.join(_DERIVE["sources"][0], "leak.csv")')
     res = run_derivation(model=FakeModel([]), executor=ScriptExecutor(timeout=60), sources=[str(run)],
                          task="t", out_dir=tmp_path / "d", scratch_dir=tmp_path / "s", code=leak, max_attempts=1, llm_verify=False)
-    assert res["status"] == "error" and "outside the output directory" in res["message"]
+    assert res["status"] == "error" and "wrote a new file into a source directory" in res["message"]
+    assert not (run / "leak.csv").exists()
+    clobber = "import os\nopen(os.path.join(_DERIVE['sources'][0], 'features.csv'), 'a').write('x\\n')\nprint('DERIVE_RESULT_JSON:{\"products\": []}')\n"
+    res = run_derivation(model=FakeModel([]), executor=ScriptExecutor(timeout=60), sources=[str(run)],
+                         task="t", out_dir=tmp_path / "d2", scratch_dir=tmp_path / "s2", code=clobber, max_attempts=1, llm_verify=False)
+    assert res["status"] == "error" and "modified a source file" in res["message"]
 
 
 # ── the orchestrator tool ──────────────────────────────────────────
