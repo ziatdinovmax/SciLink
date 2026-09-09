@@ -1974,6 +1974,106 @@ class AnalysisOrchestratorTools:
             required=[],
         )
 
+        def derive_from_outputs(task: str = None, analysis_id: str = None,
+                                source_paths=None, code: str = None,
+                                max_attempts: int = 3, timeout_s: int = 600) -> str:
+            """Derive a secondary artifact from a completed run's outputs (#599)."""
+            from ...executors import ScriptExecutor, require_sandbox_approval
+            from .derive_outputs import run_derivation
+            if not task:
+                return json.dumps({"status": "error",
+                                   "message": "task is required: say what to derive and from which run."})
+            # --- sources: an analysis record, explicit paths, or the latest run ---
+            sources: list = []
+            record = None
+            if analysis_id:
+                record = next((r for r in self.orch.analysis_results
+                               if r.get("analysis_id") == analysis_id), None)
+                if record is None:
+                    return json.dumps({"status": "error",
+                                       "message": f"No analysis with id '{analysis_id}'. "
+                                                  "Call list_results for the ids, or pass source_paths."})
+                sources.append(record["output_directory"])
+            if source_paths:
+                for sp in ([source_paths] if isinstance(source_paths, str) else list(source_paths)):
+                    p = Path(sp)
+                    if not p.is_absolute():
+                        p = Path(self.orch.base_dir) / p
+                    if not p.exists():
+                        return json.dumps({"status": "error", "message": f"Path not found: {sp}"})
+                    sources.append(str(p))
+            if not sources:
+                done = [r for r in self.orch.analysis_results
+                        if r.get("status") in ("success", "partial") and r.get("output_directory")]
+                if not done:
+                    return json.dumps({"status": "error",
+                                       "message": "No completed run to derive from: pass analysis_id or source_paths."})
+                record = done[-1]
+                sources.append(record["output_directory"])
+            print(f"  🧮 Tool: Deriving from {len(sources)} source(s): {task[:80]}")
+            if not require_sandbox_approval(
+                    context="Derive a secondary artifact from a completed run (sandboxed script)"):
+                return json.dumps({"status": "aborted", "reason": "sandbox_declined",
+                                   "message": "Code execution declined; nothing was derived."})
+            stem = re.sub(r"[^\w\-]", "_", Path(sources[0]).name)[:30]
+            self.orch._analysis_run_counter += 1
+            derive_id = f"{stem}_derive_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{self.orch._analysis_run_counter:03d}"
+            out_dir = self.orch.results_dir / f"derive_{derive_id}"
+            res = run_derivation(
+                model=self._internal_model(), executor=ScriptExecutor(timeout=int(timeout_s)),
+                sources=sources, task=task, out_dir=out_dir, scratch_dir=out_dir / "_scratch",
+                code=code, logger=logging, max_attempts=int(max_attempts))
+            self.orch.analysis_results.append({
+                "analysis_id": derive_id, "timestamp": datetime.now().isoformat(),
+                "data_path": sources[0], "agent_id": "derive", "agent_name": "OutputDerivation",
+                "status": res.get("status"), "output_directory": str(out_dir),
+                "derived_from": (record or {}).get("analysis_id"), "sources": sources,
+                "full_result": res, "novelty_assessment": None})
+            if res.get("status") != "success":
+                return json.dumps({"status": "error", "derive_id": derive_id,
+                                   "output_directory": str(out_dir), "sources": sources,
+                                   **{k: v for k, v in res.items() if k != "status"}}, default=str)
+            return json.dumps({
+                "status": "success", "derive_id": derive_id, "derived_from": (record or {}).get("analysis_id"),
+                "sources": sources, "output_directory": str(out_dir),
+                "products": res["products"], "files_produced": [p["path"] for p in res["products"]],
+                "summary": res.get("summary"), "script_path": res.get("script_path"),
+                "attempts": res.get("attempts"),
+                "note": ("Derived from the run's saved outputs; no analysis was re-run. "
+                         "Name each product and where it lives in your answer."),
+            }, default=str)
+
+        self._register_tool(
+            func=derive_from_outputs,
+            name="derive_from_outputs",
+            description=(
+                "Derive a SECONDARY ARTIFACT from a completed run's saved outputs — reformat, "
+                "subset, aggregate, convert units, join, re-render a figure, extract a scalar, "
+                "build a per-item table from saved arrays. A short script runs in the sandbox "
+                "over the run's existing files (arrays, tables, JSON, figures) and writes the "
+                "product to results/derive_<id>/ — NO skill selection, NO planning, NO "
+                "re-analysis. Use this, not run_analysis, whenever the ask is 'produce X from "
+                "what run Y already computed'; run_analysis is for analyzing DATA. Sources: "
+                "analysis_id (a run from list_results; default: the latest completed run) "
+                "and/or explicit source_paths. Optionally pass the script yourself in `code` "
+                "(it must read paths from the runtime `_DERIVE` dict); otherwise it is "
+                "generated from an inventory of the artifacts and retried on failure."
+            ),
+            parameters={
+                "task": {"type": "string",
+                         "description": "What to derive, precisely — the product, its format/columns/units, and which artifacts to build it from. Quote the user's ask; do not add unrequested products."},
+                "analysis_id": {"type": "string",
+                                "description": "The completed run to derive from (from run_analysis / list_results). Default: the latest completed run."},
+                "source_paths": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
+                                 "description": "Explicit files or directories to read instead of / in addition to the run's output directory."},
+                "code": {"type": "string",
+                         "description": "Optional Python script to run instead of generating one. Read paths from `_DERIVE['files']` / `_DERIVE['sources']`, write only under `_DERIVE['out_dir']`, and print the DERIVE_RESULT_JSON line naming the products."},
+                "max_attempts": {"type": "integer", "description": "Generate-run-check attempts before giving up (default 3)."},
+                "timeout_s": {"type": "integer", "description": "Wall-clock limit for one script execution in seconds (default 600)."},
+            },
+            required=["task"],
+        )
+
         self._register_tool(
             func=convert_metadata,
             name="convert_metadata",
