@@ -1616,8 +1616,13 @@ class MetaOrchestratorAgent:
     # summary and therefore prove nothing on their own.
     _RECOMMEND_GENERIC = frozenset(
         "recommend recommended recommendation recommends next measure measured "
-        "measuring measurement point value values step experiment experiments "
-        "single following suggest suggested proposed midpoint range within".split())
+        "measuring measurement point points value values step experiment experiments "
+        "single following suggest suggested proposed midpoint range within "
+        "after before have will then this only least between sampled stretch "
+        "interval location strategy should tighten sparse model minimum surrogate "
+        "sampling produce running reported therefore center about around "
+        "approximately currently already still again because".split())
+    _RECOMMEND_CTX_MIN_CHARS = 5
 
     @classmethod
     def _recommended_values_of(cls, result: dict) -> List[Dict[str, Any]]:
@@ -1639,7 +1644,7 @@ class MetaOrchestratorAgent:
                     continue
                 # Range endpoints ("5–50 K range") frame a recommendation but
                 # are not recommended values themselves.
-                low = re.sub(r"-?\d+(?:\.\d+)?\s*(?:–|-|to)\s*-?\d+(?:\.\d+)?", " ", low)
+                low = re.sub(r"-?\d+(?:\.\d+)?\s*(?:–|-|to|and)\s*-?\d+(?:\.\d+)?", " ", low)
                 words = re.findall(r"[a-z_][a-z0-9_]{2,}|-?\d+(?:\.\d+)?", low)
                 for i, w in enumerate(words):
                     if not re.fullmatch(r"-?\d+(?:\.\d+)?", w):
@@ -1650,7 +1655,8 @@ class MetaOrchestratorAgent:
                         continue
                     ctx = {x for x in words[max(0, i - 6): i + 7]
                            if not re.fullmatch(r"-?\d+(?:\.\d+)?", x)
-                           and len(x) >= 4 and x not in cls._RECOMMEND_GENERIC}
+                           and len(x) >= cls._RECOMMEND_CTX_MIN_CHARS
+                           and x not in cls._RECOMMEND_GENERIC}
                     if not ctx or (val, tuple(sorted(ctx))) in seen:
                         continue
                     seen.add((val, tuple(sorted(ctx))))
