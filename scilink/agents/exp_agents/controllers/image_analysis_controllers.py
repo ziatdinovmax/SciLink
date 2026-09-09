@@ -2952,6 +2952,9 @@ Return JSON:
             tool_constraint=tool_constraint,
         )
 
+        prompt_text += self._stalled_prescriptions_block(
+            state.get("_stalled_prescriptions"))
+
         # Add history context
         history_context = build_verification_prompt_with_history(
             current_result={
@@ -3159,6 +3162,7 @@ Return JSON:
         state: dict,
         verification: dict,
         history: list | None = None,
+        stalled: list | None = None,
     ) -> dict:
         """Apply LLM verification feedback to refine the analysis configuration.
 
@@ -3219,7 +3223,7 @@ Return JSON:
 **FALSE POSITIVES:** {', '.join(false_positives) if false_positives else 'None identified'}
 
 **RECOMMENDED ACTION:** {recommended_action}
-
+{self._stalled_prescriptions_block(stalled)}
 Return JSON with the refined analysis approach:
 {{
     "processing_pipeline": "updated pipeline description",
@@ -3876,14 +3880,113 @@ Return JSON with:
                 verification.get("recommended_action", "")
             )
 
+        # A prescription the codegen cannot make "take" would otherwise be
+        # re-issued to the last iteration (#568). Detect it and pivot.
+        stalled = self._detect_stalled_prescription(ctx, verification)
+        if stalled:
+            self._note_stalled_prescription(ctx, stalled)
+
         # Apply LLM's recommended fixes. Pass the
         # accumulated verification_history so the refiner
         # can see prior scores/pipelines and recognize
         # regressions instead of iterating blindly on the
         # previous (possibly degraded) config.
         return self._apply_verification_feedback(
-            ctx.state, verification, history=ctx.verification_history
+            ctx.state, verification, history=ctx.verification_history,
+            stalled=ctx.state.get("_stalled_prescriptions"),
         )
+
+    # ── stalled prescriptions (#568) ────────────────────────────────
+    # The verifier gates acceptance on a specific fix; when the codegen
+    # cannot satisfy it (an unavailable capability, an environment limit,
+    # a fix the model keeps mis-implementing) the same mandate came back
+    # every iteration and the run burned its budget repeating it. A
+    # prescription is *stalled* once it has been issued STALL_TIMES times
+    # in a row with no improvement of the best score since it first
+    # appeared. Then: it is named as stalled to the refiner AND the
+    # verifier (do not re-issue; pivot to a different path or accept the
+    # best result), and if it comes back once more anyway the loop stops
+    # with the best result so far and a legible reason.
+    STALL_TIMES = 3
+    _PRESCRIPTION_STOPWORDS = frozenset(
+        "the a an and or of to in on for with use using apply via by from "
+        "into that this then than is are be it its as at should must none".split())
+
+    @classmethod
+    def _prescription_tokens(cls, action) -> frozenset:
+        words = re.findall(r"[a-z0-9_]{3,}", str(action or "").lower())
+        return frozenset(w for w in words if w not in cls._PRESCRIPTION_STOPWORDS)
+
+    @classmethod
+    def _same_prescription(cls, a, b) -> bool:
+        ta, tb = cls._prescription_tokens(a), cls._prescription_tokens(b)
+        if not ta or not tb:
+            return False
+        return len(ta & tb) / len(ta | tb) >= 0.5
+
+    def _detect_stalled_prescription(self, ctx: QCItemContext,
+                                     verification: dict) -> Optional[dict]:
+        action = str(verification.get("recommended_action") or "").strip()
+        if not action or action.lower() in ("none", "n/a"):
+            return None
+        history = ctx.verification_history or []
+        # Consecutive tail of the history carrying this prescription (the
+        # current verification is already appended by qc_assess).
+        run = []
+        for entry in reversed(history):
+            if self._same_prescription(entry.get("recommended_action"), action):
+                run.append(entry)
+            else:
+                break
+        if len(run) < self.STALL_TIMES:
+            return None
+        run.reverse()
+        first_score = run[0].get("quality_score") or 0.0
+        best_since = max((e.get("quality_score") or 0.0) for e in run)
+        if best_since > first_score + 0.02:
+            return None  # the fix is landing, however slowly
+        return {"prescription": action, "times": len(run),
+                "score_at_first": first_score, "best_since": best_since}
+
+    def _note_stalled_prescription(self, ctx: QCItemContext, stalled: dict) -> None:
+        known = ctx.state.setdefault("_stalled_prescriptions", [])
+        prior = next((k for k in known
+                      if self._same_prescription(k["prescription"], stalled["prescription"])),
+                     None)
+        if prior is None:
+            known.append(dict(stalled))
+            self.logger.warning(
+                f"   Prescribed fix did not take after {stalled['times']} tries "
+                f"(score {stalled['score_at_first']:.2f} → {stalled['best_since']:.2f}): "
+                f"\"{stalled['prescription'][:120]}\" — pivoting: it will not be "
+                "re-issued; a different path or the best result so far is next.")
+            return
+        prior["times"] = stalled["times"]
+        # Re-issued even after being named stalled: stop repeating.
+        ctx.stop_reason = (
+            f"prescribed fix \"{stalled['prescription'][:120]}\" did not take after "
+            f"{stalled['times']} tries; keeping the best result so far "
+            f"(score {ctx.best_score:.2f})")
+
+    @staticmethod
+    def _stalled_prescriptions_block(stalled) -> str:
+        if not stalled:
+            return ""
+        lines = ["\n**STALLED PRESCRIPTIONS — DO NOT RE-ISSUE:**"]
+        for st in stalled:
+            lines.append(
+                f"- \"{st['prescription'][:200]}\" was prescribed {st['times']} times and did "
+                f"not take (score {st.get('score_at_first', 0):.2f} → "
+                f"{st.get('best_since', 0):.2f}). The environment or the code generator "
+                "cannot satisfy it. Do not prescribe or mandate it again: either name a "
+                "materially different method path, or, if the best result is "
+                "scientifically adequate, accept it.")
+        return "\n".join(lines) + "\n"
+
+    def _stamp_stalled(self, ctx: QCItemContext) -> None:
+        stalled = ctx.state.get("_stalled_prescriptions")
+        if stalled and isinstance(ctx.best_result, dict):
+            ctx.best_result["stalled_prescriptions"] = [dict(s) for s in stalled]
 
     def qc_refit(self, ctx: QCItemContext, verification: dict,
                  refine_from: Optional[str], just_escalated_to_hot: bool) -> dict:
@@ -3980,6 +4083,7 @@ Return JSON with:
         # Judge is only called after all alternatives are exhausted.
 
     def qc_post_verification(self, ctx: QCItemContext) -> Optional[dict]:
+        self._stamp_stalled(ctx)
         # --- Explicit fast-path bypass (#271) ---
         # The initial score is provisional (0.0) when no verification ran,
         # so the accept gate below cannot pass it; return the accepted
