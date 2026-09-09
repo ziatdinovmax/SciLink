@@ -1143,3 +1143,13 @@ def test_skills_catalog_view_and_upload(client, tmp_path):
     session.agent = SimpleNamespace()
     assert client.get(f"{base}/skills").json()["skills_supported"] is False
     assert client.post(f"{base}/skills", files=[("files", ("a.md", b"# a"))]).status_code == 400
+
+
+def test_server_forces_a_headless_matplotlib_backend(tmp_path):
+    """Agents plot on worker threads; macOS's GUI backend refuses that, so
+    creating the app must leave matplotlib on Agg (and set MPLBACKEND for
+    any subprocess the agents spawn)."""
+    import matplotlib
+    create_app(tmp_path, serve_frontend=False)
+    assert matplotlib.get_backend().lower() == "agg"
+    assert os.environ.get("MPLBACKEND") == "Agg"

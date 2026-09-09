@@ -71,6 +71,8 @@ def create_app(session_root: Path, serve_frontend: bool = True,
     sets it for a non-loopback bind) disables the endpoints that read
     arbitrary paths on the server's machine (pasted folders, plan dirs)
     — they only make sense when the browser and the server share a host."""
+    from .cli import _headless_matplotlib
+    _headless_matplotlib()
     app = FastAPI(title="SciLink Web", docs_url="/api/docs")
     app.add_middleware(
         CORSMiddleware,
