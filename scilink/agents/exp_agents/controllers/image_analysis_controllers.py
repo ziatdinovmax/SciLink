@@ -3497,6 +3497,11 @@ Return JSON with:
         )
         res = engine.run_item(ctx)
         self._bump_bank_adapt_success(res)
+        # Whichever path produced the returned dict (approved, exhausted,
+        # judge / best-available fallback), it carries the stalled
+        # prescriptions so the failure mode is legible (#568).
+        if isinstance(res, dict) and ctx.state.get("_stalled_prescriptions"):
+            res["stalled_prescriptions"] = [dict(s) for s in ctx.state["_stalled_prescriptions"]]
         return res
 
     # --- CodegenQCEngine hooks (bodies moved verbatim from the old driver) ---
