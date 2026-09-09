@@ -12,7 +12,7 @@ import pytest
 
 import scilink.executors as executors
 from scilink.agents.exp_agents.derive_outputs import (
-    build_artifact_inventory, check_products, parse_result_marker, run_derivation, static_guard, RESULT_MARKER)
+    build_artifact_inventory, check_products, json_outline, parse_result_marker, run_derivation, static_guard, RESULT_MARKER)
 from scilink.executors import ScriptExecutor
 
 
@@ -47,7 +47,8 @@ class FakeModel:
 
     def generate_content(self, prompt, **kw):
         self.calls.append(prompt)
-        return SimpleNamespace(text=self.replies.pop(0))
+        # an exhausted reply list answers every verification with a pass
+        return SimpleNamespace(text=self.replies.pop(0) if self.replies else '{"verdict": "pass", "reasons": []}')
 
 
 def test_inventory_describes_arrays_tables_and_json_and_skips_scratch(tmp_path):
@@ -55,7 +56,8 @@ def test_inventory_describes_arrays_tables_and_json_and_skips_scratch(tmp_path):
     text, files = build_artifact_inventory([run])
     assert "polarization_px.npy  —  npy shape=(3, 4) dtype=float64" in text
     assert "features.csv  —  table rows=1 columns=['median_P_pm', 'n_cells']" in text
-    assert "analysis_results.json  —  json keys=['status', 'detailed_analysis']" in text
+    assert "analysis_results.json  —  json {status: 'success', detailed_analysis: 'two domains'}" in text
+    assert "first_row=" in text and '"median_P_pm": 42.1' in text
     assert "junk.npy" not in text and all("_scratch" not in f for f in files)
     assert any(f.endswith("scripts/analysis_script.py") for f in files)
 
@@ -76,12 +78,24 @@ def test_guard_marker_and_product_gate(tmp_path):
     assert check_products({"products": []}, out, t0)[0] == ["the result names no products"]
 
 
+def test_json_outline_shows_nested_structure_and_list_shapes():
+    d = {"series_metadata": {"variable": "temperature", "values": [300.0, 340.0]},
+         "results": [{"index": 0, "parameters": {"peak_1": {"amplitude": 0.7996, "amplitude_err": 0.0008}}}] * 4,
+         "long": "x" * 40, "flag": True, "nothing": None}
+    o = json_outline(d)
+    assert "series_metadata: {variable: 'temperature', values: [300 ×2]}" in o
+    assert "results: [{index: 0, parameters: {peak_1: {amplitude: 0.7996, amplitude_err: 0.0008}}} ×4]" in o
+    assert "long: str" in o and "flag: bool" in o and "nothing: null" in o
+    assert json_outline({"a": {"b": {"c": {"d": 1}}}}, depth=2) == "{a: {b: {…}}}"
+    assert len(json_outline({f"k{i}": i for i in range(500)}, max_chars=80)) <= 81
+
+
 def test_engine_runs_a_supplied_script_without_calling_the_model(tmp_path):
     run = _prior_run(tmp_path)
     model = FakeModel([])
     out = tmp_path / "derive"
     res = run_derivation(model=model, executor=ScriptExecutor(timeout=60), sources=[str(run)],
-                         task="per-cell table", out_dir=out, scratch_dir=out / "_scratch", code=TABLE_SCRIPT)
+                         task="per-cell table", out_dir=out, scratch_dir=out / "_scratch", code=TABLE_SCRIPT, llm_verify=False)
     assert res["status"] == "success" and res["attempts"] == 1 and model.calls == []
     csv = Path(res["products"][0]["path"])
     assert csv.name == "per_cell_polarization.csv" and csv.read_text().count("\n") == 13
@@ -104,6 +118,31 @@ def test_engine_generates_retries_with_feedback_then_succeeds(tmp_path):
     assert "do not re-plan" in model.calls[0]
 
 
+def test_engine_verification_rejects_a_hollow_product_then_accepts_the_fix(tmp_path):
+    """The product gate is deterministic (file exists); the verifier reads the
+    product's preview against the task. A NaN-filled table fails on two
+    votes, the feedback carries the preview, the second script passes."""
+    run = _prior_run(tmp_path)
+    hollow = TABLE_SCRIPT.replace('"Px": float(px[i, j])', '"Px": float("nan")')
+    model = FakeModel(["```python\n" + hollow + "```",
+                       '{"verdict": "fail", "required_fixes": ["Px is NaN in every row"]}',
+                       '{"verdict": "fail", "required_fixes": ["Px is NaN in every row"]}',
+                       "```python\n" + TABLE_SCRIPT + "```",
+                       '{"verdict": "pass", "reasons": []}'])
+    out = tmp_path / "derive"
+    res = run_derivation(model=model, executor=ScriptExecutor(timeout=60), sources=[str(run)],
+                         task="per-cell table of Px, Py, |P|", out_dir=out, scratch_dir=out / "_scratch")
+    assert res["status"] == "success" and res["attempts"] == 2 and res["verification"]["verdict"] == "pass"
+    assert "do not satisfy it: Px is NaN in every row" in model.calls[3]
+    assert "### per_cell_polarization.csv" in model.calls[1]           # the verifier saw the preview
+    assert "nan" in model.calls[1].lower()
+    # a single dissenting vote does not cost a regeneration
+    model = FakeModel(["```python\n" + TABLE_SCRIPT + "```", '{"verdict": "fail", "reasons": ["x"]}', '{"verdict": "pass"}'])
+    res = run_derivation(model=model, executor=ScriptExecutor(timeout=60), sources=[str(run)],
+                         task="t", out_dir=tmp_path / "d2", scratch_dir=tmp_path / "s2")
+    assert res["status"] == "success" and res["attempts"] == 1
+
+
 def test_engine_gives_up_after_max_attempts_and_reports_the_last_failure(tmp_path):
     run = _prior_run(tmp_path)
     escape = "import subprocess\n_DERIVE\n"
@@ -118,7 +157,7 @@ def test_engine_rejects_a_product_written_outside_out_dir(tmp_path):
     leak = TABLE_SCRIPT.replace('os.path.join(_DERIVE["out_dir"], "per_cell_polarization.csv")',
                                 'os.path.join(_DERIVE["sources"][0], "leak.csv")')
     res = run_derivation(model=FakeModel([]), executor=ScriptExecutor(timeout=60), sources=[str(run)],
-                         task="t", out_dir=tmp_path / "d", scratch_dir=tmp_path / "s", code=leak, max_attempts=1)
+                         task="t", out_dir=tmp_path / "d", scratch_dir=tmp_path / "s", code=leak, max_attempts=1, llm_verify=False)
     assert res["status"] == "error" and "outside the output directory" in res["message"]
 
 

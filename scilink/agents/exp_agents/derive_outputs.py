@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from .data_preparation import _DENIED_CALLS, _DENIED_IMPORTS, extract_script
+from .data_preparation import _DENIED_CALLS, _DENIED_IMPORTS, _llm_verdict, extract_script
 
 RESULT_MARKER = "DERIVE_RESULT_JSON:"
 _MAX_INVENTORY_FILES = 120
@@ -36,6 +36,35 @@ _SKIP_DIRS = {"_scratch", "_candidates", "__pycache__", "norm"}
 # --------------------------------------------------------------------------
 # Inventory
 # --------------------------------------------------------------------------
+def json_outline(obj: Any, depth: int = 4, max_keys: int = 10, max_chars: int = 700) -> str:
+    """A compact STRUCTURAL outline of a JSON value — key names with value
+    types, list lengths and the first element's shape — so the model can
+    locate nested quantities (``results[i].parameters.peak_1.amplitude``)
+    instead of guessing a layout from top-level keys alone."""
+    def _o(v, d):
+        if isinstance(v, dict):
+            if d <= 0:
+                return "{…}"
+            items = list(v.items())
+            body = ", ".join(f"{k}: {_o(val, d - 1)}" for k, val in items[:max_keys])
+            return "{" + body + (f", …+{len(items) - max_keys}" if len(items) > max_keys else "") + "}"
+        if isinstance(v, list):
+            if not v:
+                return "[]"
+            return f"[{_o(v[0], d)} ×{len(v)}]"   # a list is transparent: its elements share its depth
+        if isinstance(v, bool):
+            return "bool"
+        if isinstance(v, (int, float)):
+            return "null" if v is None else (f"{v:.4g}" if isinstance(v, float) else str(v))
+        if v is None:
+            return "null"
+        if isinstance(v, str):
+            return "str" if len(v) > 24 else repr(v)
+        return type(v).__name__
+    text = _o(obj, depth)
+    return text if len(text) <= max_chars else text[:max_chars] + "…"
+
+
 def _describe_file(path: Path) -> str:
     """One line: what a saved artifact holds (shape / columns / keys)."""
     suffix = path.suffix.lower()
@@ -59,13 +88,11 @@ def _describe_file(path: Path) -> str:
             n_rows = sum(1 for _ in open(path, "rb")) - 1
             cols = list(df.columns)
             info = f"table rows={max(n_rows, 0)} columns={cols[:20]}" + (" …" if len(cols) > 20 else "")
+            if len(df):
+                info += " first_row=" + json.dumps({c: (None if pd.isna(x) else (round(float(x), 4) if isinstance(x, (int, float)) else str(x)[:20])) for c, x in df.iloc[0].items()})[:300]
         elif suffix == ".json":
             data = json.loads(path.read_text(encoding="utf-8", errors="replace")[:2_000_000])
-            if isinstance(data, dict):
-                keys = list(data.keys())
-                info = f"json keys={keys[:20]}" + (" …" if len(keys) > 20 else "")
-            elif isinstance(data, list):
-                info = f"json list len={len(data)}"
+            info = "json " + json_outline(data)
         elif suffix in (".png", ".jpg", ".jpeg", ".tif", ".tiff"):
             info = f"image {size} B"
         elif suffix in (".txt", ".md", ".log", ".py"):
@@ -136,6 +163,60 @@ product requested, and write it.
 
 Return only a single ```python code block.
 """
+
+
+VERIFY_PROMPT = """You are checking a DERIVED PRODUCT against the request that asked for it.
+
+## Requested product
+{task}
+
+## What the script reported
+{summary}
+
+## The products (previews)
+{previews}
+
+Judge ONLY whether the products deliver what was requested: the right content (values
+present, not empty / null / NaN where the artifacts held the numbers), the requested
+shape (rows, columns, keys, units, file type), and nothing extra. Do not judge style.
+If a requested quantity genuinely does not exist in the run's artifacts, an honest
+summary saying so PASSES.
+
+Return JSON only: {{"verdict": "pass" | "fail", "reasons": ["..."], "required_fixes": ["..."]}}
+"""
+
+
+def _product_previews(products: list[dict], max_chars: int = 1400) -> str:
+    """Head of each product for the verifier: CSV rows, JSON text, array
+    keys / shapes / value ranges, image size."""
+    parts = []
+    for p in products:
+        path = Path(p["path"]); suffix = path.suffix.lower()
+        try:
+            if suffix in (".csv", ".tsv", ".txt", ".md"):
+                text = path.read_text(encoding="utf-8", errors="replace")
+                lines = text.splitlines()
+                body = "\n".join(lines[:12]) + (f"\n… ({len(lines)} lines)" if len(lines) > 12 else "")
+            elif suffix == ".json":
+                body = path.read_text(encoding="utf-8", errors="replace")[:max_chars]
+            elif suffix == ".npz":
+                import numpy as np
+                with np.load(path, allow_pickle=False) as z:
+                    body = "; ".join(f"{k}: shape={tuple(z[k].shape)} range=[{float(np.nanmin(z[k])):.4g}, {float(np.nanmax(z[k])):.4g}]"
+                                     if z[k].size and np.issubdtype(z[k].dtype, np.number) else f"{k}: shape={tuple(z[k].shape)}"
+                                     for k in list(z.files)[:12])
+            elif suffix == ".npy":
+                import numpy as np
+                a = np.load(path, mmap_mode="r", allow_pickle=False)
+                body = f"shape={tuple(a.shape)} dtype={a.dtype}" + (
+                    f" range=[{float(np.nanmin(a)):.4g}, {float(np.nanmax(a)):.4g}] nan_fraction={float(np.isnan(a).mean()):.3f}"
+                    if a.size and np.issubdtype(a.dtype, np.floating) else "")
+            else:
+                body = f"{path.stat().st_size} B"
+        except Exception as e:  # noqa: BLE001
+            body = f"(preview unavailable: {type(e).__name__})"
+        parts.append(f"### {path.name} — {p.get('description', '')}\n{body[:max_chars]}")
+    return "\n\n".join(parts)
 
 
 def static_guard(script: str) -> Optional[str]:
@@ -219,11 +300,13 @@ def _tail(s: str, n: int = 2500) -> str:
 # --------------------------------------------------------------------------
 def run_derivation(*, model, executor, sources: list[str], task: str, out_dir: Path,
                    scratch_dir: Path, code: Optional[str] = None,
-                   logger: Optional[logging.Logger] = None, max_attempts: int = 3) -> dict:
-    """Inventory → (supplied or generated) script → guard → sandbox → gate,
-    retrying with the failure as feedback. Returns a dict with ``status``
-    ('success' | 'error' | 'cancelled'), ``products``, ``summary``,
-    ``script_path``, ``attempts`` and ``receipt``."""
+                   logger: Optional[logging.Logger] = None, max_attempts: int = 3,
+                   llm_verify: bool = True, parse_json=None) -> dict:
+    """Inventory → (supplied or generated) script → guard → sandbox → gate →
+    (optional) model check of the products against the task, retrying with
+    the failure as feedback. Returns a dict with ``status`` ('success' |
+    'error' | 'cancelled'), ``products``, ``summary``, ``script_path``,
+    ``attempts``, ``verification`` and ``receipt``."""
     log = logger or logging.getLogger(__name__)
     out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
     scratch_dir = Path(scratch_dir); scratch_dir.mkdir(parents=True, exist_ok=True)
@@ -282,14 +365,37 @@ def run_derivation(*, model, executor, sources: list[str], task: str, out_dir: P
             feedback = "product checks failed: " + "; ".join(problems)
             attempts.append({"attempt": attempt, "error": "product checks", "detail": problems[:6]})
             log.warning(f"🧮 product checks failed: {feedback[:300]}"); continue
+        summary = str(result.get("summary") or "")
+        verdict = {"verdict": "pass", "reasons": []}
+        if llm_verify:
+            vp = VERIFY_PROMPT.format(task=task, summary=summary or "(none)",
+                                      previews=_product_previews(products))
+            # Two-vote gate (as in prepare_data): a "fail" stands only if an
+            # independent second call agrees — a hallucinated failure would
+            # otherwise cost a full regeneration.
+            votes = []
+            for _vote in range(2):
+                try:
+                    votes.append(_llm_verdict(model, vp, parse_json))
+                except Exception as e:  # noqa: BLE001
+                    log.warning(f"🧮 product verification skipped: {e}"); break
+                if str(votes[-1].get("verdict", "pass")).lower() == "pass":
+                    break
+            if votes:
+                verdict = votes[-1]
+        if str(verdict.get("verdict", "pass")).lower() != "pass":
+            fixes = "; ".join(map(str, verdict.get("required_fixes") or verdict.get("reasons") or []))
+            feedback = ("the products were checked against the request and do not satisfy it: "
+                        + fixes + f"\nproduct previews:\n{_product_previews(products, 600)}")
+            attempts.append({"attempt": attempt, "error": "verification failed", "detail": fixes[:800]})
+            log.warning(f"🧮 product verification failed: {fixes[:300]}"); continue
         final = out_dir / "scripts" / "derive_script.py"
         final.write_text(_header(paths) + script, encoding="utf-8")
-        summary = str(result.get("summary") or "")
         receipt = {"schema": "scilink_derivation_receipt_v1", "task": task,
                    "sources": paths["sources"], "inputs_seen": len(files),
                    "attempts": attempt, "script": str(final), "products": products,
                    "summary": summary, "supplied_code": bool(code),
-                   "seconds": round(time.time() - t0, 1)}
+                   "verification": verdict, "seconds": round(time.time() - t0, 1)}
         (out_dir / "derivation_receipt.json").write_text(json.dumps(receipt, indent=2, default=str))
         (out_dir / "analysis_results.json").write_text(json.dumps({
             "agent_type": "derivation", "status": "success", "task": task,
@@ -298,7 +404,7 @@ def run_derivation(*, model, executor, sources: list[str], task: str, out_dir: P
         log.info(f"🧮 derived {len(products)} product(s) in {attempt} attempt(s)")
         return {"status": "success", "products": products, "summary": summary,
                 "script_path": str(final), "attempts": attempt, "receipt": receipt,
-                "attempt_log": attempts}
+                "verification": verdict, "attempt_log": attempts}
     last = attempts[-1] if attempts else {}
     return {"status": "error",
             "message": f"derivation failed after {max_attempts} attempt(s): "

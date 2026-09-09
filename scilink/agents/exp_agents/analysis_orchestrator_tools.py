@@ -1976,7 +1976,8 @@ class AnalysisOrchestratorTools:
 
         def derive_from_outputs(task: str = None, analysis_id: str = None,
                                 source_paths=None, code: str = None,
-                                max_attempts: int = 3, timeout_s: int = 600) -> str:
+                                max_attempts: int = 3, timeout_s: int = 600,
+                                llm_verify: bool = True) -> str:
             """Derive a secondary artifact from a completed run's outputs (#599)."""
             from ...executors import ScriptExecutor, require_sandbox_approval
             from .derive_outputs import run_derivation
@@ -2022,7 +2023,8 @@ class AnalysisOrchestratorTools:
             res = run_derivation(
                 model=self._internal_model(), executor=ScriptExecutor(timeout=int(timeout_s)),
                 sources=sources, task=task, out_dir=out_dir, scratch_dir=out_dir / "_scratch",
-                code=code, logger=logging, max_attempts=int(max_attempts))
+                code=code, logger=logging, max_attempts=int(max_attempts),
+                llm_verify=bool(llm_verify), parse_json=getattr(self.orch, "_parse_json_response", None))
             self.orch.analysis_results.append({
                 "analysis_id": derive_id, "timestamp": datetime.now().isoformat(),
                 "data_path": sources[0], "agent_id": "derive", "agent_name": "OutputDerivation",
@@ -2070,6 +2072,7 @@ class AnalysisOrchestratorTools:
                          "description": "Optional Python script to run instead of generating one. Read paths from `_DERIVE['files']` / `_DERIVE['sources']`, write only under `_DERIVE['out_dir']`, and print the DERIVE_RESULT_JSON line naming the products."},
                 "max_attempts": {"type": "integer", "description": "Generate-run-check attempts before giving up (default 3)."},
                 "timeout_s": {"type": "integer", "description": "Wall-clock limit for one script execution in seconds (default 600)."},
+                "llm_verify": {"type": "boolean", "description": "Also check the products against the task with the model before accepting them (default true)."},
             },
             required=["task"],
         )
