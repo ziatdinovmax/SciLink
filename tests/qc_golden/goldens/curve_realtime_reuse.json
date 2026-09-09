@@ -11,6 +11,14 @@
       "center": 4.0,
       "sigma": 0.8
     },
+    "fitting_scripts": {
+      "dir": "<OUTDIR>/scripts",
+      "files": [
+        "fitting_script.py"
+      ],
+      "note": "The fitting script that produced this result. To re-fit with this exact model, pass this output directory as prior_analysis_paths with reuse_locked_script=true; use script_edits for a surgical change (a bound, a window) instead of re-deriving.",
+      "representative": "fitting_script.py"
+    },
     "literature_files": null,
     "model_type": "Gaussian + linear background",
     "output_directory": "<OUTDIR>",
