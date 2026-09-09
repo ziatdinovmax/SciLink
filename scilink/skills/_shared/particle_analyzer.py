@@ -19,6 +19,15 @@ import torch
 logger = logging.getLogger(__name__)
 
 
+def mps_available() -> bool:
+    """Apple-Silicon GPU present and usable by this torch build."""
+    mps = getattr(torch.backends, "mps", None)
+    try:
+        return bool(mps is not None and mps.is_available())
+    except Exception:  # noqa: BLE001 - a torch build without the backend
+        return False
+
+
 class ParticleAnalyzer:
     """
     End-to-end particle segmentation and analysis using the Segment Anything
@@ -73,8 +82,17 @@ class ParticleAnalyzer:
 
     @staticmethod
     def _resolve_device(device: str) -> str:
+        """``auto`` → the best available accelerator: CUDA, else Apple MPS,
+        else CPU. Forcing CPU when an MPS GPU exists made ViT-H mask
+        generation over a large raster take minutes per call on Apple
+        Silicon — long enough for the SAM fallback to time out and the
+        verifier to re-prescribe it every iteration (#567)."""
         if device == "auto":
-            return "cuda" if torch.cuda.is_available() else "cpu"
+            if torch.cuda.is_available():
+                return "cuda"
+            if mps_available():
+                return "mps"
+            return "cpu"
         return device
 
     @classmethod
@@ -103,7 +121,16 @@ class ParticleAnalyzer:
                 "pip install git+https://github.com/facebookresearch/segment-anything.git"
             )
         sam = sam_model_registry[model_type](checkpoint=checkpoint_path)
-        sam.to(device=self.device)
+        try:
+            sam.to(device=self.device)
+        except Exception as exc:  # noqa: BLE001 - an accelerator that cannot host the model
+            if self.device == "cpu":
+                raise
+            logger.warning(
+                f"SAM could not be placed on '{self.device}' ({exc}); falling back to CPU. "
+                "Expect slow mask generation on large images.")
+            self.device = "cpu"
+            sam.to(device="cpu")
         return sam
 
     # ------------------------------------------------------------------
@@ -231,9 +258,24 @@ class ParticleAnalyzer:
         from segment_anything import SamAutomaticMaskGenerator
 
         sam_params = self._SAM_PRESETS.get(preset_name, {})
-        logger.info(f"Running SAM with preset: '{preset_name}'")
+        logger.info(f"Running SAM with preset: '{preset_name}' on {self.device}")
         generator = SamAutomaticMaskGenerator(self.sam_model, **sam_params)
-        return generator.generate(image_rgb)
+        try:
+            return generator.generate(image_rgb)
+        except (RuntimeError, NotImplementedError, TypeError) as exc:
+            # An accelerator backend that cannot run one of SAM's ops (MPS
+            # has had unsupported-op / dtype gaps) fails here, at inference,
+            # not at model placement. Fall back to CPU explicitly — once,
+            # and say so — rather than surfacing a raw backend error.
+            if self.device == "cpu":
+                raise
+            logger.warning(
+                f"SAM inference failed on '{self.device}' ({str(exc)[:200]}); "
+                "retrying on CPU. Expect slow mask generation on large images.")
+            self.device = "cpu"
+            self.sam_model.to(device="cpu")
+            generator = SamAutomaticMaskGenerator(self.sam_model, **sam_params)
+            return generator.generate(image_rgb)
 
     # ------------------------------------------------------------------
     # Filtering / pruning
