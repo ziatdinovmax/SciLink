@@ -1,4 +1,5 @@
 import io
+from .tool_schema import normalize_tools
 import re
 import base64
 from types import SimpleNamespace
@@ -40,7 +41,7 @@ class OpenAIAsGenerativeModel:
         """
         messages = self._prompt_parser(contents)
         params = self._map_gen_config(generation_config)
-        oa_tools = genai_tools_to_openai_tools(tools)
+        oa_tools = normalize_tools(genai_tools_to_openai_tools(tools))   # portable schemas (#606)
         resp = self.client.chat.completions.create(
             model=self.model,
             messages=messages,
