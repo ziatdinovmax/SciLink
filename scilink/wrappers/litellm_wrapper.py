@@ -32,6 +32,7 @@ import base64
 import json
 import logging
 import time
+from .tool_schema import normalize_tools
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Union
 
@@ -239,6 +240,21 @@ def _check_litellm():
     litellm.suppress_debug_info = True
 
 
+def _openai_tools_need_no_reasoning(model: str) -> bool:
+    """True for OpenAI gpt-5 family models on chat completions, which reject
+    function tools unless ``reasoning_effort`` is ``"none"`` (observed live:
+    "Function tools with reasoning_effort are not supported for gpt-5.6-sol
+    in /v1/chat/completions ... set reasoning_effort to 'none'")."""
+    m = str(model or "").lower()
+    if "/" in m:
+        provider, _, name = m.partition("/")
+        if provider != "openai":
+            return False
+    else:
+        name = m
+    return name.startswith("gpt-5")
+
+
 def _scope_drop_params(model) -> None:
     """Enable LiteLLM param-dropping only for Bedrock models.
 
@@ -284,6 +300,10 @@ def litellm_completion(*args, **kwargs):
     ceiling.
     """
     model = kwargs.get("model") or (args[0] if args else None)
+    if kwargs.get("tools"):
+        kwargs["tools"] = normalize_tools(kwargs["tools"])
+        if _openai_tools_need_no_reasoning(model) and "reasoning_effort" not in kwargs:
+            kwargs["reasoning_effort"] = "none"
     _scope_drop_params(model)
     kwargs.setdefault("num_retries", 4)   # retry transient provider errors w/ backoff
     if ("max_tokens" not in kwargs
@@ -573,7 +593,16 @@ class LiteLLMGenerativeModel:
             params["max_tokens"] = _resolve_max_output_tokens(self.model)
 
         if tools:
-            params["tools"] = tools
+            # One portable spelling of every tool schema for every provider
+            # (#606): multi-type parameters become anyOf with type-scoped
+            # keywords, oneOf becomes anyOf. Gemini validates declarations up
+            # front and rejects the lenient shapes the authors wrote.
+            params["tools"] = normalize_tools(tools)
+            # OpenAI's reasoning models refuse function tools on chat
+            # completions unless reasoning is off; a caller's explicit
+            # setting still wins.
+            if _openai_tools_need_no_reasoning(self.model) and "reasoning_effort" not in params:
+                params["reasoning_effort"] = "none"
 
         return params
     
