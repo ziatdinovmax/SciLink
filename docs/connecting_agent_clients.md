@@ -65,6 +65,11 @@ scilink serve --mode both --transport sse --host 127.0.0.1 --port 8000 \
 # clients use: {"type": "sse", "url": "http://127.0.0.1:8000/sse"}
 ```
 
+Off-box, put a TLS-terminating reverse proxy in front (the same Caddy /
+nginx shape as the [web UI](react_web_ui.md#https)), or serve HTTPS
+directly with `--ssl-certfile cert.pem --ssl-keyfile key.pem` — the
+endpoint is then `https://host:8000/sse`.
+
 `scilink serve --print-mcp-json --transport sse --port 8000` prints that
 client entry too.
 

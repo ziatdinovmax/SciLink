@@ -70,6 +70,18 @@ scilink serve --print-mcp-json                        # ready-to-paste client co
 mission control itself as a single delegation tool. See
 [connecting_agent_clients.md](connecting_agent_clients.md).
 
+The SSE transport is plain HTTP by default, meant to sit behind a
+TLS-terminating reverse proxy when exposed off-box. To serve HTTPS directly:
+
+```bash
+scilink serve --transport sse --host 0.0.0.0 --port 8000 \
+    --ssl-certfile /etc/scilink/cert.pem --ssl-keyfile /etc/scilink/key.pem
+# clients use: {"type": "sse", "url": "https://host:8000/sse"}
+```
+
+(`--ssl-keyfile-password` for an encrypted key; `--print-mcp-json` reflects
+the scheme.) `scilink-web` takes the same three flags.
+
 ## In-session slash commands
 
 Chat sessions accept slash commands alongside natural language. Common set:

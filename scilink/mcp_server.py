@@ -2100,7 +2100,9 @@ async def run_stdio(server: Server, real_stdout=None) -> None:
         )
 
 
-def run_sse(server: Server, host: str = "127.0.0.1", port: int = 8000) -> None:
+def run_sse(server: Server, host: str = "127.0.0.1", port: int = 8000,
+            ssl_certfile: Optional[str] = None, ssl_keyfile: Optional[str] = None,
+            ssl_keyfile_password: Optional[str] = None) -> None:
     """Run the MCP server over SSE (Server-Sent Events) transport.
 
     Starts an HTTP server with two endpoints:
@@ -2112,6 +2114,10 @@ def run_sse(server: Server, host: str = "127.0.0.1", port: int = 8000) -> None:
         server: The configured MCP Server.
         host: Bind address (default: ``127.0.0.1``).
         port: Bind port (default: ``8000``).
+        ssl_certfile / ssl_keyfile / ssl_keyfile_password: serve HTTPS
+            directly (#611); both files together, or neither. Without them
+            the endpoint is plain HTTP, meant to sit behind a TLS-terminating
+            reverse proxy when exposed off-box.
     """
     _require_mcp()
 
@@ -2157,5 +2163,13 @@ def run_sse(server: Server, host: str = "127.0.0.1", port: int = 8000) -> None:
         ],
     )
 
-    logging.info(f"SciLink MCP server (SSE) at http://{host}:{port}/sse")
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    tls = {}
+    if ssl_certfile or ssl_keyfile:
+        if not (ssl_certfile and ssl_keyfile):
+            raise ValueError("ssl_certfile and ssl_keyfile must be given together")
+        tls = {"ssl_certfile": ssl_certfile, "ssl_keyfile": ssl_keyfile}
+        if ssl_keyfile_password:
+            tls["ssl_keyfile_password"] = ssl_keyfile_password
+    scheme = "https" if tls else "http"
+    logging.info(f"SciLink MCP server (SSE) at {scheme}://{host}:{port}/sse")
+    uvicorn.run(app, host=host, port=port, log_level="warning", **tls)

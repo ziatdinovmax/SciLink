@@ -7,6 +7,7 @@ Usage::
     scilink serve --mode analyze                       # analysis tools only
     scilink serve --autonomy co-pilot                  # require approval
     scilink serve --transport sse --port 8000           # SSE transport
+    scilink serve --transport sse --ssl-certfile cert.pem --ssl-keyfile key.pem   # HTTPS
 """
 
 import argparse
@@ -39,10 +40,13 @@ def _print_mcp_json(args) -> int:
     if args.session_dir:
         serve_args += ["--session-dir", args.session_dir]
     if args.transport == "sse":
-        entry = {"type": "sse", "url": f"http://{args.host}:{args.port}/sse"}
+        scheme = "https" if (args.ssl_certfile or args.ssl_keyfile) else "http"
+        entry = {"type": "sse", "url": f"{scheme}://{args.host}:{args.port}/sse"}
+        tls_flags = (f" --ssl-certfile {args.ssl_certfile} --ssl-keyfile {args.ssl_keyfile}"
+                     if scheme == "https" else "")
         note = (f"# Start the server yourself:\n"
                 f"#   scilink serve {' '.join(serve_args[1:])} "
-                f"--transport sse --host {args.host} --port {args.port}")
+                f"--transport sse --host {args.host} --port {args.port}{tls_flags}")
     elif shutil.which("uvx"):
         entry = {"command": "uvx",
                  "args": ["--from",
@@ -142,6 +146,8 @@ def main():
         default=8000,
         help="Bind port for SSE transport (default: 8000)",
     )
+    from scilink.server.tls import add_tls_arguments, tls_kwargs
+    add_tls_arguments(parser, "the SSE transport")
     parser.add_argument(
         "--futurehouse-key",
         type=str,
@@ -161,6 +167,10 @@ def main():
     )
 
     args = parser.parse_args()
+    tls = tls_kwargs(args) if args.transport == "sse" else {}
+    if args.transport != "sse" and (args.ssl_certfile or args.ssl_keyfile):
+        print("Note: --ssl-* flags apply to --transport sse only; ignored for stdio.",
+              file=sys.stderr)
 
     if args.print_mcp_json:
         return _print_mcp_json(args)
@@ -219,7 +229,7 @@ def main():
           file=sys.stderr)
     server.eager_init()
 
-    transport_label = (f"SSE on http://{args.host}:{args.port}/sse"
+    transport_label = (f"SSE on {'https' if tls else 'http'}://{args.host}:{args.port}/sse"
                        if args.transport == "sse" else "stdio")
     print(f"SciLink MCP server ready ({transport_label}). "
           f"Waiting for MCP client connections...",
@@ -228,7 +238,7 @@ def main():
     sys.stderr.flush()
 
     if args.transport == "sse":
-        run_sse(server, host=args.host, port=args.port)
+        run_sse(server, host=args.host, port=args.port, **tls)
     else:
         import asyncio
         asyncio.run(run_stdio(server, real_stdout=_real_stdout))
