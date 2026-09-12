@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import { CodeBlock } from "./CodeBlock";
+import { languageForExtension } from "../highlight";
 import {
   api,
   type ProvenanceEvent,
@@ -99,9 +101,10 @@ function PreviewBody({
     return <iframe className="preview-frame" src={url} title={path} sandbox="allow-scripts" />;
   if (e === "pdf")
     return <iframe className="preview-frame tall" src={url} title={path} />;
-  if (e === "json") return <TextPreview url={url} pretty />;
+  if (e === "json") return <TextPreview url={url} pretty language="json" />;
   // code, extension-less files (POSCAR/INCAR/...), and anything text-ish
-  if (CODE_EXTS.includes(e) || e === "") return <TextPreview url={url} />;
+  if (CODE_EXTS.includes(e) || e === "")
+    return <TextPreview url={url} language={languageForExtension(e)} />;
   return (
     <p className="caption">
       No inline preview for .{e} — use Download.
@@ -319,13 +322,21 @@ function MdPreview({ sessionId, path }: { sessionId: string; path: string }) {
           }
         />
       ) : (
-        <pre className="text-preview">{text}</pre>
+        <CodeBlock code={text} language="markdown" />
       )}
     </div>
   );
 }
 
-function TextPreview({ url, pretty = false }: { url: string; pretty?: boolean }) {
+function TextPreview({
+  url,
+  pretty = false,
+  language = null,
+}: {
+  url: string;
+  pretty?: boolean;
+  language?: string | null;
+}) {
   const [text, setText] = useState<string | null>(null);
   useEffect(() => {
     setText(null);
@@ -344,5 +355,5 @@ function TextPreview({ url, pretty = false }: { url: string; pretty?: boolean })
       .catch((err) => setText(`Could not load: ${err}`));
   }, [url, pretty]);
   if (text === null) return <p className="caption">Loading…</p>;
-  return <pre className="text-preview">{text}</pre>;
+  return <CodeBlock code={text} language={language} />;
 }

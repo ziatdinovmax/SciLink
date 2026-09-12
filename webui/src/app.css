@@ -853,3 +853,21 @@ button.primary.small { padding: 4px 10px; font-size: 13px; width: auto; }
 .mem-stage-fold > .mem-stage { border-top: none; margin-top: 0; padding-top: 0; }
 .mem-stage-lead { margin: 2px 0 6px; font-size: 12px; color: var(--text-dim); }
 
+
+/* ── syntax highlighting (#605) ─────────────────────────────── */
+code.hljs { color: inherit; background: transparent; padding: 0; }   /* the pane (pre) keeps its own surface */
+.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-doctag, .hljs-tag .hljs-name { color: var(--hl-keyword); }
+.hljs-built_in, .hljs-type { color: var(--hl-builtin); }
+.hljs-string, .hljs-regexp, .hljs-quote, .hljs-template-tag { color: var(--hl-string); }
+.hljs-number, .hljs-symbol, .hljs-bullet, .hljs-link { color: var(--hl-number); }
+.hljs-comment { color: var(--hl-comment); font-style: italic; }
+.hljs-title, .hljs-title.function_, .hljs-section { color: var(--hl-function); }
+.hljs-title.class_, .hljs-title.class_.inherited__, .hljs-selector-class, .hljs-selector-id { color: var(--hl-class); }
+.hljs-attr, .hljs-attribute, .hljs-variable, .hljs-template-variable, .hljs-property { color: var(--hl-attr); }
+.hljs-meta, .hljs-meta .hljs-keyword, .hljs-params .hljs-keyword { color: var(--hl-meta); }
+.hljs-punctuation, .hljs-operator, .hljs-params { color: var(--hl-punct); }
+.hljs-addition { color: var(--hl-addition); }
+.hljs-deletion { color: var(--hl-deletion); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }
+.hljs-section { font-weight: 600; }

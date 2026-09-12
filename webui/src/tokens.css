@@ -30,6 +30,22 @@
   --code-border: #333333;
   --code-text: #e0e0e0;
 
+  /* syntax-highlighting palette (#605). Code panes are dark in both themes
+     (--code-bg is not overridden by the light theme), so one palette serves
+     both; a theme that lightens the panes overrides these in its block. */
+  --hl-keyword: #c792ea;
+  --hl-builtin: #82aaff;
+  --hl-string: #c3e88d;
+  --hl-number: #f78c6c;
+  --hl-comment: #7f8c99;
+  --hl-function: #82aaff;
+  --hl-class: #ffcb6b;
+  --hl-attr: #ffcb6b;
+  --hl-meta: #89ddff;
+  --hl-punct: #bfc7d5;
+  --hl-addition: #a6e3a1;
+  --hl-deletion: #f38ba8;
+
   /* narration colors (app.py:_log_to_html) */
   --thought-meta: #6ec1e4;
   --thought-specialist: #c9a06a;
