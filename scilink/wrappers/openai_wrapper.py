@@ -1,4 +1,5 @@
 import io
+from .tool_schema import portable_openai_client
 import re
 import time
 import base64
@@ -89,8 +90,8 @@ class OpenAIAsGenerativeModel:
         self.timeout = timeout or self.DEFAULT_TIMEOUT
 
         # Works with OpenAI and any OpenAI-compatible endpoint
-        self.client = openai.OpenAI(api_key=api_key, base_url=base_url,
-                                    timeout=self.timeout)
+        self.client = portable_openai_client(
+            openai.OpenAI(api_key=api_key, base_url=base_url, timeout=self.timeout), model)
 
     # ---------------------- public API ----------------------
     def generate_content(self, contents, generation_config=None, safety_settings=None):

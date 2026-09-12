@@ -32,7 +32,7 @@ import base64
 import json
 import logging
 import time
-from .tool_schema import normalize_tools
+from .tool_schema import normalize_tools, openai_tools_need_no_reasoning as _openai_tools_need_no_reasoning
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Union
 
@@ -238,21 +238,6 @@ def _check_litellm():
     logging.getLogger("litellm").setLevel(logging.WARNING)
 
     litellm.suppress_debug_info = True
-
-
-def _openai_tools_need_no_reasoning(model: str) -> bool:
-    """True for OpenAI gpt-5 family models on chat completions, which reject
-    function tools unless ``reasoning_effort`` is ``"none"`` (observed live:
-    "Function tools with reasoning_effort are not supported for gpt-5.6-sol
-    in /v1/chat/completions ... set reasoning_effort to 'none'")."""
-    m = str(model or "").lower()
-    if "/" in m:
-        provider, _, name = m.partition("/")
-        if provider != "openai":
-            return False
-    else:
-        name = m
-    return name.startswith("gpt-5")
 
 
 def _scope_drop_params(model) -> None:

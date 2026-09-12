@@ -884,12 +884,13 @@ class SimulationOrchestratorAgent:
     def _handle_openai_chat(self, user_input: str) -> str:
         """Chat with OpenAI-compatible models with manual function calling loop."""
         from openai import OpenAI
+        from ...wrappers.tool_schema import portable_openai_client
 
-        client = OpenAI(
+        client = portable_openai_client(OpenAI(
             api_key=self.model.api_key,
             base_url=self.model.base_url,
             timeout=120.0,
-        )
+        ), self.model.model)   # portable tool schemas on the proxy path (#606)
 
         # Repair any tool_use left unanswered by a mid-run user Stop
         # (or a trim slicing a pair apart) before extending history.

@@ -150,3 +150,51 @@ def test_wrapper_normalizes_tools_and_sets_reasoning_off_for_openai_gpt5():
     assert "reasoning_effort" not in m._build_params(None, tools)
     assert not _openai_tools_need_no_reasoning("gpt-4o") and _openai_tools_need_no_reasoning("gpt-5.6-sol")
     assert m._build_params(None, None).get("tools") is None
+
+
+# ── the OpenAI-compatible (internal proxy) path ─────────────────────────
+
+class _RawCompletions:
+    def __init__(self): self.calls = []
+    def create(self, **kw): self.calls.append(kw); return {"ok": True}
+class _RawClient:
+    def __init__(self):
+        from types import SimpleNamespace
+        self.chat = SimpleNamespace(completions=_RawCompletions()); self.embeddings = "emb"
+
+
+def test_portable_openai_client_normalizes_tools_and_applies_the_reasoning_rule():
+    from scilink.wrappers.tool_schema import portable_openai_client, openai_tools_need_no_reasoning, PortableOpenAIClient
+    raw = _RawClient(); c = portable_openai_client(raw, "gpt-5.6-sol")
+    tools = [{"type": "function", "function": {"name": "f", "parameters": {"type": "object", "properties": {"p": {"type": ["string", "array"], "items": {"type": "string"}}}}}}]
+    assert c.chat.completions.create(model="gpt-5.6-sol", messages=[], tools=tools) == {"ok": True}
+    kw = raw.chat.completions.calls[-1]
+    assert "anyOf" in kw["tools"][0]["function"]["parameters"]["properties"]["p"] and kw["reasoning_effort"] == "none"
+    assert "anyOf" not in tools[0]["function"]["parameters"]["properties"]["p"]        # caller's list untouched
+    c.chat.completions.create(model="gemini-3.8-flash", messages=[], tools=tools)
+    assert "reasoning_effort" not in raw.chat.completions.calls[-1]
+    c.chat.completions.create(model="gpt-5.6-sol", messages=[], tools=tools, reasoning_effort="low")
+    assert raw.chat.completions.calls[-1]["reasoning_effort"] == "low"                  # explicit value wins
+    c.chat.completions.create(messages=[], tools=tools)                                  # default model applies
+    assert raw.chat.completions.calls[-1]["reasoning_effort"] == "none"
+    c.chat.completions.create(model="gpt-5.6-sol", messages=[])                          # no tools: nothing added
+    assert "reasoning_effort" not in raw.chat.completions.calls[-1]
+    assert c.embeddings == "emb" and portable_openai_client(c) is c and isinstance(c, PortableOpenAIClient)
+    assert openai_tools_need_no_reasoning("gpt-5.6-sol") and openai_tools_need_no_reasoning("openai/gpt-5-mini")
+    assert not openai_tools_need_no_reasoning("gemini-3.8-flash") and not openai_tools_need_no_reasoning("bedrock/gpt-5") and not openai_tools_need_no_reasoning("gpt-4o")
+
+
+def test_every_internal_proxy_client_is_built_portable():
+    """Each proxy-path call site wraps its OpenAI client; a raw client would
+    send the authored schemas straight to the proxy's backend."""
+    import re
+    root = Path(__file__).resolve().parents[1] / "scilink"
+    sites = ["agents/exp_agents/analysis_orchestrator.py", "agents/planning_agents/planning_orchestrator.py",
+             "agents/meta_agent/meta_orchestrator.py", "agents/sim_agents/simulation_orchestrator.py",
+             "agents/sim_agents/structure_agent.py", "wrappers/openai_wrapper.py", "wrappers/openai_wrapper_tools.py"]
+    for rel in sites:
+        src = (root / rel).read_text()
+        raw = [m.start() for m in re.finditer(r"(?<![\w.])(?:openai\.)?OpenAI\(", src)]
+        assert raw, rel
+        for pos in raw:
+            assert "portable_openai_client(" in src[max(0, pos - 200):pos + 10], f"{rel}: raw OpenAI( client at {pos}"
