@@ -264,13 +264,58 @@ class AvailableSoftware:
         """Load YAML if it exists; otherwise detect and save.
 
         Non-interactive default. Suitable for headless / scripted use.
+
+        A cached YAML would otherwise be trusted forever, so a package
+        installed AFTER the cache was built (its entry cached
+        ``available: false``, or its skill absent from the cache) stays
+        invisible until a manual refresh — the fairchem-core / UMA case.
+        So on load we re-probe the not-yet-available entries and persist any
+        that flipped to available. This is cheap: a still-missing module's
+        ``find_spec`` returns None without importing; only a newly-installed
+        one pays an import, once, after which it caches ``available: true``
+        and is skipped. ``available: true`` and ``user_confirmed`` entries
+        are left untouched — trusted, and re-importing heavy MLIP packages
+        on every startup is exactly the cost the cache exists to avoid.
         """
         p = Path(path) if path else _yaml_path()
         if p.is_file():
-            return cls.load(p)
+            cfg = cls.load(p)
+            try:
+                if cfg._reprobe_unavailable():
+                    cfg.save(p)
+            except Exception as exc:  # never let a probe break the hot path
+                _logger.warning(
+                    "re-probe of unavailable software failed: %s", exc)
+            return cfg
         cfg = cls.detect()
         cfg.save(p)
         return cfg
+
+    def _reprobe_unavailable(self) -> bool:
+        """Re-run frontmatter probes for engines NOT currently available.
+
+        Walks every discoverable skill; for each engine that is neither
+        already ``available`` nor ``user_confirmed``, re-probes and adopts
+        the result only when it now reports available. Catches both a
+        newly-installed package (cached false) and a newly-added skill
+        bundle (absent from the cache). Deliberately does NOT re-probe
+        available entries — an uninstall going stale surfaces as a clear
+        import error at use time, which is cheaper than re-importing every
+        installed backend on every startup.
+
+        Returns True if any entry changed (caller persists).
+        """
+        changed = False
+        for domain, engines in list_all_skills().items():
+            for engine in engines:
+                cur = self._data.get(domain, {}).get(engine, {})
+                if cur.get("available") or cur.get("user_confirmed"):
+                    continue
+                info = _probe_from_frontmatter(domain, engine)
+                if info.get("available"):
+                    self._data.setdefault(domain, {})[engine] = info
+                    changed = True
+        return changed
 
     @classmethod
     def refresh(cls, path: Optional[Path] = None) -> "AvailableSoftware":
