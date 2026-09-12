@@ -30,6 +30,13 @@ export function demoteHeadings(text: string): string {
 }
 
 import { isFileToken } from "../filelink";
+import { HighlightedCode } from "./CodeBlock";
+
+/** react-markdown puts ```lang on the code element as `language-lang`. */
+function fenceLanguage(className?: string): string | null {
+  const m = /language-([\w+-]+)/.exec(className ?? "");
+  return m ? m[1] : null;
+}
 
 export function MarkdownBody({
   text,
@@ -51,27 +58,30 @@ export function MarkdownBody({
       <img src={src ? transformImageUri(src) : undefined} alt={alt ?? ""} />
     );
   }
-  if (onFileClick) {
-    components.code = (props: {
-      className?: string;
-      children?: React.ReactNode;
-    }) => {
-      const raw = String(props.children ?? "");
-      // Inline code only (fenced blocks carry a language class / newlines).
-      if (!props.className && !raw.includes("\n") && isFileToken(raw)) {
-        return (
-          <code
-            className="file-link"
-            title="Open in Files"
-            onClick={() => onFileClick(raw)}
-          >
-            {props.children}
-          </code>
-        );
-      }
-      return <code className={props.className}>{props.children}</code>;
-    };
-  }
+  components.code = (props: {
+    className?: string;
+    children?: React.ReactNode;
+  }) => {
+    const raw = String(props.children ?? "");
+    const lang = fenceLanguage(props.className);
+    // A fenced block (language class, or multi-line) is highlighted (#605).
+    if (lang || raw.includes("\n")) {
+      return <HighlightedCode code={raw.replace(/\n$/, "")} language={lang} />;
+    }
+    // Inline code that looks like a file path opens it in the explorer.
+    if (onFileClick && isFileToken(raw)) {
+      return (
+        <code
+          className="file-link"
+          title="Open in Files"
+          onClick={() => onFileClick(raw)}
+        >
+          {props.children}
+        </code>
+      );
+    }
+    return <code className={props.className}>{props.children}</code>;
+  };
   return (
     <div className="md-body">
       <ReactMarkdown
