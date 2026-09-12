@@ -18,6 +18,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from .tls import add_tls_arguments, tls_kwargs
+
 
 def _headless_matplotlib() -> None:
     """Force a non-interactive backend before any agent imports pyplot.
@@ -59,7 +61,9 @@ def main(argv=None) -> int:
                         help="Allow a non-loopback --host WITHOUT any auth "
                              "(only behind a reverse proxy that "
                              "authenticates for you).")
+    add_tls_arguments(parser, "the web UI")
     args = parser.parse_args(argv)
+    tls = tls_kwargs(args)
 
     try:
         import uvicorn
@@ -112,8 +116,9 @@ def main(argv=None) -> int:
     # Pasted local folder paths only make sense when the browser and the
     # server share a machine.
     app = create_app(session_root, auth=auth, local_files=loopback)
-    url = f"http://127.0.0.1:{args.port}"
-    print(f"SciLink web backend on http://{args.host}:{args.port} "
+    scheme = "https" if tls else "http"
+    url = f"{scheme}://127.0.0.1:{args.port}"
+    print(f"SciLink web backend on {scheme}://{args.host}:{args.port} "
           f"(sessions in {session_root})")
     if auth is not None:
         who = (f"{len(auth.users)} users, per-user session roots"
@@ -131,7 +136,7 @@ def main(argv=None) -> int:
         import webbrowser
 
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning", **tls)
     return 0
 
 

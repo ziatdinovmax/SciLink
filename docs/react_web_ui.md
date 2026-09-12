@@ -73,7 +73,9 @@ What a shared server changes, and only a shared server:
   server for everyone);
 - cookie sessions live in memory, so a restart signs everyone out.
 
-TLS is the reverse proxy's job. Caddy:
+### HTTPS
+
+TLS is normally the reverse proxy's job. Caddy:
 
 ```
 scilink.lab.example.org {
@@ -95,6 +97,17 @@ location / {
     client_max_body_size 2g;
 }
 ```
+
+Without a proxy, the server terminates TLS itself with the same flags
+`scilink serve` takes:
+
+```bash
+scilink-web --host 0.0.0.0 --port 8422 --users users.json \
+    --ssl-certfile /etc/scilink/cert.pem --ssl-keyfile /etc/scilink/key.pem
+```
+
+The sign-in cookie is `Secure` either way (the server reads its own scheme
+or `X-Forwarded-Proto`).
 
 If the proxy itself authenticates every request (SSO, mTLS), run with
 `--insecure-no-auth` behind it. Not covered yet: per-user LLM credentials
