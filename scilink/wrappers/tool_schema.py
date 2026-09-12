@@ -196,3 +196,72 @@ def tool_schema_problems(tools: Optional[List[Any]]) -> List[str]:
             out.append(f"{name}: parameters.type must be 'object'")
         out += [f"{name}: {p}" for p in gemini_schema_problems(params)]
     return out
+
+
+# ── the OpenAI-compatible (internal proxy) path ───────────────────────────
+def openai_tools_need_no_reasoning(model: str) -> bool:
+    """True for OpenAI's gpt-5 family, which refuses function tools on chat
+    completions unless ``reasoning_effort`` is ``"none"`` (observed live:
+    "Function tools with reasoning_effort are not supported for gpt-5.6-sol
+    in /v1/chat/completions ... set reasoning_effort to 'none'"). Accepts a
+    LiteLLM-prefixed name (``openai/gpt-5.6-sol``) or the bare model id an
+    OpenAI-compatible proxy exposes (``gpt-5.6-sol``); any other provider
+    prefix is never a match."""
+    m = str(model or "").lower()
+    if "/" in m:
+        provider, _, name = m.partition("/")
+        if provider != "openai":
+            return False
+    else:
+        name = m
+    return name.startswith("gpt-5")
+
+
+class _PortableCompletions:
+    def __init__(self, raw_completions, default_model):
+        self._raw = raw_completions
+        self._default_model = default_model
+
+    def create(self, *args, **kwargs):
+        tools = kwargs.get("tools")
+        if tools:
+            kwargs["tools"] = normalize_tools(tools)
+            model = kwargs.get("model") or self._default_model
+            if openai_tools_need_no_reasoning(model) and "reasoning_effort" not in kwargs:
+                kwargs["reasoning_effort"] = "none"
+        return self._raw.create(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+
+class _PortableChat:
+    def __init__(self, raw_chat, default_model):
+        self._raw = raw_chat
+        self.completions = _PortableCompletions(raw_chat.completions, default_model)
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+
+class PortableOpenAIClient:
+    """An ``openai.OpenAI`` client whose ``chat.completions.create`` sends
+    normalized tool schemas and turns reasoning off for gpt-5 tool calls;
+    everything else (embeddings, models, ...) is the wrapped client's. Every
+    internal-proxy call site builds its client through
+    :func:`portable_openai_client`, so an OpenAI-compatible proxy in front
+    of Gemini or a gpt-5 model gets the same portable declarations as the
+    direct LiteLLM path."""
+
+    def __init__(self, raw_client, default_model=None):
+        self._raw = raw_client
+        self.chat = _PortableChat(raw_client.chat, default_model)
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+
+def portable_openai_client(raw_client, default_model=None):
+    if isinstance(raw_client, PortableOpenAIClient):
+        return raw_client
+    return PortableOpenAIClient(raw_client, default_model)

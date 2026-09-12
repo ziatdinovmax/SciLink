@@ -1720,12 +1720,15 @@ class AnalysisOrchestratorAgent:
     def _handle_openai_chat(self, user_input: str) -> str:
         """Handle chat with OpenAI-compatible models with manual function calling loop."""
         from openai import OpenAI
-        
-        client = OpenAI(
+        from ...wrappers.tool_schema import portable_openai_client
+
+        # Portable tool schemas + gpt-5 reasoning rule on the proxy path too (#606)
+        client = portable_openai_client(OpenAI(
             api_key=self.model.api_key,
             base_url=self.model.base_url,
             timeout=120.0  # 2 minute timeout
-        )
+        ), self.model.model)
+        self.client = client
         
         # Repair any tool_use left unanswered by a mid-run user Stop
         # (or a trim slicing a pair apart) before extending history.

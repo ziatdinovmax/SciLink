@@ -297,7 +297,8 @@ class StructureGenerator:
                                   *, api_key, base_url, model_name):
         """Tool-call loop using the OpenAI Python SDK (internal-proxy path)."""
         from openai import OpenAI
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
+        from ...wrappers.tool_schema import portable_openai_client
+        client = portable_openai_client(OpenAI(api_key=api_key, base_url=base_url, timeout=60.0), model_name)
 
         for _ in range(MAX_MP_RESOLVER_ITERATIONS):
             resp = client.chat.completions.create(

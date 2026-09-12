@@ -1,5 +1,5 @@
 import io
-from .tool_schema import normalize_tools
+from .tool_schema import normalize_tools, portable_openai_client
 import re
 import base64
 from types import SimpleNamespace
@@ -28,7 +28,7 @@ class OpenAIAsGenerativeModel:
 
     def __init__(self, model: str, api_key: str | None = None, base_url: str | None = None):
         # Works with OpenAI and any OpenAI-compatible endpoint 
-        self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
+        self.client = portable_openai_client(openai.OpenAI(api_key=api_key, base_url=base_url), model)
         self.model = model
 
     # ---------------------- public API ----------------------
