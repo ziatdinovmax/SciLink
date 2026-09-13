@@ -105,7 +105,17 @@ Supported Models:
         type=str,
         dest='embedding_api_key',
         help='API key for the embedding model (defaults to --api-key / env). '
-             'Ignored when --base-url is set (the proxy key is reused).'
+             'Ignored when --base-url is set without --embedding-base-url '
+             '(the proxy key is reused).'
+    )
+
+    parser.add_argument(
+        '--embedding-base-url',
+        type=str,
+        dest='embedding_base_url',
+        help='OpenAI-compatible endpoint for the EMBEDDINGS only, authenticated '
+             'with --embedding-api-key (or --api-key). Lets the chat model run '
+             'direct (or through --base-url) while embeddings go elsewhere.'
     )
 
     parser.add_argument(
@@ -328,6 +338,7 @@ class OrchestratorPlayground:
         self._skill_files = self.config.get('skill_files')
         self._mcp_servers = self.config.get('mcp_servers')
         self._embedding_api_key = self.config.get('embedding_api_key')
+        self._embedding_base_url = self.config.get('embedding_base_url')
         self._futurehouse_api_key = self.config.get('futurehouse_api_key')
         self._session_dir_arg = self.config.get('session_dir')
         self._restore = self.config.get('restore', False)
@@ -516,6 +527,7 @@ class OrchestratorPlayground:
                 base_url=base_url,
                 embedding_model=embedding_model,
                 embedding_api_key=self._embedding_api_key,
+                embedding_base_url=self._embedding_base_url,
                 futurehouse_api_key=futurehouse_key,
                 autonomy_level=autonomy_level,
                 data_dir=self.data_dir,

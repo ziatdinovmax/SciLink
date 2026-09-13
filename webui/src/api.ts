@@ -37,7 +37,12 @@ export interface AppConfig {
     cred_error: string;
   };
   credentials: Record<string, { env_var: string | null; is_set: boolean }>;
-  embedding_credential?: { env_var: string | null; is_set: boolean; proxied?: boolean };
+  embedding_credential?: {
+    env_var: string | null;
+    is_set: boolean;
+    proxied?: boolean;
+    endpoint?: "vendor" | "base_url" | "embedding_base_url";
+  };
 }
 
 export interface ReportRef {
@@ -329,6 +334,7 @@ export interface CreateSessionBody {
   mp_api_key?: string;
   embedding_model?: string | null;
   embedding_api_key?: string | null;
+  embedding_base_url?: string | null;
   objective?: string;
   resume_dir?: string | null;
 }
@@ -365,10 +371,11 @@ export const api = {
   login: (token: string) => req<{ user: string }>(`/auth/login`, json({ token })),
   logout: () => req<{ ok: boolean }>(`/auth/logout`, { method: "POST" }),
 
-  config: (model?: string, baseUrl?: string, embeddingModel?: string) =>
+  config: (model?: string, baseUrl?: string, embeddingModel?: string, embeddingBaseUrl?: string) =>
     req<AppConfig>(
       `/config?model=${encodeURIComponent(model ?? "")}&base_url=${encodeURIComponent(baseUrl ?? "")}` +
-        `&embedding_model=${encodeURIComponent(embeddingModel ?? "")}`,
+        `&embedding_model=${encodeURIComponent(embeddingModel ?? "")}` +
+        `&embedding_base_url=${encodeURIComponent(embeddingBaseUrl ?? "")}`,
     ),
 
   listSessions: (mode: string) =>

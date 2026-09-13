@@ -112,7 +112,8 @@ def _init_analysis_agent(session_dir: Path, api_key, model, base_url,
 
 def _init_planning_agent(session_dir: Path, api_key, model, base_url,
                          autonomy, fh_api_key, objective, session_root: Path,
-                         embedding_model=None, embedding_api_key=None):
+                         embedding_model=None, embedding_api_key=None,
+                         embedding_base_url=None):
     from scilink.agents.planning_agents.planning_orchestrator import (
         AutonomyLevel, PlanningOrchestratorAgent)
     mode_map = {"co-pilot": AutonomyLevel.CO_PILOT,
@@ -130,6 +131,9 @@ def _init_planning_agent(session_dir: Path, api_key, model, base_url,
         logging.info(f"Session {session_dir.name}: embedding model {embedding_model!r}")
     if embedding_api_key:
         kwargs["embedding_api_key"] = embedding_api_key
+    if embedding_base_url:
+        kwargs["embedding_base_url"] = embedding_base_url
+        logging.info(f"Session {session_dir.name}: embeddings via {embedding_base_url!r}")
     return PlanningOrchestratorAgent(
         objective=(objective or "").strip() or "Undefined Research Goal",
         base_dir=str(session_dir), api_key=api_key, model_name=model,
@@ -141,7 +145,8 @@ def _init_planning_agent(session_dir: Path, api_key, model, base_url,
 
 def _init_meta_agent(session_dir: Path, api_key, model, base_url,
                      autonomy, fh_api_key,
-                     embedding_model=None, embedding_api_key=None):
+                     embedding_model=None, embedding_api_key=None,
+                         embedding_base_url=None):
     from scilink.agents.meta_agent.meta_orchestrator import (
         MetaMode, MetaOrchestratorAgent)
     mode_map = {"autopilot": MetaMode.AUTOPILOT,
@@ -152,6 +157,9 @@ def _init_meta_agent(session_dir: Path, api_key, model, base_url,
         logging.info(f"Session {session_dir.name}: embedding model {embedding_model!r}")
     if embedding_api_key:
         kwargs["embedding_api_key"] = embedding_api_key
+    if embedding_base_url:
+        kwargs["embedding_base_url"] = embedding_base_url
+        logging.info(f"Session {session_dir.name}: embeddings via {embedding_base_url!r}")
     return MetaOrchestratorAgent(
         base_dir=str(session_dir), api_key=api_key, model_name=model,
         base_url=base_url or None, meta_mode=mode_map[autonomy],
@@ -264,7 +272,8 @@ class SessionManager:
                base_url: str, provider_fields: Dict[str, str],
                fh_api_key: str, mp_api_key: str, objective: str = "",
                embedding_model: Optional[str] = None,
-               embedding_api_key: Optional[str] = None) -> WebSession:
+               embedding_api_key: Optional[str] = None,
+               embedding_base_url: Optional[str] = None) -> WebSession:
         if mode not in ("meta", "analyze", "plan"):
             raise SessionError(f"Unsupported mode: {mode!r}")
         if mode == "meta" and autonomy == "co-pilot":
@@ -291,13 +300,15 @@ class SessionManager:
                 agent = _init_meta_agent(
                     session_dir, resolved_key, model, base_url, autonomy,
                     fh_api_key, embedding_model=embedding_model,
-                    embedding_api_key=embedding_api_key)
+                    embedding_api_key=embedding_api_key,
+                    embedding_base_url=embedding_base_url)
             elif mode == "plan":
                 agent = _init_planning_agent(
                     session_dir, resolved_key, model, base_url, autonomy,
                     fh_api_key, objective, self.session_root,
                     embedding_model=embedding_model,
-                    embedding_api_key=embedding_api_key)
+                    embedding_api_key=embedding_api_key,
+                    embedding_base_url=embedding_base_url)
             else:
                 agent = _init_analysis_agent(
                     session_dir, resolved_key, model, base_url, autonomy,
@@ -317,7 +328,8 @@ class SessionManager:
                api_key: str, base_url: str, provider_fields: Dict[str, str],
                fh_api_key: str, mp_api_key: str,
                embedding_model: Optional[str] = None,
-               embedding_api_key: Optional[str] = None) -> WebSession:
+               embedding_api_key: Optional[str] = None,
+               embedding_base_url: Optional[str] = None) -> WebSession:
         # resume_dir is a dir NAME under the session root, never a path.
         if "/" in resume_dir or "\\" in resume_dir or resume_dir in (".", ".."):
             raise SessionError("Invalid session directory name.")
@@ -341,6 +353,8 @@ class SessionManager:
             kwargs["embedding_model"] = embedding_model
         if embedding_api_key:
             kwargs["embedding_api_key"] = embedding_api_key
+        if embedding_base_url:
+            kwargs["embedding_base_url"] = embedding_base_url
         try:
             if mode == "meta":
                 from scilink.agents.meta_agent.meta_orchestrator import (

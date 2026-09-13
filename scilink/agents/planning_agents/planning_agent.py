@@ -276,6 +276,7 @@ class PlanningAgent(BaseAgent):
                  base_url: Optional[str] = None,
                  embedding_model: str = "gemini-embedding-001",
                  embedding_api_key: Optional[str] = None,
+                 embedding_base_url: Optional[str] = None,
                  futurehouse_api_key: str = None,
                  kb_base_path: str = "./kb_storage/default_kb",
                  code_chunk_size: int = 20000,
@@ -313,7 +314,7 @@ class PlanningAgent(BaseAgent):
                     "Set SCILINK_API_KEY environment variable or pass api_key parameter."
                 )
             
-            if embedding_api_key is not None:
+            if embedding_api_key is not None and not embedding_base_url:
                 logging.warning(
                     "⚠️ embedding_api_key is ignored for internal proxy. "
                     "Using api_key for all requests."
@@ -326,7 +327,8 @@ class PlanningAgent(BaseAgent):
                 base_url=base_url
             )
             use_litellm = False
-            embedding_api_key = api_key
+            if not embedding_base_url:
+                embedding_api_key = api_key
             
         else:
             # PUBLIC LITELLM - can use different keys per provider
@@ -337,6 +339,24 @@ class PlanningAgent(BaseAgent):
             )
             use_litellm = True
             # embedding_api_key stays as passed (can be None for auto-detect)
+
+        # Where the EMBEDDINGS go. An explicit embedding_base_url is its own
+        # OpenAI-compatible endpoint, authenticated with the embedding key
+        # (the main key when none is given) — independent of where the chat
+        # model runs. Without it: the main proxy when there is one, else the
+        # vendor via LiteLLM.
+        if embedding_base_url:
+            kb_base_url, kb_use_litellm = embedding_base_url, False
+            if not embedding_api_key:
+                logging.warning(
+                    "⚠️ embedding_base_url given without an embedding_api_key; "
+                    "using the main api_key for the embedding endpoint."
+                )
+                embedding_api_key = api_key
+            logging.info(f"🏛️ PlanningAgent embeddings via {embedding_base_url}")
+        else:
+            kb_base_url, kb_use_litellm = base_url, use_litellm
+        self._embedding_base_url = embedding_base_url
         
         self._api_key = api_key
         self.generation_config = None
@@ -356,8 +376,8 @@ class PlanningAgent(BaseAgent):
         self.kb_docs = KnowledgeBase(
             api_key=embedding_api_key,
             embedding_model=embedding_model,
-            base_url=base_url,
-            use_litellm=use_litellm
+            base_url=kb_base_url,
+            use_litellm=kb_use_litellm
         )
         self.kb_docs_prefix = base_path.parent / f"{base_path.name}_docs"
         self.kb_docs_index = str(self.kb_docs_prefix.with_suffix(".faiss"))
@@ -368,8 +388,8 @@ class PlanningAgent(BaseAgent):
         self.kb_code = KnowledgeBase(
             api_key=embedding_api_key,
             embedding_model=embedding_model,
-            base_url=base_url,
-            use_litellm=use_litellm
+            base_url=kb_base_url,
+            use_litellm=kb_use_litellm
         )
         self.kb_code_prefix = base_path.parent / f"{base_path.name}_code"
         self.kb_code_index = str(self.kb_code_prefix.with_suffix(".faiss"))

@@ -165,7 +165,7 @@ def create_app(session_root: Path, serve_frontend: bool = True,
 
     @app.get("/api/v1/config")
     def get_config(request: Request, model: str = "", base_url: str = "",
-                   embedding_model: str = ""):
+                   embedding_model: str = "", embedding_base_url: str = ""):
         """Static UI config + credential AVAILABILITY (never values)."""
         modes = [m for m in APP_MODES if m["key"] != "simulate"]
         model_q = model or MODEL_OPTIONS[0]
@@ -176,10 +176,15 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         # base URL every request, embeddings included, goes through the proxy
         # with the main key and the embedding key is ignored (the planning /
         # meta agents warn and drop it), so no vendor env var applies.
-        if base_url:
-            emb_value, emb_env = "", None
+        # An embedding_base_url is the embeddings' own endpoint, used with the
+        # embedding key (the main key when blank).
+        if embedding_base_url:
+            emb_value, emb_env, emb_endpoint = "", None, "embedding_base_url"
+        elif base_url:
+            emb_value, emb_env, emb_endpoint = "", None, "base_url"
         else:
             emb_value, emb_env = resolve_embedding_prefill(embedding_model)
+            emb_endpoint = "vendor"
         return {
             "auth": {"required": auth is not None,
                      "user": _user(request) if auth is None
@@ -210,7 +215,8 @@ def create_app(session_root: Path, serve_frontend: bool = True,
                 for field, (value, env) in prefill.items()
             },
             "embedding_credential": {"env_var": emb_env, "is_set": bool(emb_value),
-                                     "proxied": bool(base_url)},
+                                     "proxied": emb_endpoint == "base_url",
+                                     "endpoint": emb_endpoint},
         }
 
     # ── sessions ─────────────────────────────────────────────────
@@ -236,7 +242,8 @@ def create_app(session_root: Path, serve_frontend: bool = True,
                     provider_fields=body.provider_fields,
                     fh_api_key=body.fh_api_key, mp_api_key=body.mp_api_key,
                     embedding_model=body.embedding_model,
-                    embedding_api_key=body.embedding_api_key)
+                    embedding_api_key=body.embedding_api_key,
+                    embedding_base_url=body.embedding_base_url)
             else:
                 session = mgr.create(
                     mode=body.mode, model=body.model, autonomy=body.autonomy,
@@ -245,7 +252,8 @@ def create_app(session_root: Path, serve_frontend: bool = True,
                     fh_api_key=body.fh_api_key, mp_api_key=body.mp_api_key,
                     objective=body.objective,
                     embedding_model=body.embedding_model,
-                    embedding_api_key=body.embedding_api_key)
+                    embedding_api_key=body.embedding_api_key,
+                    embedding_base_url=body.embedding_base_url)
         except SessionError as exc:
             raise HTTPException(400, str(exc))
         return mgr.snapshot(session)

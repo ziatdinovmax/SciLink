@@ -73,6 +73,21 @@ What a shared server changes, and only a shared server:
   server for everyone);
 - cookie sessions live in memory, so a restart signs everyone out.
 
+### Embeddings
+
+Plan and Mission Control sessions embed documents for retrieval. The sidebar
+takes an embedding model (a preset or a custom name) and, optionally, an
+**Embedding base URL**: an OpenAI-compatible endpoint used for the
+embeddings only, authenticated with the embedding API key (the main key
+when that field is blank). The chat model keeps its own route — direct to
+its vendor, or through the main base URL — so a session can, for example,
+run Bedrock for chat and an internal embedding service for retrieval.
+Without an embedding base URL, embeddings follow the main base URL when
+there is one (main key; the embedding key is ignored), else go to the
+embedding model's vendor. The same three settings exist as
+`--embedding-model`, `--embedding-api-key` and `--embedding-base-url` on
+`scilink plan` / `scilink explore`.
+
 ### HTTPS
 
 TLS is normally the reverse proxy's job. Caddy:

@@ -324,16 +324,21 @@ def test_config_reports_embedding_key_availability_for_any_model_name(client, mo
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False); monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     d = client.get("/api/v1/config", params={"embedding_model": "text-embedding-3-large"}).json()
-    assert d["embedding_credential"] == {"env_var": "OPENAI_API_KEY", "is_set": True, "proxied": False}
+    assert d["embedding_credential"] == {"env_var": "OPENAI_API_KEY", "is_set": True, "proxied": False, "endpoint": "vendor"}
     d = client.get("/api/v1/config", params={"embedding_model": "gemini-embedding-001"}).json()
     assert d["embedding_credential"]["is_set"] is False
     d = client.get("/api/v1/config").json()
-    assert d["embedding_credential"] == {"env_var": None, "is_set": False, "proxied": False}
+    assert d["embedding_credential"] == {"env_var": None, "is_set": False, "proxied": False, "endpoint": "vendor"}
     assert "value" not in d["embedding_credential"]
     # with a base URL the embedding key is never used: no vendor env var is claimed
     d = client.get("/api/v1/config", params={"embedding_model": "text-embedding-3-large",
                                               "base_url": "https://proxy.example/v1"}).json()
-    assert d["embedding_credential"] == {"env_var": None, "is_set": False, "proxied": True}
+    assert d["embedding_credential"] == {"env_var": None, "is_set": False, "proxied": True, "endpoint": "base_url"}
+    # an embedding base URL is the embeddings' own endpoint: the embedding key applies, no vendor env var
+    d = client.get("/api/v1/config", params={"embedding_model": "text-embedding-3-large",
+                                              "base_url": "https://proxy.example/v1",
+                                              "embedding_base_url": "https://emb.example/v1"}).json()
+    assert d["embedding_credential"] == {"env_var": None, "is_set": False, "proxied": False, "endpoint": "embedding_base_url"}
 
 
 def test_consent_required(client):
@@ -1195,6 +1200,8 @@ def test_custom_embedding_model_reaches_the_agent_initializer(client, monkeypatc
         r = client.post("/api/v1/sessions", json={
             "mode": mode, "model": "bedrock/us.anthropic.claude-opus-4-8", "autonomy": "autonomous",
             "api_key": "bedrock-test-key", "consent": True,
-            "embedding_model": "voyage-3-large", "embedding_api_key": "vk"})
+            "embedding_model": "voyage-3-large", "embedding_api_key": "vk",
+            "embedding_base_url": "https://emb.example/v1"})
         assert r.status_code != 200 and "initializer reached" in r.text, r.text
         assert seen[mode]["embedding_model"] == "voyage-3-large" and seen[mode]["embedding_api_key"] == "vk"
+        assert seen[mode]["embedding_base_url"] == "https://emb.example/v1"

@@ -373,6 +373,7 @@ export default function App() {
         mp_api_key: cfg.mpApiKey,
         embedding_model: cfg.embeddingModel || null,
         embedding_api_key: cfg.embeddingApiKey || null,
+        embedding_base_url: cfg.embeddingBaseUrl || null,
         objective: cfg.objective,
         resume_dir: resumeDir ?? null,
       });

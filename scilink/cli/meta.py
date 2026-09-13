@@ -81,6 +81,10 @@ Environment Variables:
                              '(default: gemini-embedding-001)')
     parser.add_argument('--embedding-api-key', type=str, dest='embedding_api_key',
                         help='API key for the embedding provider')
+    parser.add_argument('--embedding-base-url', type=str, dest='embedding_base_url',
+                        help='OpenAI-compatible endpoint for the EMBEDDINGS only '
+                             '(authenticated with --embedding-api-key or --api-key); '
+                             'the chat model keeps its own route.')
     parser.add_argument('--futurehouse-api-key', type=str, dest='futurehouse_api_key',
                         help='FutureHouse API key (or set FUTUREHOUSE_API_KEY env var). '
                              'Enables literature search in delegated analysis.')
@@ -255,6 +259,7 @@ class MetaPlayground:
         api_key = self.config.get('api_key')
         embedding_model = self.config.get('embedding_model', 'gemini-embedding-001')
         embedding_api_key = self.config.get('embedding_api_key')
+        embedding_base_url = self.config.get('embedding_base_url')
         futurehouse_api_key = self.config.get('futurehouse_api_key')
         mode_str = self.config.get('meta_mode', 'autopilot')
         session_dir = self.config.get('session_dir')
@@ -337,6 +342,7 @@ a nested child sub-session under this meta session.
                 base_url=base_url,
                 embedding_model=embedding_model,
                 embedding_api_key=embedding_api_key,
+                embedding_base_url=embedding_base_url,
                 futurehouse_api_key=futurehouse_api_key,
                 restore_checkpoint=restore,
                 meta_mode=meta_mode,
