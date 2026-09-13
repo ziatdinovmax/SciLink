@@ -76,9 +76,10 @@ Environment Variables:
     parser.add_argument('--api-key', type=str, dest='api_key',
                         help='API key for LLM provider (overrides environment variables)')
     parser.add_argument('--embedding-model', type=str, dest='embedding_model',
-                        default='gemini-embedding-001',
-                        help='Embedding model for the child orchestrators '
-                             '(default: gemini-embedding-001)')
+                        default=None,
+                        help='Embedding model for the child orchestrators. Omit '
+                             'for KEYWORD-ONLY (BM25) grounding (no key needed); '
+                             'name a model for dense retrieval.')
     parser.add_argument('--embedding-api-key', type=str, dest='embedding_api_key',
                         help='API key for the embedding provider')
     parser.add_argument('--embedding-base-url', type=str, dest='embedding_base_url',
@@ -257,7 +258,7 @@ class MetaPlayground:
         model_name = self.config.get('model_name', 'claude-opus-4-6')
         base_url = self.config.get('base_url')
         api_key = self.config.get('api_key')
-        embedding_model = self.config.get('embedding_model', 'gemini-embedding-001')
+        embedding_model = self.config.get('embedding_model')
         embedding_api_key = self.config.get('embedding_api_key')
         embedding_base_url = self.config.get('embedding_base_url')
         futurehouse_api_key = self.config.get('futurehouse_api_key')

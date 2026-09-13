@@ -37,7 +37,7 @@ class KnowledgeBase:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        embedding_model: str = "gemini-embedding-001",
+        embedding_model: Optional[str] = None,
         base_url: Optional[str] = None,
         use_litellm: bool = False,
         # Deprecated parameters
@@ -55,9 +55,16 @@ class KnowledgeBase:
         )
         
         self.embedding_model_name = embedding_model
-        
-        # Initialize embedding client
-        if base_url:
+
+        # Initialize embedding client. No embedding model is a deliberate
+        # choice, not a failure: the KB is KEYWORD-ONLY (BM25 retrieval tier),
+        # so no dense embeddings are attempted and no embedding provider /
+        # key is needed. Dense retrieval is opt-in — name an embedding model.
+        if not embedding_model:
+            logging.info("📚 KnowledgeBase: no embedding model — keyword-only "
+                         "(BM25) retrieval; dense retrieval disabled.")
+            self.embedding_client = None
+        elif base_url:
             logging.info(f"🏛️ KnowledgeBase using internal proxy for embeddings")
             self.embedding_client = OpenAIAsEmbeddingModel(
                 model=embedding_model,
@@ -97,9 +104,21 @@ class KnowledgeBase:
             return
 
         self.chunks.extend(chunks)
+
+        # No embedding model ⇒ intentional keyword-only KB: keep the chunks,
+        # build no dense index, and let the query path's BM25 tier serve
+        # retrieval. No embedding call is made (nothing to fail).
+        if self.embedding_client is None:
+            print("  - 📚 No embedding model configured — building a "
+                  "KEYWORD-ONLY knowledge base (BM25 retrieval tier). "
+                  "Name an embedding model to enable dense retrieval.")
+            self.index = None
+            self._bm25_state = None
+            return
+
         texts_to_embed = [chunk['text'] for chunk in chunks]
         all_embeddings = []
-        
+
         print(f"  - Generating embeddings for {len(texts_to_embed)} chunks using '{self.embedding_model_name}'...")
         
         total_batches = (len(texts_to_embed) + batch_size - 1) // batch_size

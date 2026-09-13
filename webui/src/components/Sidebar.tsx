@@ -340,12 +340,18 @@ export function Sidebar({
               disabled={locked}
               onChange={(e) => setEmbeddingPreset(e.target.value)}
             >
-              <option value="">(default)</option>
+              <option value="">(none — keyword-only)</option>
               {(config?.embedding_models ?? []).map((m) => (
                 <option key={m}>{m}</option>
               ))}
               <option value="__custom__">Custom</option>
             </select>
+            {!embeddingModel && (
+              <span className="caption">
+                No embedding model: knowledge bases are searched by keyword
+                (BM25), no key needed. Pick a model for dense retrieval.
+              </span>
+            )}
           </label>
           {embeddingPreset === "__custom__" && (
             <label className="field">
