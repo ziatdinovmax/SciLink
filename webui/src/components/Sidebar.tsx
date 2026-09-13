@@ -86,6 +86,15 @@ export function Sidebar({
   // effective name sent to the server.
   const [embeddingPreset, setEmbeddingPreset] = useState("");
   const [customEmbeddingModel, setCustomEmbeddingModel] = useState("");
+  // The default is keyword-only, EXCEPT on Amazon Bedrock, where the same AWS
+  // credential also covers a first-party embedder — so a Bedrock chat model
+  // auto-selects it (the user can still change it). Titan Text Embeddings V2
+  // is first-party, needs no separate model-access opt-in, and works through
+  // the same Bedrock credential.
+  const BEDROCK_EMBED = "bedrock/amazon.titan-embed-text-v2:0";
+  const isBedrock = (m: string) => m.startsWith("bedrock/");
+  // true once the user picks the embedder themselves — then auto-select stops.
+  const [embeddingUserSet, setEmbeddingUserSet] = useState(false);
   const embeddingModel =
     embeddingPreset === "__custom__" ? customEmbeddingModel.trim() : embeddingPreset;
   const [embeddingApiKey, setEmbeddingApiKey] = useState("");
@@ -141,6 +150,14 @@ export function Sidebar({
       })
       .catch(() => {});
   }, [effectiveModel, baseUrl]);
+
+  // Auto-select the embedder from the chat provider until the user overrides:
+  // Bedrock ⇒ Titan (same credential, dense retrieval for free), otherwise
+  // keyword-only. A resumed/locked session keeps its persisted choice.
+  useEffect(() => {
+    if (locked || embeddingUserSet || !effectiveModel) return;
+    setEmbeddingPreset(isBedrock(effectiveModel) ? BEDROCK_EMBED : "");
+  }, [effectiveModel, locked, embeddingUserSet]);
 
   // The embedding key's availability follows the embedding model's vendor.
   useEffect(() => {
@@ -338,18 +355,23 @@ export function Sidebar({
             <select
               value={embeddingPreset}
               disabled={locked}
-              onChange={(e) => setEmbeddingPreset(e.target.value)}
+              onChange={(e) => {
+                setEmbeddingUserSet(true);
+                setEmbeddingPreset(e.target.value);
+              }}
             >
               <option value="">(none — keyword-only)</option>
-              {(config?.embedding_models ?? []).map((m) => (
+              {[
+                ...(isBedrock(effectiveModel) ? [BEDROCK_EMBED] : []),
+                ...(config?.embedding_models ?? []),
+              ].map((m) => (
                 <option key={m}>{m}</option>
               ))}
               <option value="__custom__">Custom</option>
             </select>
-            {!embeddingModel && (
+            {!embeddingModel && embeddingPreset !== "__custom__" && (
               <span className="caption">
-                No embedding model: knowledge bases are searched by keyword
-                (BM25), no key needed. Pick a model for dense retrieval.
+                No embedding model: knowledge bases are searched by keyword (BM25)
               </span>
             )}
           </label>
