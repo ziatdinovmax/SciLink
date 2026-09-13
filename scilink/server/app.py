@@ -172,8 +172,14 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         prefill = resolve_prefill(model_q, existing_base_url=base_url)
         spec = provider_for(model_q)
         # The embedding key follows the embedding model's vendor (preset or
-        # custom name), like the Streamlit sidebar: availability only.
-        emb_value, emb_env = resolve_embedding_prefill(embedding_model)
+        # custom name), like the Streamlit sidebar: availability only. With a
+        # base URL every request, embeddings included, goes through the proxy
+        # with the main key and the embedding key is ignored (the planning /
+        # meta agents warn and drop it), so no vendor env var applies.
+        if base_url:
+            emb_value, emb_env = "", None
+        else:
+            emb_value, emb_env = resolve_embedding_prefill(embedding_model)
         return {
             "auth": {"required": auth is not None,
                      "user": _user(request) if auth is None
@@ -203,7 +209,8 @@ def create_app(session_root: Path, serve_frontend: bool = True,
                 field: {"env_var": env, "is_set": bool(value)}
                 for field, (value, env) in prefill.items()
             },
-            "embedding_credential": {"env_var": emb_env, "is_set": bool(emb_value)},
+            "embedding_credential": {"env_var": emb_env, "is_set": bool(emb_value),
+                                     "proxied": bool(base_url)},
         }
 
     # ── sessions ─────────────────────────────────────────────────

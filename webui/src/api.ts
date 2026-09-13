@@ -37,7 +37,7 @@ export interface AppConfig {
     cred_error: string;
   };
   credentials: Record<string, { env_var: string | null; is_set: boolean }>;
-  embedding_credential?: { env_var: string | null; is_set: boolean };
+  embedding_credential?: { env_var: string | null; is_set: boolean; proxied?: boolean };
 }
 
 export interface ReportRef {
