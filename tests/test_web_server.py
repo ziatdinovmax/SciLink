@@ -318,6 +318,20 @@ def test_config_endpoint(client):
     assert bedrock["provider"]["fields"][0]["name"] == "region"
 
 
+def test_config_reports_embedding_key_availability_for_any_model_name(client, monkeypatch):
+    """The embedding picker accepts a custom name; the endpoint maps preset
+    or custom names to their vendor's env var and reports availability only."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False); monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    d = client.get("/api/v1/config", params={"embedding_model": "text-embedding-3-large"}).json()
+    assert d["embedding_credential"] == {"env_var": "OPENAI_API_KEY", "is_set": True}
+    d = client.get("/api/v1/config", params={"embedding_model": "gemini-embedding-001"}).json()
+    assert d["embedding_credential"]["is_set"] is False
+    d = client.get("/api/v1/config").json()
+    assert d["embedding_credential"] == {"env_var": None, "is_set": False}
+    assert "value" not in d["embedding_credential"]
+
+
 def test_consent_required(client):
     r = client.post("/api/v1/sessions", json={
         "mode": "analyze", "model": "gpt-5.4", "autonomy": "co-pilot"})
@@ -1158,3 +1172,25 @@ def test_server_forces_a_headless_matplotlib_backend(tmp_path):
     create_app(tmp_path, serve_frontend=False)
     assert matplotlib.get_backend().lower() == "agg"
     assert os.environ.get("MPLBACKEND") == "Agg"
+
+
+def test_custom_embedding_model_reaches_the_agent_initializer(client, monkeypatch, tmp_path):
+    """The sidebar's custom embedding name travels body.embedding_model →
+    SessionManager.create → the agent initializer, for meta and plan."""
+    from scilink.server import session_manager as sm
+    seen = {}
+
+    def stop_at(mode):
+        def fake_init(session_dir, *a, **kw):
+            seen[mode] = kw
+            raise RuntimeError("initializer reached")
+        return fake_init
+
+    for mode, name in (("meta", "_init_meta_agent"), ("plan", "_init_planning_agent")):
+        monkeypatch.setattr(sm, name, stop_at(mode))
+        r = client.post("/api/v1/sessions", json={
+            "mode": mode, "model": "bedrock/us.anthropic.claude-opus-4-8", "autonomy": "autonomous",
+            "api_key": "bedrock-test-key", "consent": True,
+            "embedding_model": "voyage-3-large", "embedding_api_key": "vk"})
+        assert r.status_code != 200 and "initializer reached" in r.text, r.text
+        assert seen[mode]["embedding_model"] == "voyage-3-large" and seen[mode]["embedding_api_key"] == "vk"

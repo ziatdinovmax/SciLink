@@ -15,6 +15,7 @@ implicitly, the server takes it as an explicit ``--session-root``
 
 from __future__ import annotations
 
+import logging
 import json
 import os
 import threading
@@ -126,6 +127,7 @@ def _init_planning_agent(session_dir: Path, api_key, model, base_url,
     kwargs = {}
     if embedding_model:
         kwargs["embedding_model"] = embedding_model
+        logging.info(f"Session {session_dir.name}: embedding model {embedding_model!r}")
     if embedding_api_key:
         kwargs["embedding_api_key"] = embedding_api_key
     return PlanningOrchestratorAgent(
@@ -147,6 +149,7 @@ def _init_meta_agent(session_dir: Path, api_key, model, base_url,
     kwargs = {}
     if embedding_model:
         kwargs["embedding_model"] = embedding_model
+        logging.info(f"Session {session_dir.name}: embedding model {embedding_model!r}")
     if embedding_api_key:
         kwargs["embedding_api_key"] = embedding_api_key
     return MetaOrchestratorAgent(

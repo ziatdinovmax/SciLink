@@ -37,6 +37,7 @@ export interface AppConfig {
     cred_error: string;
   };
   credentials: Record<string, { env_var: string | null; is_set: boolean }>;
+  embedding_credential?: { env_var: string | null; is_set: boolean };
 }
 
 export interface ReportRef {
@@ -364,9 +365,10 @@ export const api = {
   login: (token: string) => req<{ user: string }>(`/auth/login`, json({ token })),
   logout: () => req<{ ok: boolean }>(`/auth/logout`, { method: "POST" }),
 
-  config: (model?: string, baseUrl?: string) =>
+  config: (model?: string, baseUrl?: string, embeddingModel?: string) =>
     req<AppConfig>(
-      `/config?model=${encodeURIComponent(model ?? "")}&base_url=${encodeURIComponent(baseUrl ?? "")}`,
+      `/config?model=${encodeURIComponent(model ?? "")}&base_url=${encodeURIComponent(baseUrl ?? "")}` +
+        `&embedding_model=${encodeURIComponent(embeddingModel ?? "")}`,
     ),
 
   listSessions: (mode: string) =>
