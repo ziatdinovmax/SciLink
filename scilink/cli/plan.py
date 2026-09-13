@@ -89,8 +89,10 @@ Supported Models:
         '--embedding-model',
         type=str,
         dest='embedding_model',
-        default='gemini-embedding-001',
-        help='Embedding model name (default: gemini-embedding-001)'
+        default=None,
+        help='Embedding model for retrieval. Omit for KEYWORD-ONLY (BM25) '
+             'grounding — no embedding provider or key needed; name a model '
+             '(e.g. gemini-embedding-001, text-embedding-3-small) for dense.'
     )
     
     parser.add_argument(

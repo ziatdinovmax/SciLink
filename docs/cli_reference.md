@@ -59,9 +59,11 @@ servers) by `analyze`, `plan`, and mission control. See
 
 ## Embeddings — plan and mission control
 
-`--embedding-model` picks the embedder (any name; presets are
-`gemini-embedding-001`, `text-embedding-3-small`, `text-embedding-3-large`),
-`--embedding-api-key` its key, and `--embedding-base-url` an
+Omit `--embedding-model` for **keyword-only (BM25)** grounding — no
+embedding provider or key needed; a knowledge base is still built and
+searched, just by keyword. Name a model (`gemini-embedding-001`,
+`text-embedding-3-small`, a Bedrock embedder, …) for dense retrieval.
+`--embedding-api-key` sets its key, and `--embedding-base-url` an
 OpenAI-compatible endpoint for the embeddings only — the chat model keeps
 its own route (vendor, or `--base-url`). Without `--embedding-base-url`,
 embeddings follow `--base-url` when given (with its key) or go to the

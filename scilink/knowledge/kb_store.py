@@ -161,6 +161,17 @@ def embedding_compat_warning(manifest: Optional[Dict[str, Any]],
     if not manifest:
         return None
     built_with = manifest.get("embedding_model")
+    if not session_embedding_model:
+        # Keyword-only session (no embedding model): a dense KB is still
+        # usable, but only via BM25 keyword search.
+        if built_with in (None, "", "unknown"):
+            return None
+        return (
+            f"KB '{manifest.get('name', '?')}' was built with "
+            f"'{built_with}' (dense); this session has no embedding model, so "
+            "it will be searched by KEYWORD (BM25). For dense retrieval, set "
+            f"the embedding model to '{built_with}' (and its API key)."
+        )
     if built_with in (None, "", "unknown"):
         return (
             f"KB '{manifest.get('name', '?')}' does not record its embedding "

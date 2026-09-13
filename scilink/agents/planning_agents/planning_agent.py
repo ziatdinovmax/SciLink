@@ -274,7 +274,7 @@ class PlanningAgent(BaseAgent):
     def __init__(self, api_key: str = None,
                  model_name: str = "claude-opus-4-6",
                  base_url: Optional[str] = None,
-                 embedding_model: str = "gemini-embedding-001",
+                 embedding_model: Optional[str] = None,
                  embedding_api_key: Optional[str] = None,
                  embedding_base_url: Optional[str] = None,
                  futurehouse_api_key: str = None,

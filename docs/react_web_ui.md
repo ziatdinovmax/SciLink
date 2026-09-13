@@ -75,8 +75,13 @@ What a shared server changes, and only a shared server:
 
 ### Embeddings
 
-Plan and Mission Control sessions embed documents for retrieval. The sidebar
-takes an embedding model (a preset or a custom name) and, optionally, an
+Plan and Mission Control sessions ground on a knowledge base when one is
+attached. **By default no embedding model is set** ("(none — keyword-only)"):
+the KB is searched by keyword (BM25) over its stored chunks, which needs no
+embedding provider or key. Pick an embedding model — a preset, a custom
+name, or a Bedrock/Titan/Cohere embedder — for dense (semantic) retrieval.
+
+When you do pick a model, the sidebar takes it and, optionally, an
 **Embedding base URL**: an OpenAI-compatible endpoint used for the
 embeddings only, authenticated with the embedding API key (the main key
 when that field is blank). The chat model keeps its own route — direct to
