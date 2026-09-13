@@ -20,6 +20,7 @@ class CreateSessionRequest(BaseModel):
     mp_api_key: str = ""
     embedding_model: Optional[str] = None
     embedding_api_key: Optional[str] = None
+    embedding_base_url: Optional[str] = None   # embeddings-only endpoint (optional)
     objective: str = ""             # plan mode: research objective
     resume_dir: Optional[str] = None  # session dir NAME to resume, not a path
 

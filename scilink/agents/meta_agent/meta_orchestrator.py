@@ -437,6 +437,7 @@ class MetaOrchestratorAgent:
         base_url: Optional[str] = None,
         embedding_model: str = "gemini-embedding-001",
         embedding_api_key: Optional[str] = None,
+        embedding_base_url: Optional[str] = None,
         futurehouse_api_key: Optional[str] = None,
         restore_checkpoint: bool = False,
         meta_mode: MetaMode = MetaMode.AUTOPILOT,
@@ -453,15 +454,17 @@ class MetaOrchestratorAgent:
                     "API key required for internal proxy.\n"
                     "Set SCILINK_API_KEY environment variable or pass api_key parameter."
                 )
-            if embedding_api_key is not None:
-                logging.warning(
-                    "⚠️ embedding_api_key is ignored for internal proxy. "
-                    "Using api_key for all requests."
-                )
-            embedding_api_key = api_key
+            if not embedding_base_url:
+                if embedding_api_key is not None:
+                    logging.warning(
+                        "⚠️ embedding_api_key is ignored for internal proxy. "
+                        "Using api_key for all requests."
+                    )
+                embedding_api_key = api_key
         else:
             if embedding_api_key is None:
                 embedding_api_key = api_key
+        self.embedding_base_url = embedding_base_url
 
         # Store configuration — these are forwarded verbatim to child
         # orchestrators when they are lazily created.
@@ -772,6 +775,7 @@ class MetaOrchestratorAgent:
                 base_url=self.base_url,
                 embedding_model=self.embedding_model,
                 embedding_api_key=self.embedding_api_key,
+                embedding_base_url=self.embedding_base_url,
                 futurehouse_api_key=self.futurehouse_api_key,
                 restore_checkpoint=restore,
                 analysis_mode=AnalysisMode.CO_PILOT,
@@ -811,6 +815,7 @@ class MetaOrchestratorAgent:
                 base_url=self.base_url,
                 embedding_model=self.embedding_model,
                 embedding_api_key=self.embedding_api_key,
+                embedding_base_url=self.embedding_base_url,
                 futurehouse_api_key=self.futurehouse_api_key,
                 restore_checkpoint=restore,
                 autonomy_level=AutonomyLevel.CO_PILOT,
@@ -1062,7 +1067,10 @@ class MetaOrchestratorAgent:
         key = (self.embedding_api_key
                if manifest and manifest.get("embedding_model") ==
                self.embedding_model else None)
-        updated = add_to_kb(name, paths, api_key=key, base_url=self.base_url)
+        # The store embeds through the embeddings' own endpoint when one is
+        # configured (embedding_base_url), else the main proxy / vendor.
+        updated = add_to_kb(name, paths, api_key=key,
+                            base_url=self.embedding_base_url or self.base_url)
 
         # Refresh the running session's copy so the addition is usable now.
         child = self._children.get("planning")

@@ -22,6 +22,7 @@ export interface SidebarConfig {
   mpApiKey: string;
   embeddingModel: string;
   embeddingApiKey: string;
+  embeddingBaseUrl: string;
   objective: string;
 }
 
@@ -88,7 +89,12 @@ export function Sidebar({
   const embeddingModel =
     embeddingPreset === "__custom__" ? customEmbeddingModel.trim() : embeddingPreset;
   const [embeddingApiKey, setEmbeddingApiKey] = useState("");
-  const [embeddingCred, setEmbeddingCred] = useState<{ env_var: string | null; is_set: boolean; proxied?: boolean } | null>(null);
+  // Optional endpoint for the embeddings alone (chat keeps its own route).
+  const [embeddingBaseUrl, setEmbeddingBaseUrl] = useState("");
+  const [embeddingCred, setEmbeddingCred] = useState<{
+    env_var: string | null; is_set: boolean; proxied?: boolean;
+    endpoint?: "vendor" | "base_url" | "embedding_base_url";
+  } | null>(null);
   const [autonomy, setAutonomy] = useState("");
   const [consent, setConsent] = useState(false);
   const [resumable, setResumable] = useState<ResumableSession[]>([]);
@@ -143,10 +149,10 @@ export function Sidebar({
       return;
     }
     api
-      .config(effectiveModel, baseUrl, embeddingModel)
+      .config(effectiveModel, baseUrl, embeddingModel, embeddingBaseUrl.trim())
       .then((c) => setEmbeddingCred(c.embedding_credential ?? null))
       .catch(() => {});
-  }, [embeddingModel, effectiveModel, baseUrl]);
+  }, [embeddingModel, effectiveModel, baseUrl, embeddingBaseUrl]);
 
   useEffect(() => {
     if (!locked)
@@ -171,6 +177,7 @@ export function Sidebar({
     mpApiKey,
     embeddingModel,
     embeddingApiKey,
+    embeddingBaseUrl: embeddingBaseUrl.trim(),
     objective: "",
   });
 
@@ -352,13 +359,25 @@ export function Sidebar({
               />
             </label>
           )}
-          {embeddingModel && embeddingCred?.proxied && (
+          {embeddingModel && (
+            <label className="field">
+              <span>Embedding base URL (optional)</span>
+              <input
+                type="text"
+                value={embeddingBaseUrl}
+                disabled={locked}
+                placeholder="OpenAI-compatible endpoint for embeddings only"
+                onChange={(e) => setEmbeddingBaseUrl(e.target.value)}
+              />
+            </label>
+          )}
+          {embeddingModel && embeddingCred?.endpoint === "base_url" && (
             <span className="caption">
               Embeddings go through the base URL with the main API key; the
               model name is sent to the proxy as typed.
             </span>
           )}
-          {embeddingModel && !embeddingCred?.proxied && (
+          {embeddingModel && embeddingCred?.endpoint !== "base_url" && (
             <label className="field">
               <span>Embedding API key (optional)</span>
               <input
@@ -368,7 +387,12 @@ export function Sidebar({
                 placeholder={embeddingCred?.is_set ? "(using environment key)" : ""}
                 onChange={(e) => setEmbeddingApiKey(e.target.value)}
               />
-              {embeddingCred?.is_set && embeddingCred.env_var ? (
+              {embeddingCred?.endpoint === "embedding_base_url" ? (
+                <span className="caption">
+                  Embeddings go to the embedding base URL with this key (the
+                  main API key if blank); the model name is sent as typed.
+                </span>
+              ) : embeddingCred?.is_set && embeddingCred.env_var ? (
                 <span className="caption cred-hint">✓ available from <code>{embeddingCred.env_var}</code></span>
               ) : (
                 <span className="caption">Leave blank to use the main API key</span>

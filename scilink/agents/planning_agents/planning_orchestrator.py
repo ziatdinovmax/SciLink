@@ -621,6 +621,7 @@ class PlanningOrchestratorAgent:
         base_url: Optional[str] = None,
         embedding_model: str = "gemini-embedding-001",
         embedding_api_key: Optional[str] = None,
+        embedding_base_url: Optional[str] = None,
         futurehouse_api_key: Optional[str] = None,
         restore_checkpoint: bool = False,
         autonomy_level: AutonomyLevel = AutonomyLevel.CO_PILOT,
@@ -651,17 +652,20 @@ class PlanningOrchestratorAgent:
                     "Set SCILINK_API_KEY environment variable or pass api_key parameter."
                 )
             
-            if embedding_api_key is not None:
-                logging.warning(
-                    "⚠️ embedding_api_key is ignored for internal proxy. "
-                    "Using api_key for all requests."
-                )
-            
-            embedding_api_key = api_key
+            # With an embedding_base_url the embeddings have their own
+            # endpoint and key; only otherwise does the proxy key cover them.
+            if not embedding_base_url:
+                if embedding_api_key is not None:
+                    logging.warning(
+                        "⚠️ embedding_api_key is ignored for internal proxy. "
+                        "Using api_key for all requests."
+                    )
+                embedding_api_key = api_key
         else:
             # LiteLLM mode: ensure embedding_api_key is set
             if embedding_api_key is None:
                 embedding_api_key = api_key
+        self.embedding_base_url = embedding_base_url
 
         # Store autonomy level
         self.autonomy_level = autonomy_level
@@ -781,6 +785,7 @@ class PlanningOrchestratorAgent:
             base_url=base_url,
             embedding_model=embedding_model,
             embedding_api_key=embedding_api_key,
+            embedding_base_url=embedding_base_url,
             futurehouse_api_key=futurehouse_api_key,
             output_dir=str(self.base_dir),
         )
