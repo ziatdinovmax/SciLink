@@ -387,7 +387,13 @@ export function Sidebar({
               />
             </label>
           )}
-          {embeddingModel && (
+          {embeddingModel && isBedrock(embeddingModel) && (
+            <span className="caption">
+              Embeddings use your Bedrock (AWS) credential — no separate key
+              or endpoint needed.
+            </span>
+          )}
+          {embeddingModel && !isBedrock(embeddingModel) && (
             <label className="field">
               <span>Embedding base URL (optional)</span>
               <input
@@ -405,7 +411,7 @@ export function Sidebar({
               model name is sent to the proxy as typed.
             </span>
           )}
-          {embeddingModel && embeddingCred?.endpoint !== "base_url" && (
+          {embeddingModel && !isBedrock(embeddingModel) && embeddingCred?.endpoint !== "base_url" && (
             <label className="field">
               <span>Embedding API key (optional)</span>
               <input
