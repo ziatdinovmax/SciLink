@@ -210,6 +210,25 @@ remembering: every pass that re-emits a plan edits the shim, so
 `resync_portfolio` (called from `_stamp_campaign`) makes the nested copy
 authoritative — otherwise a refined portfolio serves stale directions.
 
+**TEA is a grounded, audited step, and the whole assessment travels.**
+`run_economic_analysis` authors under two instruction tiers — strict (KB /
+literature only) and fallback (general benchmarks, entered only when the
+model reports insufficient economic context) — and the result records which
+one produced it (`grounding.mode`, mirrored as `generation_mode` on
+`latest_tea_results`). A TEA critic (`critique_tea`) then audits every
+`(Quantitative)` claim against the same evidence the author saw and stores
+advisory `critic_findings`; the evidence itself is written to
+`tea_analysis.grounding.md`. Downstream, `_tea_context_block` renders the
+full assessment — cost drivers, risks, comparison, **data gaps**, provenance,
+caveats — as one block that plan authoring, refinement, portfolio and
+technical-document calls all inject; nothing reads the summary sentence
+alone. `primary_data_set` takes several tables at once (folder or comma
+list), each summarised under its own name, because a TEA routinely needs a
+composition, a price list and measured yields together. A TEA-first run is
+iteration 0; a TEA run mid-campaign keeps the current iteration (stage
+`TEA Update`) and never resets the counter, and the report keys cards on
+(iteration, kind) so a TEA and the plan it assesses both render.
+
 ## Plan-mode capability boundaries
 
 Two settled conventions on where capability lives in plan mode:

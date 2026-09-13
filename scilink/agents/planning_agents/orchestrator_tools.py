@@ -21,6 +21,7 @@ def _natural_sort_key(s):
     return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', str(s))]
 
 from .parser_utils import write_experiments_to_disk
+from .user_interface import format_caveats
 from .instruct import (
     BO_OBJECTIVE_DISTILL_PROMPT,
     KNOWLEDGE_QUERY_CODEGEN_PROMPT,
@@ -629,6 +630,77 @@ class OrchestratorTools:
             # resolver skipped the campaign's most relevant corpus).
             return text
         return ""
+
+    _TEA_LIST_CAP = 8
+
+    def _tea_context_block(self, heading: bool = True) -> Optional[str]:
+        """The stored TEA as ONE markdown block for downstream prompts.
+
+        Every consumer — plan authoring, refinement, portfolio, technical
+        document — reads the same rendering (``heading=False`` drops the
+        leading ``##`` line for a caller that supplies its own). Until this existed only the
+        one-sentence ``summary`` travelled: cost drivers, risks, the
+        comparison to alternatives and above all the DATA GAPS (the list
+        that tells a planner which measurement would retire the largest
+        economic uncertainty) were computed and then dropped on the floor.
+
+        Carries the provenance line too, so an author sees whether the
+        figures are KB-sourced (strict) or benchmark estimates (fallback).
+        Lists are capped so the block stays a grounding aid, not a second
+        document. Returns None when no TEA has run.
+        """
+        tea = getattr(self.orch, "latest_tea_results", None)
+        if not tea or not isinstance(tea, dict):   # absent, or a damaged checkpoint
+            return None
+        full = tea.get("full_analysis") or {}
+        if not isinstance(full, dict):
+            full = {"summary": str(full)}
+        cap = self._TEA_LIST_CAP
+
+        def _items(key):
+            raw = full.get(key)
+            if raw is None or raw == "":
+                raw = []
+            elif not isinstance(raw, (list, tuple)):
+                raw = [raw]                   # a bare string is ONE item, not its chars
+            vals = [str(v) for v in raw if v is not None and str(v).strip()]
+            more = len(vals) - cap
+            lines = [f"- {v}" for v in vals[:cap]]
+            if more > 0:
+                lines.append(f"- (+{more} more in tea_analysis.json)")
+            return "\n".join(lines)
+
+        mode = tea.get("generation_mode")
+        if mode == "strict":
+            prov = "KB/literature-sourced (strict mode)"
+        elif mode == "fallback":
+            prov = ("GENERAL BENCHMARKS — the knowledge base held no usable "
+                    "economic data, so figures are model estimates, not "
+                    "sourced values (fallback mode)")
+        else:  # TEA restored from a checkpoint that predates tier tracking
+            prov = "not recorded (assessment predates provenance tracking)"
+        parts = (["## Techno-Economic Assessment (prior TEA step)"] if heading else []) + [
+                 f"Provenance: {prov}.",
+                 f"Summary: {tea.get('summary') or full.get('summary') or ''}".strip()]
+        for key, title in (("key_cost_drivers", "Key cost drivers"),
+                           ("potential_benefits_or_revenue", "Potential benefits / revenue"),
+                           ("economic_risks", "Economic risks")):
+            body = _items(key)
+            if body:
+                parts.append(f"{title}:\n{body}")
+        cmp_ = str(full.get("comparison_to_alternatives") or "").strip()
+        if cmp_:
+            parts.append(f"Comparison to alternatives: {cmp_}")
+        gaps = _items("data_gaps_for_quantitative_analysis")
+        if gaps:
+            parts.append("Data gaps for a quantitative TEA (an experiment that "
+                         "closes one of these is worth more than one that does "
+                         "not):\n" + gaps)
+        caveats = format_caveats(tea.get("critic_findings"))
+        if caveats:
+            parts.append("Critic caveats on the assessment:\n"
+                         + "\n".join(f"- {c}" for c in caveats[:cap]))
+        return "\n\n".join(parts)
 
     @staticmethod
     def _resolve_context_text(value) -> Optional[str]:
@@ -1367,6 +1439,64 @@ class OrchestratorTools:
                 f"later when more data is collected."
             ),
         }
+
+    _TABULAR_EXTS = ("*.csv", "*.xlsx", "*.xls")
+    # Every table is summarised INTO the prompt (small ones verbatim), so a
+    # folder of dozens would silently swamp the objective. Past this many the
+    # caller is asked to name the tables that matter instead.
+    _TABULAR_MAX_FILES = 10
+
+    def _resolve_tabular_inputs(self, spec: str):
+        """Resolve a comma-separated spec of files and/or folders to a list
+        of ``{"file_path": ...}`` entries — every tabular file in a folder,
+        in natural order, de-duplicated, each path run through
+        ``_resolve_data_path`` (typo / session / extension recovery).
+
+        Returns ``(entries, None)`` or ``(None, error_json)``.
+        """
+        entries, seen = [], set()
+        for raw in str(spec).split(","):
+            raw = raw.strip()
+            if not raw:
+                continue
+            resolved, error = self._resolve_data_path(raw)
+            if error:
+                return None, error
+            path = Path(resolved)
+            if path.is_dir():
+                files = []
+                for ext in self._TABULAR_EXTS:
+                    files.extend(path.glob(ext))
+                if not files:
+                    return None, json.dumps({
+                        "status": "error",
+                        "message": f"No data files (.csv, .xlsx, .xls) found in: {raw}",
+                        "hint": "Add data files to the folder or specify a different path"
+                    })
+                files = sorted(files, key=lambda f: _natural_sort_key(f.name))
+            else:
+                files = [path]
+            for f in files:
+                key = str(f.resolve())
+                if key not in seen:
+                    seen.add(key)
+                    entries.append({"file_path": str(f)})
+        if not entries:
+            return None, json.dumps({
+                "status": "error",
+                "message": f"No data files resolved from: {spec}"})
+        if len(entries) > self._TABULAR_MAX_FILES:
+            names = [Path(e["file_path"]).name for e in entries]
+            return None, json.dumps({
+                "status": "error",
+                "message": (f"{len(entries)} data files resolved from '{spec}', more than "
+                            f"the {self._TABULAR_MAX_FILES} a single assessment can take "
+                            f"in its prompt."),
+                "available_files": names,
+                "hint": ("Pass a comma-separated list of the tables that bear on the "
+                         "economics (composition, prices, yields, ...) instead of the "
+                         "whole folder.")})
+        return entries, None
 
     def _resolve_data_path(self, path_input: str) -> tuple[str, str]:
         """
@@ -2368,15 +2498,22 @@ class OrchestratorTools:
                 context_parts.append(f"User Requirements: {additional_context}")
                 print(f"    ℹ️  User context: {additional_context[:60]}...")
             
-            # Auto-include TEA results
-            if self.orch.latest_tea_results:
-                tea_summary = self.orch.latest_tea_results.get('summary', '')
-                context_parts.append(f"Economic Analysis Results: {tea_summary}")
-                print(f"    💰 Including TEA results in context")
-            
             context_dict = None
             if context_parts:
                 context_dict = {"user_context": "\n\n".join(context_parts)}
+
+            # Auto-include the TEA — the whole assessment, not just its
+            # summary sentence (see _tea_context_block) — under its OWN
+            # heading. It must not sit inside user_context: that block is
+            # the user's hard constraints, which the author is told to map
+            # step-by-step, and an economic assessment is grounding, not a
+            # constraint list.
+            tea_block = self._tea_context_block(heading=False)
+            if tea_block:
+                context_dict = context_dict or {}
+                context_dict["Techno-Economic Assessment (prior TEA step)"] = tea_block
+                print(f"    💰 Including TEA results in context "
+                      f"({self.orch.latest_tea_results.get('generation_mode') or 'unknown'} tier)")
             
             # Resolve skill: use provided value or fall back to orchestrator's active skill
             effective_skill = skill or getattr(self.orch, '_active_skill', None)
@@ -3041,51 +3178,21 @@ class OrchestratorTools:
             if knowledge_list:
                 print(f"    📚 Knowledge sources: {knowledge_list}")
 
-            # Parse primary dataset
+            # Parse primary dataset(s): comma-separated paths; a folder
+            # contributes EVERY tabular file it holds. A TEA routinely needs
+            # a composition table AND a price list AND measured yields, so
+            # the single-file contract (which errored on a folder with two
+            # files) forced the rest through the KB as unstructured prose.
             primary_dataset = None
             if primary_data_set:
-                # Try to resolve the path
-                resolved_path, error = self._resolve_data_path(primary_data_set)
-                
+                primary_dataset, error = self._resolve_tabular_inputs(primary_data_set)
                 if error:
-                    return error  # Return the error JSON with suggestions
-                
-                path = Path(resolved_path)
-                
-                # Now handle resolved path
-                if path.is_file():
-                    primary_dataset = {"file_path": str(path)}
-                    print(f"    📊 Primary data: {path.name}")
-                    
-                elif path.is_dir():
-                    # Directory - check how many data files
-                    all_files = []
-                    for ext in ['*.csv', '*.xlsx', '*.xls']:
-                        all_files.extend(path.glob(ext))
-                    
-                    if not all_files:
-                        return json.dumps({
-                            "status": "error",
-                            "message": f"No data files (.csv, .xlsx, .xls) found in: {primary_data_set}",
-                            "hint": "Add data files to the folder or specify a different path"
-                        })
-                    
-                    elif len(all_files) == 1:
-                        # Only one file - use it automatically
-                        primary_dataset = {"file_path": str(all_files[0])}
-                        print(f"    📊 Primary data (auto-selected): {all_files[0].name}")
-                        
-                    else:
-                        # Multiple files - require user to specify
-                        file_list = sorted([f.name for f in all_files], key=_natural_sort_key)
-                        return json.dumps({
-                            "status": "error",
-                            "message": f"Multiple data files found in '{primary_data_set}'",
-                            "available_files": file_list,
-                            "file_count": len(file_list),
-                            "hint": f"Please specify which file to use. Example: primary_data_set='./experimental_results/{file_list[0]}'"
-                        })
-            
+                    return error
+                names = [Path(e["file_path"]).name for e in primary_dataset]
+                print(f"    📊 Primary data ({len(names)} file(s)): {', '.join(names)}")
+                if len(primary_dataset) == 1:
+                    primary_dataset = primary_dataset[0]
+
             try:
                 # Resolve literature context
                 ext_ctx = None
@@ -3100,7 +3207,8 @@ class OrchestratorTools:
                     knowledge_paths=knowledge_list,
                     primary_data_set=primary_dataset,
                     output_json_path=str(self._output_dir() / "tea_analysis.json"),
-                    external_context=ext_ctx
+                    external_context=ext_ctx,
+                    additional_context=additional_context,
                 )
                 
                 if res.get("error"):
@@ -3109,23 +3217,48 @@ class OrchestratorTools:
                         "message": res.get("error")
                     })
                 
-                summary = res.get('technoeconomic_assessment', {}).get('summary', 'No summary')
+                assess = res.get('technoeconomic_assessment', {}) or {}
+                summary = assess.get('summary', 'No summary')
+                mode = (res.get("grounding") or {}).get("mode") or res.get("generation_mode") or "strict"
+                findings = res.get("critic_findings") or []
                 
-                # Store TEA results in orchestrator state
+                # Store TEA results in orchestrator state — the full
+                # assessment plus its provenance, which every downstream
+                # consumer reads through _tea_context_block.
                 self.orch.latest_tea_results = {
                     "summary": summary,
-                    "full_analysis": res.get('technoeconomic_assessment'),
+                    "full_analysis": assess,
+                    "generation_mode": mode,
+                    "critic_findings": findings,
+                    "source_documents": assess.get("source_documents") or [],
+                    "primary_data_files": (res.get("grounding") or {}).get("primary_data_files") or [],
                     "timestamp": datetime.now().isoformat()
                 }
                 print(f"    ✅ TEA results stored for future planning")
                 
-                return json.dumps({
+                out = {
                     "status": "success",
+                    "generation_mode": mode,
                     "summary": summary,
+                    "data_gaps_for_quantitative_analysis":
+                        assess.get("data_gaps_for_quantitative_analysis") or [],
+                    "caveats": format_caveats(findings),
                     "output_path": str(self._output_dir() / "tea_analysis.json"),
+                    "grounding_record": str(self._output_dir() / "tea_analysis.grounding.md"),
                     "html_report": str(self._output_dir() / "tea_analysis.html"),
-                    "hint": "These results will automatically inform future generate_initial_plan calls"
-                })
+                    "hint": ("The full assessment (cost drivers, risks, data gaps, "
+                             "provenance) is automatically included in later "
+                             "generate_initial_plan / refine / document calls.")
+                }
+                if mode == "fallback":
+                    out["warning"] = (
+                        "FALLBACK tier: the knowledge base and literature held no "
+                        "usable economic data, so every figure is a general "
+                        "benchmark estimated by the model, not a sourced value. "
+                        "Tell the user this explicitly; add economic sources "
+                        "(price tables, TEA reports) or run search_literature("
+                        "search_type='economic_data') to ground it.")
+                return json.dumps(out)
                 
             except Exception as e:
                 logging.error(f"TEA error: {e}", exc_info=True)
@@ -3152,7 +3285,12 @@ class OrchestratorTools:
                 },
                 "primary_data_set": {
                     "type": "string",
-                    "description": "Path to experimental data file or folder"
+                    "description": (
+                        "Tabular data (.csv/.xlsx/.xls) for the assessment: "
+                        "one path, a comma-separated list of paths, or a folder "
+                        "(ALL tabular files in it are used). Pass every table "
+                        "that bears on the economics — feedstock composition, "
+                        "price list, measured yields — in one call.")
                 },
                 "additional_context": {
                     "type": "string",
@@ -3230,6 +3368,12 @@ class OrchestratorTools:
             if additional_context:
                 ext_parts.append(f"## Additional Context\n{additional_context}")
                 print(f"    ℹ️  Additional context provided")
+            # The TEA rides along as its own block (NOT as literature, so
+            # provenance stamping never mistakes it for a search result).
+            tea_block = self._tea_context_block()
+            if tea_block:
+                ext_parts.append(tea_block)
+                print("    💰 Including TEA results in refinement context")
             ext_ctx = "\n\n".join(ext_parts) if ext_parts else None
 
             try:
@@ -7980,7 +8124,9 @@ class OrchestratorTools:
                     generation_config=planner.generation_config,
                     external_context=lit,
                     source_documents=("\n\n".join(sources) if sources else None),
-                    additional_context=date_note,
+                    additional_context=("\n\n".join(
+                        x for x in (date_note, self._tea_context_block()) if x)
+                        or None),
                     skill_context=planner._build_skill_context("planning"),
                     revise_document=current,
                     style="memo" if memo else "report",

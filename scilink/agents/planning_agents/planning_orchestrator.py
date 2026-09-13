@@ -61,7 +61,9 @@ _CO_PILOT_DIRECTIVE = """
 
 **POST-TEA PAUSE RULE:**
 After `run_economic_analysis` completes, ALWAYS stop and present the TEA results to the
-user. Then ask what experimental system, equipment, and constraints they want to use
+user — including its `generation_mode` (a FALLBACK result is benchmark estimates, not
+sourced figures, and must be described that way) and its data gaps. Then ask what
+experimental system, equipment, and constraints they want to use
 before calling `generate_initial_plan`. Do NOT proceed directly to plan generation
 unless the user's original objective already contained detailed experimental setup
 information (specific equipment names, plate formats, measurement techniques, etc.).
@@ -274,8 +276,10 @@ to `generate_initial_plan` or `refine_plan_with_results`.
 **TEA-FIRST RULE:** Run `run_economic_analysis` BEFORE `generate_initial_plan` when the
 objective or subject implies economic relevance — e.g., critical materials recovery,
 process scale-up, cost optimization, resource extraction, manufacturing, market-driven
-material selection, or any goal where viability/profitability matters. TEA results are
-automatically injected into the plan, producing a more grounded strategy.
+material selection, or any goal where viability/profitability matters. The full TEA
+(cost drivers, risks, data gaps, provenance) is automatically injected into later plan,
+refinement and document calls. Pass EVERY relevant table (composition, prices, yields)
+to `primary_data_set` in one call; report the result's `generation_mode` to the user.
 Do NOT run TEA for purely scientific exploration (e.g., "study phase transitions",
 "characterize this sample", "explore structure-property relationships").
 
@@ -1552,8 +1556,26 @@ class PlanningOrchestratorAgent:
         for col in self.expected_target_columns or []:
             direction = self.target_directions.get(col, "optimize")
             key_findings.append(f"Optimization target: {col} ({direction}).")
-        if self.latest_tea_results:
-            key_findings.append("Techno-economic analysis results are available.")
+        if isinstance(self.latest_tea_results, dict) and self.latest_tea_results:
+            _tea = self.latest_tea_results
+            _mode = _tea.get("generation_mode")
+            _full = _tea.get("full_analysis")
+            _gaps = (_full.get("data_gaps_for_quantitative_analysis") or []
+                     if isinstance(_full, dict) else [])
+            if not isinstance(_gaps, list):
+                _gaps = [_gaps]
+            key_findings.append(
+                "Techno-economic analysis results are available "
+                + ("(KB/literature-grounded)." if _mode == "strict" else
+                   "(FALLBACK tier: figures are general benchmarks, not "
+                   "sourced values)." if _mode == "fallback" else
+                   "(provenance not recorded).")
+            )
+            if _tea.get("summary"):
+                key_findings.append(f"TEA summary: {_tea['summary']}")
+            for _g in _gaps[:5]:
+                if _g is not None and str(_g).strip():
+                    key_findings.append(f"TEA data gap: {_g}")
 
         # Heuristic: collected BO data with no further direction is a natural
         # cue to propose the next experiment batch.
