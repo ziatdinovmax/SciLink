@@ -324,12 +324,16 @@ def test_config_reports_embedding_key_availability_for_any_model_name(client, mo
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False); monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     d = client.get("/api/v1/config", params={"embedding_model": "text-embedding-3-large"}).json()
-    assert d["embedding_credential"] == {"env_var": "OPENAI_API_KEY", "is_set": True}
+    assert d["embedding_credential"] == {"env_var": "OPENAI_API_KEY", "is_set": True, "proxied": False}
     d = client.get("/api/v1/config", params={"embedding_model": "gemini-embedding-001"}).json()
     assert d["embedding_credential"]["is_set"] is False
     d = client.get("/api/v1/config").json()
-    assert d["embedding_credential"] == {"env_var": None, "is_set": False}
+    assert d["embedding_credential"] == {"env_var": None, "is_set": False, "proxied": False}
     assert "value" not in d["embedding_credential"]
+    # with a base URL the embedding key is never used: no vendor env var is claimed
+    d = client.get("/api/v1/config", params={"embedding_model": "text-embedding-3-large",
+                                              "base_url": "https://proxy.example/v1"}).json()
+    assert d["embedding_credential"] == {"env_var": None, "is_set": False, "proxied": True}
 
 
 def test_consent_required(client):

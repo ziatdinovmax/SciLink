@@ -88,7 +88,7 @@ export function Sidebar({
   const embeddingModel =
     embeddingPreset === "__custom__" ? customEmbeddingModel.trim() : embeddingPreset;
   const [embeddingApiKey, setEmbeddingApiKey] = useState("");
-  const [embeddingCred, setEmbeddingCred] = useState<{ env_var: string | null; is_set: boolean } | null>(null);
+  const [embeddingCred, setEmbeddingCred] = useState<{ env_var: string | null; is_set: boolean; proxied?: boolean } | null>(null);
   const [autonomy, setAutonomy] = useState("");
   const [consent, setConsent] = useState(false);
   const [resumable, setResumable] = useState<ResumableSession[]>([]);
@@ -352,7 +352,13 @@ export function Sidebar({
               />
             </label>
           )}
-          {embeddingModel && (
+          {embeddingModel && embeddingCred?.proxied && (
+            <span className="caption">
+              Embeddings go through the base URL with the main API key; the
+              model name is sent to the proxy as typed.
+            </span>
+          )}
+          {embeddingModel && !embeddingCred?.proxied && (
             <label className="field">
               <span>Embedding API key (optional)</span>
               <input
