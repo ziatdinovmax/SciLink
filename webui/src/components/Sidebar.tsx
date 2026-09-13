@@ -80,8 +80,15 @@ export function Sidebar({
   const [providerFields, setProviderFields] = useState<Record<string, string>>({});
   const [fhApiKey, setFhApiKey] = useState("");
   const [mpApiKey, setMpApiKey] = useState("");
-  const [embeddingModel, setEmbeddingModel] = useState("");
+  // Embedding picker: a preset, "(default)", or "Custom" + a typed name —
+  // the same shape as the Streamlit sidebar. `embeddingModel` is the
+  // effective name sent to the server.
+  const [embeddingPreset, setEmbeddingPreset] = useState("");
+  const [customEmbeddingModel, setCustomEmbeddingModel] = useState("");
+  const embeddingModel =
+    embeddingPreset === "__custom__" ? customEmbeddingModel.trim() : embeddingPreset;
   const [embeddingApiKey, setEmbeddingApiKey] = useState("");
+  const [embeddingCred, setEmbeddingCred] = useState<{ env_var: string | null; is_set: boolean } | null>(null);
   const [autonomy, setAutonomy] = useState("");
   const [consent, setConsent] = useState(false);
   const [resumable, setResumable] = useState<ResumableSession[]>([]);
@@ -128,6 +135,18 @@ export function Sidebar({
       })
       .catch(() => {});
   }, [effectiveModel, baseUrl]);
+
+  // The embedding key's availability follows the embedding model's vendor.
+  useEffect(() => {
+    if (!embeddingModel) {
+      setEmbeddingCred(null);
+      return;
+    }
+    api
+      .config(effectiveModel, baseUrl, embeddingModel)
+      .then((c) => setEmbeddingCred(c.embedding_credential ?? null))
+      .catch(() => {});
+  }, [embeddingModel, effectiveModel, baseUrl]);
 
   useEffect(() => {
     if (!locked)
@@ -310,25 +329,44 @@ export function Sidebar({
           <label className="field">
             <span>Embedding model (optional)</span>
             <select
-              value={embeddingModel}
+              value={embeddingPreset}
               disabled={locked}
-              onChange={(e) => setEmbeddingModel(e.target.value)}
+              onChange={(e) => setEmbeddingPreset(e.target.value)}
             >
               <option value="">(default)</option>
               {(config?.embedding_models ?? []).map((m) => (
                 <option key={m}>{m}</option>
               ))}
+              <option value="__custom__">Custom</option>
             </select>
           </label>
+          {embeddingPreset === "__custom__" && (
+            <label className="field">
+              <span>Embedding model name</span>
+              <input
+                type="text"
+                value={customEmbeddingModel}
+                disabled={locked}
+                placeholder="e.g. voyage-3, nomic-embed-text, text-embedding-3-large"
+                onChange={(e) => setCustomEmbeddingModel(e.target.value)}
+              />
+            </label>
+          )}
           {embeddingModel && (
             <label className="field">
-              <span>Embedding API key</span>
+              <span>Embedding API key (optional)</span>
               <input
                 type="password"
                 value={embeddingApiKey}
                 disabled={locked}
+                placeholder={embeddingCred?.is_set ? "(using environment key)" : ""}
                 onChange={(e) => setEmbeddingApiKey(e.target.value)}
               />
+              {embeddingCred?.is_set && embeddingCred.env_var ? (
+                <span className="caption cred-hint">✓ available from <code>{embeddingCred.env_var}</code></span>
+              ) : (
+                <span className="caption">Leave blank to use the main API key</span>
+              )}
             </label>
           )}
         </>

@@ -23,6 +23,7 @@ from scilink.ui.config import (
     EMBEDDING_MODEL_OPTIONS,
     MODEL_OPTIONS,
     resolve_prefill,
+    resolve_embedding_prefill,
 )
 from scilink.ui.session_meta import save_session_name
 
@@ -163,12 +164,16 @@ def create_app(session_root: Path, serve_frontend: bool = True,
     # ── config ───────────────────────────────────────────────────
 
     @app.get("/api/v1/config")
-    def get_config(request: Request, model: str = "", base_url: str = ""):
+    def get_config(request: Request, model: str = "", base_url: str = "",
+                   embedding_model: str = ""):
         """Static UI config + credential AVAILABILITY (never values)."""
         modes = [m for m in APP_MODES if m["key"] != "simulate"]
         model_q = model or MODEL_OPTIONS[0]
         prefill = resolve_prefill(model_q, existing_base_url=base_url)
         spec = provider_for(model_q)
+        # The embedding key follows the embedding model's vendor (preset or
+        # custom name), like the Streamlit sidebar: availability only.
+        emb_value, emb_env = resolve_embedding_prefill(embedding_model)
         return {
             "auth": {"required": auth is not None,
                      "user": _user(request) if auth is None
@@ -198,6 +203,7 @@ def create_app(session_root: Path, serve_frontend: bool = True,
                 field: {"env_var": env, "is_set": bool(value)}
                 for field, (value, env) in prefill.items()
             },
+            "embedding_credential": {"env_var": emb_env, "is_set": bool(emb_value)},
         }
 
     # ── sessions ─────────────────────────────────────────────────
