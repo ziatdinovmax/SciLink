@@ -172,7 +172,11 @@ def format_caveats(findings: Optional[List[Dict[str, Any]]]) -> List[str]:
     both the console summary and ``run_task`` warnings.
     """
     lines: List[str] = []
-    for f in findings or []:
+    if not isinstance(findings, list):
+        findings = []          # a damaged record (dict / string) is no caveat
+    for f in findings:
+        if not isinstance(f, dict):
+            continue
         dim = f.get("dimension", "")
         issue = (f.get("issue") or "").strip()
         if not issue:

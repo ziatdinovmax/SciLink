@@ -422,13 +422,185 @@ If the plan is clean, return {{"findings": []}}.
         return {"findings": []}
 
 
+def critique_tea(objective: str,
+                 result: Dict[str, Any],
+                 model: Any,
+                 generation_config: Any,
+                 retrieved_context: Optional[str] = None,
+                 primary_data: Optional[str] = None,
+                 tier: str = "strict",
+                 skill_context: Optional[str] = None) -> Dict[str, Any]:
+    """Advisory critic for a technoeconomic assessment.
+
+    The TEA counterpart of ``critique_plan``: a separate LLM call over the
+    finished assessment and the SAME evidence the author saw, returning
+    caveats it never acts on. Where the plan critic checks physics, this one
+    checks GROUNDING — a TEA's failure mode is a confident cost figure the
+    evidence never stated. Two things the author could not police itself:
+
+    * every ``(Quantitative)`` claim must trace to a number in the evidence;
+      a claim tagged quantitative with no supporting figure, or a figure
+      the evidence gives with different units or for a different system, is
+      flagged;
+    * on the fallback tier (``tier="fallback"``) the author was LICENSED to
+      use general knowledge, so the critic marks which numeric claims are
+      benchmarks rather than sourced values — that is what lets the card
+      say "the model estimated this" instead of "the KB said this".
+
+    Returns ``{"findings": [{"dimension","severity","claim","issue"}, ...]}``
+    with ``dimension`` in {grounding, quantification, consistency, scope}.
+    Fails open (``{"findings": []}``) so a critic crash never blocks the TEA.
+    """
+    assess = result.get("technoeconomic_assessment") or {}
+    if not assess:
+        return {"findings": []}
+
+    evidence_parts = []
+    if primary_data:
+        evidence_parts.append(f"## 📊 Primary Data:\n{primary_data}")
+    if retrieved_context:
+        evidence_parts.append(
+            f"## Retrieved Context (KB + literature):\n{retrieved_context}")
+    if skill_context:
+        evidence_parts.append(skill_context)
+    evidence_section = ("\n".join(evidence_parts) if evidence_parts
+                        else "(No evidence was available to the author.)")
+
+    tier_note = (
+        "The author ran in FALLBACK mode: the evidence held no usable economic "
+        "data, so it was told to estimate from general engineering economics "
+        "and industry benchmarks. Treat every figure as a benchmark unless the "
+        "evidence below states it; report each such figure under 'grounding' "
+        "so the reader knows it is an estimate, not a sourced value."
+        if tier == "fallback" else
+        "The author ran in STRICT mode: it was told to use ONLY the evidence "
+        "below and to invent nothing. A figure or claim the evidence does not "
+        "support is a defect."
+    )
+
+    eval_prompt = f"""
+You are auditing a preliminary technoeconomic assessment (TEA) the way a reviewer
+audits a feasibility memo: does each claim trace to the evidence the author had?
+
+OBJECTIVE: "{objective}"
+
+{tier_note}
+
+THE ASSESSMENT:
+{json.dumps(assess, indent=2)}
+
+────────────────────────────────────
+EVIDENCE THE AUTHOR USED:
+{evidence_section}
+────────────────────────────────────
+
+Try to break the assessment on these axes:
+  • grounding      — a claim (especially one tagged "(Quantitative)") with no
+                     supporting figure or statement anywhere in the evidence; a
+                     source listed under source_documents that the evidence does
+                     not contain.
+  • quantification — a figure copied with the wrong units, scale or system; a
+                     number the evidence gives as a range or projection reported
+                     as a point value; an arithmetic step the evidence does not
+                     support.
+  • consistency    — a cost driver that contradicts a listed benefit; a summary
+                     verdict the listed risks do not support; a data gap listed
+                     for data the evidence actually provides.
+  • scope          — the assessment evaluates a different process, scale or
+                     product than the objective names; the primary data was
+                     available but not used where it bears on a claim.
+Report only a flaw you can name concretely, quoting the claim. Do NOT invent
+problems to appear thorough. At most 8 findings, most material first.
+
+SEVERITY:
+  • critical — the claim would mislead a go/no-go decision.
+  • minor    — worth noting; the assessment still stands.
+
+OUTPUT — a single JSON object:
+{{"findings": [
+   {{"dimension": "grounding|quantification|consistency|scope",
+     "severity": "critical|minor",
+     "claim": "<the assessment text at issue, abbreviated>",
+     "issue": "<one concrete sentence>"}}
+]}}
+If the assessment is clean, return {{"findings": []}}.
+"""
+    try:
+        response = model.generate_content([eval_prompt],
+                                          generation_config=generation_config)
+        verdict, _ = parse_json_from_response(response)
+        findings = (verdict or {}).get("findings", []) or []
+        findings = [f for f in findings if isinstance(f, dict) and f.get("issue")]
+        crit = [f for f in findings if f.get("severity") == "critical"]
+        if crit:
+            print(f"    - ⚠️  TEA critic noted {len(crit)} significant caveat(s).")
+        else:
+            print(f"    - ✅ TEA critic: {len(findings)} minor caveat(s).")
+        return {"findings": findings}
+    except Exception as e:  # noqa: BLE001 - advisory; never block the TEA
+        logging.error(f"TEA critic step failed: {e}")
+        return {"findings": []}
+
+
+def summarize_primary_data(primary_data_set: Any) -> Optional[str]:
+    """Summarise one or several tabular primary-data files for a prompt.
+
+    Accepts ``None``, one ``{"file_path", "metadata_path"}`` dict, or a list
+    of them. A single file keeps the historical output byte-for-byte (the
+    bare summary text). Several files are each summarised and joined under
+    a ``## Data file i of N: <filename>`` heading so the author can tell a composition table
+    from a price table — the previous single-dict contract forced a TEA to
+    pick ONE of them and push the rest through the KB as prose.
+
+    A file that fails to parse is reported and skipped; the others still
+    reach the prompt.
+    """
+    if not primary_data_set:
+        return None
+    entries = (primary_data_set if isinstance(primary_data_set, list)
+               else [primary_data_set])
+    entries = [e for e in entries if e and e.get("file_path")]
+    if not entries:
+        return None
+
+    def _one(entry: Dict[str, Any]) -> Optional[str]:
+        try:
+            chunks = parse_adaptive_excel(
+                entry["file_path"], entry.get("metadata_path")
+            )
+        except Exception as e:  # noqa: BLE001 - one bad file must not drop the rest
+            print(f"  - ⚠️ Warning: Failed to parse primary data set "
+                  f"{Path(entry['file_path']).name}: {e}")
+            return None
+        if not chunks:
+            return None
+        summary = next(
+            (c for c in chunks if c["metadata"].get("content_type")
+             in ("dataset_summary", "dataset_package")),
+            chunks[0],
+        )
+        return summary["text"]
+
+    if len(entries) == 1:
+        return _one(entries[0])
+
+    # The per-file summary already opens with its own '### Experiment Data'
+    # heading, so the file label sits one level ABOVE it.
+    parts, n = [], len(entries)
+    for i, entry in enumerate(entries, 1):
+        text = _one(entry)
+        if text:
+            parts.append(f"## Data file {i} of {n}: {Path(entry['file_path']).name}\n{text}")
+    return "\n\n".join(parts) if parts else None
+
+
 def perform_science_rag(objective: str,
                         instructions: str,
                         task_name: str,
                         kb_docs: Any,  # Pass the KB object here
                         model: Any,    # Pass the LLM object here
                         generation_config: Any,
-                        primary_data_set: Optional[Dict[str, str]] = None,
+                        primary_data_set: Optional[Any] = None,
                         image_paths: Optional[List[str]] = None,
                         image_descriptions: Optional[List[str]] = None,
                         additional_context: Optional[str] = None,
@@ -440,6 +612,11 @@ def perform_science_rag(objective: str,
     """
     Executes the Scientific/TEA RAG loop over the Docs KnowledgeBase.
 
+    ``primary_data_set`` is one ``{"file_path", "metadata_path"}`` dict or a
+    list of them; several files are summarised one after another, each
+    under its own filename, so a TEA can read a composition table and a
+    price table in the same call (see ``summarize_primary_data``).
+
     Thin planning-side wrapper over the shared ``scilink.knowledge.run_rag``
     engine: it resolves planning's primary-data Excel summary and selects the
     matching fallback instruction set, then delegates retrieval + generation.
@@ -450,22 +627,8 @@ def perform_science_rag(objective: str,
     against the same material. Default False preserves the result-only return.
     """
 
-    # --- Resolve primary data (Excel) into a summary string ---
-    primary_data_str = None
-    if primary_data_set:
-        try:
-            chunks = parse_adaptive_excel(
-                primary_data_set['file_path'], primary_data_set['metadata_path']
-            )
-            if chunks:
-                summary = next(
-                    (c for c in chunks if c['metadata'].get('content_type')
-                     in ('dataset_summary', 'dataset_package')),
-                    chunks[0],
-                )
-                primary_data_str = summary['text']
-        except Exception as e:
-            print(f"  - ⚠️ Warning: Failed to parse primary data set: {e}")
+    # --- Resolve primary data (Excel / CSV, one file or several) ---
+    primary_data_str = summarize_primary_data(primary_data_set)
 
     # Literature context crowds out the less glamorous constraints: plans stay
     # on-topic but silently drop individual requirements, and the misses are
@@ -473,7 +636,11 @@ def perform_science_rag(objective: str,
     # mapping restores coverage at no measurable cost to plan quality. Scoped
     # to the condition it was measured in — constraints AND literature both
     # present; a constraints-only run already complies.
-    if additional_context and external_context:
+    # Not for a TEA: its additional_context is the user's economic framing,
+    # and the note's "named experimental step" demand has no referent there.
+    # Every other instruction set keeps the note exactly as before.
+    if (additional_context and external_context
+            and not instructions.startswith(TEA_INSTRUCTIONS)):
         additional_context = f"{additional_context}\n{CONSTRAINT_COVERAGE_NOTE}"
 
     # --- Select the fallback instruction set matching the planning task ---

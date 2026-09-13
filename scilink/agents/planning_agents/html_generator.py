@@ -266,12 +266,82 @@ class HTMLReportGenerator:
         """
 
     def _render_tea(self, plan: Dict[str, Any]) -> str:
-        assess = plan.get('technoeconomic_assessment', {})
+        assess = plan.get('technoeconomic_assessment') or {}
+        if not isinstance(assess, dict):
+            assess = {"summary": str(assess)}
+
+        def _as_list(key):
+            # The model may hand back None, a bare string or a scalar where a
+            # list was asked for; a string must become ONE item, not its chars.
+            v = assess.get(key)
+            if v is None or v == "":
+                return []
+            if isinstance(v, (list, tuple)):
+                return [x for x in v if x is not None and str(x).strip()]
+            return [v]
+
         def list_to_html(key, css_class):
-            return "".join(f"<li class='{css_class}'>{html.escape(str(x))}</li>" for x in assess.get(key, []))
-        
+            return "".join(f"<li class='{css_class}'>{html.escape(str(x))}</li>"
+                           for x in _as_list(key))
+
         # Summary might contain tables
-        summary_html = self._markdown_to_html(assess.get('summary', ''))
+        summary_html = self._markdown_to_html(str(assess.get('summary') or ''))
+
+        # Provenance: the one line a reader needs before trusting a figure.
+        grounding = plan.get("grounding") or {}
+        mode = grounding.get("mode") or plan.get("generation_mode")  # None: legacy record
+        sources = [str(x) for x in _as_list("source_documents")]
+        files = grounding.get("primary_data_files") or []
+        if mode == "fallback":
+            prov_html = (
+                '<div style="margin-top:12px;padding:10px 14px;background:#fef3c7;'
+                'border-left:4px solid #f59e0b;border-radius:6px;color:#92400e;">'
+                '<strong>⚠️ Fallback tier — general benchmarks.</strong> The knowledge '
+                'base and literature held no usable economic data, so the figures '
+                'below are model estimates from industry norms, not sourced values.'
+                '</div>')
+        elif mode is None:
+            prov_html = (
+                '<div style="margin-top:12px;padding:10px 14px;background:#f1f5f9;'
+                'border-left:4px solid #94a3b8;border-radius:6px;color:#334155;">'
+                '<strong>ℹ️ Provenance not recorded.</strong> This assessment predates '
+                'tier tracking; whether its figures are sourced or estimated is unknown.'
+                '</div>')
+        else:
+            src_txt = (", ".join(html.escape(x) for x in sources)
+                       if sources else "retrieved knowledge-base / literature context")
+            prov_html = (
+                '<div style="margin-top:12px;padding:10px 14px;background:#ecfdf5;'
+                'border-left:4px solid #10b981;border-radius:6px;color:#065f46;">'
+                f'<strong>✅ Grounded (strict tier).</strong> Sources: {src_txt}.'
+                '</div>')
+        if files:
+            prov_html += ('<div class="meta" style="margin-top:6px;">Primary data: '
+                          + ", ".join(html.escape(f) for f in files) + '</div>')
+
+        comparison = str(assess.get("comparison_to_alternatives") or "").strip()
+        comparison_html = (
+            f'<div style="margin-top:15px;"><strong>⚖️ Comparison to Alternatives:</strong>'
+            f'<div>{self._markdown_to_html(comparison)}</div></div>'
+            if comparison else "")
+        gaps_html = list_to_html('data_gaps_for_quantitative_analysis', 'gap')
+        gaps_block = (
+            '<div style="margin-top:15px;padding:12px 14px;background:#eff6ff;'
+            'border-left:4px solid #3b82f6;border-radius:6px;">'
+            '<strong style="color:#1d4ed8">🔍 Data Gaps for a Quantitative TEA</strong>'
+            '<div class="meta">What to measure or source next to turn this into numbers.</div>'
+            f'<ul class="tea-list" style="margin-top:8px;">{gaps_html}</ul></div>'
+            if gaps_html else "")
+
+        caveat_lines = format_caveats(plan.get('critic_findings'))
+        caveats_html = ""
+        if caveat_lines:
+            items = "".join(f"<li>{html.escape(c)}</li>" for c in caveat_lines)
+            caveats_html = (
+                '<div class="caveats" style="margin-top:18px;padding:14px 16px;'
+                'background:#fef3c7;border-left:4px solid #f59e0b;border-radius:6px;">'
+                '<strong style="color:#b45309">⚠️ Critic Caveats on this Assessment</strong>'
+                f'<ul style="margin:8px 0 0;color:#92400e">{items}</ul></div>')
 
         return f"""
         <div class="exp-block" style="border-left-color: #10b981;">
@@ -279,11 +349,15 @@ class HTMLReportGenerator:
                 <strong>💰 Executive Summary:</strong><br>
                 {summary_html}
             </div>
+            {prov_html}
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px;">
                 <div><strong>💸 Key Cost Drivers:</strong><ul class="tea-list">{list_to_html('key_cost_drivers', 'cost')}</ul></div>
                 <div><strong>📈 Potential Benefits:</strong><ul class="tea-list">{list_to_html('potential_benefits_or_revenue', 'benefit')}</ul></div>
             </div>
             <div style="margin-top: 15px;"><strong>⚠️ Economic Risks:</strong><ul>{list_to_html('economic_risks', '')}</ul></div>
+            {comparison_html}
+            {gaps_block}
+            {caveats_html}
         </div>
         """
 
@@ -395,10 +469,16 @@ class HTMLReportGenerator:
         # Filter out superseded plans - they stay in JSON for transparency
         active_plans = [p for p in full_history if p.get('status') != 'superseded']
 
+        # One card per (iteration, kind): a TEA run mid-campaign shares its
+        # iteration number with the plan it assesses and must not replace it
+        # (keying on iteration alone silently dropped one of the two). Within
+        # an iteration the TEA renders first; the latest entry of a kind wins.
         finalized_plans = {}
         for plan in active_plans:
             iter_idx = plan.get('iteration', 0)
-            finalized_plans[iter_idx] = plan
+            is_tea = ("technoeconomic_assessment" in plan
+                      or plan.get("type") == "technoeconomic_analysis")
+            finalized_plans[(iter_idx, 0 if is_tea else 1)] = plan
 
         sorted_plans = [finalized_plans[k] for k in sorted(finalized_plans.keys())]
         results = self.state.get('experimental_results', [])

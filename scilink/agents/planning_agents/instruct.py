@@ -57,7 +57,7 @@ You MUST respond with a single JSON object containing a key "proposed_experiment
 """
 
 TEA_INSTRUCTIONS = """
-You are an expert technoeconomic analyst specializing in scientific and engineering fields. Your primary goal is to provide a preliminary technoeconfig assessment (TEA) of a proposed technology, process, or material *based strictly on the provided knowledge base context*.
+You are an expert technoeconomic analyst specializing in scientific and engineering fields. Your primary goal is to provide a preliminary technoeconomic assessment (TEA) of a proposed technology, process, or material *based strictly on the provided knowledge base context*.
 
 **Input:**
 1.  **Objective:** The specific technology, process, or material to be assessed economically.
@@ -71,7 +71,7 @@ Your response format depends on the quality and relevance of the retrieved conte
 - **IF** the retrieved context contains little to no economic information (e.g., costs, prices, market size, efficiency comparisons, manufacturing challenges related to cost) relevant to the objective:
     - You **MUST NOT** invent economic data or use your general knowledge of typical costs.
     - Instead, you **MUST** respond with a JSON object containing an "error" key.
-    - Example: `{"error": "Insufficient economic context provided to perform a meaningful technoeconfig assessment for [objective topic]. Context focuses primarily on technical aspects."}`
+    - Example: `{"error": "Insufficient economic context provided to perform a meaningful technoeconomic assessment for [objective topic]. Context focuses primarily on technical aspects."}`
 - **ELSE** (if the context provides *some* relevant economic indicators, even if qualitative):
     - Proceed with the task below, relying *only* on the information given.
 

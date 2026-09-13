@@ -46,6 +46,7 @@ from .planning_rag import (
     refine_code_with_feedback,
     verify_plan_relevance,
     critique_plan,
+    critique_tea,
     generate_plan_candidates,
     judge_plan_candidates
 )
@@ -2556,11 +2557,12 @@ Select the most appropriate strategy:
 
     def perform_technoeconomic_analysis(self, objective: str,
                                         knowledge_paths: Optional[List[str]] = None,
-                                        primary_data_set: Optional[Union[str, Dict[str, str]]] = None,
+                                        primary_data_set: Optional[Any] = None,
                                         image_paths: Optional[List[str]] = None,
                                         image_descriptions: Optional[List[str]] = None,
                                         output_json_path: Optional[str] = None,
-                                        external_context: Optional[str] = None) -> Dict[str, Any]:
+                                        external_context: Optional[str] = None,
+                                        additional_context: Optional[str] = None) -> Dict[str, Any]:
         """
         Performs technoeconomic analysis (TEA) using Dual-KB retrieval.
 
@@ -2601,9 +2603,12 @@ Select the most appropriate strategy:
                 and Excel/CSV.
                 Example: ["./market_reports/", "./critical_materials_report.pdf"]
 
-            primary_data_set: Main dataset for analysis.
-                Can contain composition, concentration, or yield data.
-                Example: {"file_path": "./feedstock_composition.xlsx"}
+            primary_data_set: Main dataset(s) for analysis — a path, a
+                ``{"file_path": ...}`` dict, or a LIST of either. A TEA
+                usually wants several tables at once (a feedstock
+                composition, a price list, measured yields); every file
+                is summarised under its own name in the prompt.
+                Example: ["./feedstock_composition.xlsx", "./prices.csv"]
 
             image_paths: Images to support TEA analysis.
                 Examples: criticality matrices, supply chain diagrams, cost breakdowns.
@@ -2613,8 +2618,16 @@ Select the most appropriate strategy:
 
             output_json_path: Path to save TEA results.
                 Saves results to {output_json_path}, state to
-                {output_json_path}.state.json, and HTML report to
+                {output_json_path}.state.json, the evidence the author saw
+                to {stem}.grounding.md, and HTML report to
                 {output_json_path}.html.
+
+            external_context: External literature text (from the
+                orchestrator's economic_data literature search).
+
+            additional_context: Free-text constraints / requirements from
+                the user (plant scale, target market, budget ceiling, ...),
+                injected as the prompt's Additional Context block.
 
         Returns:
             Dict[str, Any]: Technoeconomic analysis results containing
@@ -2641,8 +2654,14 @@ Select the most appropriate strategy:
             ... )
         """
         
-        # 0a. Resolve Primary Data
-        primary_data_set = resolve_primary_data_path(primary_data_set)
+        # 0a. Resolve Primary Data — one file or several (metadata sidecars
+        # are auto-discovered per file, exactly as for a single one).
+        if isinstance(primary_data_set, list):
+            primary_data_set = [r for r in
+                                (resolve_primary_data_path(e) for e in primary_data_set)
+                                if r] or None
+        else:
+            primary_data_set = resolve_primary_data_path(primary_data_set)
         # 0b. Resolve image paths
         # Images explicitly specified by user undr image_paths (will be deprecated in the future)
         manual_images = image_paths or []
@@ -2662,8 +2681,18 @@ Select the most appropriate strategy:
                 image_descriptions=image_descriptions
             )
 
-        #  TEA is always step 0 (pre-planning)
-        self.state["iteration_index"] = 0
+        # TEA-first is step 0 (pre-planning). A TEA run MID-campaign must not
+        # reset the iteration counter: the next plan would be numbered 1 again,
+        # colliding with the existing iteration-1 plan (refine's executed-plan
+        # lookup and the report's per-iteration cards both key on it). It is
+        # stamped with the CURRENT iteration instead, alongside the plan it
+        # assesses.
+        _has_plans = any(
+            (h or {}).get("type") != "technoeconomic_analysis"
+            for h in (self.state.get("plan_history") or []))
+        if not _has_plans:
+            self.state["iteration_index"] = 0
+        _tea_iteration = self.state.get("iteration_index", 0)
 
         # 2. Build KB if needed
         if not self._ensure_kb_is_ready(knowledge_paths, code_paths=None):
@@ -2685,7 +2714,11 @@ Select the most appropriate strategy:
         # Build skill context for TEA (overview section if relevant)
         skill_tea_context = self._build_skill_context("overview")
 
-        res = perform_science_rag(
+        # return_context + mode_key: keep the evidence the author saw and the
+        # instruction tier that produced the result. Without them a TEA card
+        # could not say whether "the KB said this" or "the model estimated
+        # this" — and the fallback tier explicitly licenses estimates.
+        res, author_context = perform_science_rag(
             objective=objective,
             instructions=TEA_INSTRUCTIONS,
             task_name="Technoeconomic Analysis",
@@ -2696,18 +2729,55 @@ Select the most appropriate strategy:
             image_paths=all_image_paths,
             image_descriptions=image_descriptions,
             external_context=lit_context,
-            skill_context=skill_tea_context
+            additional_context=additional_context,
+            skill_context=skill_tea_context,
+            return_context=True,
+            mode_key="generation_mode",
         )
 
         if lit_context:
             res["literature_search"] = lit_context
 
-        # 5. Commit to State
+        # 5. Provenance + advisory critic, then commit to State
         if not res.get("error"):
+            tier = res.get("generation_mode") or "strict"
+            _files = ([Path(e["file_path"]).name for e in primary_data_set]
+                      if isinstance(primary_data_set, list)
+                      else [Path(primary_data_set["file_path"]).name]
+                      if primary_data_set else [])
+            res["grounding"] = {
+                "mode": tier,
+                "retrieved_context_chars": len(author_context.get("retrieved_context") or ""),
+                "has_primary_data": bool(author_context.get("primary_data")),
+                "primary_data_files": _files,
+                "has_external_literature": bool(lit_context),
+            }
+            if tier == "fallback":
+                print("    ⚠️  TEA authored in FALLBACK mode — the knowledge base "
+                      "held no usable economic data, so figures are general "
+                      "benchmarks, not sourced values.")
+            verdict = critique_tea(
+                objective, res, self.model, self.generation_config,
+                retrieved_context=author_context.get("retrieved_context"),
+                primary_data=author_context.get("primary_data"),
+                tier=tier,
+                skill_context=skill_tea_context,
+            )
+            findings = verdict.get("findings", [])
+            if findings:
+                _order = {"critical": 0, "minor": 1}
+                findings = sorted(findings, key=lambda f: _order.get(f.get("severity"), 1))
+                res["critic_findings"] = findings
+                self._log_action(
+                    action="tea_critic_review",
+                    input_ctx={"findings": findings},
+                    result=res,
+                    rationale="Advisory caveats recorded; assessment not modified."
+                )
             # Tags for the HTML Generator
             res["type"] = "technoeconomic_analysis"
-            res["stage"] = "TEA Initial"
-            res["iteration"] = 0 # TEA is step 0 (pre-planning)
+            res["stage"] = "TEA Initial" if _tea_iteration == 0 else "TEA Update"
+            res["iteration"] = _tea_iteration
             # Append copy to history
             self.state["plan_history"].append(self._stamp_campaign(res).copy())
      
@@ -2717,7 +2787,8 @@ Select the most appropriate strategy:
                 "objective": objective,
                 "knowledge_paths": knowledge_paths,
                 "has_primary_data": primary_data_set is not None,
-                "has_literature": bool(lit_context)
+                "has_literature": bool(lit_context),
+                "has_additional_context": bool(additional_context),
             },
             result=res,
             rationale=res.get("technoeconomic_assessment", {}).get("summary") if not res.get("error") else None
@@ -2727,7 +2798,25 @@ Select the most appropriate strategy:
         if output_json_path:
             self._save_results_to_json(res, output_json_path)
             self._save_state_to_json(output_json_path + ".state.json")
-            
+            # The evidence the author saw, as a sidecar: auditable without
+            # bloating the result JSON that rides into every later prompt.
+            if not res.get("error"):
+                try:
+                    _gp = Path(output_json_path).with_suffix(".grounding.md")
+                    _g = res.get("grounding", {})
+                    _gp.write_text(
+                        "# TEA grounding record\n\n"
+                        f"- generation mode: **{_g.get('mode')}**\n"
+                        f"- primary data files: {', '.join(_g.get('primary_data_files') or []) or 'none'}\n"
+                        f"- external literature: {'yes' if _g.get('has_external_literature') else 'no'}\n\n"
+                        "## Primary data summary\n\n"
+                        f"{author_context.get('primary_data') or '(none)'}\n\n"
+                        "## Retrieved context\n\n"
+                        f"{author_context.get('retrieved_context') or '(none)'}\n",
+                        encoding="utf-8")
+                except Exception as e:  # noqa: BLE001 - record-keeping must not fail the TEA
+                    logging.warning(f"Could not write TEA grounding record: {e}")
+
             # Trigger HTML Generation (will show TEA card)
             self._generate_html_report(output_json_path)
 
