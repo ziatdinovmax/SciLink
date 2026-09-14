@@ -17,6 +17,7 @@ No network: the literature agent is a scripted stub.
 """
 
 import json
+import logging
 import threading
 from pathlib import Path
 import time
@@ -40,6 +41,8 @@ class StubLitAgent:
         self._lock = threading.Lock()
 
     def _run(self, kind, query):
+        # The real agent logs its submission from the worker thread.
+        logging.getLogger("LitAgent").info(f"🚀 Submitting ({kind}) query")
         with self._lock:
             self._active += 1
             self.max_concurrent = max(self.max_concurrent, self._active)
@@ -56,6 +59,9 @@ class StubLitAgent:
 
     def search_for_cross_domain(self, q):
         return self._run("cross_domain", q)
+
+    def search_for_technique_limitations(self, q):
+        return self._run("technique_limitations", q)
 
     def search_for_economic_data(self, q):
         return self._run("economic_data", q)
@@ -349,17 +355,20 @@ def test_one_wedged_search_cannot_hold_the_whole_call(tool, monkeypatch,
     func, lit, *_ = tool
     monkeypatch.setattr(ot, "_LIT_BATCH_DEADLINE", 1)   # 1s instead of 25 min
 
-    started = threading.Event()
+    started, release = threading.Event(), threading.Event()
 
     def wedged(q):
         started.set()
-        time.sleep(30)                                   # never returns in time
+        release.wait(30)                                 # never returns in time
         return {"status": "success", "content": "too late"}
 
     lit.search_for_cross_domain = wedged
     t0 = time.time()
-    out = json.loads(func({"hypothesis_context": ["a", "b"],
-                           "cross_domain": ["stuck"]}))
+    try:
+        out = json.loads(func({"hypothesis_context": ["a", "b"],
+                               "cross_domain": ["stuck"]}))
+    finally:
+        release.set()   # the abandoned worker must not outlive the test
     elapsed = time.time() - t0
 
     assert started.is_set()
@@ -377,10 +386,14 @@ def test_all_searches_wedged_reports_failure_not_success(tool, monkeypatch):
     from scilink.agents.planning_agents import orchestrator_tools as ot
     func, lit, *_ = tool
     monkeypatch.setattr(ot, "_LIT_BATCH_DEADLINE", 1)
-    lit.search_for_hypothesis_context = lambda q: time.sleep(30)
-    lit.search_for_cross_domain = lambda q: time.sleep(30)
+    release = threading.Event()
+    lit.search_for_hypothesis_context = lambda q: release.wait(30)
+    lit.search_for_cross_domain = lambda q: release.wait(30)
 
-    out = json.loads(func(["x", "y"], "hypothesis_context,cross_domain"))
+    try:
+        out = json.loads(func(["x", "y"], "hypothesis_context,cross_domain"))
+    finally:
+        release.set()
     assert out["status"] != "success"
 
 
@@ -403,7 +416,7 @@ def test_heartbeat_clock_restarts_with_each_batch(monkeypatch, capsys):
     # ...and the reset happens INSIDE the batch loop, before the work
     i_loop = flat.index("for start in range(0, len(tasks), MAX_CONCURRENT):")
     i_reset = flat.index('_hb_state["t0"] = _time.time()')
-    i_submit = flat.index("f = ex.submit(search_methods[t]")
+    i_submit = flat.index("attributed_to_current(search_methods[t])")
     assert i_loop < i_reset < i_submit
 
     # the display reads that clock and names the batch when there are several
@@ -422,3 +435,65 @@ def test_batch_count_matches_the_announced_split():
     MAX = 6
     for n, expected in ((1, 1), (6, 1), (7, 2), (12, 2), (13, 3)):
         assert -(-n // MAX) == expected, n
+
+
+def test_heartbeat_reaches_the_web_session_stream(tool, monkeypatch):
+    """#627: under the web app's per-thread stdout router the heartbeat ran
+    on an unregistered thread, so its '⏳ … still running' ticks reached
+    the server console only and a 10-15 min search read as a hang in the
+    browser. The ticker must land in the calling turn's capture."""
+    import io
+    import sys
+
+    from scilink.agents.planning_agents import orchestrator_tools as ot
+    from scilink.server import stdout_router as sr
+
+    func, lit, *_ = tool
+    monkeypatch.setattr(ot, "_LIT_HEARTBEAT_SECONDS", 0.15)
+    lit.delay = 0.9
+    console = io.StringIO()
+    old_out, old_err = sys.stdout, sys.stderr
+    sys.stdout = sr._RoutingStream(console)
+    try:
+        cap = sr.RoutedCapture(tag="")
+        with cap:
+            func("q1", "hypothesis_context,cross_domain")
+        captured = cap.getvalue()
+    finally:
+        sys.stdout, sys.stderr = old_out, old_err
+    assert "still running" in captured, (
+        "heartbeat ticks did not reach the session stream")
+    assert "still running" in console.getvalue()   # console still sees them
+
+
+def test_search_worker_log_records_reach_the_web_session_stream(tool, monkeypatch):
+    """The pool workers running the searches log 'Submitting ... query'
+    and the result lines; the web turn's log handler keeps a record only
+    when its thread is attributed to the chat thread, so those lines were
+    dropped from the browser too (#627)."""
+    import io
+    import logging
+    import threading
+
+    from scilink.utils.log_context import effective_thread
+
+    func, lit, *_ = tool
+    prev_disable = logging.root.manager.disable
+    logging.disable(logging.NOTSET)
+    chat_thread = threading.get_ident()
+    buf = io.StringIO()
+    handler = logging.StreamHandler(buf)
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    handler.addFilter(lambda r: effective_thread(r.thread) == chat_thread)
+    root = logging.getLogger()
+    prev_level = root.level
+    root.setLevel(logging.INFO)
+    root.addHandler(handler)
+    try:
+        func("q1", "hypothesis_context,cross_domain")   # 2 jobs -> a pool
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(prev_level)
+        logging.disable(prev_disable)
+    assert buf.getvalue().count("Submitting (") == 2, buf.getvalue()

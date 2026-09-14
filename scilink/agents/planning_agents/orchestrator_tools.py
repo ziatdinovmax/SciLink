@@ -1938,7 +1938,12 @@ class OrchestratorTools:
                               f"{'es' if _hb_state['total'] != 1 else ''} still "
                               f"running ({mins} min elapsed{_of}; {_eta})")
 
-            _threading.Thread(target=_heartbeat, daemon=True).start()
+            # Attributed to this (chat) thread: under the web app's per-thread
+            # stdout router a bare Thread's prints reach only the server
+            # console, and the ticker's whole purpose is the browser (#627).
+            from ...utils.log_context import (attributed_to_current,
+                                              start_attributed_thread)
+            start_attributed_thread(_heartbeat, name="lit-search-heartbeat")
 
             try:
                 clean_queries = [optimize_search_query(
@@ -1988,8 +1993,13 @@ class OrchestratorTools:
                             for oi, t in batch:
                                 _l = _task_label(oi, t)
                                 _hb_mark_running(_l)
-                                f = ex.submit(search_methods[t],
-                                              clean_queries[oi])
+                                # Attributed like the heartbeat: the
+                                # agent's "Submitting ... query" / result
+                                # log records come from these workers and
+                                # otherwise never reach the browser (#627).
+                                f = ex.submit(
+                                    attributed_to_current(search_methods[t]),
+                                    clean_queries[oi])
                                 f.add_done_callback(
                                     lambda _f, _l=_l: _hb_mark_done(_l))
                                 futures[(oi, t)] = f
