@@ -130,6 +130,11 @@ export function Sidebar({
   const shownCustomModel = session ? session.model : customModel;
   const shownAutonomy = session ? session.autonomy : autonomy;
   const effectiveModel = shownModel === "__custom__" ? shownCustomModel : shownModel;
+  // The chat-model proxy (Base URL) is offered only for a Custom model:
+  // proxy endpoints alias their models, so a proxy session names the model
+  // itself (Custom). A URL typed under Custom is dropped once a preset is
+  // chosen, so it is never sent stale.
+  const baseUrlEff = shownModel === "__custom__" ? baseUrl.trim() : "";
   const autonomyOptions = config?.autonomy_options[mode] ?? [];
 
   useEffect(() => {
@@ -145,7 +150,7 @@ export function Sidebar({
   useEffect(() => {
     if (!effectiveModel) return;
     api
-      .config(effectiveModel, baseUrl)
+      .config(effectiveModel, baseUrlEff)
       .then((c) => {
         setProviderInfo(c.provider);
         setCredInfo(c.credentials);
@@ -174,7 +179,7 @@ export function Sidebar({
       return;
     }
     api
-      .config(effectiveModel, baseUrl, embeddingModel, embeddingBaseUrlEff)
+      .config(effectiveModel, baseUrlEff, embeddingModel, embeddingBaseUrlEff)
       .then((c) => setEmbeddingCred(c.embedding_credential ?? null))
       .catch(() => {});
   }, [embeddingModel, effectiveModel, baseUrl, embeddingBaseUrl]);
@@ -196,7 +201,7 @@ export function Sidebar({
     autonomy,
     consent,
     apiKey,
-    baseUrl,
+    baseUrl: baseUrlEff,
     providerFields,
     fhApiKey,
     mpApiKey,
@@ -323,16 +328,18 @@ export function Sidebar({
         </label>
       ))}
 
-      <label className="field">
-        <span>Base URL (optional)</span>
-        <input
-          type="text"
-          value={baseUrl}
-          disabled={locked}
-          onChange={(e) => setBaseUrl(e.target.value)}
-        />
-        {envCaption("base_url")}
-      </label>
+      {shownModel === "__custom__" && (
+        <label className="field">
+          <span>Base URL (optional)</span>
+          <input
+            type="text"
+            value={baseUrl}
+            disabled={locked}
+            onChange={(e) => setBaseUrl(e.target.value)}
+          />
+          {envCaption("base_url")}
+        </label>
+      )}
 
       <label className="field">
         <span>FutureHouse API key (optional)</span>
