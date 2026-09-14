@@ -467,7 +467,16 @@ export default function App() {
           title="Show sidebar"
           onClick={() => toggleSidebar(true)}
         >
-          ☰
+          {/* SVG (not the ☰ glyph, whose metrics sit high in the box) so the
+              bars are symmetric about the button's center. */}
+          <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
+            <path
+              d="M3 5h12M3 9h12M3 13h12"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+            />
+          </svg>
         </button>
       )}
       {sidebarOpen && (
