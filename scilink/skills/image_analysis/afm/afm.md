@@ -111,7 +111,9 @@ class counts or a dominant-orientation summary. Deliver all three:
 3. **A spatially-resolved, color-coded orientation map/overlay** — each
    domain/patch colored by its measured orientation (cyclic colormap),
    distinct from a domain-*identity* map (which colors domains to tell
-   them apart, not by angle).
+   them apart, not by angle). It **must carry a cyclic color-wheel legend**
+   mapping hue → angle (not a linear colorbar — orientation wraps at
+   0°≡180°); a color map with no legend cannot be read as angles.
 State the angle's reliability honestly: if the values are grid-snapped or
 FFT-quantized, report them as relative/class labels with that caveat
 rather than as precise crystallographic angles.
@@ -156,9 +158,10 @@ science.
   confirm the results deliver each domain's orientation as a value, not
   just aggregate classes: a per-domain row in the saved table carrying its
   orientation angle, angle labels printed on the map at each domain, and a
-  color-coded orientation overlay. A run that reports only class counts /
-  a dominant orientation, colors domains by identity rather than angle, or
-  shows a colorbar with no per-domain numbers has NOT met "quantify each
+  color-coded orientation overlay that carries a cyclic color-wheel legend
+  (hue → angle). A run that reports only class counts / a dominant
+  orientation, colors domains by identity rather than angle, or shows an
+  orientation map with no color→angle legend has NOT met "quantify each
   domain's orientation" — even if it segmented the domains correctly.
 
 Do not penalize an analysis for having preserved the raw line-to-line

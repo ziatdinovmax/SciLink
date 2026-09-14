@@ -3804,6 +3804,9 @@ original image, and the second MUST show a segmentation overlay (original image 
 colored semi-transparent masks and contour boundaries for each detected object). For \
 multi-channel images, show each channel as a separate grayscale subplot (do not try to \
 display a 2-channel array directly with imshow). \
+Any panel that encodes a quantity in color (orientation, phase, abundance, height, ...) MUST \
+carry a colorbar or legend mapping color to value — use a cyclic colorbar or color wheel for a \
+cyclic quantity such as orientation (which wraps at 0°≡180°) — or the panel cannot be read. \
 **`visualization.png` MUST contain the actual headline result figure.** If a registered tool \
 returns a `figure_bytes` that IS the result (e.g. a polarization/defect/QC map), write those \
 bytes directly to `visualization.png` (or embed them as panels in it). NEVER save the result to \
