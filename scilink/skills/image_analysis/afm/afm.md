@@ -40,6 +40,18 @@ interest is genuinely row-correlated (e.g. striped domains parallel
 to the fast-scan axis); in that case use a global plane fit only and
 document the choice.
 
+Estimate each row's baseline from that **row's own** substrate — a
+robust low estimator per row (its lowest histogram mode or a low
+percentile), not from a single global-threshold substrate mask. A
+smooth plane fit cannot remove an abrupt baseline step partway down a
+scan (a tip event or feedback jump), and that is exactly where a global
+mask fails: the stepped band's substrate sits *above* the global
+threshold, so it is dropped from the mask, its per-row offset is
+interpolated (≈0) from neighbors instead of measured, and the band is
+left elevated — where it is then misread as a raised terrace/layer.
+Correct each row against its own local substrate so a genuine
+row-baseline step is removed regardless of the global level.
+
 **2. Non-square pixels → rescale to square pixels.**
 AFM scans frequently use different numbers of pixels (or different
 scan sizes) along x and y, so a pixel is physically rectangular.
@@ -129,6 +141,16 @@ science.
   should not show a global row-to-row offset. If residual stripes
   remain over featureless areas, escalate from median subtraction
   to per-row polynomial.
+- The leveled substrate must be flat across the **whole field**, not
+  just where the substrate mask landed. Check for a residual step: a
+  full-width band (typically at a scan edge) that reads as bare
+  background yet sits elevated is a leveling failure, not a layer.
+  The tell in the output is a large contiguous background-looking
+  region assigned to a nonzero terrace/height class; substrate-only
+  flatness metrics will look clean because that band was dropped from
+  the substrate mask, so judge it from the assignment map's geometry.
+  If found, re-level (per-row-local baseline) before trusting any
+  per-layer coverage or thickness statistics.
 - After pixel-square resampling, the aspect ratio of known objects
   (e.g. circular grains should look circular, not elliptical).
   Confirm the recorded nm/px matches `field_of_view_x / N_x_new`
