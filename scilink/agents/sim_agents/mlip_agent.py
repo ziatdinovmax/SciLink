@@ -368,6 +368,7 @@ Return JSON:
             elements=elements,
             working_dir=self.working_dir,
             device=sim.get("device", "cpu"),
+            task_name=sim.get("task_name"),
         )
 
         # Delegate run generation to MDSimulationAgent. MLIPAgent's job

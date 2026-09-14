@@ -207,23 +207,29 @@ def deploy(
     elements: List[str],
     working_dir: str,
     device: str = "cpu",
+    task_name: Optional[str] = None,
 ) -> DeployedPotential:
     """
     Deploy an MLIP model as an engine-neutral DeployedPotential.
 
     ``model`` is a model *identifier* — each backend's deploy function
     decides whether it's a foundation-model keyword (``"mace-mp-0"``,
-    ``"chgnet"``) or an on-disk path to a trained/fine-tuned model
-    (the output of ``train()`` / ``fine_tune()``). This single entry
-    point covers both cases so adding a backend touches exactly one
-    deploy function — no separate pretrained/trained code paths.
+    ``"chgnet"``, ``"uma-s-1p2"``) or an on-disk path to a
+    trained/fine-tuned model (the output of ``train()`` /
+    ``fine_tune()``). This single entry point covers both cases so
+    adding a backend touches exactly one deploy function — no separate
+    pretrained/trained code paths.
 
     Args:
-        backend:     "mace" | "chgnet" | "nequip" | "deepmd"
+        backend:     "mace" | "chgnet" | "uma" | "nequip" | "deepmd"
         model:       Foundation-model keyword or path to a trained model
         elements:    Chemical elements in the system
         working_dir: Output directory
         device:      "cpu" or "cuda"
+        task_name:   Prediction-head selector for multi-task foundation
+                     models (UMA: "omat", "omol", "oc20", ...). Ignored
+                     by single-task backends. Defaults per backend when
+                     None.
 
     Returns:
         A DeployedPotential descriptor — the engine-neutral contract
@@ -236,6 +242,8 @@ def deploy(
         return _mace_deploy(model, elements, working_dir, device)
     elif backend == "chgnet":
         return _chgnet_deploy(model, elements, working_dir, device)
+    elif backend == "uma":
+        return _uma_deploy(model, elements, working_dir, device, task_name)
     elif backend in ("nequip", "deepmd"):
         # These have no foundation models. A trained model file is the
         # only way to deploy them — but the deploy function (with its
@@ -308,6 +316,79 @@ def _chgnet_deploy(
             device_env_var="CHGNET_DEVICE",
         ),
         notes=notes,
+    )
+
+
+# UMA foundation-model keywords. All UMA checkpoints load through the same
+# fairchem `pretrained_mlip.get_predict_unit` path; the keyword IS the
+# checkpoint name passed straight through. Bare "uma" resolves to the small
+# model — the fastest, the sensible default when a caller forces
+# backend="uma" without naming a size.
+_UMA_DEFAULT_MODEL = "uma-s-1p2"
+
+# Default prediction head when the caller doesn't specify one. UMA is a
+# multi-task model; "omat" (inorganic materials) is the right default for
+# the crystal/MD workflows this orchestrator drives. A molecular workflow
+# should pass task_name="omol".
+_UMA_DEFAULT_TASK = "omat"
+
+
+def _uma_deploy(
+    model: str,
+    elements: List[str],
+    working_dir: str,
+    device: str,
+    task_name: Optional[str] = None,
+) -> DeployedPotential:
+    """Deploy a UMA (fairchem) foundation model as a DeployedPotential.
+
+    UMA ships only foundation checkpoints (no trained-file path): ``model``
+    is a registry keyword such as ``"uma-s-1p2"`` / ``"uma-m-1p1"``, or the
+    bare ``"uma"`` which resolves to the small model. The calculator is
+    built from fairchem's two-step API — a predict unit from the pretrained
+    registry, then a ``FAIRChemCalculator`` wrapping it with a task head —
+    and constructed once here to validate the install and trigger the
+    weight download. ASE-only: fairchem has no LAMMPS pair_style in the base
+    package.
+    """
+    from fairchem.core import FAIRChemCalculator, pretrained_mlip
+
+    checkpoint = _UMA_DEFAULT_MODEL if (not model or model == "uma") else model
+    task = task_name or _UMA_DEFAULT_TASK
+    use_device = "cuda" if device == "cuda" else "cpu"
+
+    # Construct-and-discard: validates fairchem is importable, the checkpoint
+    # name is valid, and the weights download. The generated script rebuilds
+    # it from the ASECalculatorSpec below.
+    predictor = pretrained_mlip.get_predict_unit(checkpoint, device=use_device)
+    FAIRChemCalculator(predictor, task_name=task)
+
+    construct_expr = (
+        f"FAIRChemCalculator(__import__('fairchem.core', "
+        f"fromlist=['pretrained_mlip']).pretrained_mlip.get_predict_unit("
+        f"{checkpoint!r}, device=('cuda' if DEVICE == 'cuda' else 'cpu')), "
+        f"task_name={task!r})"
+    )
+
+    logger.info(
+        f"Deployed UMA {checkpoint} (task={task}, ASE-only, device={use_device})"
+    )
+    return DeployedPotential(
+        kind="mlip",
+        backend="uma",
+        model_name=checkpoint,
+        model_file="",  # fairchem manages its own weight cache
+        elements=list(elements),
+        ase_calculator=ASECalculatorSpec(
+            import_line="from fairchem.core import FAIRChemCalculator",
+            construct_expr=construct_expr,
+            device_env_var="UMA_DEVICE",
+        ),
+        notes=(
+            f"UMA {checkpoint} (task head '{task}'). ASE-only — no LAMMPS "
+            f"pair_style in the base fairchem package; the MD agent must use "
+            f"the ASE runner. Pass task_name='omol' for molecular systems."
+        ),
     )
 
 

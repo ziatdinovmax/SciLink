@@ -75,19 +75,25 @@ Deployment path:
 ASE calculator path:
 
 ```python
-from fairchem.core import FAIRChemCalculator
+from fairchem.core import FAIRChemCalculator, pretrained_mlip
 from ase.io import read
 from ase.md.langevin import Langevin
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from ase import units
 
 atoms = read("structure.xyz")
-atoms.calc = FAIRChemCalculator(checkpoint_path="uma-m-1p1", task_name="omat")
+predictor = pretrained_mlip.get_predict_unit("uma-m-1p1", device="cpu")
+atoms.calc = FAIRChemCalculator(predictor, task_name="omat")
 
 MaxwellBoltzmannDistribution(atoms, temperature_K=300)
 dyn = Langevin(atoms, timestep=1.0 * units.fs, temperature_K=300, friction=0.01)
 dyn.run(1000)
 ```
+
+`FAIRChemCalculator` takes the predict unit as its first positional argument
+(there is no `checkpoint_path=` keyword). Load the checkpoint through
+`pretrained_mlip.get_predict_unit(name, device=...)`, then wrap it, selecting
+the prediction head with `task_name`.
 
 `task_name` selects the prediction head:
 - `"oc20"` — use for catalysis
