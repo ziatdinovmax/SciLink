@@ -78,6 +78,8 @@ class OutputCapture:
         self._stop_event.set()
         # Kill any subprocess the agent thread is waiting on.
         if self._agent_thread_id is not None:
+            from scilink.utils.log_context import stop_workers_of
+            stop_workers_of(self._agent_thread_id)   # outlives this stream
             try:
                 from scilink.executors import kill_subprocesses_for_thread
                 kill_subprocesses_for_thread(self._agent_thread_id)
@@ -85,7 +87,9 @@ class OutputCapture:
                 pass  # Best-effort; stop event will still propagate via print()
 
     def __enter__(self) -> "OutputCapture":
+        from scilink.utils.log_context import clear_stop
         self._agent_thread_id = threading.get_ident()
+        clear_stop(self._agent_thread_id)
         self._old_stdout = sys.stdout
         self._old_stderr = sys.stderr
         sys.stdout = TeeStream(self._old_stdout, self._buffer, self._stop_event)

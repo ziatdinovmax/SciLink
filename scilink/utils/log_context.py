@@ -37,6 +37,15 @@ from typing import Callable, Dict, Optional, Tuple
 _WORKERS: Dict[int, Tuple[int, str, bool]] = {}
 _LOCK = threading.Lock()
 _FILTER_INSTALLED = False
+# Chat threads whose turn was stopped while workers were still attributed to
+# them. A worker's stop signal used to be the session route itself
+# (``AgentStoppedError`` raised from a routed write) — but the route goes
+# away when the chat thread exits, and a fan-out branch inside a long model
+# call at Stop time next printed AFTER that, found no route, and kept
+# running (seen live: a branch kept fitting after its turn was stopped).
+# A stopped parent stays flagged until its last worker unregisters, so a
+# straggler is stopped by its next print OR log record regardless of route.
+_STOPPED_PARENTS: set = set()
 
 
 def register_worker(parent_thread_id: int, tag: str, prefix: bool = True) -> None:
@@ -55,7 +64,40 @@ def register_worker(parent_thread_id: int, tag: str, prefix: bool = True) -> Non
 
 def unregister_worker() -> None:
     with _LOCK:
-        _WORKERS.pop(threading.get_ident(), None)
+        entry = _WORKERS.pop(threading.get_ident(), None)
+        if entry and _STOPPED_PARENTS:
+            root = effective_thread(entry[0])
+            if root in _STOPPED_PARENTS and not any(
+                    effective_thread(t) == root for t in _WORKERS):
+                _STOPPED_PARENTS.discard(root)   # last straggler is gone
+
+
+def stop_workers_of(chat_thread_id: int) -> None:
+    """A turn on ``chat_thread_id`` was stopped: every thread attributed to
+    it (now or later) raises ``AgentStoppedError`` on its next print or log
+    record, even after the chat thread and its session route are gone."""
+    with _LOCK:
+        _STOPPED_PARENTS.add(chat_thread_id)
+
+
+def clear_stop(chat_thread_id: int) -> None:
+    """A fresh turn starts on ``chat_thread_id`` (thread ids are reused)."""
+    with _LOCK:
+        _STOPPED_PARENTS.discard(chat_thread_id)
+
+
+def worker_stopped(thread_id: int) -> bool:
+    """True for an attributed worker whose owning turn was stopped."""
+    if not _STOPPED_PARENTS:
+        return False
+    root = effective_thread(thread_id)
+    return root != thread_id and root in _STOPPED_PARENTS
+
+
+def raise_if_stopped_worker() -> None:
+    if worker_stopped(threading.get_ident()):
+        from scilink.ui.output_capture import AgentStoppedError
+        raise AgentStoppedError("Agent stopped by user")
 
 
 # Longest worker chain resolved by ``effective_thread`` — a bound, not a
@@ -197,6 +239,11 @@ def _install_prefix_filter() -> None:
         previous_factory = logging.getLogRecordFactory()
 
         def factory(*args, **kwargs):
+            # The one hook on the LOGGING path that every worker record
+            # passes through in the emitting thread — the turn's own log
+            # handler (whose filter raises on stop) is removed with the
+            # turn, so a straggler's log records must raise here.
+            raise_if_stopped_worker()
             record = previous_factory(*args, **kwargs)
             entry = _WORKERS.get(record.thread)
             if entry and entry[2]:          # entry[2] = prefix?  (routing is separate)

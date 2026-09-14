@@ -34,7 +34,8 @@ import threading
 from typing import Dict, Optional, TextIO, Tuple
 
 from scilink.ui.output_capture import AgentStoppedError
-from scilink.utils.log_context import effective_thread
+from scilink.utils.log_context import (clear_stop, effective_thread,
+                                       stop_workers_of, worker_stopped)
 
 class _Route:
     """One turn's capture target + console-attribution state."""
@@ -67,8 +68,15 @@ class _RoutingStream:
 
     def write(self, data: str) -> int:
         out = data
-        route = _ROUTES.get(effective_thread(threading.get_ident()))
-        if route is not None:
+        tid = threading.get_ident()
+        route = _ROUTES.get(effective_thread(tid))
+        if route is None:
+            if worker_stopped(tid):
+                # The turn is gone (route removed) but this worker still
+                # belongs to it — a fan-out branch outliving its stopped
+                # coordinator.
+                raise AgentStoppedError("Agent stopped by user")
+        else:
             if route.stop.is_set():
                 raise AgentStoppedError("Agent stopped by user")
             if not getattr(_tls, "routing", False):
@@ -134,6 +142,7 @@ class RoutedCapture:
         """Abort the turn on its next print/log; kill its subprocesses."""
         self._stop_event.set()
         if self._agent_thread_id is not None:
+            stop_workers_of(self._agent_thread_id)
             try:
                 from scilink.executors import kill_subprocesses_for_thread
                 kill_subprocesses_for_thread(self._agent_thread_id)
@@ -143,6 +152,7 @@ class RoutedCapture:
     def __enter__(self) -> "RoutedCapture":
         install()
         self._agent_thread_id = threading.get_ident()
+        clear_stop(self._agent_thread_id)   # a fresh turn on a reused id
         with _ROUTES_LOCK:
             _ROUTES[self._agent_thread_id] = _Route(
                 self._buffer, self._buffer_lock, self._stop_event, self._tag)

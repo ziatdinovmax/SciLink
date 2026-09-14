@@ -43,6 +43,13 @@ def _install_fakes(behaviors):
                     for _ in range(400):
                         print(f"{MARKER} still working...")
                         time.sleep(0.05)
+                elif beh == "late":
+                    # Silent 'model call' that outlives the coordinator's
+                    # exit after a Stop, THEN chatty — the live shape.
+                    time.sleep(2.5)
+                    for _ in range(400):
+                        print(f"{MARKER} late branch still working...")
+                        time.sleep(0.05)
                 else:
                     print(f"{MARKER} quick branch")
                 return {"status": "success", "summary": f"{beh} ok",
@@ -88,10 +95,13 @@ def meta(tmp_path):
     import scilink.agents.exp_agents.analysis_orchestrator  # noqa: F401
     ag = MetaOrchestratorAgent(base_dir=str(tmp_path), api_key="sk-dummy",
                                meta_mode=MetaMode.AUTONOMOUS)
-    orig = (fo._make_ephemeral_analysis_child, fo._llm_json, fo._FANOUT_POLL_S)
+    orig = (fo._make_ephemeral_analysis_child, fo._llm_json, fo._FANOUT_POLL_S,
+            fo._FANOUT_HEARTBEAT_S)
     fo._FANOUT_POLL_S = 0.2
+    fo._FANOUT_HEARTBEAT_S = 0.5   # the coordinator prints (and so raises) soon
     yield ag
-    fo._make_ephemeral_analysis_child, fo._llm_json, fo._FANOUT_POLL_S = orig
+    (fo._make_ephemeral_analysis_child, fo._llm_json, fo._FANOUT_POLL_S,
+     fo._FANOUT_HEARTBEAT_S) = orig
 
 
 def _datasets(tmp_path, names):
@@ -120,27 +130,42 @@ def test_branch_prints_reach_the_coordinator_session(meta, tmp_path):
     assert not lc._WORKERS
 
 
-def test_user_stop_reaches_the_branch_threads(meta, tmp_path):
+@pytest.mark.parametrize("shape", ["chatty", "late"])
+def test_user_stop_reaches_the_branch_threads(meta, tmp_path, shape):
     """Stop during a fan-out must abort the branch workers, not only the
-    coordinator: the chatty branch would otherwise run ~20 s on."""
+    coordinator: a branch would otherwise run ~20 s on. 'chatty' raises
+    while the coordinator (and its route) is still there; 'late' is the
+    live shape — the branch is silent inside a model call until after the
+    coordinator has exited, and must still be stopped by its next print."""
     A, B = _datasets(tmp_path, "AB")
-    _install_fakes({A: "chatty", B: "chatty"})
+    _install_fakes({A: shape, B: shape})
     cap = sr.RoutedCapture(tag="")
     threading.Timer(0.8, cap.request_stop).start()
     t0 = time.monotonic()
-    with routed_console(), cap:
-        with pytest.raises(AgentStoppedError):
-            meta._run_fanout(
-                [{"data_path": p, "task": f"Analyze {p}",
-                  "label": os.path.basename(p)} for p in (A, B)])
-    # Both branch threads released their admission slots well before the
-    # ~20 s they would have run to completion.
-    deadline = time.monotonic() + 5.0
-    while fo._mem_running and time.monotonic() < deadline:
-        time.sleep(0.1)
-    assert not fo._mem_running, "a branch thread outlived the user Stop"
-    assert time.monotonic() - t0 < 10.0
-    assert MARKER in cap.getvalue()
+    # The router stays installed for the whole test, as it does for the
+    # server process: the stragglers' prints must still pass through it
+    # after the coordinator's capture is gone.
+    with routed_console():
+        with cap:
+            with pytest.raises(AgentStoppedError):
+                meta._run_fanout(
+                    [{"data_path": p, "task": f"Analyze {p}",
+                      "label": os.path.basename(p)} for p in (A, B)])
+        assert not sr._ROUTES   # coordinator turn is over; route removed
+        # Both branch threads released their admission slots well before
+        # the ~20 s they would have run to completion.
+        deadline = time.monotonic() + 8.0
+        while fo._mem_running and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not fo._mem_running, "a branch thread outlived the user Stop"
+        assert time.monotonic() - t0 < 12.0
+        if shape == "chatty":
+            assert MARKER in cap.getvalue()
+        from scilink.utils import log_context as lc
+        deadline = time.monotonic() + 5.0
+        while (lc._WORKERS or lc._STOPPED_PARENTS) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not lc._WORKERS and not lc._STOPPED_PARENTS
 
 
 if __name__ == "__main__":

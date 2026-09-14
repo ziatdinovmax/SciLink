@@ -163,3 +163,118 @@ def test_plain_register_worker_is_unchanged():
     finally:
         lc.unregister_worker()
     assert lc.effective_thread(threading.get_ident()) == threading.get_ident()
+
+
+# ---------------------------------------------------------------- stop persistence
+
+
+@pytest.fixture
+def logging_enabled():
+    """Some test modules call ``logging.disable(logging.CRITICAL)`` at import
+    time, which short-circuits ``logger.info`` before the record factory —
+    the hook these tests exercise. Lift it for the test, restore after."""
+    import logging
+    prev = logging.root.manager.disable
+    logging.disable(logging.NOTSET)
+    try:
+        yield
+    finally:
+        logging.disable(prev)
+
+
+def _blocked_worker(stream, gate, results, logger_name="test.stop.persist"):
+    """An attributed worker parked in a 'long model call' (the gate) that
+    prints and logs only after being released."""
+    import logging
+
+    def body():
+        gate.wait(10)
+        try:
+            stream.write("late print\n")
+            results["print"] = "wrote"
+        except AgentStoppedError:
+            results["print"] = "raised"
+        try:
+            logging.getLogger(logger_name).info("late log record")
+            results["log"] = "emitted"
+        except AgentStoppedError:
+            results["log"] = "raised"
+    return body
+
+
+def test_stop_persists_for_workers_after_the_route_is_gone(logging_enabled):
+    """Live failure: a fan-out branch inside a long model call at Stop time
+    next printed AFTER the coordinator had exited (route removed, turn log
+    handler removed), found nothing to raise on, and kept running. The
+    stop must outlive the route for every thread attributed to the turn —
+    on the print path and on the logging path."""
+    import logging
+    logging.getLogger("test.stop.persist").setLevel(logging.INFO)
+    console, stream, cap = _routed_session()
+    gate, results = threading.Event(), {}
+    with cap:
+        t = lc.start_attributed_thread(_blocked_worker(stream, gate, results))
+        cap.request_stop()
+    assert not sr._ROUTES                      # the turn is gone...
+    gate.set()                                 # ...now the worker wakes up
+    t.join(5)
+    assert results == {"print": "raised", "log": "raised"}
+    assert not lc._STOPPED_PARENTS, "flag must clear with the last straggler"
+    assert not lc._WORKERS
+
+
+def test_worker_attributed_after_the_stop_is_stopped_too(logging_enabled):
+    """A queued fan-out branch admitted after Stop (seen live: the second
+    branch was still waiting for memory headroom) must not start narrating."""
+    import logging
+    logging.getLogger("test.stop.persist").setLevel(logging.INFO)
+    console, stream, cap = _routed_session()
+    with cap:
+        wrapped = lc.attributed_to_current(lambda: None)   # captured pre-stop
+        cap.request_stop()
+    gate, results = threading.Event(), {}
+    gate.set()
+    late = lc.attributed_to_current(_blocked_worker(stream, gate, results))
+    t = threading.Thread(target=lambda: (late(), None))
+    t.start(); t.join(5)
+    assert results == {"print": "raised", "log": "raised"}
+    assert not lc._STOPPED_PARENTS
+
+
+def test_stop_does_not_touch_unrelated_threads_or_a_fresh_turn():
+    import logging
+    console, stream, cap = _routed_session()
+    with cap:
+        lc.start_attributed_thread(lambda: None).join(5)
+        cap.request_stop()
+    # An unrelated (never attributed) thread writes and logs freely.
+    out = {}
+    def other():
+        stream.write("unrelated\n")
+        logging.getLogger("test.stop.other").warning("unrelated record")
+        out["ok"] = True
+    t = threading.Thread(target=other); t.start(); t.join(5)
+    assert out.get("ok")
+    # A fresh turn on the SAME thread id starts clean.
+    cap2 = sr.RoutedCapture(tag="")
+    with cap2:
+        res = {}
+        lc.start_attributed_thread(
+            lambda: res.setdefault("w", stream.write("fresh\n"))).join(5)
+    assert res.get("w") == 6
+    assert "fresh" in cap2.getvalue()
+    assert not lc._STOPPED_PARENTS
+
+
+def test_streamlit_capture_stop_also_persists_for_workers(logging_enabled):
+    """The Streamlit OutputCapture shares the gap (its TeeStream is
+    restored when the turn exits); same wiring, same guarantee."""
+    from scilink.ui.output_capture import OutputCapture
+    cap = OutputCapture()
+    gate, results = threading.Event(), {}
+    with cap:
+        t = lc.start_attributed_thread(_blocked_worker(sr._RoutingStream(io.StringIO()), gate, results))
+        cap.request_stop()
+    gate.set(); t.join(5)
+    assert results == {"print": "raised", "log": "raised"}
+    assert not lc._STOPPED_PARENTS
