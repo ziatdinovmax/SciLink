@@ -566,10 +566,13 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 }
 .icon-btn:hover:not(:disabled) { color: var(--accent); border: none; }
 .sidebar-reveal {
-  position: fixed; top: 6px; left: 10px; z-index: 60;
+  /* Vertically centered in the band above the tab-bar line (~49px): a 30px
+     chip sits at top:10 so the gap above (~10px) matches the gap below to
+     the line (~9px). */
+  position: fixed; top: 10px; left: 10px; z-index: 60;
   width: 38px; height: 30px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
-  font-size: 16px; line-height: 1;
+  line-height: 1;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
 }
 
