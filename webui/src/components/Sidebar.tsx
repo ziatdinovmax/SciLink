@@ -97,9 +97,17 @@ export function Sidebar({
   const [embeddingUserSet, setEmbeddingUserSet] = useState(false);
   const embeddingModel =
     embeddingPreset === "__custom__" ? customEmbeddingModel.trim() : embeddingPreset;
+  // Custom means "a model I'm about to name" — reveal its base URL / key
+  // right away, not only after the name is typed.
+  const embeddingActive = !!embeddingModel || embeddingPreset === "__custom__";
   const [embeddingApiKey, setEmbeddingApiKey] = useState("");
   // Optional endpoint for the embeddings alone (chat keeps its own route).
   const [embeddingBaseUrl, setEmbeddingBaseUrl] = useState("");
+  // The embedding base URL is a custom-endpoint concept — offered only for a
+  // Custom model, never for a vendor preset or Bedrock. A value typed under
+  // Custom is ignored once a preset is chosen, so it is never sent stale.
+  const embeddingBaseUrlEff =
+    embeddingPreset === "__custom__" ? embeddingBaseUrl.trim() : "";
   const [embeddingCred, setEmbeddingCred] = useState<{
     env_var: string | null; is_set: boolean; proxied?: boolean;
     endpoint?: "vendor" | "base_url" | "embedding_base_url";
@@ -166,7 +174,7 @@ export function Sidebar({
       return;
     }
     api
-      .config(effectiveModel, baseUrl, embeddingModel, embeddingBaseUrl.trim())
+      .config(effectiveModel, baseUrl, embeddingModel, embeddingBaseUrlEff)
       .then((c) => setEmbeddingCred(c.embedding_credential ?? null))
       .catch(() => {});
   }, [embeddingModel, effectiveModel, baseUrl, embeddingBaseUrl]);
@@ -194,7 +202,7 @@ export function Sidebar({
     mpApiKey,
     embeddingModel,
     embeddingApiKey,
-    embeddingBaseUrl: embeddingBaseUrl.trim(),
+    embeddingBaseUrl: embeddingBaseUrlEff,
     objective: "",
   });
 
@@ -393,7 +401,7 @@ export function Sidebar({
               or endpoint needed.
             </span>
           )}
-          {embeddingModel && !isBedrock(embeddingModel) && (
+          {embeddingPreset === "__custom__" && !isBedrock(embeddingModel) && (
             <label className="field">
               <span>Embedding base URL (optional)</span>
               <input
@@ -411,7 +419,7 @@ export function Sidebar({
               model name is sent to the proxy as typed.
             </span>
           )}
-          {embeddingModel && !isBedrock(embeddingModel) && embeddingCred?.endpoint !== "base_url" && (
+          {embeddingActive && !isBedrock(embeddingModel) && embeddingCred?.endpoint !== "base_url" && (
             <label className="field">
               <span>Embedding API key (optional)</span>
               <input
@@ -428,6 +436,11 @@ export function Sidebar({
                 </span>
               ) : embeddingCred?.is_set && embeddingCred.env_var ? (
                 <span className="caption cred-hint">✓ available from <code>{embeddingCred.env_var}</code></span>
+              ) : isBedrock(effectiveModel) ? (
+                <span className="caption">
+                  Set an embedding API key or a base URL — your Bedrock (AWS)
+                  credential cannot be used for this embedder.
+                </span>
               ) : (
                 <span className="caption">Leave blank to use the main API key</span>
               )}
