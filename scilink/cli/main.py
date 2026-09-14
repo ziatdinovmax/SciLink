@@ -308,8 +308,8 @@ Available Commands:
                 library (COD-derived) enabling offline powder-pattern
                 identification via search_match_pattern
 
-  ui            Launch the Streamlit web interface for interactive
-                analysis
+  ui            Launch the web interface (React by default; --streamlit
+                for the classic Streamlit app)
 
   serve         Start SciLink as an MCP tool server so external clients
                 (Claude Desktop, Cursor) can use SciLink's tools

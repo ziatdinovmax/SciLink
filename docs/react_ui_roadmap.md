@@ -105,14 +105,18 @@ restart, resume).
 
 - Web-UI fixes go straight onto the current feature branch / main —
   no per-fix PRs into an unmerged branch.
-- **The web UI becomes the default.** Decided 2026-09-07: once the web
-  UI reaches daily-use parity (simulate mode being the main gap), the
-  `web` extra's dependencies move into the core install and `scilink-web`
-  supersedes `scilink-ui` as the default; Streamlit is then retired.
-  Until then the Streamlit app stays untouched and functional and the
-  server keeps reusing its streamlit-free modules (`hitl`, `session_meta`,
-  `ui/config`). Consequence: parity gaps are on the critical path, not
-  optional, and nothing new is built Streamlit-only.
+- **The web UI is the default.** Decided 2026-09-07, shipped 2026-09-13:
+  the `web` extra's dependencies moved into the core install (`web = []`
+  is a kept but empty back-compat alias) and `scilink ui` / `scilink-ui`
+  now launch the React web UI. Rather than block the flip on full parity,
+  Streamlit is kept as an explicit fallback — `scilink ui --streamlit`,
+  and an automatic fallback (with a note) on a source checkout with no
+  built bundle — which covers both the simulate-mode gap (React excludes
+  simulate) and Node-less source/git installs. Streamlit is therefore NOT
+  retired; it stays untouched and functional and the server keeps reusing
+  its streamlit-free modules (`hitl`, `session_meta`, `ui/config`).
+  Consequence: parity gaps still matter (they are what `--streamlit`
+  covers), and nothing new is built Streamlit-only.
 - **The built bundle is not in git.** `scripts/build_webui.sh` produces
   `scilink/server/static/`; `release.yml` builds it before the wheel and
   verifies it is inside; CI builds the frontend on every push. A checkout

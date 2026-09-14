@@ -8,7 +8,7 @@ commands and the flags you'll actually reach for.
 | Command | What it starts |
 |---|---|
 | `scilink` | **Mission control** (the meta agent) — routes tasks across plan / analyze / simulate. Explicit form: `scilink explore` (alias `meta`) |
-| `scilink ui` | Mission control and all modes in the browser |
+| `scilink ui` | Mission control and all modes in the browser (React web UI; `--streamlit` for the classic app) |
 | `scilink plan` | Planning session — experimental design, ideation, optimization |
 | `scilink analyze` | Analysis session — images, spectra, datacubes, curve series |
 | `scilink simulate` | Simulation session — structures, DFT, classical MD |
@@ -56,6 +56,22 @@ skill bundles) are accepted by all chat modes; `--mcp` (external MCP
 servers) by `analyze`, `plan`, and mission control. See
 [custom_tools_integration.md](custom_tools_integration.md) and
 [mcp_client_integration.md](mcp_client_integration.md).
+
+## Web UI — `scilink ui`
+
+```bash
+scilink ui                        # React web UI (default) → http://127.0.0.1:8422
+scilink ui --port 9000            # flags pass through to the web server
+scilink ui --streamlit            # the classic Streamlit app instead
+```
+
+`scilink ui` launches the React web UI — same server as `scilink-web`, so it
+takes that command's flags (`--host`, `--port`, `--session-root`, `--token`,
+`--users`, TLS flags; see [react_web_ui.md](react_web_ui.md)). The web
+backend is a core dependency, and release wheels ship the built bundle, so a
+plain `pip install scilink` gets it with no extra step. `--streamlit` forces
+the classic Streamlit app; a source checkout without a built bundle also
+falls back to Streamlit automatically (with a note).
 
 ## Embeddings — plan and mission control
 
