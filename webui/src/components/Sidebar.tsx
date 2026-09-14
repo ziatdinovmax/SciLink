@@ -179,6 +179,22 @@ export function Sidebar({
     setEmbeddingPreset(isBedrock(effectiveModel) ? BEDROCK_EMBED : "");
   }, [effectiveModel, locked, embeddingUserSet]);
 
+  // Keep the embedding preset consistent with the offered options: if the
+  // selected value is no longer available (e.g. the Bedrock embedder after
+  // switching to a non-Bedrock chat model, whose option is then removed),
+  // fall back to keyword-only — otherwise the dropdown shows "(none)" while
+  // the stale value is still what gets sent.
+  useEffect(() => {
+    if (locked) return;
+    const valid = new Set<string>([
+      "",
+      "__custom__",
+      ...(config?.embedding_models ?? []),
+      ...(isBedrock(effectiveModel) ? [BEDROCK_EMBED] : []),
+    ]);
+    if (!valid.has(embeddingPreset)) setEmbeddingPreset("");
+  }, [effectiveModel, embeddingPreset, config, locked]);
+
   // The embedding key's availability follows the embedding model's vendor.
   useEffect(() => {
     if (!embeddingModel) {
