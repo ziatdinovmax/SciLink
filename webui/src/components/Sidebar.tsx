@@ -148,7 +148,14 @@ export function Sidebar({
 
   // Provider-specific fields + credential availability follow the model.
   useEffect(() => {
-    if (!effectiveModel) return;
+    if (!effectiveModel) {
+      // e.g. Custom with no name yet — drop the previous provider's fields
+      // (region, key label) instead of leaving them stale.
+      setProviderInfo(null);
+      setCredInfo(null);
+      setProviderFields({});
+      return;
+    }
     api
       .config(effectiveModel, baseUrlEff)
       .then((c) => {
