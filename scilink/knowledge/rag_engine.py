@@ -153,20 +153,23 @@ def retrieve_context(kb: Any, query: str, top_k: int = 10, dedupe: bool = True) 
     if not (kb is not None and kb.index and kb.index.ntotal > 0):
         return ""
 
+    from .knowledge_base import describe_error
+
     try:
         chunks = kb.retrieve(query, top_k=top_k)
     except Exception as e:  # noqa: BLE001 - any retrieval failure degrades, never kills
+        logging.debug("dense KB retrieval failure", exc_info=True)
         try:
             chunks = kb.retrieve_sparse(query, top_k=top_k)
             logging.warning(
-                f"Dense KB retrieval failed ({e}); using keyword (BM25) "
-                f"fallback — retrieved {len(chunks)} chunks without the "
-                "embedding provider."
+                f"Dense KB retrieval failed [{describe_error(e)}]; using "
+                f"keyword (BM25) fallback — retrieved {len(chunks)} chunks "
+                "without the embedding provider."
             )
         except Exception as e2:  # noqa: BLE001
             logging.warning(
-                f"KB retrieval failed (dense: {e}; sparse: {e2}); "
-                "proceeding without retrieved context."
+                f"KB retrieval failed (dense: {describe_error(e)}; sparse: "
+                f"{describe_error(e2)}); proceeding without retrieved context."
             )
             return ""
     if dedupe:

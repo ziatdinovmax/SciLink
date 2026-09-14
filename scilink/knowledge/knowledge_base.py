@@ -20,6 +20,31 @@ from openai import RateLimitError
 from scilink.utils.announce import announce_litellm
 
 
+def describe_error(e: BaseException) -> str:
+    """``type: message`` for a log line — never empty.
+
+    ``str(e)`` is empty for the failures that matter most here: FAISS's
+    Python wrapper rejects a query whose dimension differs from the
+    index's with a bare ``assert`` (``AssertionError()``), which rendered
+    as ``Dense KB retrieval failed ()`` and was undiagnosable (#631).
+    """
+    return f"{type(e).__name__}: {str(e) or repr(e)}"
+
+
+class EmbeddingDimensionMismatch(RuntimeError):
+    """A query (or new batch) embedding does not fit the dense index: the
+    index was built by a different embedding model than the one this
+    session embeds with. Named so the failure explains itself and the
+    caller's keyword fallback can say why it is running."""
+
+
+def _index_meta_path(index_path: str) -> Path:
+    """Provenance sidecar next to the FAISS index: which embedding model
+    built it and its dimension. Shares the index's stem so the planning
+    agent's ``default_kb_*`` copies carry it along."""
+    return Path(index_path).with_suffix(".meta.json")
+
+
 class KnowledgeBase:
     """
     Handles embedding, retrieval, and repository structure mapping.
@@ -87,6 +112,13 @@ class KnowledgeBase:
         self.index = None
         self.chunks = []
         self.sources: List[str | Dict[str, str]] = []
+        # Provenance of the loaded/built dense index (None = unrecorded,
+        # i.e. files written before the sidecar existed).
+        self.index_built_with: Optional[str] = None
+        # Why dense retrieval is off for this KB (model or dimension
+        # mismatch); ``retrieve`` then serves BM25 without embedding the
+        # query — one explanation, not a failed embedding call per query.
+        self._dense_disabled_reason: Optional[str] = None
         
         # Registry for Repo Maps: {'repo_name': 'tree_structure_string'}
         # This stores the visual directory trees for any repo you ingest.
@@ -156,7 +188,9 @@ class KnowledgeBase:
                     # are kept, the dense index is dropped entirely (a
                     # partial index would silently search a stale subset),
                     # and the query path's existing BM25 tier takes over.
-                    print(f"    - ❌ Error embedding batch {i//batch_size + 1}: {e}")
+                    print(f"    - ❌ Error embedding batch {i//batch_size + 1} "
+                          f"[{describe_error(e)}]")
+                    logging.debug("KB build embedding failure", exc_info=True)
                     print(
                         "  - ⚠️  Embeddings unavailable — building a "
                         "KEYWORD-ONLY knowledge base (BM25 retrieval tier). "
@@ -175,9 +209,28 @@ class KnowledgeBase:
             self.index = faiss.IndexFlatL2(dimension)
         else:
             print("  - Appending to existing FAISS vector index...")
+            if dimension != self.index.d:
+                # FAISS would reject this with a message-less assert.
+                raise EmbeddingDimensionMismatch(self._mismatch_message(
+                    dimension, what="new document embeddings"))
 
         self.index.add(embeddings_np)
-        print("  - ✅ Knowledge base built successfully.")
+        self.index_built_with = self.embedding_model_name
+        self._dense_disabled_reason = None
+        print(f"  - ✅ Knowledge base built successfully "
+              f"({self.index.ntotal} vectors, {dimension}-d, "
+              f"'{self.embedding_model_name}').")
+
+    def _mismatch_message(self, got_dim: int, what: str) -> str:
+        built = (f"'{self.index_built_with}'" if self.index_built_with
+                 else "an unrecorded embedding model")
+        return (
+            f"{what} are {got_dim}-d but the dense index is "
+            f"{self.index.d}-d: the index was built with {built} and this "
+            f"session embeds with '{self.embedding_model_name}'. Start the "
+            f"session with the model that built the KB, or rebuild the KB "
+            f"with '{self.embedding_model_name}'."
+        )
 
     def save(self, index_path: str, chunks_path: str, repo_map_path: str = None, sources_path: str = None):
         """Saves the FAISS index, text chunks, and optionally the repo maps to disk."""
@@ -186,6 +239,17 @@ class KnowledgeBase:
         if self.index:
             faiss.write_index(self.index, index_path)
             print(f"  - FAISS index saved to {index_path}")
+            try:
+                with open(_index_meta_path(index_path), "w",
+                          encoding="utf-8") as f:
+                    json.dump({
+                        "embedding_model": (self.index_built_with
+                                            or self.embedding_model_name),
+                        "dimension": int(self.index.d),
+                        "vectors": int(self.index.ntotal),
+                    }, f, indent=2)
+            except Exception as e:  # noqa: BLE001 - provenance is advisory
+                print(f"  - ⚠️ Could not write index provenance: {e}")
         
         with open(chunks_path, 'w', encoding='utf-8') as f:
             json.dump(self.chunks, f, indent=2)
@@ -218,8 +282,11 @@ class KnowledgeBase:
             return False
 
         try:
+            self.index_built_with = None
+            self._dense_disabled_reason = None
             if index_file.exists():
                 self.index = faiss.read_index(index_path)
+                self._read_index_provenance(index_path)
             else:
                 # A keyword-only KB (built while embeddings were
                 # unavailable) has chunks but no dense index — load it in
@@ -251,10 +318,46 @@ class KnowledgeBase:
             self.chunks = []
             return False
 
+    def _read_index_provenance(self, index_path: str) -> None:
+        """Pick up the sidecar written by :meth:`save`; on a model mismatch
+        say so ONCE and switch this KB to keyword retrieval up front —
+        embedding every query only to fail on the index (empty
+        ``AssertionError``) was the silent degradation of #631."""
+        meta_file = _index_meta_path(index_path)
+        if not meta_file.exists():
+            return  # pre-sidecar files: the query-time dimension check covers it
+        try:
+            with open(meta_file, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+        except Exception as e:  # noqa: BLE001
+            print(f"  - ⚠️ Unreadable index provenance {meta_file.name}: {e}")
+            return
+        self.index_built_with = meta.get("embedding_model") or None
+        session_model = self.embedding_model_name
+        if (self.index_built_with and session_model
+                and self.index_built_with != session_model):
+            self._dense_disabled_reason = (
+                f"the dense index was built with '{self.index_built_with}' "
+                f"but this session embeds with '{session_model}'")
+            msg = (f"⚠️  KB dense index was built with "
+                   f"'{self.index_built_with}' ({meta.get('dimension', '?')}-d); "
+                   f"this session embeds with '{session_model}', so dense "
+                   f"retrieval is OFF for this KB and keyword (BM25) search "
+                   f"is used. Start the session with embedding model "
+                   f"'{self.index_built_with}', or rebuild the KB with "
+                   f"'{session_model}'.")
+            print(f"  - {msg}")
+            logging.warning(msg)
+
     def retrieve(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """
         Retrieves the most relevant document chunks for a given query.
         """
+        reason = getattr(self, "_dense_disabled_reason", None)
+        if self.index and reason:
+            print(f"  - ℹ️  Dense retrieval off for this KB ({reason}) — "
+                  "retrieving via BM25.")
+            return self.retrieve_sparse(query, top_k=top_k)
         if not self.index:
             if self.chunks:
                 # Keyword-only KB: the dense tier does not exist, so ANY
@@ -288,7 +391,8 @@ class KnowledgeBase:
                     print(f"    - ❌ Rate limit hit on final attempt. Retrieval failed.")
                     raise e # Re-raise the exception if all retries fail
             except Exception as e:
-                print(f"    - ❌ Error embedding query: {e}")
+                print(f"    - ❌ Error embedding query [{describe_error(e)}]")
+                logging.debug("KB query embedding failure", exc_info=True)
                 raise e
         
         if response is None:
@@ -299,6 +403,13 @@ class KnowledgeBase:
 
         if query_embedding.ndim == 3:
             query_embedding = np.squeeze(query_embedding, axis=0)
+
+        if query_embedding.shape[1] != self.index.d:
+            # FAISS raises a bare AssertionError here — explain it, and
+            # stop embedding queries for an index they can never match.
+            self._dense_disabled_reason = self._mismatch_message(
+                query_embedding.shape[1], what="query embeddings")
+            raise EmbeddingDimensionMismatch(self._dense_disabled_reason)
 
         distances, indices = self.index.search(query_embedding, top_k)
         
