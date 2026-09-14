@@ -33,6 +33,7 @@ export function Sidebar({
   sessionName,
   status,
   locked,
+  starting = false,
   onStart,
   onResume,
   onRename,
@@ -56,6 +57,7 @@ export function Sidebar({
   sessionName: string | null;
   status: string;
   locked: boolean;
+  starting?: boolean; // a create / restore request is in flight
   onStart: (cfg: SidebarConfig) => void;
   onResume: (cfg: SidebarConfig, dir: string) => void;
   onRename: (name: string) => Promise<void>;
@@ -73,6 +75,10 @@ export function Sidebar({
   authUser?: string | null; // set when the server requires sign-in
   onLogout?: () => void;
 }) {
+  // The config is frozen once a session exists AND while one is being
+  // created: the Start button stayed clickable during "Initializing agent…"
+  // and a second click could fire a second create request.
+  const frozen = locked || starting;
   const models = config?.models ?? [];
   const [model, setModel] = useState("");
   const [customModel, setCustomModel] = useState("");
@@ -288,7 +294,7 @@ export function Sidebar({
         <span>Model</span>
         <select
           value={shownModel}
-          disabled={locked}
+          disabled={frozen}
           onChange={(e) => setModel(e.target.value)}
         >
           {models.map((m) => (
@@ -305,7 +311,7 @@ export function Sidebar({
           <input
             type="text"
             value={shownCustomModel}
-            disabled={locked}
+            disabled={frozen}
             onChange={(e) => setCustomModel(e.target.value)}
           />
         </label>
@@ -316,7 +322,7 @@ export function Sidebar({
         <input
           type="password"
           value={apiKey}
-          disabled={locked}
+          disabled={frozen}
           onChange={(e) => setApiKey(e.target.value)}
           placeholder={cred("api_key")?.is_set ? "(using environment key)" : ""}
         />
@@ -329,7 +335,7 @@ export function Sidebar({
           {f.kind === "select" ? (
             <select
               value={providerFields[f.name] ?? f.default}
-              disabled={locked}
+              disabled={frozen}
               onChange={(e) =>
                 setProviderFields({ ...providerFields, [f.name]: e.target.value })
               }
@@ -342,7 +348,7 @@ export function Sidebar({
             <input
               type="text"
               value={providerFields[f.name] ?? f.default}
-              disabled={locked}
+              disabled={frozen}
               onChange={(e) =>
                 setProviderFields({ ...providerFields, [f.name]: e.target.value })
               }
@@ -357,7 +363,7 @@ export function Sidebar({
           <input
             type="text"
             value={baseUrl}
-            disabled={locked}
+            disabled={frozen}
             onChange={(e) => setBaseUrl(e.target.value)}
           />
           {envCaption("base_url")}
@@ -369,7 +375,7 @@ export function Sidebar({
         <input
           type="password"
           value={fhApiKey}
-          disabled={locked}
+          disabled={frozen}
           onChange={(e) => setFhApiKey(e.target.value)}
         />
         {envCaption("fh")}
@@ -380,7 +386,7 @@ export function Sidebar({
         <input
           type="password"
           value={mpApiKey}
-          disabled={locked}
+          disabled={frozen}
           onChange={(e) => setMpApiKey(e.target.value)}
         />
         {envCaption("mp")}
@@ -392,7 +398,7 @@ export function Sidebar({
             <span>Embedding model (optional)</span>
             <select
               value={embeddingPreset}
-              disabled={locked}
+              disabled={frozen}
               onChange={(e) => {
                 setEmbeddingUserSet(true);
                 setEmbeddingPreset(e.target.value);
@@ -419,7 +425,7 @@ export function Sidebar({
               <input
                 type="text"
                 value={customEmbeddingModel}
-                disabled={locked}
+                disabled={frozen}
                 placeholder="e.g. voyage-3, nomic-embed-text, text-embedding-3-large"
                 onChange={(e) => setCustomEmbeddingModel(e.target.value)}
               />
@@ -437,7 +443,7 @@ export function Sidebar({
               <input
                 type="text"
                 value={embeddingBaseUrl}
-                disabled={locked}
+                disabled={frozen}
                 placeholder="OpenAI-compatible endpoint for embeddings only"
                 onChange={(e) => setEmbeddingBaseUrl(e.target.value)}
               />
@@ -455,7 +461,7 @@ export function Sidebar({
               <input
                 type="password"
                 value={embeddingApiKey}
-                disabled={locked}
+                disabled={frozen}
                 placeholder={embeddingCred?.is_set ? "(using environment key)" : ""}
                 onChange={(e) => setEmbeddingApiKey(e.target.value)}
               />
@@ -483,7 +489,7 @@ export function Sidebar({
         <span>Autonomy mode</span>
         <select
           value={shownAutonomy}
-          disabled={locked}
+          disabled={frozen}
           onChange={(e) => setAutonomy(e.target.value)}
         >
           {autonomyOptions.map((a) => (
@@ -496,7 +502,7 @@ export function Sidebar({
         <input
           type="checkbox"
           checked={consent}
-          disabled={locked}
+          disabled={frozen}
           onChange={(e) => setConsent(e.target.checked)}
           style={{ width: "auto", marginTop: 3 }}
         />
@@ -507,16 +513,17 @@ export function Sidebar({
         <>
           <button
             className="primary"
-            disabled={!consent || !effectiveModel}
+            disabled={starting || !consent || !effectiveModel}
             onClick={() => onStart(gather())}
           >
-            Start Session
+            {starting ? "Starting…" : "Start Session"}
           </button>
           {resumable.length > 0 && (
             <div className="sidebar-section">
               <h3>Resume past session</h3>
               <select
                 value={resumeChoice}
+                disabled={starting}
                 onChange={(e) => setResumeChoice(e.target.value)}
               >
                 <option value="">— select —</option>
@@ -529,10 +536,10 @@ export function Sidebar({
               </select>
               <button
                 style={{ marginTop: 8, width: "100%" }}
-                disabled={!resumeChoice || !consent}
+                disabled={starting || !resumeChoice || !consent}
                 onClick={() => onResume(gather(), resumeChoice)}
               >
-                Resume Session
+                {starting ? "Restoring…" : "Resume Session"}
               </button>
             </div>
           )}

@@ -358,6 +358,7 @@ export default function App() {
   );
 
   const startSession = async (cfg: SidebarConfig, resumeDir?: string) => {
+    if (busy) return; // a create/restore is already in flight
     setBusy(resumeDir ? "Restoring session…" : "Initializing agent…");
     setStartError(null);
     try {
@@ -487,6 +488,7 @@ export default function App() {
         sessionName={state.name}
         status={state.status}
         locked={session !== null}
+        starting={busy !== null}
         onStart={(cfg) => startSession(cfg)}
         onResume={(cfg, dir) => startSession(cfg, dir)}
         onRename={async (name) => {
