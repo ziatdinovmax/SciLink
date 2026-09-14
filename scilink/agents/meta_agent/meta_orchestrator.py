@@ -775,7 +775,6 @@ class MetaOrchestratorAgent:
                 base_url=self.base_url,
                 embedding_model=self.embedding_model,
                 embedding_api_key=self.embedding_api_key,
-                embedding_base_url=self.embedding_base_url,
                 futurehouse_api_key=self.futurehouse_api_key,
                 restore_checkpoint=restore,
                 analysis_mode=AnalysisMode.CO_PILOT,
