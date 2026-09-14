@@ -370,6 +370,10 @@ def _find_new_md_documents() -> list[str]:
 
     MAX_INLINE_BYTES = 60_000
     BULK_STEMS = ("literature_search", "chat_history", "session_log")
+    # Evidence records written next to a deliverable for the tool's own
+    # critic (the TEA grounding record) are not documents — skipped by
+    # suffix; a marked deliverable still embeds whatever its name (#633).
+    EVIDENCE_SUFFIXES = (".grounding.md",)
     try:
         from scilink.agents.planning_agents.user_interface import (
             load_deliverables)
@@ -396,6 +400,8 @@ def _find_new_md_documents() -> list[str]:
         is_marked = str(p.resolve()) in marked
         if not is_marked:
             if any(p.stem.startswith(b) for b in BULK_STEMS):
+                continue
+            if p.name.endswith(EVIDENCE_SUFFIXES):
                 continue
             try:
                 if p.stat().st_size > MAX_INLINE_BYTES:

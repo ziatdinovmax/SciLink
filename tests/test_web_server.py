@@ -1205,3 +1205,33 @@ def test_custom_embedding_model_reaches_the_agent_initializer(client, monkeypatc
         assert r.status_code != 200 and "initializer reached" in r.text, r.text
         assert seen[mode]["embedding_model"] == "voyage-3-large" and seen[mode]["embedding_api_key"] == "vk"
         assert seen[mode]["embedding_base_url"] == "https://emb.example/v1"
+
+
+def test_artifact_tracker_skips_evidence_record_but_embeds_marked_docs(tmp_path):
+    """#633: the TEA grounding record (``tea_analysis.grounding.md``, RAG
+    provenance written for the critic) is small and unregistered, so the
+    surface-every-small-unmarked-md convenience embedded it as a report
+    card titled "Tea Analysis.Grounding". Evidence is skipped by suffix;
+    a MARKED deliverable — including one with an invented filename, and
+    even one that happens to carry the suffix — always embeds."""
+    from scilink.agents.planning_agents.user_interface import record_deliverable
+    tracker = ArtifactTracker(str(tmp_path))
+    (tmp_path / "TEA_critical_material_recovery.md").write_text("# TEA")
+    (tmp_path / "tea_analysis.grounding.md").write_text(
+        "Source: doc.pdf\nType: text\n\nDOCUMENT: ...")
+    (tmp_path / "top3_priority_brief.md").write_text("# brief")     # custom name, marked
+    (tmp_path / "scratch_note.md").write_text("# unmarked but small")
+    (tmp_path / "audit.grounding.md").write_text("# marked evidence")
+    record_deliverable(tmp_path, tmp_path / "TEA_critical_material_recovery.md",
+                       "Technoeconomic Analysis", deliverable=True)
+    record_deliverable(tmp_path, tmp_path / "top3_priority_brief.md",
+                       "Top-3 Priority Brief", deliverable=True)
+    record_deliverable(tmp_path, tmp_path / "audit.grounding.md",
+                       "Audit", deliverable=True)
+    out = tracker.sweep_turn("autonomous")
+    names = sorted(d["name"] for d in out["md_reports"])
+    assert names == ["TEA_critical_material_recovery.md", "audit.grounding.md",
+                     "scratch_note.md", "top3_priority_brief.md"]
+    assert "tea_analysis.grounding.md" not in names
+    titles = {d["name"]: d["title"] for d in out["md_reports"]}
+    assert titles["top3_priority_brief.md"] == "Top-3 Priority Brief"

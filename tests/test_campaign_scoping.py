@@ -589,8 +589,12 @@ def test_ui_embeds_marked_deliverables_and_skips_bulk(tmp_path, monkeypatch):
     (tmp_path / "scratch.md").write_text("# note")
     (tmp_path / "literature_search_x.md").write_text("corpus " * 100)
     (tmp_path / "huge_notes.md").write_text("x" * 70_000)
+    # TEA evidence record (#633): unregistered RAG provenance, not a document.
+    (tmp_path / "tea_analysis.grounding.md").write_text("Source: a.pdf\nType: text")
+    (tmp_path / "audit.grounding.md").write_text("# marked despite the suffix")
     record_deliverable(tmp_path, tmp_path / "top3_priority_brief.md",
                        "Top-3 priority brief", True)
+    record_deliverable(tmp_path, tmp_path / "audit.grounding.md", "Audit", True)
 
     src = Path("scilink/ui/app.py").read_text()
     tree = ast.parse(src)
@@ -606,6 +610,8 @@ def test_ui_embeds_marked_deliverables_and_skips_bulk(tmp_path, monkeypatch):
     assert "scratch.md" in found                    # small -> still embedded
     assert "literature_search_x.md" not in found    # bulk context excluded
     assert "huge_notes.md" not in found             # too big to read in chat
+    assert "tea_analysis.grounding.md" not in found # evidence record, not a doc
+    assert "audit.grounding.md" in found            # marked -> embeds regardless
     assert ns["_find_new_md_documents"]() == []    # each file surfaces once
 
 
