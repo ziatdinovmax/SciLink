@@ -112,6 +112,8 @@ def _datasets(tmp_path, names):
 
 
 def test_branch_prints_reach_the_coordinator_session(meta, tmp_path):
+    from scilink.utils import log_context as lc
+    workers_before = set(lc._WORKERS)
     A, B = _datasets(tmp_path, "AB")
     _install_fakes({A: "good", B: "good"})
     cap = sr.RoutedCapture(tag="")
@@ -125,9 +127,10 @@ def test_branch_prints_reach_the_coordinator_session(meta, tmp_path):
         "branch narration did not reach the session stream")
     assert "analysis branch finished" in captured   # coordinator lines too
     assert console.getvalue().count(MARKER) == 2    # console still tees
-    # No branch stays attributed once the fan-out has returned.
+    # No branch stays attributed once the fan-out has returned (relative to
+    # whatever an earlier test may have left running).
     from scilink.utils import log_context as lc
-    assert not lc._WORKERS
+    assert set(lc._WORKERS) <= workers_before
 
 
 @pytest.mark.parametrize("shape", ["chatty", "late"])
@@ -137,6 +140,8 @@ def test_user_stop_reaches_the_branch_threads(meta, tmp_path, shape):
     while the coordinator (and its route) is still there; 'late' is the
     live shape — the branch is silent inside a model call until after the
     coordinator has exited, and must still be stopped by its next print."""
+    from scilink.utils import log_context as lc
+    workers_before, stopped_before = set(lc._WORKERS), set(lc._STOPPED_PARENTS)
     A, B = _datasets(tmp_path, "AB")
     _install_fakes({A: shape, B: shape})
     cap = sr.RoutedCapture(tag="")
@@ -161,11 +166,13 @@ def test_user_stop_reaches_the_branch_threads(meta, tmp_path, shape):
         assert time.monotonic() - t0 < 12.0
         if shape == "chatty":
             assert MARKER in cap.getvalue()
-        from scilink.utils import log_context as lc
         deadline = time.monotonic() + 5.0
-        while (lc._WORKERS or lc._STOPPED_PARENTS) and time.monotonic() < deadline:
+        while (set(lc._WORKERS) - workers_before
+               or set(lc._STOPPED_PARENTS) - stopped_before) \
+                and time.monotonic() < deadline:
             time.sleep(0.05)
-        assert not lc._WORKERS and not lc._STOPPED_PARENTS
+        assert set(lc._WORKERS) <= workers_before
+        assert set(lc._STOPPED_PARENTS) <= stopped_before
 
 
 if __name__ == "__main__":
