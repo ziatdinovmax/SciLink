@@ -14,6 +14,12 @@ back to their owning turn — so a print lands in exactly its own session's
 capture (and still reaches the real console). Unrouted threads (HTTP
 handlers, the main thread) pass straight through.
 
+The contract that follows: ONLY a registered thread's output reaches the
+browser. A tool that spawns a background thread which prints (a progress
+heartbeat, a pool of branch workers) must attribute it to the session —
+``log_context.start_attributed_thread`` / ``attributed_to_current`` — or its
+output silently stays on the server console (#627).
+
 ``RoutedCapture`` keeps the surface of ``OutputCapture`` that the turn
 runner uses (context manager, ``getvalue``, ``request_stop`` with the
 print-driven ``AgentStoppedError`` + subprocess kill), so the runner swaps

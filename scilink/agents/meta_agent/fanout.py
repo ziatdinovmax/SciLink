@@ -183,6 +183,21 @@ class _ThreadStopStream:
         return getattr(self._original, name)
 
 
+def _attributed_branch(fn):
+    """Bind a branch worker to the coordinator's session for its run.
+
+    A branch thread prints the child orchestrator's whole narration and is
+    the thread a user's Stop must reach. Both ride the session route keyed
+    by the coordinator (chat) thread — the Streamlit-era global capture saw
+    every thread, the per-thread web router sees only attributed ones
+    (#627) — so the worker registers as the coordinator's child for the
+    duration of the branch. Routing only: no ``[tag]`` log prefix and no
+    panel trimming, so CLI output is unchanged.
+    """
+    from ...utils.log_context import attributed_to_current
+    return attributed_to_current(fn)
+
+
 def _ensure_stop_guard_installed() -> None:
     """Install the thread-aware stop guard on stdout/stderr (idempotent).
 
@@ -1280,8 +1295,8 @@ def resume_fanout(orch, retry_failed: bool = False) -> str:
                 "_resume": has_ckpt,
             }
             stop_ev = _threading.Event()
-            fut = pool.submit(_run_one_branch, orch, branch, [], e,
-                              None, None, stop_ev)
+            fut = pool.submit(_attributed_branch(_run_one_branch), orch,
+                              branch, [], e, None, None, stop_ev)
             fut_entry[fut] = e
             fut_stop[fut] = stop_ev
             fut_label[fut] = e.get("label") or f"branch {e['index']}"
@@ -1794,9 +1809,10 @@ def run_fanout(orch, branches: List[dict],
             entries[i]["_budget_s"] = resolve_branch_budget(
                 run_branches[i], budget, explicit=branch_time_budget_s is not None)
             stop_ev = _threading.Event()
-            fut = pool.submit(_run_one_branch, orch, run_branches[i],
-                              branch_companions[i], entries[i],
-                              queue_channel, branch_autonomy, stop_ev)
+            fut = pool.submit(_attributed_branch(_run_one_branch), orch,
+                              run_branches[i], branch_companions[i],
+                              entries[i], queue_channel, branch_autonomy,
+                              stop_ev)
             fut_label[fut] = run_branches[i]["label"]
             fut_entry[fut] = entries[i]
             fut_stop[fut] = stop_ev

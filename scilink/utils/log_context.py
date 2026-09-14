@@ -14,13 +14,24 @@ candidate tag. ``effective_thread`` lets the UI filter treat worker records
 as belonging to the parent thread, and a root-logger filter prefixes each
 registered worker's messages with its candidate tag so the interleave is
 attributable everywhere (UI, CLI, log files).
+
+The same mapping is the ONLY way a background thread's ``print()`` reaches
+the web app: ``scilink.server.stdout_router`` routes each write by the
+calling thread's *effective* thread, so an unregistered helper thread's
+output lands on the server console and nowhere else (issue #627 — the
+``search_literature`` heartbeat read as a 10-minute hang in the browser).
+Any thread that prints or logs on a session's behalf must therefore inherit
+the session's route: use ``start_attributed_thread`` for a fire-and-forget
+helper and ``attributed_to_current`` for a callable handed to a thread pool,
+rather than a bare ``threading.Thread`` / ``pool.submit``.
 """
 
 from __future__ import annotations
 
+import functools
 import logging
 import threading
-from typing import Dict, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 # worker thread id -> (parent thread id, candidate tag, prefix messages?)
 _WORKERS: Dict[int, Tuple[int, str, bool]] = {}
@@ -47,10 +58,77 @@ def unregister_worker() -> None:
         _WORKERS.pop(threading.get_ident(), None)
 
 
+# Longest worker chain resolved by ``effective_thread`` — a bound, not a
+# design limit: chat -> fan-out branch -> best-of-N candidate -> helper is
+# four hops, and a stale (thread-id reuse) entry must never spin forever.
+_MAX_WORKER_DEPTH = 8
+
+
 def effective_thread(thread_id: int) -> int:
-    """Parent thread id for registered workers; identity otherwise."""
-    entry = _WORKERS.get(thread_id)
-    return entry[0] if entry else thread_id
+    """Root (chat) thread id for registered workers; identity otherwise.
+
+    Follows the chain, so a worker spawned BY a worker (a best-of-N
+    candidate inside a fan-out branch, or a heartbeat inside a candidate)
+    still resolves to the chat thread that owns the session route.
+    """
+    for _ in range(_MAX_WORKER_DEPTH):
+        entry = _WORKERS.get(thread_id)
+        if not entry or entry[0] == thread_id:
+            break
+        thread_id = entry[0]
+    return thread_id
+
+
+def attributed_to_current(fn: Callable, tag: str = "",
+                          prefix: bool = False) -> Callable:
+    """Wrap ``fn`` so that, wherever it later runs, that thread is attributed
+    to the CALLING thread's session for the duration of the call.
+
+    Call this on the owning (chat / worker) thread and hand the result to a
+    ``ThreadPoolExecutor`` or ``threading.Thread``. Registration is scoped to
+    the call — a pool thread that outlives the call is unregistered again,
+    so no stale mapping survives thread-id reuse. Exceptions propagate
+    unchanged (a pool future must still see them).
+    """
+    parent = effective_thread(threading.get_ident())
+
+    @functools.wraps(fn)
+    def _attributed(*args, **kwargs):
+        register_worker(parent, tag, prefix=prefix)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            unregister_worker()
+
+    return _attributed
+
+
+def start_attributed_thread(target: Callable, *, args: tuple = (),
+                            kwargs: Optional[dict] = None,
+                            name: Optional[str] = None,
+                            daemon: bool = True, tag: str = "",
+                            prefix: bool = False) -> threading.Thread:
+    """Start a background thread whose prints and log records belong to the
+    calling thread's session (drop-in for ``threading.Thread(...).start()``).
+
+    A session stop reaches the helper through the routed stream exactly as
+    it reaches the chat thread (``AgentStoppedError`` on its next write); the
+    helper then simply ends — a stopped session's progress ticker has nothing
+    left to report, and a traceback for it would only be console noise.
+    """
+    from scilink.ui.output_capture import AgentStoppedError
+
+    attributed = attributed_to_current(target, tag=tag, prefix=prefix)
+
+    def _run():
+        try:
+            attributed(*args, **(kwargs or {}))
+        except AgentStoppedError:
+            pass
+
+    t = threading.Thread(target=_run, name=name, daemon=daemon)
+    t.start()
+    return t
 
 
 def is_concise_fanout_worker(thread_id: int) -> bool:

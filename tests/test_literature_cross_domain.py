@@ -57,6 +57,9 @@ class StubLitAgent:
     def search_for_cross_domain(self, q):
         return self._run("cross_domain", q)
 
+    def search_for_technique_limitations(self, q):
+        return self._run("technique_limitations", q)
+
     def search_for_economic_data(self, q):
         return self._run("economic_data", q)
 
@@ -422,3 +425,32 @@ def test_batch_count_matches_the_announced_split():
     MAX = 6
     for n, expected in ((1, 1), (6, 1), (7, 2), (12, 2), (13, 3)):
         assert -(-n // MAX) == expected, n
+
+
+def test_heartbeat_reaches_the_web_session_stream(tool, monkeypatch):
+    """#627: under the web app's per-thread stdout router the heartbeat ran
+    on an unregistered thread, so its '⏳ … still running' ticks reached
+    the server console only and a 10-15 min search read as a hang in the
+    browser. The ticker must land in the calling turn's capture."""
+    import io
+    import sys
+
+    from scilink.agents.planning_agents import orchestrator_tools as ot
+    from scilink.server import stdout_router as sr
+
+    func, lit, *_ = tool
+    monkeypatch.setattr(ot, "_LIT_HEARTBEAT_SECONDS", 0.15)
+    lit.delay = 0.9
+    console = io.StringIO()
+    old_out, old_err = sys.stdout, sys.stderr
+    sys.stdout = sr._RoutingStream(console)
+    try:
+        cap = sr.RoutedCapture(tag="")
+        with cap:
+            func("q1", "hypothesis_context,cross_domain")
+        captured = cap.getvalue()
+    finally:
+        sys.stdout, sys.stderr = old_out, old_err
+    assert "still running" in captured, (
+        "heartbeat ticks did not reach the session stream")
+    assert "still running" in console.getvalue()   # console still sees them

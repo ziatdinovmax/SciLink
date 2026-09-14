@@ -1938,7 +1938,11 @@ class OrchestratorTools:
                               f"{'es' if _hb_state['total'] != 1 else ''} still "
                               f"running ({mins} min elapsed{_of}; {_eta})")
 
-            _threading.Thread(target=_heartbeat, daemon=True).start()
+            # Attributed to this (chat) thread: under the web app's per-thread
+            # stdout router a bare Thread's prints reach only the server
+            # console, and the ticker's whole purpose is the browser (#627).
+            from ...utils.log_context import start_attributed_thread
+            start_attributed_thread(_heartbeat, name="lit-search-heartbeat")
 
             try:
                 clean_queries = [optimize_search_query(
