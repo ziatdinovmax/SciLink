@@ -65,7 +65,9 @@ pip install scilink
 pip install scilink[sim]
 ```
 
-The web UI (`scilink ui`) is included in the default installation.
+The web UI (`scilink ui`) is included in the default installation — it now
+launches the React web app by default (`scilink ui --streamlit` for the
+classic Streamlit interface).
 
 The analysis agents work without additional dependencies, but installing Meta's [Segment Anything Model](https://github.com/facebookresearch/segment-anything) (SAM) enables more advanced particle and grain segmentation. SAM is not available on PyPI and must be installed from source:
 
@@ -112,7 +114,8 @@ scilink analyze --data ./sample.tif --metadata ./metadata.json
 ### Web UI
 
 ```bash
-scilink ui
+scilink ui              # React web UI (default)
+scilink ui --streamlit  # classic Streamlit app
 ```
 
 ### MCP Server

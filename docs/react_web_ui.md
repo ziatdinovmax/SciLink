@@ -2,22 +2,26 @@
 
 A React single-page app + FastAPI backend that provides the SciLink chat
 experience with a real client–server split: live streaming instead of
-Streamlit reruns, and a UI that can be served remotely. The Streamlit app
-(`scilink-ui`) is unchanged and remains available; the two share the same
-orchestrators, session directories, and checkpoint format — a session
-started in one can be resumed in the other.
+Streamlit reruns, and a UI that can be served remotely. **This is now the
+default web UI**: `scilink ui` (and `scilink-ui`) launch it. The classic
+Streamlit app is still shipped and reachable with `scilink ui --streamlit`;
+the two share the same orchestrators, session directories, and checkpoint
+format — a session started in one can be resumed in the other.
 
 ## Quick start
 
 ```bash
-pip install "scilink[web]"      # fastapi, uvicorn, python-multipart
+pip install scilink               # the web backend is a core dependency now
 
-cd /path/to/your/data           # session dirs are created here
-scilink-web                     # http://127.0.0.1:8422
+cd /path/to/your/data             # session dirs are created here
+scilink ui                        # React web UI → http://127.0.0.1:8422
+# scilink-web does the same; scilink ui --streamlit is the classic app
 ```
 
-Release wheels ship the built React bundle. From a **repository checkout**
-the bundle is not in git — build it once (Node 20+):
+Release wheels ship the built React bundle, so `pip install scilink` gets the
+React UI with no extra step. From a **repository checkout** the bundle is not
+in git — either build it once (Node 20+) or use `scilink ui --streamlit`,
+which needs no bundle:
 
 ```bash
 scripts/build_webui.sh          # npm ci + build → scilink/server/static/
@@ -26,7 +30,9 @@ scripts/build_webui.sh          # npm ci + build → scilink/server/static/
 The server serves `webui/dist` when present (freshest, from `npm run build`
 in `webui/`), else the bundle in `scilink/server/static/`; with neither it
 answers `/` with a 503 that says how to build, while the API stays up.
-Options:
+(`scilink ui` detects the missing bundle before launching and falls back to
+the Streamlit app with a note, so an unbuilt checkout still gets a working
+UI; `scilink-web` starts the API-only server regardless.) Options:
 
 ```
 scilink-web --host 127.0.0.1 --port 8422 --session-root .

@@ -59,6 +59,13 @@ dependencies = [
     # Markdown -> PDF export (with pymupdf above). Arrives transitively via
     # streamlit -> rich, but this is a direct import, so pin it directly.
     "markdown-it-py>=2.2.0",
+    # React web UI backend (scilink-web / the default `scilink ui`). Moved
+    # from the [web] extra into core: the React UI is now the default, its
+    # bundle ships in release wheels, and `scilink ui` launches it out of the
+    # box (falling back to Streamlit only on an unbuilt source checkout).
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]
@@ -73,19 +80,13 @@ sim = [
 # dependency). The empty extra is kept so existing `pip install scilink[ui]`
 # instructions keep working.
 ui = []
-# React web frontend's backend server (scilink-web). uvicorn/starlette were
-# previously only implied by the MCP SSE transport; the web server declares
-# them explicitly. The React bundle itself (scilink/server/static/) is NOT in
-# git: scripts/build_webui.sh produces it and the release workflow runs that
-# before `python -m build`, so release wheels carry it and a checkout builds
-# it once. Direction: once the web UI reaches daily-use parity these deps
-# move into the core list and scilink-web supersedes the Streamlit app as
-# the default UI.
-web = [
-    "fastapi>=0.110",
-    "uvicorn[standard]>=0.29",
-    "python-multipart>=0.0.9",
-]
+# The React web UI backend deps now live in the core dependency list (the
+# React UI is the default). This empty extra is kept so existing
+# `pip install scilink[web]` instructions keep working. The React bundle
+# (scilink/server/static/) is built by scripts/build_webui.sh — the release
+# workflow runs it before `python -m build`, so release wheels carry it; a
+# source checkout builds it once (or `scilink ui` falls back to Streamlit).
+web = []
 structure-matching = [
     # Cap <2026: pymatgen 2026.x makes pymatgen.analysis a namespace package and
     # drops bundled pymatgen.analysis.phase_diagram, which breaks the emmet-core /
