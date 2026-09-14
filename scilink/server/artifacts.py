@@ -16,6 +16,15 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 _UPLOAD_DIRS = {"uploads", "knowledge", "code", "data"}
 _MAX_INLINE_BYTES = 60_000
 _BULK_STEMS = ("literature_search", "chat_history", "session_log")
+# Evidence / provenance records a tool writes NEXT TO its deliverable, for
+# its own critic and downstream injection — not for the reader. The TEA
+# grounding record (``tea_analysis.grounding.md``: retrieved chunks with
+# ``Source:`` / ``DOCUMENT:`` headers) is never registered as a deliverable,
+# yet it is small and unmarked, so the "surface every small unregistered
+# .md" convenience embedded it as a report card titled "Tea Analysis.Grounding"
+# (#633). Evidence by construction is skipped by suffix; a MARKED deliverable
+# still embeds whatever its name.
+_EVIDENCE_SUFFIXES = (".grounding.md",)
 
 
 def _natural_sort_key(s: str):
@@ -146,6 +155,8 @@ class ArtifactTracker:
             is_marked = str(p.resolve()) in marked
             if not is_marked:
                 if any(p.stem.startswith(b) for b in _BULK_STEMS):
+                    continue
+                if p.name.endswith(_EVIDENCE_SUFFIXES):
                     continue
                 try:
                     if p.stat().st_size > _MAX_INLINE_BYTES:
