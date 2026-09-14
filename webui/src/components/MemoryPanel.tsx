@@ -167,19 +167,22 @@ export function MemoryPanel({ sessionId, active }: { sessionId: string; active: 
       </p>
 
       <label className="mem-switch">
-        <input
-          type="checkbox"
-          checked={memOn}
-          disabled={Boolean(ov.env_override)}
-          onChange={async (e) => {
-            try {
-              await api.setMemoryEnabled(e.target.checked);
-              await refresh();
-            } catch (err) {
-              notify("warn", errText(err));
-            }
-          }}
-        />
+        <span className="toggle-switch">
+          <input
+            type="checkbox"
+            checked={memOn}
+            disabled={Boolean(ov.env_override)}
+            onChange={async (e) => {
+              try {
+                await api.setMemoryEnabled(e.target.checked);
+                await refresh();
+              } catch (err) {
+                notify("warn", errText(err));
+              }
+            }}
+          />
+          <span className="track" />
+        </span>
         <span>Enable persistent memory</span>
         <span className="caption">
           {memOn
