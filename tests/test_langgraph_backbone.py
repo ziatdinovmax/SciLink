@@ -27,7 +27,6 @@ import sys
 import tempfile
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List
 from unittest.mock import MagicMock, patch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -105,7 +104,6 @@ def test_state_schemas():
         AnalysisOrchestratorState,
         PlanningOrchestratorState,
         SimulationOrchestratorState,
-        VerificationState,
     )
 
     # These are TypedDicts — check they have annotations
@@ -114,9 +112,6 @@ def test_state_schemas():
     assert "current_data_path" in AnalysisOrchestratorState.__annotations__
     assert "objective" in PlanningOrchestratorState.__annotations__
     assert "generated_structures" in SimulationOrchestratorState.__annotations__
-    assert "verification_history" in VerificationState.__annotations__
-    assert "annealing_level" in VerificationState.__annotations__
-    assert "patience_counter" in VerificationState.__annotations__
     print("   ✅ State schemas: all expected fields present")
 
 
@@ -129,11 +124,9 @@ def test_graphs_init_exports():
         "AnalysisOrchestratorState",
         "PlanningOrchestratorState",
         "SimulationOrchestratorState",
-        "VerificationState",
         "build_analysis_graph",
         "build_planning_graph",
         "build_simulation_graph",
-        "build_verification_subgraph",
     ]
     for name in expected:
         assert hasattr(g, name), f"graphs.__init__ missing: {name}"
@@ -196,172 +189,6 @@ def test_simulation_orch_constructs_graph():
         assert "call_model" in graph_nodes
         assert "execute_tools" in graph_nodes
         print("   ✅ SimulationOrchestratorAgent: graph constructed with correct nodes")
-
-
-def test_verification_subgraph_topology():
-    """build_verification_subgraph() produces a graph with the correct nodes."""
-    from scilink.graphs.verification import build_verification_subgraph
-
-    def run_fn(state):
-        return {"current_result": {"success": True, "_quality_score": 0.8}}
-
-    def verify_fn(state):
-        return {"approved": True, "best_score": 0.8, "best_result": state.get("current_result")}
-
-    def feedback_fn(state):
-        return {"analysis_config": state.get("analysis_config", {})}
-
-    subgraph = build_verification_subgraph(
-        run_fn=run_fn,
-        verify_fn=verify_fn,
-        feedback_fn=feedback_fn,
-        max_iterations=3,
-        quality_threshold=0.7,
-    )
-
-    nodes = set(subgraph.get_graph().nodes.keys())
-    assert "run_analysis" in nodes, f"nodes: {nodes}"
-    assert "verify_quality" in nodes, f"nodes: {nodes}"
-    assert "apply_feedback" in nodes, f"nodes: {nodes}"
-    assert "anneal" in nodes, f"nodes: {nodes}"
-    assert "human_feedback" in nodes, f"nodes: {nodes}"
-    print("   ✅ Verification subgraph: correct topology")
-
-
-def test_verification_subgraph_terminates_on_approval():
-    """Verification subgraph reaches END after a single successful run."""
-    from scilink.graphs.verification import build_verification_subgraph
-
-    call_log: List[str] = []
-
-    def run_fn(state):
-        call_log.append("run")
-        return {
-            "current_result": {"success": True, "_quality_score": 0.9},
-            "best_result": {"success": True, "_quality_score": 0.9},
-            "best_score": 0.9,
-        }
-
-    def verify_fn(state):
-        call_log.append("verify")
-        return {
-            "approved": True,
-            "best_score": 0.9,
-            "best_result": state.get("current_result"),
-        }
-
-    def feedback_fn(state):
-        call_log.append("feedback")
-        return {"analysis_config": {}}
-
-    subgraph = build_verification_subgraph(
-        run_fn=run_fn,
-        verify_fn=verify_fn,
-        feedback_fn=feedback_fn,
-        max_iterations=7,
-        quality_threshold=0.7,
-        checkpointer=None,
-    )
-
-    from langgraph.checkpoint.memory import MemorySaver
-
-    subgraph = build_verification_subgraph(
-        run_fn=run_fn,
-        verify_fn=verify_fn,
-        feedback_fn=feedback_fn,
-        max_iterations=7,
-        quality_threshold=0.7,
-        checkpointer=MemorySaver(),
-    )
-
-    initial_state = {
-        "messages": [],
-        "analysis_config": {"method": "test"},
-        "current_result": None,
-        "best_result": None,
-        "best_score": 0.0,
-        "verification_history": [],
-        "iteration": 0,
-        "max_iterations": 7,
-        "annealing_level": 0,
-        "patience_counter": 0,
-        "approved": False,
-        "human_feedback_requested": False,
-    }
-
-    cfg = {"configurable": {"thread_id": "verify-test-1"}}
-    result = subgraph.invoke(initial_state, config=cfg)
-
-    assert result["approved"] is True, f"expected approved=True, got {result}"
-    assert result["best_score"] >= 0.7
-    # run_fn and verify_fn called exactly once (approved immediately)
-    assert call_log.count("run") == 1
-    assert call_log.count("verify") == 1
-    assert call_log.count("feedback") == 0
-    print("   ✅ Verification subgraph: terminates on first approval")
-
-
-def test_verification_subgraph_max_iterations():
-    """Verification subgraph stops at max_iterations even without approval."""
-    from scilink.graphs.verification import build_verification_subgraph
-    from langgraph.checkpoint.memory import MemorySaver
-
-    run_count = [0]
-    verify_count = [0]
-
-    def run_fn(state):
-        run_count[0] += 1
-        return {
-            "current_result": {"success": True, "_quality_score": 0.3},
-            "best_result": {"success": True, "_quality_score": 0.3},
-            "best_score": 0.3,
-        }
-
-    def verify_fn(state):
-        verify_count[0] += 1
-        return {
-            "approved": False,
-            "best_score": 0.3,
-            "best_result": state.get("current_result"),
-        }
-
-    def feedback_fn(state):
-        return {"analysis_config": state.get("analysis_config", {})}
-
-    max_iter = 3
-    subgraph = build_verification_subgraph(
-        run_fn=run_fn,
-        verify_fn=verify_fn,
-        feedback_fn=feedback_fn,
-        max_iterations=max_iter,
-        quality_threshold=0.7,
-        checkpointer=MemorySaver(),
-    )
-
-    initial_state = {
-        "messages": [],
-        "analysis_config": {},
-        "current_result": None,
-        "best_result": None,
-        "best_score": 0.0,
-        "verification_history": [],
-        "iteration": 0,
-        "max_iterations": max_iter,
-        "annealing_level": 0,
-        "patience_counter": 0,
-        "approved": False,
-        "human_feedback_requested": False,
-    }
-
-    cfg = {"configurable": {"thread_id": "verify-test-maxiter"}}
-    result = subgraph.invoke(initial_state, config=cfg)
-
-    assert result["approved"] is False
-    assert result["iteration"] >= max_iter
-    print(
-        f"   ✅ Verification subgraph: terminates at max_iterations "
-        f"(run×{run_count[0]}, verify×{verify_count[0]})"
-    )
 
 
 def test_analysis_graph_message_format_helpers():
@@ -541,9 +368,6 @@ TARGETED_TESTS = [
     test_analysis_orch_constructs_graph,
     test_planning_orch_constructs_graph,
     test_simulation_orch_constructs_graph,
-    test_verification_subgraph_topology,
-    test_verification_subgraph_terminates_on_approval,
-    test_verification_subgraph_max_iterations,
     test_analysis_graph_message_format_helpers,
     test_no_old_handle_methods_on_orchestrators,
 ]

@@ -104,20 +104,12 @@ def test_guard_survives_a_toolset_without_schemas():
 
 # ── malformed arguments (#270, ported to the meta) ───────────────────
 
-class _Fn:
-    def __init__(self, name, arguments):
-        self.name, self.arguments = name, arguments
-
-
-class _Call:
-    def __init__(self, arguments, name="delegate_to_planning"):
-        self.id, self.function = "tc_1", _Fn(name, arguments)
-
-
 def _parse(arguments, finish_reason=None):
     from scilink.agents.meta_agent.meta_orchestrator import MetaOrchestratorAgent
-    return MetaOrchestratorAgent._parse_tool_args(
-        _Call(arguments), finish_reason)
+    from scilink.graphs._react import _parse_tool_args
+    return _parse_tool_args(
+        arguments, finish_reason,
+        extra_hint=MetaOrchestratorAgent._tool_arg_error_hint)
 
 
 def test_valid_arguments_parse():
@@ -172,3 +164,7 @@ def test_meta_chat_is_graph_backed_with_a_single_dispatch_path():
         "expected the shared execute_tools to use the recovery-hint parser"
     )
     assert "args = {}" not in src.replace("``args = {}``", "")
+    assert not hasattr(mo.MetaOrchestratorAgent, "_parse_tool_args"), (
+        "the dead per-orchestrator _parse_tool_args should be gone, not just "
+        "unreachable — its hint now lives in _tool_arg_error_hint"
+    )

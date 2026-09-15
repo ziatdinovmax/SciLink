@@ -4,15 +4,15 @@ scilink.graphs.refinement
 
 Reusable human-feedback refinement subgraph — 1:1 replacement for the
 imperative ``while iteration < self.max_iterations`` accept/refine loops
-duplicated (independently of the quality-verification loop already migrated
-in ``graphs/verification.py``) across:
+duplicated (independently of the codegen quality-verification loop, which
+lives in ``CodegenQCEngine`` — non-LangGraph, see ``_qc_engine.py``) across:
 
 * ``image_analysis_controllers.py:PlanningStep.execute``
 * ``curve_fitting_controllers.py:PlanningStep.execute``
 * ``fft_microscopy_controllers.py`` (parameter refinement)
 * ``sam_microscopy_controllers.py`` (parameter refinement, both controllers)
 
-Unlike the verification subgraph, this loop has no quality score and no
+Unlike that verification loop, this one has no quality score and no
 annealing: show the current payload, take one round of feedback ("accept"
 or "refine"), either lock it in or apply the refinement and loop again.
 Feedback can come from a human (``input()``) or from an LLM acting as an
@@ -280,3 +280,64 @@ def build_refinement_subgraph(
     )
 
     return builder.compile(checkpointer=checkpointer)
+
+
+class PlanRefinementMixin:
+    """Shared plan-refinement subgraph wiring for a foundation agent's
+    planning controller.
+
+    ``CurveFittingPlanningController`` and ``ImagePlanningController`` each
+    hand-rolled an identical ``_build_refinement_subgraph`` /
+    ``_rsg_feedback`` / ``_rsg_apply`` trio — pure glue between
+    ``build_refinement_subgraph``'s generic accept/refine contract and the
+    controller's own technique-specific planning methods, with no
+    per-controller logic in the glue itself. Any adapter fix had to be
+    manually reapplied at both sites; this mixin makes there be only one.
+
+    A host class must implement:
+
+        self._get_human_feedback(state: dict) -> dict
+            Display the plan, collect one round of feedback. Returns
+            ``state`` unchanged (accept) or with ``_refine_requested`` /
+            ``_refine_feedback`` set (refine) — the shape
+            ``CurveFittingPlanningController``/``ImagePlanningController``
+            already produce.
+        self._refine_plan(state: dict, feedback: str) -> dict
+            Apply one round of feedback, mutating and returning ``state``.
+        self.logger: logging.Logger
+        self.max_iterations: int
+
+    and call ``self._refinement_subgraph = self._build_refinement_subgraph()``
+    once, e.g. at the end of ``__init__``.
+    """
+
+    def _build_refinement_subgraph(self):
+        """Build the plan-refinement subgraph once at init."""
+        return build_refinement_subgraph(
+            feedback_fn=self._rsg_feedback,
+            apply_fn=self._rsg_apply,
+            max_iterations=self.max_iterations,
+            checkpointer=MemorySaver(),
+        )
+
+    def _rsg_feedback(self, rstate: dict) -> dict:
+        """Subgraph feedback_fn adapter — wraps self._get_human_feedback."""
+        plan_state = self._get_human_feedback(dict(rstate.get("payload", {})))
+        if plan_state.pop("_refine_requested", False):
+            plan_state["_pending_feedback"] = plan_state.pop("_refine_feedback", "")
+            return {"action": "refine", "payload": plan_state}
+        return {"action": "accept", "payload": plan_state}
+
+    def _rsg_apply(self, rstate: dict) -> dict:
+        """Subgraph apply_fn adapter — wraps self._refine_plan."""
+        plan_state = dict(rstate.get("payload", {}))
+        feedback = plan_state.pop("_pending_feedback", "")
+        self.logger.info(f"  Refining with feedback: {feedback}")
+        print("\n🔄 Refining plan...\n")
+        # Persist the applied feedback so it survives to end-of-run (the
+        # staging hook distills human corrections into skills) — mirrors
+        # curve_fitting_controllers.py::_refine_model_from_feedback's
+        # post-fit equivalent.
+        if feedback:
+            plan_state.setdefault("human_feedback_log", []).append(str(feedback))
+        return {"payload": self._refine_plan(plan_state, feedback)}

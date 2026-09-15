@@ -25,16 +25,17 @@ from enum import Enum
 
 from ...auth import get_internal_proxy_key
 from ...utils.prose_style import PROSE_STYLE_RULE
-from ...utils.tool_media import (repair_dangling_tool_calls,
-                                 close_interrupted_turn,
-                                 build_tool_message, provider_supports_tool_image,
-                                 sanitize_history_images)
+from ...utils.tool_media import (build_tool_message, provider_supports_tool_image,
+                                 sanitize_history_images, repair_dangling_tool_calls)
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .meta_orchestrator_tools import MetaOrchestratorTools
 from ...graphs.meta import build_meta_graph
+from ...graphs._react import (repair_graph_state, seed_graph_history,
+                              sync_system_prompt, invoke_graph_turn,
+                              extract_final_text)
 
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from langchain_core.messages import HumanMessage
 
 
 class MetaMode(Enum):
@@ -550,20 +551,16 @@ class MetaOrchestratorAgent:
                 self._trim_history(history, max_messages=self.MAX_HISTORY_MESSAGES)
             )
 
-        # ── LangGraph backbone ─────────────────────────────────────────────
-        # Build the ReAct graph.  A fixed thread_id per session lets MemorySaver
-        # accumulate message history across chat() calls so the graph is always
-        # up to date without replaying the full history on every turn.
+        # A fixed thread_id lets MemorySaver accumulate history across chat()
+        # calls without replaying it every turn.
         self._graph_thread_id = f"meta-{self.base_dir.name}"
         self._graph = build_meta_graph(self)
         self._graph_config = {"configurable": {"thread_id": self._graph_thread_id}}
+        self._graph_synced_message_count = 0
+        self._graph_state_repaired = False
 
-        # Seed the graph with existing history so a restored session picks up
-        # where it left off (only non-system messages; graph handles system
-        # prompt internally via the node closure).
         if history:
             self._seed_graph_history(history)
-        # ──────────────────────────────────────────────────────────────────
 
         logging.info(f"✅ MetaOrchestratorAgent initialized. Session: {self.base_dir}")
 
@@ -587,8 +584,7 @@ class MetaOrchestratorAgent:
 
         new_system_prompt = get_system_prompt(mode) + self._kb_note()
         self._system_prompt = new_system_prompt
-        if self.messages and self.messages[0]["role"] == "system":
-            self.messages[0]["content"] = new_system_prompt
+        sync_system_prompt(self)
 
         logging.info(f"🔄 Meta mode changed: {old_mode.value} → {mode.value}")
 
@@ -1217,15 +1213,10 @@ class MetaOrchestratorAgent:
                     "**SPECIALIST CAPABILITIES**: (inventory unavailable — "
                     "route by the principles below.)"
                 )
-        self.messages[0]["content"] = self.messages[0]["content"].replace(
-            "__SPECIALIST_CAPABILITIES__", self._capabilities_block
-        )
-        # The graph reads orch._system_prompt fresh every call_model turn
-        # (not self.messages[0]) — keep both in sync so the capability
-        # inventory actually reaches the LLM via the LangGraph path.
         self._system_prompt = self._system_prompt.replace(
             "__SPECIALIST_CAPABILITIES__", self._capabilities_block
         )
+        sync_system_prompt(self)
 
     # =========================================================================
     # Delegation + ledger (used by MetaOrchestratorTools)
@@ -1768,9 +1759,9 @@ class MetaOrchestratorAgent:
         """
         self._repair_graph_state()
 
-        # Keep self.messages in sync (used by _save_history / _auto_checkpoint)
-        self.messages.append({"role": "user", "content": user_input})
-
+        # Trim self.messages if needed — sized against messages accumulated
+        # through the END of the prior turn; this turn's messages are
+        # appended after invoke, below.
         if len(self.messages) > 120:
             print("  ⚠️  Context window getting full - trimming history...")
             system_msg = self.messages[0]
@@ -1778,158 +1769,45 @@ class MetaOrchestratorAgent:
                 self.messages[1:], max_messages=self.MAX_HISTORY_MESSAGES
             )
             self.messages = [system_msg] + recent_msgs
+            # Repair AFTER the trim, not before — the head/tail splice above
+            # can orphan a tool_use/tool_result pair exactly at its seam;
+            # repairing beforehand would only re-validate an already-fine
+            # history and leave the fresh splice damage unfixed.
+            self.messages = repair_dangling_tool_calls(self.messages)
 
-        result = self._graph.invoke(
-            {
-                "messages": [HumanMessage(content=user_input)],
-                "step_count": 0,
-                "autonomy_mode": self.meta_mode.value,
-                "active_skill": None,
-                "session_dir": str(self.base_dir),
-                "checkpoint_data": {},
-                "mcp_connections": list(self._mcp_connections.keys()),
-                "message_count": self.message_count,
-            },
-            config=self._graph_config,
-        )
+        result = invoke_graph_turn(self, {
+            "messages": [HumanMessage(content=user_input)],
+            "step_count": 0,
+            "autonomy_mode": self.meta_mode.value,
+            "active_skill": None,
+            "session_dir": str(self.base_dir),
+            "checkpoint_data": {},
+            "mcp_connections": list(self._mcp_connections.keys()),
+            "message_count": self.message_count,
+        }, user_input)
 
-        final_text = ""
-        for msg in reversed(result.get("messages", [])):
-            if isinstance(msg, AIMessage) and msg.content:
-                final_text = msg.content
-                break
-
-        if not final_text:
-            if result.get("step_count", 0) >= self.max_iterations:
-                self._last_chat_hit_iter_cap = True
-            final_text = "⚠️ Maximum tool iterations reached. Please simplify your request."
-
-        self.messages.append({"role": "assistant", "content": final_text})
-        return final_text
+        # Extract the final assistant response, mirror the turn into
+        # self.messages — see scilink.graphs._react.extract_final_text.
+        return extract_final_text(self, result)
 
     def _repair_graph_state(self) -> None:
-        """Heal a dangling tool call left by a mid-run interruption — the
-        LangGraph-state analogue of ``repair_dangling_tool_calls`` /
-        ``close_interrupted_turn``. See AnalysisOrchestratorAgent for the
-        full rationale; the checkpointer only ever appends, so the fix is
-        always additive.
-        """
-        try:
-            snapshot = self._graph.get_state(self._graph_config)
-        except Exception:
-            return
-        if not snapshot or not snapshot.values:
-            return
-        messages = snapshot.values.get("messages") or []
-        if not messages:
-            return
-
-        last = messages[-1]
-        patch = []
-        if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
-            for tc in last.tool_calls:
-                patch.append(ToolMessage(
-                    content=(
-                        "⚠️ Tool execution was interrupted before a result "
-                        "was produced (the run was stopped). Re-run this "
-                        "tool if its output is still needed."
-                    ),
-                    tool_call_id=tc["id"],
-                ))
-        elif isinstance(last, ToolMessage):
-            patch.append(AIMessage(
-                content="[Turn interrupted before a reply was produced.]"
-            ))
-
-        if patch:
-            self.logger.info(
-                "  🔧 Repaired %d dangling message(s) from an interrupted run",
-                len(patch),
-            )
-            self._graph.update_state(self._graph_config, {"messages": patch})
+        """Heal a dangling tool call left by a mid-run interruption. Shared
+        implementation: see ``scilink.graphs._react.repair_graph_state``."""
+        repair_graph_state(self)
 
     def _seed_graph_history(self, history: List[Dict]) -> None:
-        """
-        Replay persisted history into the graph's MemorySaver so a restored
-        session has full context.
+        """Replay persisted history into the graph's MemorySaver at init.
+        Shared implementation: see ``scilink.graphs._react.seed_graph_history``."""
+        seed_graph_history(self, history)
 
-        Only called once at init when history is non-empty.
-        """
-        history = close_interrupted_turn(repair_dangling_tool_calls(list(history)))
-
-        lc_messages = []
-        for m in history:
-            role = m.get("role", "")
-            content = m.get("content") or ""
-            if role == "user":
-                lc_messages.append(HumanMessage(content=content))
-            elif role == "assistant":
-                tool_calls_raw = m.get("tool_calls", [])
-                lc_tc = [
-                    {
-                        "id": tc.get("id", ""),
-                        "name": tc.get("function", {}).get("name", ""),
-                        "args": json.loads(tc.get("function", {}).get("arguments", "{}"))
-                        if isinstance(tc.get("function", {}).get("arguments", "{}"), str)
-                        else tc.get("function", {}).get("arguments", {}),
-                        "type": "tool_call",
-                    }
-                    for tc in tool_calls_raw
-                ]
-                lc_messages.append(AIMessage(content=content, tool_calls=lc_tc))
-            elif role == "tool":
-                lc_messages.append(
-                    ToolMessage(content=content, tool_call_id=m.get("tool_call_id", ""))
-                )
-
-        if not lc_messages:
-            return
-
-        try:
-            self._graph.update_state(self._graph_config, {"messages": lc_messages})
-            self.logger.info(
-                "  🧠 Graph history seeded: %d messages loaded into MemorySaver",
-                len(lc_messages),
-            )
-        except Exception as e:
-            self.logger.warning("Failed to seed graph history: %s", e)
-
-    @staticmethod
-    def _parse_tool_args(tool_call, finish_reason=None):
-        """Parse a tool call's JSON arguments, failing loud on bad input.
-
-        Returns (args, None) on success, or (None, error_json) when the
-        arguments are malformed or truncated. Ported from the planning
-        orchestrator (#270), where the same silent ``args = {}`` fallback
-        was found to hide the real cause: the tool then raises about a
-        MISSING argument, so the model "resubmits with the full task" —
-        fixing the wrong thing — and loops. Seen live on the meta four times
-        in a row for one delegate_to_planning call.
-        """
-        try:
-            return json.loads(tool_call.function.arguments), None
-        except json.JSONDecodeError:
-            raw = getattr(tool_call.function, "arguments", "") or ""
-            if finish_reason == "length":
-                cause = ("the arguments JSON was truncated — the response hit "
-                         "the output-token limit")
-            else:
-                cause = ("the arguments string was not valid JSON — typically "
-                         "broken escaping of quotes or newlines inside a large "
-                         "string value")
-            return None, json.dumps({
-                "status": "error",
-                "message": (
-                    f"Tool call discarded: {cause} ({len(raw)} characters "
-                    "received). The tool was NOT executed, and the arguments "
-                    "you sent were never seen — this is NOT a missing-argument "
-                    "error, so re-sending the same call will fail the same "
-                    "way. Send a SHORTER call: for a delegation keep the "
-                    "essential instruction in `task` and move supporting "
-                    "detail into `context`; otherwise split the work across "
-                    "several smaller calls."
-                ),
-            })
+    # Appended to the shared _react._parse_tool_args generic remediation
+    # message on a malformed/truncated tool call. Seen live on the meta four
+    # times in a row for one delegate_to_planning call (#270).
+    _tool_arg_error_hint = (
+        "For a delegation keep the essential instruction in `task` and move "
+        "supporting detail into `context`; otherwise split the work across "
+        "several smaller calls."
+    )
 
     def _print_assistant_reasoning(self, content) -> None:
         """Surface the LLM's interim reasoning that accompanies a tool call.

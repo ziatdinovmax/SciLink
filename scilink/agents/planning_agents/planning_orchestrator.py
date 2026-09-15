@@ -8,12 +8,10 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from enum import Enum
 
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from langchain_core.messages import HumanMessage
 
 from ...auth import get_internal_proxy_key
 from ...utils.prose_style import PROSE_STYLE_RULE
-from ...utils.tool_media import (repair_dangling_tool_calls,
-                                 close_interrupted_turn)
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .planning_agent import (
@@ -24,6 +22,10 @@ from .bo_agent import BOAgent
 from .orchestrator_tools import OrchestratorTools
 from ._deprecation import normalize_params
 from ...graphs.planning import build_planning_graph
+from ...graphs._react import (repair_graph_state, seed_graph_history,
+                              sync_system_prompt, invoke_graph_turn,
+                              extract_final_text)
+from ...utils.tool_media import repair_dangling_tool_calls
 
 
 class AutonomyLevel(Enum):
@@ -872,14 +874,14 @@ class PlanningOrchestratorAgent:
                 recent_history = self._trim_history(history, max_messages=100)
                 self.messages.extend(recent_history)
 
-        # ── LangGraph backbone ─────────────────────────────────────────────
         self._graph_thread_id = f"planning-{self.base_dir.name}"
         self._graph = build_planning_graph(self)
         self._graph_config = {"configurable": {"thread_id": self._graph_thread_id}}
+        self._graph_synced_message_count = 0
+        self._graph_state_repaired = False
 
         if history:
             self._seed_graph_history(history)
-        # ──────────────────────────────────────────────────────────────────
 
     def _convert_tools_to_litellm_format(self) -> List[Dict]:
         """
@@ -930,11 +932,8 @@ class PlanningOrchestratorAgent:
             level, self._external_tools or None
         )
         self._system_prompt = new_system_prompt
+        sync_system_prompt(self)
 
-        # Update system message in messages list (works for both OpenAI and LiteLLM now)
-        if self.messages and self.messages[0]["role"] == "system":
-            self.messages[0]["content"] = new_system_prompt
-        
         logging.info(f"🔄 Autonomy level changed: {old_level.value} → {level.value}")
         logging.info(f"   Human feedback enabled: {self._enable_human_feedback}")
 
@@ -977,8 +976,7 @@ class PlanningOrchestratorAgent:
             self.autonomy_level, self._external_tools or None
         )
         self._system_prompt += self._build_workspace_context()
-        if self.messages and self.messages[0]["role"] == "system":
-            self.messages[0]["content"] = self._system_prompt
+        sync_system_prompt(self)
 
     def _load_data_for_factory(self, data_path: str):
         """Load a data file for use by external tool factories.
@@ -1576,131 +1574,53 @@ class PlanningOrchestratorAgent:
         """
         self._repair_graph_state()
 
-        # Keep self.messages in sync for JSON persistence
-        self.messages.append({"role": "user", "content": user_input})
-
+        # Trim self.messages if needed — sized against messages accumulated
+        # through the END of the prior turn; this turn's messages are
+        # appended after invoke, below.
         if len(self.messages) > 120:
             print("  ⚠️  Context window getting full - trimming history...")
             system_msg = self.messages[0]
             recent_msgs = self._trim_history(self.messages[1:], max_messages=100)
             self.messages = [system_msg] + recent_msgs
+            # Repair AFTER the trim, not before — the head/tail splice above
+            # can orphan a tool_use/tool_result pair exactly at its seam;
+            # repairing beforehand would only re-validate an already-fine
+            # history and leave the fresh splice damage unfixed.
+            self.messages = repair_dangling_tool_calls(self.messages)
 
-        result = self._graph.invoke(
-            {
-                "messages": [HumanMessage(content=user_input)],
-                "step_count": 0,
-                "autonomy_mode": self.autonomy_level.value,
-                "active_skill": None,
-                "session_dir": str(self.base_dir),
-                "checkpoint_data": {},
-                "mcp_connections": list(self._mcp_connections.keys()),
-                "objective": self.objective,
-                "active_scalarizer_script": self.active_scalarizer_script,
-                "expected_input_columns": self.expected_input_columns,
-                "expected_target_columns": self.expected_target_columns,
-                "target_directions": self.target_directions,
-                "expected_input_types": self.expected_input_types,
-                "expected_input_levels": self.expected_input_levels,
-                "latest_tea_results": self.latest_tea_results,
-                "active_knowledge": self.active_knowledge,
-                "message_count": self.message_count,
-            },
-            config=self._graph_config,
-        )
+        result = invoke_graph_turn(self, {
+            "messages": [HumanMessage(content=user_input)],
+            "step_count": 0,
+            "autonomy_mode": self.autonomy_level.value,
+            "active_skill": None,
+            "session_dir": str(self.base_dir),
+            "checkpoint_data": {},
+            "mcp_connections": list(self._mcp_connections.keys()),
+            "objective": self.objective,
+            "active_scalarizer_script": self.active_scalarizer_script,
+            "expected_input_columns": self.expected_input_columns,
+            "expected_target_columns": self.expected_target_columns,
+            "target_directions": self.target_directions,
+            "expected_input_types": self.expected_input_types,
+            "expected_input_levels": self.expected_input_levels,
+            "latest_tea_results": self.latest_tea_results,
+            "active_knowledge": self.active_knowledge,
+            "message_count": self.message_count,
+        }, user_input)
 
-        final_text = ""
-        for msg in reversed(result.get("messages", [])):
-            if isinstance(msg, AIMessage) and msg.content:
-                final_text = msg.content
-                break
-
-        if not final_text:
-            if result.get("step_count", 0) >= self.max_iterations:
-                self._last_chat_hit_iter_cap = True
-            final_text = "⚠️ Maximum tool iterations reached. Please simplify your request."
-
-        self.messages.append({"role": "assistant", "content": final_text})
-        return final_text
+        # Extract the final assistant response, mirror the turn into
+        # self.messages — see scilink.graphs._react.extract_final_text.
+        return extract_final_text(self, result)
 
     def _repair_graph_state(self) -> None:
-        """Heal a dangling tool call left by a mid-run interruption — the
-        LangGraph-state analogue of ``repair_dangling_tool_calls`` /
-        ``close_interrupted_turn``. See AnalysisOrchestratorAgent for the
-        full rationale; the checkpointer only ever appends, so the fix is
-        always additive.
-        """
-        try:
-            snapshot = self._graph.get_state(self._graph_config)
-        except Exception:
-            return
-        if not snapshot or not snapshot.values:
-            return
-        messages = snapshot.values.get("messages") or []
-        if not messages:
-            return
-
-        last = messages[-1]
-        patch = []
-        if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
-            for tc in last.tool_calls:
-                patch.append(ToolMessage(
-                    content=(
-                        "⚠️ Tool execution was interrupted before a result "
-                        "was produced (the run was stopped). Re-run this "
-                        "tool if its output is still needed."
-                    ),
-                    tool_call_id=tc["id"],
-                ))
-        elif isinstance(last, ToolMessage):
-            patch.append(AIMessage(
-                content="[Turn interrupted before a reply was produced.]"
-            ))
-
-        if patch:
-            logging.info(
-                "  🔧 Repaired %d dangling message(s) from an interrupted run",
-                len(patch),
-            )
-            self._graph.update_state(self._graph_config, {"messages": patch})
+        """Heal a dangling tool call left by a mid-run interruption. Shared
+        implementation: see ``scilink.graphs._react.repair_graph_state``."""
+        repair_graph_state(self)
 
     def _seed_graph_history(self, history: List[Dict]) -> None:
-        """Replay persisted history into the graph's MemorySaver at init."""
-        history = close_interrupted_turn(repair_dangling_tool_calls(list(history)))
-
-        lc_messages = []
-        for m in history:
-            role = m.get("role", "")
-            content = m.get("content") or ""
-            if role == "user":
-                lc_messages.append(HumanMessage(content=content))
-            elif role == "assistant":
-                tool_calls_raw = m.get("tool_calls", [])
-                lc_tc = [
-                    {
-                        "id": tc.get("id", ""),
-                        "name": tc.get("function", {}).get("name", ""),
-                        "args": json.loads(tc.get("function", {}).get("arguments", "{}"))
-                        if isinstance(tc.get("function", {}).get("arguments", "{}"), str)
-                        else tc.get("function", {}).get("arguments", {}),
-                        "type": "tool_call",
-                    }
-                    for tc in tool_calls_raw
-                ]
-                lc_messages.append(AIMessage(content=content, tool_calls=lc_tc))
-            elif role == "tool":
-                lc_messages.append(ToolMessage(content=content, tool_call_id=m.get("tool_call_id", "")))
-
-        if not lc_messages:
-            return
-
-        try:
-            self._graph.update_state(self._graph_config, {"messages": lc_messages})
-            logging.info(
-                "  🧠 Graph history seeded: %d messages loaded into MemorySaver",
-                len(lc_messages),
-            )
-        except Exception as e:
-            logging.warning("Failed to seed graph history: %s", e)
+        """Replay persisted history into the graph's MemorySaver at init.
+        Shared implementation: see ``scilink.graphs._react.seed_graph_history``."""
+        seed_graph_history(self, history)
 
     def _compress_large_tool_results(self):
         """Compress large tool results in chat history to prevent context overflow.
@@ -1766,37 +1686,13 @@ class PlanningOrchestratorAgent:
         except Exception as e:
             logging.warning(f"Auto-checkpoint failed: {e}")
 
-    @staticmethod
-    def _parse_tool_args(tool_call, finish_reason=None):
-        """Parse a tool call's JSON arguments, failing loud on bad input.
-
-        Returns (args, None) on success, or (None, error_json) when the
-        arguments string is malformed or truncated. The error_json is handed
-        back to the model as the tool result so it can recover (#270) —
-        silently substituting ``args = {}`` surfaces as a raw TypeError from
-        the tool itself, which hides the real cause and sends the model into
-        an unrecoverable retry loop.
-        """
-        try:
-            return json.loads(tool_call.function.arguments), None
-        except json.JSONDecodeError:
-            if finish_reason == "length":
-                cause = ("the arguments JSON was truncated — the response "
-                         "hit the output-token limit")
-            else:
-                cause = ("the arguments string was not valid JSON — "
-                         "typically broken escaping of quotes/newlines "
-                         "inside a large string value")
-            return None, json.dumps({
-                "status": "error",
-                "message": (
-                    f"Tool call discarded: {cause}. The tool was NOT "
-                    "executed. Do not retry with one large argument. For "
-                    "large text content, write the file in chunks: "
-                    "save_file with the first chunk, then append_file for "
-                    "each remaining chunk."
-                ),
-            })
+    # Appended to the shared _react._parse_tool_args generic remediation
+    # message on a malformed/truncated tool call (#270).
+    _tool_arg_error_hint = (
+        "Do not retry with one large argument. For large text content, "
+        "write the file in chunks: save_file with the first chunk, then "
+        "append_file for each remaining chunk."
+    )
 
     def _print_assistant_reasoning(self, content) -> None:
         """Surface the LLM's interim reasoning that accompanies a tool call.

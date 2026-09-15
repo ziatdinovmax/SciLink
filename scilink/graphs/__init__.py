@@ -21,14 +21,13 @@ _react.py
     Not exported from this package; use the mode-specific builders below.
 
 state.py
-    TypedDict state schemas for all three orchestrators and the verification
-    subgraph.  Three-level hierarchy::
+    TypedDict state schemas for all three orchestrators.  Three-level
+    hierarchy::
 
         OrchestratorState
             └── AnalysisOrchestratorState
             └── PlanningOrchestratorState
             └── SimulationOrchestratorState
-        VerificationState  (self-contained, used by verification.py)
 
 analysis.py
     ReAct graph for ``AnalysisOrchestratorAgent``.
@@ -46,11 +45,14 @@ meta.py
     ReAct graph for ``MetaOrchestratorAgent``.
     Entry point: ``build_meta_graph(orch)``
 
-verification.py
-    Reusable verification-retry subgraph that replaces the duplicated
-    ``while`` loops in ``image_analysis_controllers.py`` and
-    ``curve_fitting_controllers.py``.
-    Entry point: ``build_verification_subgraph(run_fn, verify_fn, ...)``
+Note: an earlier ``verification.py`` (a LangGraph verification-retry
+subgraph meant to replace the per-item verify/refine loop duplicated in
+``image_analysis_controllers.py`` / ``curve_fitting_controllers.py``) was
+removed — it was never wired into either controller. Both, plus
+hyperspectral, were unified instead behind a shared, non-LangGraph
+``CodegenQCEngine`` (issue #327), which gained substantial exclusive
+capability (locked-script reuse, wall-clock budgets, hyperspectral support)
+that the subgraph never had. See TODO.md round-2 item 4.
 
 Phase 2 (planned)
 -----------------
@@ -69,13 +71,11 @@ from scilink.graphs.state import (
     PlanningOrchestratorState,
     SimulationOrchestratorState,
     MetaOrchestratorState,
-    VerificationState,
 )
 from scilink.graphs.analysis import build_analysis_graph
 from scilink.graphs.planning import build_planning_graph
 from scilink.graphs.simulation import build_simulation_graph
 from scilink.graphs.meta import build_meta_graph
-from scilink.graphs.verification import build_verification_subgraph, build_curve_fitting_verification_subgraph
 
 __all__ = [
     # State schemas
@@ -84,12 +84,9 @@ __all__ = [
     "PlanningOrchestratorState",
     "SimulationOrchestratorState",
     "MetaOrchestratorState",
-    "VerificationState",
     # Graph builders
     "build_analysis_graph",
     "build_planning_graph",
     "build_simulation_graph",
     "build_meta_graph",
-    "build_verification_subgraph",
-    "build_curve_fitting_verification_subgraph",
 ]

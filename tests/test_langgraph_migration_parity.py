@@ -9,12 +9,17 @@ Each test class maps to a finding from the migration audit:
        has been restored in _react.py (_TIMEOUT_RETRIES = 3). Tests now assert
        the restored behaviour: up to 3 retries on timeout, raise on the 3rd.
 
-  R2 — REGRESSION: Verification subgraph not wired into controllers
-       graphs/verification.py is exported and tested in isolation, but
-       image_analysis_controllers.py and curve_fitting_controllers.py still
-       run their own imperative `for verification_iter in range(...)` loops.
-       Tests assert this structural gap so it cannot be silently closed
-       (or re-opened) without the test suite noticing.
+  R2 — RESOLVED: Verification subgraph removed (was never wired in)
+       graphs/verification.py was a ~990-line LangGraph verification-retry
+       subgraph, exported and tested in isolation, but never wired into
+       image_analysis_controllers.py or curve_fitting_controllers.py —
+       both, plus hyperspectral, were unified instead behind a shared,
+       non-LangGraph CodegenQCEngine (issue #327), which has since grown
+       substantial exclusive capability (locked-script reuse, wall-clock
+       budgets, hyperspectral support) the subgraph never had. Deleted as
+       dead code rather than left "available standalone" — see TODO.md
+       round-2 item 4. The former TestR2VerificationSubgraphNotWired class
+       (which asserted the gap, not the fix) went with it.
 
   D1 — BEHAVIORAL DELTA: Empty-response nudge path changed
        Old code made a second API call with `tool_choice="none"` to force a
@@ -211,88 +216,6 @@ class TestR1TimeoutRetryRegression:
 
 
 # ===========================================================================
-# R2 — Verification subgraph not wired into controllers
-# ===========================================================================
-
-class TestR2VerificationSubgraphNotWired:
-    """
-    graphs/verification.py defines and exports a LangGraph subgraph that
-    could in principle replace the per-item verify/refine loop in
-    image_analysis_controllers.py and curve_fitting_controllers.py.
-
-    That wiring is deliberately NOT done: upstream/main independently unified
-    the same loop across all three codegen controllers (image, curve-fitting,
-    hyperspectral) behind a shared, non-LangGraph ``CodegenQCEngine``
-    (issue #327). Wiring only 2 of the 3 controllers onto a LangGraph
-    subgraph would leave hyperspectral inconsistent, and this inner
-    generate/verify/refine loop is not part of the LangGraph backbone's
-    scope (that's the orchestrator-level chat loop — see CLAUDE.md). These
-    tests confirm the subgraph stays available standalone without being
-    wired into the controllers.
-    """
-
-    def test_verification_subgraph_is_importable_and_exported(self):
-        """
-        The subgraph IS built and exported — confirming it exists and is
-        ready to be wired in once the controllers are migrated.
-        """
-        from scilink.graphs import build_verification_subgraph
-        assert callable(build_verification_subgraph)
-
-    def test_verification_subgraph_runs_independently(self):
-        """
-        The subgraph works correctly in isolation — a prerequisite for wiring
-        it into the controllers without breaking existing behaviour.
-        """
-        from scilink.graphs import build_verification_subgraph
-        from langgraph.checkpoint.memory import MemorySaver
-
-        approved = [False]
-
-        def run_fn(state):
-            return {
-                "current_result": {"success": True},
-                "best_result": {"success": True},
-                "best_score": 0.85,
-            }
-
-        def verify_fn(state):
-            approved[0] = True
-            return {"approved": True, "best_score": 0.85}
-
-        def feedback_fn(state):
-            return {"analysis_config": {}}
-
-        sg = build_verification_subgraph(
-            run_fn=run_fn,
-            verify_fn=verify_fn,
-            feedback_fn=feedback_fn,
-            max_iterations=3,
-            quality_threshold=0.7,
-            checkpointer=MemorySaver(),
-        )
-        result = sg.invoke(
-            {
-                "messages": [],
-                "analysis_config": {},
-                "current_result": None,
-                "best_result": None,
-                "best_score": 0.0,
-                "verification_history": [],
-                "iteration": 0,
-                "max_iterations": 3,
-                "annealing_level": 0,
-                "patience_counter": 0,
-                "approved": False,
-                "human_feedback_requested": False,
-            },
-            config={"configurable": {"thread_id": "r2-sanity"}},
-        )
-        assert result["approved"] is True
-        assert approved[0], "verify_fn was never called"
-
-
-# ===========================================================================
 # D1 — Empty-response nudge: FIXED to match old tool_choice="none" behaviour
 # ===========================================================================
 
@@ -353,7 +276,7 @@ class TestD1EmptyResponseNudgeDelta:
         reply, identical to the old tool_choice="none" followup call.
         """
         from langchain_core.messages import HumanMessage, AIMessage
-        from scilink.graphs._react import _make_react_nodes, _EMPTY_RESPONSE_NUDGE
+        from scilink.graphs._react import _make_react_nodes, _EMPTY_RESPONSE_NUDGE, _NUDGE_MARKER_KEY
 
         orch = MagicMock()
         orch.use_openai = True
@@ -381,7 +304,10 @@ class TestD1EmptyResponseNudgeDelta:
                 "messages": [
                     HumanMessage(content="original question"),
                     AIMessage(content=""),
-                    HumanMessage(content=_EMPTY_RESPONSE_NUDGE),
+                    HumanMessage(
+                        content=_EMPTY_RESPONSE_NUDGE,
+                        additional_kwargs={_NUDGE_MARKER_KEY: True},
+                    ),
                 ],
                 "step_count": 1,
             }

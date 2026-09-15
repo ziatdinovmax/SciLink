@@ -36,15 +36,17 @@ from ...auth import (
     require_vendor_credentials,
 )
 from ...utils.prose_style import PROSE_STYLE_RULE
-from ...utils.tool_media import (repair_dangling_tool_calls,
-                                 close_interrupted_turn)
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .simulation_orchestrator_tools import SimulationOrchestratorTools
 from ._deprecation import normalize_params
 from ...graphs.simulation import build_simulation_graph
+from ...graphs._react import (repair_graph_state, seed_graph_history,
+                              sync_system_prompt, invoke_graph_turn,
+                              extract_final_text)
+from ...utils.tool_media import repair_dangling_tool_calls
 
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from langchain_core.messages import HumanMessage
 
 
 class SimulationMode(Enum):
@@ -441,14 +443,14 @@ class SimulationOrchestratorAgent:
             recent_history = self._trim_history(history, max_messages=self.MAX_HISTORY_MESSAGES)
             self.messages.extend(recent_history)
 
-        # ── LangGraph backbone ─────────────────────────────────────────────
         self._graph_thread_id = f"simulation-{self.base_dir.name}"
         self._graph = build_simulation_graph(self)
         self._graph_config = {"configurable": {"thread_id": self._graph_thread_id}}
+        self._graph_synced_message_count = 0
+        self._graph_state_repaired = False
 
         if history:
             self._seed_graph_history(history)
-        # ──────────────────────────────────────────────────────────────────
 
         logging.info(f"✅ SimulationOrchestratorAgent initialized. Session: {self.base_dir}")
 
@@ -491,38 +493,26 @@ class SimulationOrchestratorAgent:
         from ...hitl import set_thread_feedback_log as _set_fblog
         from pathlib import Path as _P
         _set_fblog(str(_P(self.base_dir) / "feedback_log.jsonl"))
-        # ── Console display features not yet wired here (parity TODO) ──────────
-        # Analysis, meta, and planning distinguish three console output classes;
-        # this orchestrator currently emits only structural logs. To bring it to
-        # parity, mirror AnalysisOrchestratorAgent:
-        #   1. 💭 Reasoning — copy `_print_assistant_reasoning(self, content)` and
-        #      call it from the `call_model` node in scilink/graphs/simulation.py
-        #      (mirroring scilink/graphs/analysis.py) whenever the response
-        #      carries tool_calls. Shows the interim reasoning dim+italic so a
-        #      deliberate step doesn't read as a silent jump to "🔧 Calling
-        #      tool". Mirror the analysis/planning copy
-        #      exactly, including the invisible U+2063 specialist marker
-        #      (`mark = "\u2063" if _agent_label != "Agent" else ""`,
-        #      printed as `💭{mark} …`) so a meta-delegated sim run's reasoning
-        #      gets the specialist color in the UI; standalone keeps a plain 💭.
-        #   2. 🤖 Answer — copy `_print_agent_answer(self, text)` and call
-        #      `self._print_agent_answer(response)` just before `return response`
-        #      below. NB: unlike analysis/planning (which print "🤖 Agent:" in
-        #      chat()), this chat() returns the answer un-printed, so this is an
-        #      ADD, not a replace.
-        #   3. Meta attribution — when the deferred `delegate_to_simulation` seam
-        #      creates the sim child, set
-        #      `child._agent_label = "Simulation specialist"` (mirrors the
-        #      analysis/planning children in MetaOrchestratorAgent).
-        #   4. UI — no change needed; `ui/app.py::_log_to_html` already styles 💭
-        #      (dim italic, cool meta / warm specialist by the U+2063 marker) and
-        #      the 🤖 header (bold) regardless of source.
+        # Parity TODO: unlike analysis/planning/meta, this orchestrator has no
+        # _print_assistant_reasoning/_print_agent_answer (💭/🤖 console output)
+        # and no _agent_label for meta-delegation attribution. Port from
+        # AnalysisOrchestratorAgent, wiring reasoning into the call_model node
+        # in scilink/graphs/simulation.py.
         self._last_chat_hit_iter_cap = False
-        response = self._invoke_graph(user_input)
         self.message_count += 1
-        self._auto_checkpoint()
-        self._save_history()
-        return response
+        try:
+            response = self._invoke_graph(user_input)
+            self._auto_checkpoint()
+            self._save_history()
+            return response
+
+        except Exception as e:
+            logging.error(f"Chat Error: {e}", exc_info=True)
+
+            print("  💾 Error detected - saving emergency checkpoint...")
+            self._auto_checkpoint()
+
+            return f"❌ Error: {e}\n\n(Emergency checkpoint saved to {self.checkpoint_path})"
 
     def _invoke_graph(self, user_input: str) -> str:
         """
@@ -533,9 +523,9 @@ class SimulationOrchestratorAgent:
         """
         self._repair_graph_state()
 
-        # Keep self.messages in sync for JSON persistence
-        self.messages.append({"role": "user", "content": user_input})
-
+        # Trim self.messages if needed — sized against messages accumulated
+        # through the END of the prior turn; this turn's messages are
+        # appended after invoke, below.
         if len(self.messages) > 120:
             print("  ⚠️  Context window getting full - trimming history...")
             system_msg = self.messages[0]
@@ -543,116 +533,38 @@ class SimulationOrchestratorAgent:
                 self.messages[1:], max_messages=self.MAX_HISTORY_MESSAGES
             )
             self.messages = [system_msg] + recent_msgs
+            # Repair AFTER the trim, not before — the head/tail splice above
+            # can orphan a tool_use/tool_result pair exactly at its seam;
+            # repairing beforehand would only re-validate an already-fine
+            # history and leave the fresh splice damage unfixed.
+            self.messages = repair_dangling_tool_calls(self.messages)
 
-        result = self._graph.invoke(
-            {
-                "messages": [HumanMessage(content=user_input)],
-                "step_count": 0,
-                "autonomy_mode": self.simulation_mode.value,
-                "active_skill": None,
-                "session_dir": str(self.base_dir),
-                "checkpoint_data": {},
-                "mcp_connections": list(self._mcp_connections.keys()),
-                "generated_structures": self.generated_structures,
-                "default_calc_params": self.default_calc_params,
-                "message_count": self.message_count,
-            },
-            config=self._graph_config,
-        )
+        result = invoke_graph_turn(self, {
+            "messages": [HumanMessage(content=user_input)],
+            "step_count": 0,
+            "autonomy_mode": self.simulation_mode.value,
+            "active_skill": None,
+            "session_dir": str(self.base_dir),
+            "checkpoint_data": {},
+            "mcp_connections": list(self._mcp_connections.keys()),
+            "generated_structures": self.generated_structures,
+            "default_calc_params": self.default_calc_params,
+            "message_count": self.message_count,
+        }, user_input)
 
-        final_text = ""
-        for msg in reversed(result.get("messages", [])):
-            if isinstance(msg, AIMessage) and msg.content:
-                final_text = msg.content
-                break
-
-        if not final_text:
-            if result.get("step_count", 0) >= self.max_iterations:
-                self._last_chat_hit_iter_cap = True
-            final_text = "⚠️ Maximum tool iterations reached. Please simplify your request."
-
-        self.messages.append({"role": "assistant", "content": final_text})
-        return final_text
+        # Extract the final assistant response, mirror the turn into
+        # self.messages — see scilink.graphs._react.extract_final_text.
+        return extract_final_text(self, result)
 
     def _repair_graph_state(self) -> None:
-        """Heal a dangling tool call left by a mid-run interruption — the
-        LangGraph-state analogue of ``repair_dangling_tool_calls`` /
-        ``close_interrupted_turn``. See AnalysisOrchestratorAgent for the
-        full rationale; the checkpointer only ever appends, so the fix is
-        always additive.
-        """
-        try:
-            snapshot = self._graph.get_state(self._graph_config)
-        except Exception:
-            return
-        if not snapshot or not snapshot.values:
-            return
-        messages = snapshot.values.get("messages") or []
-        if not messages:
-            return
-
-        last = messages[-1]
-        patch = []
-        if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
-            for tc in last.tool_calls:
-                patch.append(ToolMessage(
-                    content=(
-                        "⚠️ Tool execution was interrupted before a result "
-                        "was produced (the run was stopped). Re-run this "
-                        "tool if its output is still needed."
-                    ),
-                    tool_call_id=tc["id"],
-                ))
-        elif isinstance(last, ToolMessage):
-            patch.append(AIMessage(
-                content="[Turn interrupted before a reply was produced.]"
-            ))
-
-        if patch:
-            self.logger.info(
-                "  🔧 Repaired %d dangling message(s) from an interrupted run",
-                len(patch),
-            )
-            self._graph.update_state(self._graph_config, {"messages": patch})
+        """Heal a dangling tool call left by a mid-run interruption. Shared
+        implementation: see ``scilink.graphs._react.repair_graph_state``."""
+        repair_graph_state(self)
 
     def _seed_graph_history(self, history: List[Dict]) -> None:
-        """Replay persisted history into the graph's MemorySaver at init."""
-        history = close_interrupted_turn(repair_dangling_tool_calls(list(history)))
-
-        lc_messages = []
-        for m in history:
-            role = m.get("role", "")
-            content = m.get("content") or ""
-            if role == "user":
-                lc_messages.append(HumanMessage(content=content))
-            elif role == "assistant":
-                tool_calls_raw = m.get("tool_calls", [])
-                lc_tc = [
-                    {
-                        "id": tc.get("id", ""),
-                        "name": tc.get("function", {}).get("name", ""),
-                        "args": json.loads(tc.get("function", {}).get("arguments", "{}"))
-                        if isinstance(tc.get("function", {}).get("arguments", "{}"), str)
-                        else tc.get("function", {}).get("arguments", {}),
-                        "type": "tool_call",
-                    }
-                    for tc in tool_calls_raw
-                ]
-                lc_messages.append(AIMessage(content=content, tool_calls=lc_tc))
-            elif role == "tool":
-                lc_messages.append(ToolMessage(content=content, tool_call_id=m.get("tool_call_id", "")))
-
-        if not lc_messages:
-            return
-
-        try:
-            self._graph.update_state(self._graph_config, {"messages": lc_messages})
-            self.logger.info(
-                "  🧠 Graph history seeded: %d messages loaded into MemorySaver",
-                len(lc_messages),
-            )
-        except Exception as e:
-            self.logger.warning("Failed to seed graph history: %s", e)
+        """Replay persisted history into the graph's MemorySaver at init.
+        Shared implementation: see ``scilink.graphs._react.seed_graph_history``."""
+        seed_graph_history(self, history)
 
     def run_task(self, task: str, context: Optional[Dict[str, Any]] = None,
                  autonomy: Optional[SimulationMode] = None,
@@ -815,10 +727,7 @@ class SimulationOrchestratorAgent:
             custom_skills=self._custom_skills or None,
         )
         self._system_prompt = new_system_prompt
-        if self.messages and self.messages[0].get("role") == "system":
-            self.messages[0]["content"] = new_system_prompt
-        else:
-            self.messages.insert(0, {"role": "system", "content": new_system_prompt})
+        sync_system_prompt(self)
         logging.info(f"🎛️  Simulation mode: {old_mode.value.upper()} → {mode.value.upper()}")
 
     def get_human_feedback_setting(self) -> bool:
@@ -900,8 +809,7 @@ class SimulationOrchestratorAgent:
             custom_skills=self._custom_skills or None,
         )
         self._system_prompt = new_prompt
-        if self.messages and self.messages[0].get("role") == "system":
-            self.messages[0]["content"] = new_prompt
+        sync_system_prompt(self)
 
     def _trim_history(self, history: List[Dict], max_messages: int = None) -> List[Dict]:
         """Keep only the most recent N messages from history."""

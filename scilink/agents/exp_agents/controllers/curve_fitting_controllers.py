@@ -27,6 +27,7 @@ import base64
 import copy
 import re
 import shutil
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
@@ -41,6 +42,7 @@ from .._qc_engine import CodegenQCEngine, QCEngineSpec, QCItemContext
 from ....utils.codegen_parse import parse_codegen_response
 from ....utils.synthesis_parse import salvage_synthesis_from_response
 from ....hitl import request_human_feedback
+from ....graphs.refinement import sanitize_for_checkpoint, PlanRefinementMixin
 
 # Canonical fitted-curve output the fit script saves alongside visualization.png.
 # Best-effort: when present it powers controller-side residual diagnostics; when
@@ -1813,7 +1815,7 @@ class GenerateCurveFittingReportController:
 # UNIFIED CONTROLLERS (for series analysis support)
 # ============================================================================
 
-class CurveFittingPlanningController:
+class CurveFittingPlanningController(PlanRefinementMixin):
     """
     Plans the fitting analysis for the first spectrum: drafts the plan (one
     large model call over the plot + metadata + skill guidance), validates it
@@ -1854,33 +1856,6 @@ class CurveFittingPlanningController:
         self.enable_human_feedback = enable_human_feedback
         self.max_iterations = max_iterations
         self._refinement_subgraph = self._build_refinement_subgraph()
-
-    def _build_refinement_subgraph(self):
-        """Build the plan-refinement subgraph once at init."""
-        from scilink.graphs.refinement import build_refinement_subgraph
-        from langgraph.checkpoint.memory import MemorySaver
-        return build_refinement_subgraph(
-            feedback_fn=self._rsg_feedback,
-            apply_fn=self._rsg_apply,
-            max_iterations=self.max_iterations,
-            checkpointer=MemorySaver(),
-        )
-
-    def _rsg_feedback(self, rstate: dict) -> dict:
-        """Subgraph feedback_fn adapter — wraps self._get_human_feedback."""
-        plan_state = self._get_human_feedback(dict(rstate.get("payload", {})))
-        if plan_state.pop("_refine_requested", False):
-            plan_state["_pending_feedback"] = plan_state.pop("_refine_feedback", "")
-            return {"action": "refine", "payload": plan_state}
-        return {"action": "accept", "payload": plan_state}
-
-    def _rsg_apply(self, rstate: dict) -> dict:
-        """Subgraph apply_fn adapter — wraps self._refine_plan."""
-        plan_state = dict(rstate.get("payload", {}))
-        feedback = plan_state.pop("_pending_feedback", "")
-        self.logger.info(f"  Refining with feedback: {feedback}")
-        print("\n🔄 Refining plan...\n")
-        return {"payload": self._refine_plan(plan_state, feedback)}
 
     def _display_plan(self, state: dict) -> None:
         is_single = state.get("is_single_spectrum", True)
@@ -2553,8 +2528,6 @@ class CurveFittingPlanningController:
             # it is pointless interruption. Planning still ran above (downstream
             # stages need its fields); we only skip the display/approval gate.
             if self.enable_human_feedback and not state.get("reuse_locked_script"):
-                import uuid as _uuid
-                from scilink.graphs.refinement import sanitize_for_checkpoint
                 rsg_initial = {
                     "messages": [],
                     "payload": sanitize_for_checkpoint(state),
@@ -2566,12 +2539,17 @@ class CurveFittingPlanningController:
                     "aborted": False,
                     "history": [],
                 }
-                rsg_thread = f"cf-plan-refine-{_uuid.uuid4().hex[:8]}"
+                rsg_thread = f"cf-plan-refine-{uuid.uuid4().hex[:8]}"
                 rsg_result = self._refinement_subgraph.invoke(
                     rsg_initial,
                     config={"configurable": {"thread_id": rsg_thread}},
                 )
-                state = rsg_result.get("locked_payload") or state
+                # `or state` would silently discard a legitimately empty
+                # (but present) locked_payload — check key presence instead
+                # of truthiness so an empty dict doesn't fall back to the
+                # pre-refinement state.
+                if "locked_payload" in rsg_result:
+                    state = rsg_result["locked_payload"]
 
                 if not rsg_result.get("accepted", False):
                     self.logger.warning("  Max iterations reached.")

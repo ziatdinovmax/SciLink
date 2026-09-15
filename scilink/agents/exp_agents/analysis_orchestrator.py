@@ -24,19 +24,20 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from enum import Enum
 
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from langchain_core.messages import HumanMessage
 
 from ...auth import get_internal_proxy_key
 from ...utils.prose_style import PROSE_STYLE_RULE
-from ...utils.tool_media import (repair_dangling_tool_calls,
-                                 close_interrupted_turn,
-                                 build_tool_message, provider_supports_tool_image,
-                                 sanitize_history_images)
+from ...utils.tool_media import (build_tool_message, provider_supports_tool_image,
+                                 sanitize_history_images, repair_dangling_tool_calls)
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .analysis_orchestrator_tools import AnalysisOrchestratorTools
 from ._deprecation import normalize_params
 from ...graphs.analysis import build_analysis_graph
+from ...graphs._react import (repair_graph_state, seed_graph_history,
+                              sync_system_prompt, invoke_graph_turn,
+                              extract_final_text)
 
 
 # Built-in agent registry seed — classes are lazy-loaded on first use.
@@ -735,20 +736,16 @@ class AnalysisOrchestratorAgent:
             recent_history = self._trim_history(history, max_messages=self.MAX_HISTORY_MESSAGES)
             self.messages.extend(recent_history)
 
-        # ── LangGraph backbone ─────────────────────────────────────────────
-        # Build the ReAct graph.  A fixed thread_id per session lets MemorySaver
-        # accumulate message history across chat() calls so the graph is always
-        # up to date without replaying the full history on every turn.
+        # A fixed thread_id lets MemorySaver accumulate history across chat()
+        # calls without replaying it every turn.
         self._graph_thread_id = f"analysis-{self.base_dir.name}"
         self._graph = build_analysis_graph(self)
         self._graph_config = {"configurable": {"thread_id": self._graph_thread_id}}
+        self._graph_synced_message_count = 0
+        self._graph_state_repaired = False
 
-        # Seed the graph with existing history so a restored session picks up
-        # where it left off (only non-system messages; graph handles system prompt
-        # internally via the node closure).
         if history:
             self._seed_graph_history(history)
-        # ──────────────────────────────────────────────────────────────────
 
         logging.info(f"✅ AnalysisOrchestratorAgent initialized. Session: {self.base_dir}")
 
@@ -773,10 +770,8 @@ class AnalysisOrchestratorAgent:
             literature_available=self._literature_available,
         )
         self._system_prompt = new_system_prompt
+        sync_system_prompt(self)
 
-        if self.messages and self.messages[0]["role"] == "system":
-            self.messages[0]["content"] = new_system_prompt
-        
         logging.info(f"🔄 Analysis mode changed: {old_mode.value} → {mode.value}")
         logging.info(f"   Human feedback enabled: {self._enable_human_feedback}")
 
@@ -867,8 +862,7 @@ class AnalysisOrchestratorAgent:
             self._external_tools or None, self._custom_skills or None,
             literature_available=self._literature_available,
         )
-        if self.messages and self.messages[0]["role"] == "system":
-            self.messages[0]["content"] = self._system_prompt
+        sync_system_prompt(self)
 
         logging.info(f"✅ Registered agent {agent_id}: {resolved_name}")
 
@@ -977,8 +971,7 @@ class AnalysisOrchestratorAgent:
             self._external_tools, self._custom_skills or None,
             literature_available=self._literature_available,
         )
-        if self.messages and self.messages[0]["role"] == "system":
-            self.messages[0]["content"] = self._system_prompt
+        sync_system_prompt(self)
 
     def register_skill(self, skill_path: str) -> str:
         """Register a custom skill file (.md) for use in analysis.
@@ -1017,8 +1010,7 @@ class AnalysisOrchestratorAgent:
             self._external_tools, self._custom_skills,
             literature_available=self._literature_available,
         )
-        if self.messages and self.messages[0]["role"] == "system":
-            self.messages[0]["content"] = self._system_prompt
+        sync_system_prompt(self)
 
         logging.info(f"✅ Registered custom skill '{name}' from {path}")
         return name
@@ -1113,8 +1105,7 @@ class AnalysisOrchestratorAgent:
             self._external_tools, self._custom_skills or None,
             literature_available=self._literature_available,
         )
-        if self.messages and self.messages[0]["role"] == "system":
-            self.messages[0]["content"] = self._system_prompt
+        sync_system_prompt(self)
 
         logging.info(
             f"✅ MCP '{server_name}': registered {registered} tool(s)"
@@ -1155,8 +1146,7 @@ class AnalysisOrchestratorAgent:
             self._external_tools, self._custom_skills or None,
             literature_available=self._literature_available,
         )
-        if self.messages and self.messages[0]["role"] == "system":
-            self.messages[0]["content"] = self._system_prompt
+        sync_system_prompt(self)
 
         logging.info(f"🔌 MCP '{server_name}' disconnected.")
 
@@ -1623,11 +1613,10 @@ class AnalysisOrchestratorAgent:
         """
         self._repair_graph_state()
 
-        # Keep self.messages in sync (used by _save_history / _auto_checkpoint)
-        self.messages.append({"role": "user", "content": user_input})
-
         # Trim self.messages if needed (graph state trims itself via the
         # MemorySaver accumulation, but we keep the JSON persistence in sync).
+        # Sized against messages accumulated through the END of the prior
+        # turn — this turn's messages are appended after invoke, below.
         if len(self.messages) > 120:
             print("  ⚠️  Context window getting full - trimming history...")
             system_msg = self.messages[0]
@@ -1635,164 +1624,45 @@ class AnalysisOrchestratorAgent:
                 self.messages[1:], max_messages=self.MAX_HISTORY_MESSAGES
             )
             self.messages = [system_msg] + recent_msgs
+            # Repair AFTER the trim, not before — the head/tail splice above
+            # can orphan a tool_use/tool_result pair exactly at its seam;
+            # repairing beforehand would only re-validate an already-fine
+            # history and leave the fresh splice damage unfixed.
+            self.messages = repair_dangling_tool_calls(self.messages)
 
         # Invoke the graph with only the new user message.
         # MemorySaver accumulates the rest.
-        result = self._graph.invoke(
-            {
-                "messages": [HumanMessage(content=user_input)],
-                "step_count": 0,
-                "autonomy_mode": self.analysis_mode.value,
-                "active_skill": None,
-                "session_dir": str(self.base_dir),
-                "checkpoint_data": {},
-                "mcp_connections": list(self._mcp_connections.keys()),
-                "current_data_path": self.current_data_path,
-                "current_data_type": self.current_data_type,
-                "current_metadata": self.current_metadata,
-                "selected_agent_id": self.selected_agent_id,
-                "analysis_results": self.analysis_results,
-                "active_knowledge": self.active_knowledge,
-                "message_count": self.message_count,
-                "analysis_run_counter": self._analysis_run_counter,
-            },
-            config=self._graph_config,
-        )
+        result = invoke_graph_turn(self, {
+            "messages": [HumanMessage(content=user_input)],
+            "step_count": 0,
+            "autonomy_mode": self.analysis_mode.value,
+            "active_skill": None,
+            "session_dir": str(self.base_dir),
+            "checkpoint_data": {},
+            "mcp_connections": list(self._mcp_connections.keys()),
+            "current_data_path": self.current_data_path,
+            "current_data_type": self.current_data_type,
+            "current_metadata": self.current_metadata,
+            "selected_agent_id": self.selected_agent_id,
+            "analysis_results": self.analysis_results,
+            "active_knowledge": self.active_knowledge,
+            "message_count": self.message_count,
+            "analysis_run_counter": self._analysis_run_counter,
+        }, user_input)
 
-        # Extract the final assistant response (last AIMessage in the thread)
-        final_text = ""
-        for msg in reversed(result.get("messages", [])):
-            if isinstance(msg, AIMessage) and msg.content:
-                final_text = msg.content
-                break
-
-        # Handle MAX_TOOL_ITERATIONS case (graph routed to END after step limit)
-        if not final_text:
-            if result.get("step_count", 0) >= self.max_iterations:
-                self._last_chat_hit_iter_cap = True
-            final_text = "⚠️ Maximum tool iterations reached. Please simplify your request."
-
-        # Sync the assistant response back into self.messages
-        self.messages.append({"role": "assistant", "content": final_text})
-
-        # Sync state fields that tools may have mutated on self back into the
-        # orchestrator instance (tools mutate self.* directly, so no sync needed —
-        # this comment is here as a reminder that state is currently orchestrator-owned).
-
-        return final_text
+        # Extract the final assistant response, mirror the turn into
+        # self.messages — see scilink.graphs._react.extract_final_text.
+        return extract_final_text(self, result)
 
     def _repair_graph_state(self) -> None:
-        """Heal a dangling tool call left by a mid-run interruption (process
-        stopped between ``execute_tools`` committing its result and the loop
-        continuing) — the LangGraph-state analogue of
-        ``repair_dangling_tool_calls`` / ``close_interrupted_turn``.
-
-        The checkpointer only ever appends, so the realistic failure mode is
-        purely additive: the persisted thread ends on an AIMessage whose
-        tool_calls have no matching ToolMessage, or ends on a ToolMessage with
-        no assistant reply. Both are healed by appending the missing
-        message(s) via ``update_state`` — never by rewriting history.
-        """
-        try:
-            snapshot = self._graph.get_state(self._graph_config)
-        except Exception:
-            return
-        if not snapshot or not snapshot.values:
-            return
-        messages = snapshot.values.get("messages") or []
-        if not messages:
-            return
-
-        last = messages[-1]
-        patch = []
-        if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
-            for tc in last.tool_calls:
-                patch.append(ToolMessage(
-                    content=(
-                        "⚠️ Tool execution was interrupted before a result "
-                        "was produced (the run was stopped). Re-run this "
-                        "tool if its output is still needed."
-                    ),
-                    tool_call_id=tc["id"],
-                ))
-        elif isinstance(last, ToolMessage):
-            patch.append(AIMessage(
-                content="[Turn interrupted before a reply was produced.]"
-            ))
-
-        if patch:
-            logging.info(
-                "  🔧 Repaired %d dangling message(s) from an interrupted run",
-                len(patch),
-            )
-            self._graph.update_state(self._graph_config, {"messages": patch})
+        """Heal a dangling tool call left by a mid-run interruption. Shared
+        implementation: see ``scilink.graphs._react.repair_graph_state``."""
+        repair_graph_state(self)
 
     def _seed_graph_history(self, history: List[Dict]) -> None:
-        """
-        Replay persisted history into the graph's MemorySaver so a restored
-        session has full context.
-
-        Only called once at init when history is non-empty.  Uses a bulk
-        invoke so the graph thread accumulates all prior messages without
-        making any LLM calls.
-        """
-        # Repair/close before converting: a session file saved mid-interruption
-        # can end on an unanswered tool_call or a dangling tool result, which
-        # `update_state` would otherwise seed verbatim into the checkpoint.
-        history = close_interrupted_turn(repair_dangling_tool_calls(list(history)))
-
-        lc_messages = []
-        for m in history:
-            role = m.get("role", "")
-            content = m.get("content") or ""
-            if role == "user":
-                lc_messages.append(HumanMessage(content=content))
-            elif role == "assistant":
-                tool_calls_raw = m.get("tool_calls", [])
-                lc_tc = [
-                    {
-                        "id": tc.get("id", ""),
-                        "name": tc.get("function", {}).get("name", ""),
-                        "args": json.loads(tc.get("function", {}).get("arguments", "{}"))
-                        if isinstance(tc.get("function", {}).get("arguments", "{}"), str)
-                        else tc.get("function", {}).get("arguments", {}),
-                        "type": "tool_call",
-                    }
-                    for tc in tool_calls_raw
-                ]
-                lc_messages.append(AIMessage(content=content, tool_calls=lc_tc))
-            elif role == "tool":
-                lc_messages.append(
-                    ToolMessage(
-                        content=content,
-                        tool_call_id=m.get("tool_call_id", ""),
-                    )
-                )
-            # system messages are skipped — the graph handles system prompt internally
-
-        if not lc_messages:
-            return
-
-        # Directly update the MemorySaver state rather than re-running the graph,
-        # to avoid making LLM calls during init.
-        try:
-            # Use the put() API to write the accumulated messages into the checkpoint.
-            checkpoint = self._graph.get_state(self._graph_config)
-            if not checkpoint or not checkpoint.values:
-                # No existing state — write an initial empty checkpoint then update.
-                pass
-            # The safest approach is to invoke with all prior messages in one shot
-            # using the graph's update_state API so no LLM call is made.
-            self._graph.update_state(
-                self._graph_config,
-                {"messages": lc_messages},
-            )
-            logging.info(
-                "  🧠 Graph history seeded: %d messages loaded into MemorySaver",
-                len(lc_messages),
-            )
-        except Exception as e:
-            logging.warning("Failed to seed graph history: %s", e)
+        """Replay persisted history into the graph's MemorySaver at init.
+        Shared implementation: see ``scilink.graphs._react.seed_graph_history``."""
+        seed_graph_history(self, history)
 
     def _auto_checkpoint(self):
         """Internal auto-checkpoint without LLM interaction."""

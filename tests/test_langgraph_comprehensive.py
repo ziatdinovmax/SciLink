@@ -22,18 +22,6 @@ G4  — build_react_graph duck-type contract: confirms every attribute in the
 G5  — _seed_graph_history: assistant messages with tool_calls replay correctly
       (existing tests only cover user/assistant/tool messages without calls).
 
-G6  — graphs/__init__.py exports build_curve_fitting_verification_subgraph
-      (not checked by test_graphs_init_exports).
-
-G7  — Verification subgraph: verify_fn raising an exception → safe break
-      (distinct from returning None — currently only the None case is tested).
-
-G8  — Verification subgraph: config_unchanged at level < max → force_anneal
-      escalates level, then loop continues (not breaks).
-
-G9  — Verification subgraph: human_feedback_requested resets to False after
-      human_fn runs so the next iteration doesn't re-trigger it.
-
 G10 — ReAct graph: two consecutive turns share MemorySaver thread state so
       message history accumulates across calls.
 
@@ -73,6 +61,18 @@ def _make_analysis_orch(base_dir: str):
         api_key="dummy-key-not-used",
         model_name="claude-opus-4-6",
         analysis_mode=AnalysisMode.AUTONOMOUS,
+    )
+
+
+def _make_simulation_orch(base_dir: str):
+    from scilink.agents.sim_agents.simulation_orchestrator import (
+        SimulationOrchestratorAgent, SimulationMode,
+    )
+    return SimulationOrchestratorAgent(
+        base_dir=base_dir,
+        api_key="dummy-key-not-used",
+        model_name="claude-opus-4-6",
+        simulation_mode=SimulationMode.AUTONOMOUS,
     )
 
 
@@ -389,6 +389,11 @@ class TestCheckpointRoundTrip:
         """
         A second chat() call sees messages from the first call in the LLM
         wire context (MemorySaver thread accumulation).
+
+        Both turns share ONE patch context: the graph's openai.OpenAI
+        client is cached on the orchestrator (see _get_openai_client) and
+        reused across turns rather than reconstructed per call, so a second,
+        separate `with patch(...)` block would never actually be consulted.
         """
         from scilink.graphs.analysis import build_analysis_graph
         from langgraph.checkpoint.memory import MemorySaver
@@ -398,31 +403,22 @@ class TestCheckpointRoundTrip:
             orch.use_openai = True
             orch._graph = build_analysis_graph(orch, checkpointer=MemorySaver())
 
-            captured = []
+            all_captured = []
 
-            def capture_first(**kwargs):
-                captured.append(list(kwargs.get("messages", [])))
-                return _fake_openai_response("First response.")
+            def capture(**kwargs):
+                all_captured.append(list(kwargs.get("messages", [])))
+                label = "First" if len(all_captured) == 1 else "Second"
+                return _fake_openai_response(f"{label} response.")
 
             with patch("openai.OpenAI") as mock_cls:
                 mock_client = MagicMock()
                 mock_cls.return_value = mock_client
-                mock_client.chat.completions.create.side_effect = capture_first
+                mock_client.chat.completions.create.side_effect = capture
                 orch.chat("Turn one content UNIQUE_MARKER_ALPHA")
-
-            captured2 = []
-
-            def capture_second(**kwargs):
-                captured2.append(list(kwargs.get("messages", [])))
-                return _fake_openai_response("Second response.")
-
-            with patch("openai.OpenAI") as mock_cls:
-                mock_client = MagicMock()
-                mock_cls.return_value = mock_client
-                mock_client.chat.completions.create.side_effect = capture_second
                 orch.chat("Turn two question")
 
-            assert len(captured2) == 1
+            assert len(all_captured) == 2
+            captured2 = [all_captured[1]]
             all_wire_content = " ".join(
                 m.get("content", "") or "" for m in captured2[0]
             )
@@ -544,308 +540,6 @@ class TestSeedGraphHistoryToolCalls:
 
 
 # ---------------------------------------------------------------------------
-# G6 — build_curve_fitting_verification_subgraph exported from __init__
-# ---------------------------------------------------------------------------
-
-class TestGraphsInitExportsCurveFitting:
-    """build_curve_fitting_verification_subgraph must be exported."""
-
-    def test_g6_curve_fitting_builder_exported(self):
-        from scilink.graphs import build_curve_fitting_verification_subgraph
-        assert callable(build_curve_fitting_verification_subgraph)
-
-
-# ---------------------------------------------------------------------------
-# G7 — verify_fn raising an exception → verification_failed (safe break)
-# ---------------------------------------------------------------------------
-
-class TestVerifyFnExceptionSafeBreak:
-    """
-    verify_fn raising an exception must set verification_failed=True and
-    route to END immediately — the same as returning None.
-    """
-
-    def test_g7_verify_fn_exception_triggers_safe_break(self):
-        from scilink.graphs.verification import build_verification_subgraph
-        from langgraph.checkpoint.memory import MemorySaver
-
-        run_count = [0]
-
-        def run_fn(state):
-            run_count[0] += 1
-            return {"current_result": {"success": True}}
-
-        def verify_fn(state):
-            raise RuntimeError("LLM call failed unexpectedly")
-
-        def feedback_fn(state):
-            return {"analysis_config": {}}
-
-        sg = build_verification_subgraph(
-            run_fn=run_fn,
-            verify_fn=verify_fn,
-            feedback_fn=feedback_fn,
-            max_iterations=5,
-            quality_threshold=0.7,
-            checkpointer=MemorySaver(),
-        )
-
-        result = sg.invoke(
-            {
-                "messages": [],
-                "analysis_config": {},
-                "current_result": None,
-                "best_result": None,
-                "best_score": 0.0,
-                "prev_best_score": 0.0,
-                "last_verification": None,
-                "verification_failed": False,
-                "config_unchanged": False,
-                "verification_history": [],
-                "iteration": 0,
-                "max_iterations": 5,
-                "annealing_level": 0,
-                "patience_counter": 0,
-                "approved": False,
-                "human_feedback_requested": False,
-                "best_r2": 0.0,
-                "r2_floor": 0.0,
-                "r2_threshold": 0.8,
-                "best_ever_rejected": False,
-                "best_verification": None,
-            },
-            config={"configurable": {"thread_id": "g7-exception"}},
-        )
-
-        assert result.get("verification_failed") is True, (
-            "Expected verification_failed=True when verify_fn raises"
-        )
-        # Only one run attempt before safe break
-        assert run_count[0] == 1, (
-            f"Expected exactly 1 run before safe break, got {run_count[0]}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# G8 — force_anneal escalates level < max → loop continues (not breaks)
-# ---------------------------------------------------------------------------
-
-class TestForceAnnealContinuesLoop:
-    """
-    When apply_feedback returns the same config and annealing_level < max,
-    force_anneal should escalate the level and continue the loop (not break).
-    """
-
-    def test_g8_force_anneal_at_level_0_continues(self):
-        """
-        force_anneal at level 0 (< max 2) should escalate to 1 and continue.
-        Loop should run more than 1 iteration total.
-        """
-        from scilink.graphs.verification import build_verification_subgraph
-        from langgraph.checkpoint.memory import MemorySaver
-
-        run_count = [0]
-        config_call = [0]
-
-        def run_fn(state):
-            run_count[0] += 1
-            return {"current_result": {"success": True}}
-
-        def verify_fn(state):
-            return {"quality_score": 0.3}
-
-        def feedback_fn(state):
-            config_call[0] += 1
-            # Always return the same config so force_anneal fires
-            return {"analysis_config": {"fixed": True}}
-
-        sg = build_verification_subgraph(
-            run_fn=run_fn,
-            verify_fn=verify_fn,
-            feedback_fn=feedback_fn,
-            max_iterations=5,
-            quality_threshold=0.9,
-            n_annealing_levels=3,
-            checkpointer=MemorySaver(),
-        )
-
-        result = sg.invoke(
-            {
-                "messages": [],
-                "analysis_config": {"fixed": True},
-                "current_result": None,
-                "best_result": None,
-                "best_score": 0.0,
-                "prev_best_score": 0.0,
-                "last_verification": None,
-                "verification_failed": False,
-                "config_unchanged": False,
-                "verification_history": [],
-                "iteration": 0,
-                "max_iterations": 5,
-                "annealing_level": 0,
-                "patience_counter": 0,
-                "approved": False,
-                "human_feedback_requested": False,
-                "best_r2": 0.0,
-                "r2_floor": 0.0,
-                "r2_threshold": 0.8,
-                "best_ever_rejected": False,
-                "best_verification": None,
-            },
-            config={"configurable": {"thread_id": "g8-force-continue"}},
-        )
-
-        # Level escalated from 0 → higher before breaking at max
-        assert result["annealing_level"] > 0
-
-    def test_g8_force_anneal_at_max_level_breaks(self):
-        """
-        force_anneal at max level (2 for n=3) with no-config-change
-        should break the loop, not continue indefinitely.
-        """
-        from scilink.graphs.verification import build_verification_subgraph
-        from langgraph.checkpoint.memory import MemorySaver
-
-        run_count = [0]
-
-        def run_fn(state):
-            run_count[0] += 1
-            return {"current_result": {"success": True}}
-
-        def verify_fn(state):
-            return {"quality_score": 0.3}
-
-        def feedback_fn(state):
-            return {"analysis_config": {}}
-
-        sg = build_verification_subgraph(
-            run_fn=run_fn,
-            verify_fn=verify_fn,
-            feedback_fn=feedback_fn,
-            max_iterations=20,
-            quality_threshold=0.9,
-            n_annealing_levels=3,
-            checkpointer=MemorySaver(),
-        )
-
-        result = sg.invoke(
-            {
-                "messages": [],
-                "analysis_config": {},  # same as feedback_fn will return
-                "current_result": None,
-                "best_result": None,
-                "best_score": 0.0,
-                "prev_best_score": 0.0,
-                "last_verification": None,
-                "verification_failed": False,
-                "config_unchanged": False,
-                "verification_history": [],
-                "iteration": 0,
-                "max_iterations": 20,
-                "annealing_level": 2,  # already at max
-                "patience_counter": 0,
-                "approved": False,
-                "human_feedback_requested": False,
-                "best_r2": 0.0,
-                "r2_floor": 0.0,
-                "r2_threshold": 0.8,
-                "best_ever_rejected": False,
-                "best_verification": None,
-            },
-            config={"configurable": {"thread_id": "g8-force-break"}},
-        )
-
-        # Should have broken early, well short of max_iterations=20
-        assert result["iteration"] < 20, (
-            "Expected early break at max annealing level, but loop ran to max_iterations"
-        )
-
-
-# ---------------------------------------------------------------------------
-# G9 — human_feedback_requested clears after human_fn runs
-# ---------------------------------------------------------------------------
-
-class TestHumanFeedbackClearsAfterRun:
-    """
-    After human_fn is called, human_feedback_requested should be False
-    so subsequent iterations don't immediately re-enter human feedback.
-    """
-
-    def test_g9_human_flag_clears_after_human_fn(self):
-        """human_feedback_requested resets after human_fn executes."""
-        from scilink.graphs.verification import build_verification_subgraph
-        from langgraph.checkpoint.memory import MemorySaver
-
-        human_call_count = [0]
-        verify_count = [0]
-
-        def run_fn(state):
-            return {"current_result": {"success": True}}
-
-        def verify_fn(state):
-            verify_count[0] += 1
-            # Request human feedback only on the very first verify call
-            return {
-                "quality_score": 0.3,
-                "human_feedback_requested": verify_count[0] == 1,
-            }
-
-        def feedback_fn(state):
-            return {"analysis_config": {"step": verify_count[0]}, "human_feedback_requested": False}
-
-        def human_fn(state):
-            human_call_count[0] += 1
-            return {"analysis_config": {"human": True}, "human_feedback_requested": False}
-
-        sg = build_verification_subgraph(
-            run_fn=run_fn,
-            verify_fn=verify_fn,
-            feedback_fn=feedback_fn,
-            human_fn=human_fn,
-            max_iterations=5,
-            quality_threshold=0.95,
-            checkpointer=MemorySaver(),
-        )
-
-        result = sg.invoke(
-            {
-                "messages": [],
-                "analysis_config": {},
-                "current_result": None,
-                "best_result": None,
-                "best_score": 0.0,
-                "prev_best_score": 0.0,
-                "last_verification": None,
-                "verification_failed": False,
-                "config_unchanged": False,
-                "verification_history": [],
-                "iteration": 0,
-                "max_iterations": 5,
-                "annealing_level": 0,
-                "patience_counter": 0,
-                "approved": False,
-                "human_feedback_requested": False,
-                "best_r2": 0.0,
-                "r2_floor": 0.0,
-                "r2_threshold": 0.8,
-                "best_ever_rejected": False,
-                "best_verification": None,
-            },
-            config={"configurable": {"thread_id": "g9-human-clear"}},
-        )
-
-        # human_fn called exactly once (feedback only on first iteration)
-        assert human_call_count[0] == 1, (
-            f"Expected human_fn called once, got {human_call_count[0]}"
-        )
-        # Loop ran beyond the first iteration (flag cleared → continued normally)
-        assert verify_count[0] > 1, (
-            "Loop should have continued after human feedback cleared the flag"
-        )
-
-
-# ---------------------------------------------------------------------------
 # G10 — Two consecutive turns share MemorySaver thread
 # ---------------------------------------------------------------------------
 
@@ -935,6 +629,92 @@ class TestChatExceptionErrorString:
 
             assert "MARKER_ERROR_42" in result, (
                 f"Exception message not in error string: {result!r}"
+            )
+
+
+class TestSimulationChatExceptionHandling:
+    """TODO round-2 item 3: SimulationOrchestratorAgent.chat() had no
+    exception handling, unlike analysis/planning/meta (test_g11 above),
+    which all catch and degrade gracefully. Any exception mid-graph
+    propagated uncaught out of chat(), crashing the caller instead of
+    returning a checkpointed error string."""
+
+    def test_chat_exception_returns_error_string_not_raise(self):
+        with tempfile.TemporaryDirectory() as td:
+            orch = _make_simulation_orch(td)
+            orch.use_openai = True
+
+            with patch("openai.OpenAI") as mock_cls:
+                mock_client = MagicMock()
+                mock_cls.return_value = mock_client
+                mock_client.chat.completions.create.side_effect = \
+                    Exception("Unexpected internal error XYZ")
+
+                result = orch.chat("Do something")  # must not raise
+
+            assert isinstance(result, str)
+            assert "Error" in result or "❌" in result, (
+                f"Expected error string, got: {result!r}"
+            )
+
+    def test_chat_error_string_contains_exception_message_and_checkpoint_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            orch = _make_simulation_orch(td)
+            orch.use_openai = True
+
+            with patch("openai.OpenAI") as mock_cls:
+                mock_client = MagicMock()
+                mock_cls.return_value = mock_client
+                mock_client.chat.completions.create.side_effect = \
+                    Exception("MARKER_ERROR_42")
+
+                result = orch.chat("Do something")
+
+            assert "MARKER_ERROR_42" in result
+            assert str(orch.checkpoint_path) in result
+
+
+class TestSimulationMessageCountOrdering:
+    """TODO round-2 item 9: SimulationOrchestratorAgent.chat() incremented
+    message_count AFTER _invoke_graph, unlike analysis/planning/meta (all
+    increment BEFORE) — and _invoke_graph threads message_count into the
+    graph's initial state, so simulation passed a value one lower than the
+    other three modes for the equivalent turn."""
+
+    def test_message_count_reflects_current_turn_inside_invoke_graph(self):
+        """The value read from self.message_count while building the
+        graph's initial state must already include the current turn."""
+        import scilink.agents.sim_agents.simulation_orchestrator as sim_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            orch = _make_simulation_orch(td)
+            orch.use_openai = True
+
+            seen_counts = []
+            real_invoke_graph_turn = sim_mod.invoke_graph_turn
+
+            def spy_invoke_graph_turn(o, initial_state, user_input):
+                seen_counts.append(initial_state["message_count"])
+                return real_invoke_graph_turn(o, initial_state, user_input)
+
+            with patch.object(sim_mod, "invoke_graph_turn", side_effect=spy_invoke_graph_turn):
+                with patch("openai.OpenAI") as mock_cls:
+                    mock_client = MagicMock()
+                    mock_cls.return_value = mock_client
+                    mock_client.chat.completions.create.return_value = \
+                        _fake_openai_response("First reply.")
+                    orch.chat("Turn one")
+
+                with patch("openai.OpenAI") as mock_cls:
+                    mock_client = MagicMock()
+                    mock_cls.return_value = mock_client
+                    mock_client.chat.completions.create.return_value = \
+                        _fake_openai_response("Second reply.")
+                    orch.chat("Turn two")
+
+            assert seen_counts == [1, 2], (
+                f"Expected message_count to already reflect the current turn "
+                f"(1, then 2) inside _invoke_graph, got {seen_counts}"
             )
 
 
@@ -1071,78 +851,6 @@ class TestRunTaskRestoresAutonomyMode:
 
 
 # ---------------------------------------------------------------------------
-# G13 — Verification history accumulates across iterations
-# ---------------------------------------------------------------------------
-
-class TestVerificationHistoryAccumulation:
-    """
-    Each iteration appends a record to verification_history.
-    After N iterations the history should have N + 1 entries
-    (N loop iterations + 1 final pass).
-    """
-
-    def test_g13_history_grows_per_iteration(self):
-        """verification_history length == number of verify_fn calls."""
-        from scilink.graphs.verification import build_verification_subgraph
-        from langgraph.checkpoint.memory import MemorySaver
-
-        step = [0]
-
-        def run_fn(state):
-            return {"current_result": {"success": True}}
-
-        def verify_fn(state):
-            return {"quality_score": 0.3}
-
-        def feedback_fn(state):
-            step[0] += 1
-            return {"analysis_config": {"step": step[0]}}
-
-        max_iter = 3
-        sg = build_verification_subgraph(
-            run_fn=run_fn,
-            verify_fn=verify_fn,
-            feedback_fn=feedback_fn,
-            max_iterations=max_iter,
-            quality_threshold=0.9,
-            checkpointer=MemorySaver(),
-        )
-
-        result = sg.invoke(
-            {
-                "messages": [],
-                "analysis_config": {},
-                "current_result": None,
-                "best_result": None,
-                "best_score": 0.0,
-                "prev_best_score": 0.0,
-                "last_verification": None,
-                "verification_failed": False,
-                "config_unchanged": False,
-                "verification_history": [],
-                "iteration": 0,
-                "max_iterations": max_iter,
-                "annealing_level": 0,
-                "patience_counter": 0,
-                "approved": False,
-                "human_feedback_requested": False,
-                "best_r2": 0.0,
-                "r2_floor": 0.0,
-                "r2_threshold": 0.8,
-                "best_ever_rejected": False,
-                "best_verification": None,
-            },
-            config={"configurable": {"thread_id": "g13-history"}},
-        )
-
-        # Loop ran max_iter times + 1 final pass = max_iter + 1 entries
-        history = result.get("verification_history", [])
-        assert len(history) >= max_iter, (
-            f"Expected at least {max_iter} history entries, got {len(history)}"
-        )
-
-
-# ---------------------------------------------------------------------------
 # G14 — _build_openai_messages prepends system prompt
 # ---------------------------------------------------------------------------
 
@@ -1219,6 +927,7 @@ class TestExecuteToolsJsonDecodeGuard:
         orch.tools_for_model = []
         orch.tools.execute_tool.return_value = "ok"
         del orch._tool_message  # not every orchestrator has this hook
+        del orch._tool_arg_error_hint  # not every orchestrator has this hook
 
         _, execute_tools = _make_react_nodes(orch)
 

@@ -15,11 +15,6 @@ Three-level hierarchy
 Each layer extends the one above by adding domain-specific fields that mirror
 the mutable instance variables currently held on the orchestrator objects.
 
-Verification subgraph state
----------------------------
-
-    VerificationState               (self-contained; used by graphs/verification.py)
-
 Refinement subgraph state
 --------------------------
 
@@ -250,161 +245,6 @@ class MetaOrchestratorState(OrchestratorState):
 
 
 # ---------------------------------------------------------------------------
-# Verification subgraph
-# ---------------------------------------------------------------------------
-
-
-class VerificationRecord(Dict[str, Any]):
-    """Type alias — a single entry in the verification history list.
-
-    Each record contains at minimum:
-        iteration        int
-        score            float
-        issues_found     list[str]
-        overall_assessment  str
-        recommended_action  str
-        annealing_level  int
-        approved         bool
-        config_snapshot  dict
-
-    Curve-fitting records additionally contain:
-        r_squared                  float
-        physically_better_than_best bool
-        comparison_note            str
-    """
-
-
-class VerificationState(MessagesState):
-    """
-    Self-contained state for the verification-retry subgraph.
-
-    This subgraph replaces the ``while`` loop that currently appears in both
-    ``image_analysis_controllers.py:_execute_and_verify`` and
-    ``curve_fitting_controllers.py``.  The loop logic (annealing, patience,
-    best-result tracking) moves from imperative iteration variables into this
-    TypedDict so LangGraph can checkpoint individual verification passes and
-    the loop can be paused / resumed.
-
-    Fields
-    ------
-    analysis_config
-        Mutable configuration dict for the current analysis attempt.
-        Updated by ``apply_feedback`` node after each verification round.
-
-    current_result
-        Result dict from the most recent analysis execution, or ``None``.
-
-    best_result
-        Best result seen so far (highest quality score), or ``None``.
-
-    best_score
-        Quality score of ``best_result`` (0.0–1.0 scale used by verifiers).
-
-    prev_best_score
-        Best score recorded at the end of the previous iteration.
-        Used by the annealing node for the correct high-water-mark comparison
-        (mirrors ``_prev_best_score`` in the imperative loop).
-
-    last_verification
-        Raw dict returned by the most recent ``verify_fn`` call.
-        Passed through state so ``apply_feedback`` and history nodes can read
-        all verifier fields (``issues_found``, ``recommended_action``, etc.)
-        without extra arguments.
-
-    verification_failed
-        Set to ``True`` by ``verify_quality`` when ``verify_fn`` returns ``None``
-        or raises.  Triggers the break-on-failure route (mirrors
-        ``if verification is None: break`` in the imperative loop).
-
-    config_unchanged
-        Set to ``True`` by ``apply_feedback`` when the refined config equals
-        the current locked config.  Triggers immediate annealing escalation
-        (or break at max level) rather than a new run.
-
-    verification_history
-        Ordered list of ``VerificationRecord`` entries — one per round.
-        Uses ``Annotated[list, operator.add]`` so sub-branches can append
-        without clobbering each other in parallel contexts.
-
-    iteration
-        Current verification iteration index (0-based).
-
-    max_iterations
-        Upper bound on iterations (mirrors ``DEFAULT_MAX_VERIFICATION_ITERATIONS``
-        from the controllers).
-
-    annealing_level
-        Current constraint-annealing level (0=tight, 1=warm, 2=hot).
-
-    patience_counter
-        Number of consecutive iterations without a score improvement.
-
-    approved
-        ``True`` once a result meets the quality threshold.
-
-    human_feedback_requested
-        ``True`` if the current state is waiting for human input (used by
-        CO_PILOT / SUPERVISED modes to surface the interrupt).
-
-    --- Curve-fitting-specific fields ---
-
-    best_r2
-        R² value of ``best_result`` (curve fitting only; 0.0 for image analysis).
-
-    r2_floor
-        Minimum R² for in-band physics-based promotion (curve fitting only).
-
-    r2_threshold
-        R² threshold for numeric approval (curve fitting only).
-
-    best_ever_rejected
-        ``True`` if the verifier has ever rejected ``best_result``.
-        Gates the verifier-approval bypass of the R² threshold check.
-
-    best_verification
-        Most recent verifier verdict on ``best_result``, or ``None``.
-    """
-
-    # --- Analysis configuration ---
-    analysis_config: Dict[str, Any]
-
-    # --- Current / best results ---
-    current_result: Optional[Dict[str, Any]]
-    best_result: Optional[Dict[str, Any]]
-    best_score: float
-    prev_best_score: float
-
-    # --- Verification output passthrough ---
-    last_verification: Optional[Dict[str, Any]]
-    verification_failed: bool
-    config_unchanged: bool
-
-    # --- History ---
-    verification_history: Annotated[List[Dict[str, Any]], operator.add]
-
-    # --- Loop control ---
-    iteration: int
-    max_iterations: int
-    annealing_level: int
-    patience_counter: int
-
-    # --- Terminal flags ---
-    approved: bool
-    human_feedback_requested: bool
-
-    # --- Internal loop-control flags ---
-    _force_anneal_was_noop: bool
-    _last_refinement_error: str
-
-    # --- Curve-fitting-specific ---
-    best_r2: float
-    r2_floor: float
-    r2_threshold: float
-    best_ever_rejected: bool
-    best_verification: Optional[Dict[str, Any]]
-
-
-# ---------------------------------------------------------------------------
 # Refinement subgraph
 # ---------------------------------------------------------------------------
 
@@ -421,9 +261,10 @@ class RefinementState(MessagesState):
         fft_microscopy_controllers.py (param refinement)
         sam_microscopy_controllers.py (param refinement)
 
-    Unlike ``VerificationState`` this loop has no LLM quality score, no
-    annealing, and no judge — it is a plain "show the user the current
-    payload, take one round of feedback, apply it or stop" loop.
+    Unlike the codegen quality-verification loop (``CodegenQCEngine``,
+    non-LangGraph) this loop has no LLM quality score, no annealing, and no
+    judge — it is a plain "show the user the current payload, take one
+    round of feedback, apply it or stop" loop.
 
     Fields
     ------

@@ -2,7 +2,8 @@
 
 Two halves:
 
-1. ``PlanningOrchestratorAgent._parse_tool_args`` — malformed/truncated
+1. The shared ``scilink.graphs._react._parse_tool_args``, given
+   ``PlanningOrchestratorAgent._tool_arg_error_hint`` — malformed/truncated
    tool-call arguments must surface an actionable error the model can
    recover from, never a silent ``args = {}`` + raw TypeError.
 2. ``append_file`` — the chunked-write companion to ``save_file`` so large
@@ -21,11 +22,13 @@ from scilink.agents.planning_agents.orchestrator_tools import OrchestratorTools
 from scilink.agents.planning_agents.planning_orchestrator import (
     PlanningOrchestratorAgent,
 )
+from scilink.graphs._react import _parse_tool_args
 
 
-def _tool_call(arguments: str):
-    return SimpleNamespace(function=SimpleNamespace(name="save_file",
-                                                    arguments=arguments))
+def _parse(arguments: str, finish_reason=None):
+    return _parse_tool_args(
+        arguments, finish_reason,
+        extra_hint=PlanningOrchestratorAgent._tool_arg_error_hint)
 
 
 # ---------------------------------------------------------------------------
@@ -33,8 +36,7 @@ def _tool_call(arguments: str):
 # ---------------------------------------------------------------------------
 
 def test_valid_args_parse_cleanly():
-    args, err = PlanningOrchestratorAgent._parse_tool_args(
-        _tool_call('{"filename": "a.md", "content": "hello"}'))
+    args, err = _parse('{"filename": "a.md", "content": "hello"}')
     assert err is None
     assert args == {"filename": "a.md", "content": "hello"}
 
@@ -43,7 +45,7 @@ def test_malformed_args_fail_loud_with_recovery_hint():
     """Broken escaping must NOT become args={}; the error must name the
     cause and point at the chunked-write path."""
     bad = '{"filename": "a.md", "content": "it\'s \n broken'
-    args, err = PlanningOrchestratorAgent._parse_tool_args(_tool_call(bad))
+    args, err = _parse(bad)
     assert args is None
     payload = json.loads(err)
     assert payload["status"] == "error"
@@ -55,8 +57,7 @@ def test_malformed_args_fail_loud_with_recovery_hint():
 def test_truncated_args_report_truncation():
     """finish_reason == 'length' must be distinguished from bad escaping."""
     truncated = '{"filename": "a.md", "content": "very long protoc'
-    args, err = PlanningOrchestratorAgent._parse_tool_args(
-        _tool_call(truncated), finish_reason="length")
+    args, err = _parse(truncated, finish_reason="length")
     assert args is None
     payload = json.loads(err)
     assert "truncated" in payload["message"]
@@ -127,8 +128,7 @@ def test_bad_args_never_reach_execute_tool(tmp_path):
     """Simulate what the chat loops now do with a malformed call: the
     recovery hint is returned and the tool function is never invoked."""
     tools = OrchestratorTools(SimpleNamespace(base_dir=tmp_path))
-    args, err = PlanningOrchestratorAgent._parse_tool_args(
-        _tool_call('{"filename": "p.md", "content": "trunc'))
+    args, err = _parse('{"filename": "p.md", "content": "trunc')
     assert args is None and err is not None
     # Even if bad args DO reach execute_tool (valid-but-incomplete JSON slips
     # past the parse guard), the schema-required check returns an actionable
