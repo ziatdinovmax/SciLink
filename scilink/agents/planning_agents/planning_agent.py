@@ -1859,7 +1859,7 @@ class PlanningAgent(BaseAgent):
                 "  3. Pass state_file_path='path.state.json' to this method"
             )
         
-        print(f"\n--- 🔄 Refining Plan based on New Results ---")
+        print(f"\n--- 🔄 Refining Plan based on New Results / Feedback ---")
         executed_plan_idx = self.state["iteration_index"]
         
         # Extract from state
