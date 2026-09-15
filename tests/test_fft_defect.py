@@ -191,3 +191,39 @@ class TestContract:
         from scilink.skills._shared._registry import get_tools_for
         names = [s.name for s in get_tools_for("image_analysis")]
         assert "fft_defect_map" in names
+
+
+class TestSignAwareDeficitGate:
+    """deficit_null_percentile / deficit_k_min: a separate, lower gate for the
+    deficit (vacancy) side, defaulting to a no-op. Missing units are shallower
+    than adsorbates, so a symmetric gate under-counts them (issue #650)."""
+
+    def _counts(self, res):
+        d = res.get("defects", [])
+        exc = sum(1 for c in d if c["sign"] == "excess")
+        dfc = sum(1 for c in d if c["sign"] == "deficit")
+        return exc, dfc
+
+    def test_default_is_symmetric_noop(self):
+        # both gates None -> deficit threshold equals the excess threshold
+        img, _ = make_defective_lattice((512, 512), a_px=14.0, kind="hex",
+                                        n_vacancies=6, n_interstitials=6, seed=3)
+        res = fft_defect_map(img)
+        assert res["threshold_deficit"] == pytest.approx(res["threshold"])
+
+    def test_deficit_knob_recovers_more_vacancies_without_touching_excess(self):
+        # a lattice with shallow vacancies AND tall interstitials: the symmetric
+        # gate favors the tall excess; a lower deficit gate must recover more
+        # deficits while leaving the excess count unchanged.
+        img, _ = make_defective_lattice((512, 512), a_px=14.0, kind="hex",
+                                        n_vacancies=10, n_interstitials=6,
+                                        noise=0.06, seed=5)
+        base = fft_defect_map(img)
+        lowered = fft_defect_map(
+            img, params={"deficit_k_min": 3.0, "deficit_null_percentile": 99.0})
+        e0, d0 = self._counts(base)
+        e1, d1 = self._counts(lowered)
+        assert lowered["threshold_deficit"] < base["threshold_deficit"]
+        assert lowered["threshold"] == pytest.approx(base["threshold"])
+        assert e1 == e0            # excess side untouched
+        assert d1 >= d0            # deficit recall does not drop
