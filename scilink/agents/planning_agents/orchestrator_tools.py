@@ -1306,13 +1306,59 @@ class OrchestratorTools:
                 model=self.orch.bo.model, output_dir=str(self.orch.base_dir))
         return self._diagram_agent
 
+    @staticmethod
+    def _existing_workflow_figure(text: str, out_dir) -> Optional[str]:
+        """Describe a workflow figure the document ALREADY carries, or None.
+
+        The author may embed one in the body (live: a copy of
+        ``campaign_workflow.png`` under a proposal-specific name), and the
+        append step used to add its own regardless, so the reader saw the
+        same workflow twice under two captions (#639). Three signals: a
+        prior appended "Campaign Workflow" section; an image whose alt
+        text or filename says "workflow"; an embedded image byte-identical
+        to a campaign workflow diagram already in the output directory.
+        """
+        import hashlib
+        import re
+        if re.search(r"^#{1,6}\s+Campaign Workflow\s*$", text or "", re.M):
+            return "a 'Campaign Workflow' section"
+        embeds = re.findall(r"!\[([^\]]*)\]\(([^)\s]+)", text or "")
+        for alt, src in embeds:
+            if "workflow" in f"{alt} {Path(src).name}".lower():
+                return f"![{alt}]({src})"
+        digests = {}
+        try:
+            for cand in Path(out_dir).glob("campaign_workflow*.png"):
+                digests[hashlib.md5(cand.read_bytes()).hexdigest()] = cand.name
+        except OSError:
+            digests = {}
+        if not digests:
+            return None
+        for alt, src in embeds:
+            cand = Path(src) if Path(src).is_absolute() else Path(out_dir) / src
+            try:
+                if cand.is_file() and hashlib.md5(
+                        cand.read_bytes()).hexdigest() in digests:
+                    return (f"![{alt}]({src}) — a copy of "
+                            f"{digests[hashlib.md5(cand.read_bytes()).hexdigest()]}")
+            except OSError:
+                continue
+        return None
+
     def _maybe_embed_workflow_diagram(self, text: str, out_dir,
                                       stem: str = "campaign_workflow") -> str:
         """Append a compact workflow diagram section to a document when the
         renderer is available and the QC'd diagram succeeds. Any failure
         returns the text unchanged — a document must never be lost to a
-        figure."""
+        figure. Idempotent: a document that already carries a workflow
+        figure (authored inline, or from an earlier pass) is returned as
+        is, without rendering a second one."""
         try:
+            existing = self._existing_workflow_figure(text, out_dir)
+            if existing:
+                print(f"    🗺️  Workflow figure already in the document "
+                      f"({existing}) — not appending a second one")
+                return text
             from ...utils.mermaid_render import mermaid_available
             if not mermaid_available():
                 return text
