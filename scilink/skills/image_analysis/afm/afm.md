@@ -133,18 +133,25 @@ before reporting angles; using the wrong modulus makes a single grain's
 symmetry-equivalent lattice directions read as different orientations, so the
 per-grain mean is meaningless and its within-grain spread balloons.
 
-**Gate on resolvability — decline rather than fabricate.** Per-grain
-orientation is measurable only when the lattice is adequately sampled (period
-comfortably above the 2-px Nyquist limit) AND each grain's orientation field is
-spatially coherent. If the period is at/near Nyquist, or a grain's within-grain
-orientation spread is large (the direction is not consistent across the grain),
-the orientation is NOT resolved: deliver the grains and their geometry with an
-explicit "orientation unresolvable" note and the per-grain spread — do NOT emit
-a confident angle. A large within-grain spread, or the same exact fallback angle
-repeated across grains, is the signature of a forced, meaningless measurement;
-flag such grains rather than reporting them as `ok`. State reliability honestly:
-grid-snapped or FFT-quantized values are relative/class labels, not precise
-crystallographic angles.
+**Report orientation with a per-grain confidence — do not fabricate, and do
+not cull with an absolute threshold.** Give *every* grain an angle *and* a
+continuous reliability measure (the circular resultant length R, or the
+within-grain angular spread, of its per-window estimates), so an ill-defined
+grain is self-evidently unreliable from its own number rather than either
+reported as confident or silently dropped. Judge whether an angle is meaningful
+by **consistency relative to noise, not an absolute signal cut**: a grain's
+orientation is resolved when its per-window estimates agree far more than they
+would for an isotropic / phase-randomized null of that same grain (high R vs the
+null's R) — this self-calibrates to each image's noise floor. Do NOT gate on a
+fixed absolute Bragg-SNR / "SNR-passing-window count"; that is right for one
+dataset and wrong for the next (too permissive → confident garbage, too strict →
+real grains vanish). Below the physics floor there is nothing to fold: if the
+period is at/near the 2-px Nyquist limit the orientation is unresolvable for
+every grain regardless of consistency. Mark a low-confidence grain
+"unresolvable" (with its spread) rather than as `ok`; a large within-grain
+spread, or the same exact angle repeated across grains, is the signature of a
+forced measurement. State reliability honestly: grid-snapped or FFT-quantized
+values are relative/class labels, not precise crystallographic angles.
 
 ## validation
 ### foundational
@@ -203,12 +210,14 @@ science.
   domain's orientation" — even if it segmented the domains correctly.
 - But a *confident* per-grain angle is worse than an honest decline when the
   measurement is not resolvable. Confirm the run established the lattice
-  symmetry and folded to its modulus, and that it gated on resolvability
-  (period above Nyquist, coherent per-grain field). Large within-grain spreads
-  (tens of degrees), an exact angle repeated across grains, or angles reported
-  with no symmetry established are signs of a forced measurement — the correct
-  result there is grains + geometry with an explicit "unresolvable" note, and a
-  run that fabricates confident angles instead has done worse, not better.
+  symmetry and folded to its modulus, and that each grain carries a continuous
+  confidence (R or within-grain spread) judged against a noise null rather than
+  culled by a fixed absolute-SNR cut. Large within-grain spreads (tens of
+  degrees), an exact angle repeated across grains, or angles reported with no
+  symmetry established are signs of a forced measurement. Equally, resolving
+  only a tiny fraction of clearly-lattice-bearing grains points to an
+  over-strict absolute gate, not honest caution — the criterion should scale
+  with the image's own noise, not a hard threshold.
 - When the figure marks FFT reflections (to report a lattice parameter or the
   symmetry), the markers must sit on the **actual detected peaks** — locate each
   peak as the argmax within an angular window on the ring, not as an idealized
