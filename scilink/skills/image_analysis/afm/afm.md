@@ -82,6 +82,20 @@ done first: it does **no** leveling or resampling, and a tilted or
 anisotropic input gives wrong geometry. Pass the square-pixel size in
 nm. Read `pattern_period_nm` for the self-assembly lattice parameter.
 
+The excess (extra unit / adsorbate) and deficit (missing unit / vacancy) sides
+of the residual need not be equal in amplitude, so the tool's single symmetric
+gate can bias detection toward one sign. Check the residual distribution — the
+excess vs deficit tails, or the ± extremes of `residual_sigma_map` — and whether
+one sign is under-counted relative to what is visibly present; if so, move
+*that* sign's gate (`deficit_null_percentile` / `deficit_k_min` for the missing
+units) and visually verify recall vs new false positives. Do **not** assume a
+direction: a single-layer height map on a substrate often has shallower
+vacancies than adsorbates (missing units only drop to the substrate floor while
+adsorbates pile up unbounded), but non-topographic channels (KPFM / PFM /
+current), multilayer or pit-forming films, and arrays whose adsorbates are just
+single extra units can be symmetric or reversed. Read the asymmetry off the
+data, don't apply a fixed rule.
+
 **3. Intensity is physical — track the mapping.**
 AFM intensity is not arbitrary. It is height (nm), voltage (V),
 phase (deg), current (A), etc. Whenever the image is stored or
@@ -126,9 +140,50 @@ class counts or a dominant-orientation summary. Deliver all three:
    them apart, not by angle). It **must carry a cyclic color-wheel legend**
    mapping hue → angle (not a linear colorbar — orientation wraps at
    0°≡180°); a color map with no legend cannot be read as angles.
-State the angle's reliability honestly: if the values are grid-snapped or
-FFT-quantized, report them as relative/class labels with that caveat
-rather than as precise crystallographic angles.
+**Fold orientation to the lattice symmetry.** A 2D lattice's orientation is
+only defined modulo its symmetry — square/p4 folds mod 90°, hexagonal/p6 mod
+60°, oblique mod 180°. Establish the symmetry (from the FFT spot geometry — spot
+count and angular spacing: 4 spots 90° apart = square/rectangular, 6 spots 60°
+apart = hexagonal) before reporting angles; using the wrong modulus makes a
+single grain's symmetry-equivalent lattice directions read as different
+orientations, so the per-grain mean is meaningless and its within-grain spread
+balloons.
+
+**Determine symmetry from a single-orientation region, never the whole-field
+FFT of a grain mosaic.** When the field is many grains at different
+orientations, the global FFT superimposes each grain's reflections into a
+smeared *ring* — the azimuthal spot count and spacing that distinguish 4-fold
+from 6-fold are exactly what the smearing destroys, so the global FFT cannot be
+trusted for the point group (it also readily mis-reads a square lattice's
+diagonal (11) reflections as extra spots → a false hexagon). Instead FFT each
+grain's *interior* (single orientation → discrete, countable spots), classify
+its symmetry, and take the cross-grain consensus; the global FFT is for the
+average *period* only, never the symmetry. **When there are no grains** — a
+single-domain / single-crystal field, or segmentation returns one region — the
+whole image is already single-orientation, so read the symmetry from its FFT
+directly; the smearing problem is specific to multiple co-present orientations.
+State the symmetry with the evidence (spot count/spacing) and, if the spots are
+too smeared or sparse to decide, say so rather than committing to one.
+
+**Report orientation with a per-grain confidence — do not fabricate, and do
+not cull with an absolute threshold.** Give *every* grain an angle *and* a
+continuous reliability measure (the circular resultant length R, or the
+within-grain angular spread, of its per-window estimates), so an ill-defined
+grain is self-evidently unreliable from its own number rather than either
+reported as confident or silently dropped. Judge whether an angle is meaningful
+by **consistency relative to noise, not an absolute signal cut**: a grain's
+orientation is resolved when its per-window estimates agree far more than they
+would for an isotropic / phase-randomized null of that same grain (high R vs the
+null's R) — this self-calibrates to each image's noise floor. Do NOT gate on a
+fixed absolute Bragg-SNR / "SNR-passing-window count"; that is right for one
+dataset and wrong for the next (too permissive → confident garbage, too strict →
+real grains vanish). Below the physics floor there is nothing to fold: if the
+period is at/near the 2-px Nyquist limit the orientation is unresolvable for
+every grain regardless of consistency. Mark a low-confidence grain
+"unresolvable" (with its spread) rather than as `ok`; a large within-grain
+spread, or the same exact angle repeated across grains, is the signature of a
+forced measurement. State reliability honestly: grid-snapped or FFT-quantized
+values are relative/class labels, not precise crystallographic angles.
 
 ## validation
 ### foundational
@@ -185,6 +240,25 @@ science.
   orientation, colors domains by identity rather than angle, or shows an
   orientation map with no color→angle legend has NOT met "quantify each
   domain's orientation" — even if it segmented the domains correctly.
+- But a *confident* per-grain angle is worse than an honest decline when the
+  measurement is not resolvable. Confirm the run established the lattice
+  symmetry and folded to its modulus, and that each grain carries a continuous
+  confidence (R or within-grain spread) judged against a noise null rather than
+  culled by a fixed absolute-SNR cut. Large within-grain spreads (tens of
+  degrees), an exact angle repeated across grains, or angles reported with no
+  symmetry established are signs of a forced measurement. Equally, resolving
+  only a tiny fraction of clearly-lattice-bearing grains points to an
+  over-strict absolute gate, not honest caution — the criterion should scale
+  with the image's own noise, not a hard threshold.
+- When the figure marks FFT reflections (to report a lattice parameter or the
+  symmetry), the markers must sit on the **actual detected peaks** — locate each
+  peak as the argmax within an angular window on the ring, not as an idealized
+  rosette of equally-spaced points drawn at an assumed orientation. Finding the
+  ring *radius* from the radial power profile fixes the period but not the peak
+  *angles*; markers placed at assumed angles land on empty ring positions and
+  misrepresent where the peaks are. Confirm each marker overlies a bright spot;
+  a marker with no peak under it is a visualization bug even when the measured
+  period is correct.
 
 Do not penalize an analysis for having preserved the raw line-to-line
 baseline only when the features are genuinely row-correlated and the
