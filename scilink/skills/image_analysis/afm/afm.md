@@ -209,6 +209,15 @@ science.
   with no symmetry established are signs of a forced measurement — the correct
   result there is grains + geometry with an explicit "unresolvable" note, and a
   run that fabricates confident angles instead has done worse, not better.
+- When the figure marks FFT reflections (to report a lattice parameter or the
+  symmetry), the markers must sit on the **actual detected peaks** — locate each
+  peak as the argmax within an angular window on the ring, not as an idealized
+  rosette of equally-spaced points drawn at an assumed orientation. Finding the
+  ring *radius* from the radial power profile fixes the period but not the peak
+  *angles*; markers placed at assumed angles land on empty ring positions and
+  misrepresent where the peaks are. Confirm each marker overlies a bright spot;
+  a marker with no peak under it is a visualization bug even when the measured
+  period is correct.
 
 Do not penalize an analysis for having preserved the raw line-to-line
 baseline only when the features are genuinely row-correlated and the
