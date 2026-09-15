@@ -40,6 +40,18 @@ interest is genuinely row-correlated (e.g. striped domains parallel
 to the fast-scan axis); in that case use a global plane fit only and
 document the choice.
 
+Estimate each row's baseline from that **row's own** substrate — a
+robust low estimator per row (its lowest histogram mode or a low
+percentile), not from a single global-threshold substrate mask. A
+smooth plane fit cannot remove an abrupt baseline step partway down a
+scan (a tip event or feedback jump), and that is exactly where a global
+mask fails: the stepped band's substrate sits *above* the global
+threshold, so it is dropped from the mask, its per-row offset is
+interpolated (≈0) from neighbors instead of measured, and the band is
+left elevated — where it is then misread as a raised terrace/layer.
+Correct each row against its own local substrate so a genuine
+row-baseline step is removed regardless of the global level.
+
 **2. Non-square pixels → rescale to square pixels.**
 AFM scans frequently use different numbers of pixels (or different
 scan sizes) along x and y, so a pixel is physically rectangular.
@@ -111,7 +123,9 @@ class counts or a dominant-orientation summary. Deliver all three:
 3. **A spatially-resolved, color-coded orientation map/overlay** — each
    domain/patch colored by its measured orientation (cyclic colormap),
    distinct from a domain-*identity* map (which colors domains to tell
-   them apart, not by angle).
+   them apart, not by angle). It **must carry a cyclic color-wheel legend**
+   mapping hue → angle (not a linear colorbar — orientation wraps at
+   0°≡180°); a color map with no legend cannot be read as angles.
 State the angle's reliability honestly: if the values are grid-snapped or
 FFT-quantized, report them as relative/class labels with that caveat
 rather than as precise crystallographic angles.
@@ -127,6 +141,16 @@ science.
   should not show a global row-to-row offset. If residual stripes
   remain over featureless areas, escalate from median subtraction
   to per-row polynomial.
+- The leveled substrate must be flat across the **whole field**, not
+  just where the substrate mask landed. Check for a residual step: a
+  full-width band (typically at a scan edge) that reads as bare
+  background yet sits elevated is a leveling failure, not a layer.
+  The tell in the output is a large contiguous background-looking
+  region assigned to a nonzero terrace/height class; substrate-only
+  flatness metrics will look clean because that band was dropped from
+  the substrate mask, so judge it from the assignment map's geometry.
+  If found, re-level (per-row-local baseline) before trusting any
+  per-layer coverage or thickness statistics.
 - After pixel-square resampling, the aspect ratio of known objects
   (e.g. circular grains should look circular, not elliptical).
   Confirm the recorded nm/px matches `field_of_view_x / N_x_new`
@@ -156,9 +180,10 @@ science.
   confirm the results deliver each domain's orientation as a value, not
   just aggregate classes: a per-domain row in the saved table carrying its
   orientation angle, angle labels printed on the map at each domain, and a
-  color-coded orientation overlay. A run that reports only class counts /
-  a dominant orientation, colors domains by identity rather than angle, or
-  shows a colorbar with no per-domain numbers has NOT met "quantify each
+  color-coded orientation overlay that carries a cyclic color-wheel legend
+  (hue → angle). A run that reports only class counts / a dominant
+  orientation, colors domains by identity rather than angle, or shows an
+  orientation map with no color→angle legend has NOT met "quantify each
   domain's orientation" — even if it segmented the domains correctly.
 
 Do not penalize an analysis for having preserved the raw line-to-line
