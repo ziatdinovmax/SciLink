@@ -126,9 +126,25 @@ class counts or a dominant-orientation summary. Deliver all three:
    them apart, not by angle). It **must carry a cyclic color-wheel legend**
    mapping hue → angle (not a linear colorbar — orientation wraps at
    0°≡180°); a color map with no legend cannot be read as angles.
-State the angle's reliability honestly: if the values are grid-snapped or
-FFT-quantized, report them as relative/class labels with that caveat
-rather than as precise crystallographic angles.
+**Fold orientation to the lattice symmetry.** A 2D lattice's orientation is
+only defined modulo its symmetry — square/p4 folds mod 90°, hexagonal/p6 mod
+60°, oblique mod 180°. Establish the symmetry (e.g. from the FFT spot geometry)
+before reporting angles; using the wrong modulus makes a single grain's
+symmetry-equivalent lattice directions read as different orientations, so the
+per-grain mean is meaningless and its within-grain spread balloons.
+
+**Gate on resolvability — decline rather than fabricate.** Per-grain
+orientation is measurable only when the lattice is adequately sampled (period
+comfortably above the 2-px Nyquist limit) AND each grain's orientation field is
+spatially coherent. If the period is at/near Nyquist, or a grain's within-grain
+orientation spread is large (the direction is not consistent across the grain),
+the orientation is NOT resolved: deliver the grains and their geometry with an
+explicit "orientation unresolvable" note and the per-grain spread — do NOT emit
+a confident angle. A large within-grain spread, or the same exact fallback angle
+repeated across grains, is the signature of a forced, meaningless measurement;
+flag such grains rather than reporting them as `ok`. State reliability honestly:
+grid-snapped or FFT-quantized values are relative/class labels, not precise
+crystallographic angles.
 
 ## validation
 ### foundational
@@ -185,6 +201,14 @@ science.
   orientation, colors domains by identity rather than angle, or shows an
   orientation map with no color→angle legend has NOT met "quantify each
   domain's orientation" — even if it segmented the domains correctly.
+- But a *confident* per-grain angle is worse than an honest decline when the
+  measurement is not resolvable. Confirm the run established the lattice
+  symmetry and folded to its modulus, and that it gated on resolvability
+  (period above Nyquist, coherent per-grain field). Large within-grain spreads
+  (tens of degrees), an exact angle repeated across grains, or angles reported
+  with no symmetry established are signs of a forced measurement — the correct
+  result there is grains + geometry with an explicit "unresolvable" note, and a
+  run that fabricates confident angles instead has done worse, not better.
 
 Do not penalize an analysis for having preserved the raw line-to-line
 baseline only when the features are genuinely row-correlated and the
