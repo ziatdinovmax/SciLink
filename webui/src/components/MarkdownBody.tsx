@@ -1,33 +1,8 @@
 import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 
-/** Escape tildes outside $...$ / $$...$$ so they don't render as
- * strikethrough — port of app.py:95 `_escape_tildes`. */
-export function escapeTildes(text: string): string {
-  const parts = text.split(/(\$\$[\s\S]*?\$\$|\$[^$]+?\$)/);
-  return parts
-    .map((part, i) => (i % 2 === 0 ? part.replaceAll("~", "\\~") : part))
-    .join("");
-}
-
-/** Shift headings down two levels (H1→H3, capped at H6) for in-chat
- * previews — port of app.py:338 `_demote_md_headings`. */
-export function demoteHeadings(text: string): string {
-  const out: string[] = [];
-  let inFence = false;
-  for (const line of text.split("\n")) {
-    let l = line;
-    if (l.trimStart().startsWith("```")) inFence = !inFence;
-    if (!inFence) {
-      const m = /^(#{1,6})(\s)/.exec(l);
-      if (m) l = "#".repeat(Math.min(m[1].length + 2, 6)) + l.slice(m[1].length);
-    }
-    out.push(l);
-  }
-  return out.join("\n");
-}
+import { demoteHeadings, escapeTildes, markdownRemarkPlugins } from "../markdown_text";
+export { demoteHeadings, escapeTildes };
 
 import { isFileToken } from "../filelink";
 import { HighlightedCode } from "./CodeBlock";
@@ -85,7 +60,7 @@ export function MarkdownBody({
   return (
     <div className="md-body">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath]}
+        remarkPlugins={markdownRemarkPlugins() as never}
         rehypePlugins={[rehypeKatex]}
         components={Object.keys(components).length ? components : undefined}
       >

@@ -65,6 +65,7 @@ export function MdReportCard({
           {text !== null ? (
             <MarkdownBody
               text={demoteHeadings(text)}
+              escapeTilde
               transformImageUri={transformImageUri}
             />
           ) : (

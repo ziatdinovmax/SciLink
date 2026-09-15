@@ -9,7 +9,8 @@
     "build:package": "npm run build && rsync -a --delete dist/ ../scilink/server/static/",
     "preview": "vite preview",
     "check:graph": "node --experimental-strip-types scripts/graph_check.ts",
-    "check:highlight": "node --experimental-strip-types scripts/highlight_check.ts"
+    "check:highlight": "node --experimental-strip-types scripts/highlight_check.ts",
+    "check:markdown": "node --experimental-strip-types scripts/markdown_check.ts"
   },
   "dependencies": {
     "highlight.js": "^11.12.0",
