@@ -1,5 +1,5 @@
 ---
-description: Segmentation of touching or overlapping objects (grains, particles, droplets, cells, bubbles) — separates detection from instance partitioning when binary masks merge neighbors.
+description: Detection, counting, and per-object measurement of discrete objects — touching/overlapping OR dispersed/separated (grains, particles, nanoparticles, droplets, cells, bubbles, precipitates). Separates detection from instance partitioning when masks merge neighbors, and from per-object characterization (size/shape, lattice/FFT orientation, intensity) so detection is never gated on the property being measured.
 ---
 # Overlapping / Touching Object Segmentation Skill
 
@@ -12,10 +12,80 @@ cells, bubbles, etc. The key principle is to separate detection (finding
 where individual objects are) from assignment (labeling which pixels belong
 to which object).
 
+A second separation matters when the objective also asks to *characterize*
+each object (a per-object property — crystalline lattice / FFT orientation,
+fluorescence, composition, a size/shape class): **detection must not be
+gated on that property.** Detect every object by morphology/contrast first;
+measure the property per object afterward; and report the two counts
+separately (objects detected vs. objects exhibiting the property). Folding
+the property into detection (e.g. only "finding" particles that show lattice
+fringes) silently under-counts the population.
+
 ## planning
 
 ### foundational
-**Check first whether the problem actually needs instance segmentation.**
+**Pixel size (calibration).** When sizing needs physical units (`pixel_size_nm`
+for `object_diameter_nm`, or size stats in nm), resolve it with the shared
+helper, not inline arithmetic:
+`from scilink.skills._shared.image_analysis_tools import resolve_pixel_size_nm`;
+`px = resolve_pixel_size_nm(metadata, image.shape)` → `{"x","y","source"}` nm/px,
+or `None`. It divides `field_of_view` by the image **shape** — never divide by a
+metadata pixel-count field (`n_cols`/`width`), which is usually absent and
+silently yields `None`. If `None`, report diameters in pixels (uncalibrated).
+
+**Detect particles with the method that fits the image — choose by packing and
+contrast (you can see it).** For **densely-packed or faint small cores**,
+scale-space LoG blob detection is the right first choice — it finds each core as
+its own maximum without merging. Use **`log_blob_detect`** for it: it is a
+faithful SUPERSET of `skimage.feature.blob_log` (passes every native arg through,
+so it equals raw `blob_log`) plus polarity handling, scale-bar masking, and
+calibrated sizing for free — so prefer it over hand-calling `blob_log`. **Set
+`polarity` from the image** (dark vs. bright objects) and **tune `threshold_rel`
+from the overlay** (LoG over-detects at a default threshold; raise it until the
+count matches what you see). For **well-separated** objects, Otsu + connected
+components. For **touching** objects, classical splitting comes FIRST: round /
+blob-like cores → `log_blob_detect`; clear contrast or a visible boundary
+between neighbours → distance-transform watershed. Reserve **SAM only for the
+touching case where NO boundary feature is extractable** (and for the
+crop-then-SAM regimes below) — it is the heavy last resort, not the default for
+"touching". A high-contrast, near-monodisperse field (e.g. dark nanoparticles on
+a light substrate with thin bright gaps) is the classical case, not a SAM case.
+
+A second registered tool, **`scale_matched_blob_detect`**, addresses ONE specific
+FAILURE MODE — when detection **OVER-detects on a speckled / noisy background**:
+its scale-matched band-pass + band-pass-SNR gate reject the fine texture that
+watershed / Otsu / `blob_log` fragment into false particles. Best for SPARSE
+particles on a grainy background — reach for it **when the LoG detector
+over-detects on speckle, not by default**.
+
+Both return per-object `bbox` for a per-object property step, take a `polarity`
+you should **set from the image** (dark vs. bright; `auto` is only a fallback),
+and expose their detection knobs to **tune from the overlay**: `log_blob_detect`
+takes the native `blob_log` args directly (mainly `threshold_rel`, plus
+`min_sigma`/`max_sigma` or `object_diameter_nm`+`pixel_size_nm` for the scale);
+`scale_matched_blob_detect` takes a `params` dict (`k_thresh` / `snr_min`).
+Re-run with adjusted values until the overlay matches the image. **A dense field
+on a speckled background is the hard gap**
+(band-pass merges, plain `blob_log` over-detects the speckle): there, prefer
+`blob_log`/`log_blob_detect` with a raised `threshold_rel` (or a light
+pre-smoothing), and verify the overlay. Use SAM / boundary routes below only for
+genuinely touching objects or space-filling grains.
+
+**Keep the DETECTION step simple — one well-chosen detector, tuned, is almost
+always enough.** When the count looks wrong, first **tune that detector's knobs**
+(threshold, polarity, scale) and re-check the overlay; do NOT chain a second
+detector onto the first or bolt on an aggressive post-detection "validation" /
+filter pass. Stacking detectors and over-filtering is a common way to turn a
+working detection into a failure — it frequently **zeroes out recall** (an
+empty/near-empty mask, or far fewer objects than are plainly visible). Chain a
+second detector only when a single tuned detector demonstrably cannot separate
+real objects from artifacts, and verify the overlay after every change. (This
+concerns the DETECTION step only — it does **not** override the *detect-then-
+measure-property* decoupling below, whose per-object significance gate flags
+objects as "property indeterminate" *without* dropping them from the detected
+count.)
+
+**Check next whether the problem actually needs instance segmentation.**
 Several common cases resolve with simple classical methods before
 reaching for a heavy model like SAM:
 
@@ -49,27 +119,70 @@ Only reach for SAM when objects genuinely touch or overlap AND no
 visible boundary feature delineates them — the case where classical
 approaches would merge adjacent objects into single blobs.
 
+**Also crop-then-SAM in two specific regimes a single blob scale cannot
+handle:** (a) features span a **wide size range** or are densely packed within
+**distinct sub-regions** (e.g. one large feature plus many fine ones in the same
+ROI — no single blob diameter covers both); or (b) **topographically-shaded
+surface features** with a specular highlight + cast shadow (blisters, bubbles,
+pits) where a bright-blob detector keys on the saturated highlight, not the true
+object extent. In these cases define each sub-region as an ROI, **crop it,
+upscale, and run `run_sam_analysis` per crop**, remapping coordinates back; a
+single scale-matched bright-blob pass under-counts the fine population. This is
+the regime where you deliberately **switch detector family** — it is the
+explicit exception to, not a contradiction of, the "tune one detector, don't
+over-stack" guidance above (which governs the ordinary single-scale case).
+
+**Per-object characterization (decoupled from detection).** When the
+objective is "detect the objects AND measure property X per object"
+(e.g. *detect the nanoparticles and FFT each to get its lattice
+orientation*), run it as two stages, never one:
+1. **Detect ALL objects** by morphology/contrast using the decision
+   tree above — independent of whether each object shows property X.
+   For small, low-contrast, dispersed particles a band-pass +
+   Laplacian-of-Gaussian blob detection (`skimage.feature.blob_log`)
+   sized to the particle radius is usually more reliable than
+   thresholding; de-duplicate detections within ~one radius.
+2. **Measure X on each detected object**, and accept the per-object
+   result only when it clears its own significance gate. For a
+   per-particle *lattice orientation*, crop each object and take a
+   windowed local FFT; report the orientation/d-spacing only when the
+   first-order spot SNR exceeds a threshold, and flag the rest as
+   "detected, property indeterminate" (off-zone / amorphous / too
+   noisy). For a lattice/superstructure question, `fourier_reflection_map`
+   (in `scilink.skills._shared.fourier_reflection`) can do the
+   per-crop detection.
+**Report N_detected and N_with_property as two separate numbers** — a
+large gap is an expected, informative result (e.g. "12 particles
+detected, 4 crystalline"), not a reason to drop the others.
+
 ### genuinely-overlapping case (no visible boundary)
 
 When the foundational checks above rule out classical methods —
 i.e. objects genuinely touch with no boundary feature you can extract —
 connected component labeling on a binary mask will merge all touching
 pixels into one object, so the pipeline must include a dedicated
-splitting step. Within this case, in order of preference:
+splitting step. Order the splitting method by object **shape**, not by
+reaching for the heaviest model first:
 
-1. **SAM instance segmentation**: Use `run_sam_analysis` from
-   `scilink.skills._shared.sam`. SAM detects individual object instances
-   directly, even when they overlap, without requiring thresholding or
-   binary masks. Works for any object shape. Tune via `sam_parameters`
-   preset and `min_area` / `pruning_iou_threshold`. Avoid Gaussian blur
-   before SAM unless noise is very high.
+1. **Watershed splitting (roughly convex objects — the common case)**:
+   Create a binary mask (any method) → distance transform → find markers
+   (local maxima of the distance transform) → watershed on the inverted
+   distance transform. This splits touching convex objects (discs,
+   spheres, droplets, nanoparticles) by shape alone — it needs no
+   intensity boundary between them and no learned model, so it is the
+   first choice whenever the objects are approximately convex. Key
+   parameter: `min_distance` in `peak_local_max` should approximate the
+   object radius.
 
-2. **Watershed splitting**: Create binary mask (any method) → distance
-   transform → find markers (local maxima of distance transform) →
-   watershed on inverted distance transform. Use when objects are
-   roughly convex and SAM produces poor results (over-merged or
-   over-split for the size scale). Key parameter: `min_distance` in
-   `peak_local_max` should approximate the object radius.
+2. **SAM instance segmentation (irregular / arbitrary shapes, or when
+   watershed over-/under-splits)**: Use `run_sam_analysis` from
+   `scilink.skills._shared.sam`. SAM detects individual instances
+   directly, even when they overlap, without thresholding or binary
+   masks, and handles arbitrary shapes a distance transform cannot. It is
+   the heavy last resort — reach for it when the objects are NOT convex
+   enough for watershed, not as the default for "touching". Tune via
+   `sam_parameters` preset and `min_area` / `pruning_iou_threshold`.
+   Avoid Gaussian blur before SAM unless noise is very high.
 
 3. **Instance detection**: Detect individual objects directly from
    the image without relying on a binary mask. For elliptical objects:
@@ -209,7 +322,19 @@ too few large objects suggests under-segmentation.
 ## validation
 
 ### foundational
-**Object count**: Should match visual estimate within ±20%.
+**Object count — judge recall by inspecting the raw image, both ways.**
+Overlay the detections on the *original* image and check directly:
+(a) visible objects with no detection mark → under-detection;
+(b) detection marks on noise / background → over-detection. Both are
+errors; report `N_detected` against this visual estimate (≈±20%). A
+second automated detector is NOT a fix — it is just detection run again,
+with the same biases (a permissive one over-detects on noise), so it adds
+no independent ground truth. Where the population is small and
+low-contrast the count is genuinely uncertain — **report that
+uncertainty** (and the detection sensitivity used) rather than presenting
+one number as exact. (The **size distribution** check below independently
+guards over-detection: many fragments below ~1/4 the typical object area
+signal over-segmentation.)
 
 **Size distribution**: Should be unimodal or match expected physics.
 Many fragments below 1/4 of the typical object area indicate
@@ -218,3 +343,10 @@ over-segmentation artifacts.
 **Shape metrics**: Circularity and solidity should be physically
 reasonable for the object type (e.g., >0.7 for droplets/bubbles,
 variable for grains).
+
+**Per-object characterization** (when the objective measures a property
+per object): detection recall is judged on N_detected (the full
+population), not on N_with_property — if the detected count tracks only
+the objects that show the property (e.g. only the fringed particles),
+detection was wrongly coupled to the property; re-detect on morphology
+alone. Report N_detected and N_with_property separately.

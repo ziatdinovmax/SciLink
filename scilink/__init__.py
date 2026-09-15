@@ -1,4 +1,5 @@
 from .auth import set_api_key, show_api_status
+from .tracing import enable_tracing, disable_tracing, is_enabled as is_tracing_enabled
 import torch  # Load PyTorch's BLAS first to avoid conflicts with faiss
 
 def configure(service: str, api_key: str):
@@ -36,8 +37,11 @@ def show_config():
 
 
 __all__ = [
-    'configure', 
-    'configure_from_dict', 
+    'configure',
+    'configure_from_dict',
     'show_config',
+    'enable_tracing',
+    'disable_tracing',
+    'is_tracing_enabled',
     'torch'
 ]

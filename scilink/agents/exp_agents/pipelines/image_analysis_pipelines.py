@@ -52,6 +52,7 @@ def create_unified_image_analysis_pipeline(
     safety_settings,
     parse_fn: Callable,
     store_fn: Callable,
+    load_skills_fn: Callable,
     image_to_bytes_fn: Callable,
     montage_fn: Callable,
     executor: Any,
@@ -145,24 +146,24 @@ def create_unified_image_analysis_pipeline(
             generation_config=generation_config,
             safety_settings=safety_settings,
             parse_fn=parse_fn,
+            load_skills_fn=load_skills_fn,
         )
     )
 
     # Step 4: LLM planning with optional human feedback
-    pipeline.append(
-        ImagePlanningController(
-            model=model,
-            logger=logger,
-            generation_config=generation_config,
-            safety_settings=safety_settings,
-            parse_fn=parse_fn,
-            instructions=IMAGE_ANALYSIS_PLANNING_INSTRUCTIONS,
-            output_dir=output_dir,
-            enable_human_feedback=enable_human_feedback,
-            max_iterations=5,
-            num_plan_candidates=num_plan_candidates,
-        )
+    planning_controller = ImagePlanningController(
+        model=model,
+        logger=logger,
+        generation_config=generation_config,
+        safety_settings=safety_settings,
+        parse_fn=parse_fn,
+        instructions=IMAGE_ANALYSIS_PLANNING_INSTRUCTIONS,
+        output_dir=output_dir,
+        enable_human_feedback=enable_human_feedback,
+        max_iterations=5,
+        num_plan_candidates=num_plan_candidates,
     )
+    pipeline.append(planning_controller)
 
     # Step 5: Literature search (runs once)
     pipeline.append(
@@ -192,6 +193,9 @@ def create_unified_image_analysis_pipeline(
             max_verification_iterations=max_verification_iterations,
             conformance_instructions=IMAGE_ANALYSIS_PLAN_CONFORMANCE_CHECK_INSTRUCTIONS,
             refinement_instructions=IMAGE_ANALYSIS_SCRIPT_REFINEMENT_PROMPT,
+            # Lets each best-of-N fan-out candidate (>=1) plan its own
+            # independent approach instead of sharing the locked plan.
+            replanner=planning_controller,
         )
     )
 

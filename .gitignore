@@ -194,7 +194,77 @@ kb_storage/
 test_*/
 tests/_e2e_runs/
 tests/_simulate_runs/
+# Live-test OUTPUT directories. Every one of these is written by a test
+# (base = Path("tests/_x_runs").resolve()), never read as a fixture — 1,681
+# of them reached a PR through a broad `git add -A tests/`. One glob so the
+# next harness is covered without another edit.
+tests/_*_runs/
+tests/_*_live_runs/
 benchmark_suite_*/
 
 # Office autosave temp files (Word/Excel/PowerPoint)
 ~$*
+
+# Large binaries / local-only artifacts (exceed GitHub's 100 MB limit or are
+# scratch material that shouldn't live in the repo). The earlier `.vscode*.tar`
+# entry was malformed and let tar archives slip through.
+*.tar
+dcnn_trained/
+
+# Slide decks and Office documents (drafts/proposals kept locally, not tracked)
+*.pptx
+*.docx
+*.xlsx
+
+# Media scratch (figures/animations generated during analysis)
+*.mp4
+*.gif
+
+# Root-level PDFs (papers/exports dropped in the working dir; tracked example
+# PDFs under examples/ are unaffected)
+/*.pdf
+
+# macOS
+.DS_Store
+
+# ── SciLink simulation additions ─────────────────────────────────────
+# Engine run artifacts — outputs, never source (multi-MB; bloat history).
+# VASP
+CHG
+CHGCAR
+WAVECAR
+CONTCAR
+DOSCAR
+EIGENVAL
+IBZKPT
+OSZICAR
+OUTCAR
+PCDAT
+REPORT
+XDATCAR
+vasprun.xml
+POTCAR
+# Quantum ESPRESSO
+espresso.pw[io]
+# MD / LAMMPS
+*.lammpstrj
+*.restart[0-9]
+log.lammps
+# Large binary data drops
+*.npy
+*.npz
+# Session / workflow output directories from example + smoke runs
+*_session_*/
+*_smoke_*/
+*_series_*/
+simulation_workflow_output/
+composition_series_output/
+
+# --- added after the #405 accidental-commit cleanup ---
+.claude/
+validation/results/
+packmol_test_output/
+*.model
+claude_resume
+lammps_make_notes
+tests/_critic_lenses_fixtures/

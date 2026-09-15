@@ -9,43 +9,11 @@ import json
 import pandas as pd
 import PIL.Image as PIL_Image
 
-from .excel_parser import parse_adaptive_excel
+from scilink.parsers import parse_adaptive_excel, SUPPORTED_EXTENSIONS
 
+# get_files_from_directory / SUPPORTED_EXTENSIONS / table_to_markdown now live
+# in scilink.parsers; parse_json_from_response lives in scilink.knowledge.
 
-# Match these to the extensions you check in planning_agent.py
-SUPPORTED_EXTENSIONS = {
-    '.py', '.java', '.r', '.cpp', '.h', '.js', '.json',
-    '.csv', '.txt', '.md', '.pdf',
-    '.xlsx', '.xls',
-    '.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.gif'
-}
-
-def get_files_from_directory(directory_path: str) -> List[str]:
-    """
-    Recursively finds all supported files in a directory, ignoring hidden files.
-    """
-    found_files = []
-    path = Path(directory_path)
-    
-    if not path.exists():
-        print(f"  - ⚠️ Directory not found: {directory_path}")
-        return []
-
-    print(f"  - 📂 Scanning directory: {path.name}...")
-
-    for root, dirs, files in os.walk(path):
-        # In-place modification to skip hidden dirs and common junk
-        dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('__pycache__', 'venv', 'env', 'node_modules', '.git')]
-        
-        for file in files:
-            if file.startswith('.'): continue
-            
-            file_path = Path(root) / file
-            if file_path.suffix.lower() in SUPPORTED_EXTENSIONS:
-                found_files.append(str(file_path))
-                
-    print(f"    -> Found {len(found_files)} files in directory.")
-    return found_files
 
 def generate_repo_map(root_dir: str) -> str:
     """
@@ -71,140 +39,6 @@ def generate_repo_map(root_dir: str) -> str:
             tree_lines.append(f"{indent}├── {path.name}")
             
     return "\n".join(tree_lines)
-
-def table_to_markdown(table: List[List[str]]) -> str:
-    """Converts a 2D list representation of a table into Markdown format."""
-    if not table or not table[0]: return ""
-    # Ensure all cells are strings before joining
-    cleaned_table = [[str(cell).strip() if cell is not None else "" for cell in row] for row in table]
-    header, *rows = cleaned_table
-    md = f"| {' | '.join(header)} |\n| {' | '.join(['---'] * len(header))} |\n"
-    for row in rows:
-        # Pad rows that are shorter than the header
-        while len(row) < len(header): row.append("")
-        # Truncate rows that are longer than the header
-        md += f"| {' | '.join(row[:len(header)])} |\n"
-    return md
-
-
-def parse_json_from_response(resp) -> "Tuple[Optional[Dict[str, Any]], Optional[str]]":
-    """
-    Robustly extracts and parses JSON from an LLM response object.
-    
-    Handles:
-    - Gemini: resp.text or resp.parts[0].text
-    - OpenAI/Anthropic wrapper: resp.text (via SimpleNamespace)
-    - Raw strings
-    - Markdown code fences (```json ... ```)
-    - Preamble/postamble text around JSON (common with Anthropic models)
-    """
-    import json
-    
-    json_text = ""
-    
-    # 1. Extract raw text from response object
-    try:
-        if hasattr(resp, 'text'): 
-            json_text = resp.text.strip()
-        elif hasattr(resp, 'parts') and resp.parts: 
-            json_text = resp.parts[0].text.strip()
-        elif isinstance(resp, str):
-            json_text = resp.strip()
-        else:
-            return None, f"LLM response format unexpected: {type(resp)}"
-            
-    except ValueError as e:
-        return None, f"Response blocked or empty (Safety Filter): {e}"
-    except Exception as e:
-        return None, f"Error extracting text from response: {e}"
-
-    if not json_text:
-        return None, "Empty response from LLM"
-
-    # 2. Strip Markdown code fences
-    if json_text.startswith("```json"):
-        json_text = json_text[len("```json"):].strip()
-    elif json_text.startswith("```"):
-        json_text = json_text[len("```"):].strip()
-    
-    if json_text.endswith("```"):
-        json_text = json_text[:-len("```")].strip()
-
-    # 3. Try direct parse first (fast path — works for Gemini and clean responses)
-    try:
-        return json.loads(json_text), None
-    except json.JSONDecodeError:
-        pass  # Fall through to extraction logic
-    
-    # 4. Extract JSON object from surrounding text (handles Anthropic preamble)
-    #    Find the outermost { ... } by brace matching
-    first_brace = json_text.find('{')
-    if first_brace == -1:
-        return None, (
-            f"No JSON object found in response. "
-            f"First 300 chars: {json_text[:300]}"
-        )
-    
-    # Match braces to find the complete JSON object
-    depth = 0
-    in_string = False
-    escape_next = False
-    last_brace = -1
-    
-    for i in range(first_brace, len(json_text)):
-        ch = json_text[i]
-        
-        if escape_next:
-            escape_next = False
-            continue
-        
-        if ch == '\\' and in_string:
-            escape_next = True
-            continue
-        
-        if ch == '"' and not escape_next:
-            in_string = not in_string
-            continue
-        
-        if in_string:
-            continue
-            
-        if ch == '{':
-            depth += 1
-        elif ch == '}':
-            depth -= 1
-            if depth == 0:
-                last_brace = i
-                break
-    
-    if last_brace == -1:
-        return None, (
-            f"Unbalanced braces in response. "
-            f"First 300 chars: {json_text[:300]}"
-        )
-    
-    extracted = json_text[first_brace:last_brace + 1]
-
-    try:
-        return json.loads(extracted), None
-    except json.JSONDecodeError:
-        pass
-
-    # Attempt to fix broken Unicode escapes (e.g. \u00B instead of \u00B5)
-    # by replacing malformed \uXXX sequences with the Unicode replacement char.
-    import re
-    sanitized = re.sub(
-        r'\\u([0-9a-fA-F]{1,3})(?![0-9a-fA-F])',
-        lambda m: chr(int(m.group(1), 16)) if len(m.group(1)) >= 2 else '\ufffd',
-        extracted,
-    )
-    try:
-        return json.loads(sanitized), None
-    except json.JSONDecodeError as e:
-        return None, (
-            f"Failed to decode JSON: {e}. "
-            f"Extracted text (first 500 chars): {extracted[:500]}"
-        )
 
 def append_experiment_result(file_path: str, parameters: Dict[str, float], results: Dict[str, float]):
     """
@@ -337,6 +171,17 @@ def resolve_primary_data_path(data_input: Union[str, Dict[str, str], None]) -> O
     if saved_desc_file.exists():
         print(f"  - 🔍 Found saved user description: {saved_desc_file.name}")
         return {"file_path": str(path), "metadata_path": str(saved_desc_file)}
+
+    # Priority D: Session-internal artifacts (produced by the agent itself
+    # earlier in this session — screening CSVs, scalarizer outputs, etc.).
+    # The agent already knows what's in them; the metadata prompt is asking
+    # the human about something the agent just wrote. Skip the prompt and
+    # let the parser infer from headers.
+    for parent in path.parents:
+        if parent.name.startswith("meta_session_") or parent.name == "campaign_outputs":
+            print(f"  - ℹ️  Session-internal file ({path.name}); "
+                  "skipping metadata prompt — parser will use headers.")
+            return {"file_path": str(path), "metadata_path": None}
 
     # 4. Interactive Fallback
     from .user_interface import get_dataset_description
@@ -533,3 +378,131 @@ def parse_multimodal_results(results: Any) -> Tuple[str, List]:
 
     consolidated_feedback = "\n\n".join(parsed_text_results)
     return consolidated_feedback, loaded_images
+
+# ── Plan payload accessors ───────────────────────────────────────────
+# A plan-mode artifact is one of two things: an EXPERIMENT (a testable
+# hypothesis with measurements, in `proposed_experiments`) or a PORTFOLIO of
+# research directions (ideation). The portfolio rode the experiment schema
+# for a long time — one `proposed_experiments` entry wrapping the whole
+# portfolio, with the directions in `concepts` if the author complied and in
+# `experimental_steps` as pseudo-sections if it did not.
+#
+# Everything that reads directions goes through here, so consumers never
+# branch on payload shape and old sessions stay readable. Resolution order:
+#   1. top-level `directions`      — the portfolio contract
+#   2. `proposed_experiments[*].concepts` — the PR #394 shape
+#   3. a single direction synthesised from the experiment fields — plans
+#      that predate `concepts` entirely
+# Tiers 2 and 3 are what let a checkpoint written before this change restore.
+
+def plan_is_portfolio(plan: Optional[Dict[str, Any]]) -> bool:
+    """Is this plan-mode artifact a research portfolio rather than an
+    experiment? Reads the plan's own stamp; falls back to the presence of
+    directions for a plan dict read in isolation."""
+    if not isinstance(plan, dict):
+        return False
+    if plan.get("type") == "ideation":
+        return True
+    return bool(plan.get("directions"))
+
+
+def plan_thesis(plan: Optional[Dict[str, Any]]) -> str:
+    """The portfolio's organizing idea, or the experiment's hypothesis."""
+    if not isinstance(plan, dict):
+        return ""
+    if plan.get("thesis"):
+        return str(plan["thesis"])
+    exps = plan.get("proposed_experiments") or []
+    return str((exps[0] or {}).get("hypothesis") or "") if exps else ""
+
+
+def plan_directions(plan: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Every research direction in a portfolio, in the author's order.
+
+    Returns [] for an experiment plan — callers use that to tell the shapes
+    apart without reading the schema themselves.
+    """
+    if not isinstance(plan, dict):
+        return []
+    top = plan.get("directions")
+    if isinstance(top, list) and top:
+        return [d for d in top if isinstance(d, dict)]
+
+    nested: List[Dict[str, Any]] = []
+    for exp in plan.get("proposed_experiments") or []:
+        if isinstance(exp, dict):
+            nested.extend(c for c in (exp.get("concepts") or [])
+                          if isinstance(c, dict))
+    if nested:
+        return nested
+
+    # Tier 3: an ideation plan authored before `concepts` existed carries one
+    # direction spread across the experiment fields. Synthesised rather than
+    # returned empty so the portfolio consumers render SOMETHING true for it.
+    if plan.get("type") == "ideation":
+        for exp in plan.get("proposed_experiments") or []:
+            if isinstance(exp, dict) and (exp.get("experiment_name")
+                                          or exp.get("hypothesis")):
+                return [{"id": "D1",
+                         "title": exp.get("experiment_name") or "Direction",
+                         "hypothesis": exp.get("hypothesis"),
+                         "rationale": exp.get("justification"),
+                         "_synthesised": True}]
+    return []
+
+
+def portfolio_to_experiment_shim(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Give a portfolio the minimal experiment shape its legacy readers need.
+
+    Transitional. Fifty-odd sites read `proposed_experiments` — validity
+    checks, counters, log rationales, the best-of-N judge, the HTML report.
+    Rewriting them all at once would leave every intermediate state a
+    half-migration, so a portfolio carries BOTH shapes: `directions` is the
+    real payload, and this one-entry shim keeps the legacy readers correct
+    rather than empty-handed. Removed once nothing depends on it.
+    """
+    dirs = plan_directions(plan)
+    if not dirs or plan.get("proposed_experiments"):
+        return plan
+    titles = [str(d.get("title") or d.get("id") or "").strip()
+              for d in dirs]
+    plan["proposed_experiments"] = [{
+        "experiment_name": (plan.get("portfolio_title")
+                            or "Research portfolio"),
+        "hypothesis": plan_thesis(plan),
+        "concepts": dirs,
+        "experimental_steps": plan.get("shared_protocol") or [],
+        "required_equipment": plan.get("required_equipment") or [],
+        "expected_outcome": plan.get("expected_outcome") or "",
+        "justification": plan.get("rationale") or "",
+        "source_documents": plan.get("source_documents") or [],
+        "_portfolio_shim": True,
+        "_direction_titles": [t for t in titles if t],
+    }]
+    return plan
+
+
+def resync_portfolio(plan: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Keep a portfolio's two copies of its directions consistent.
+
+    Through the transition a portfolio carries `directions` (the payload) and
+    a shimmed copy under `proposed_experiments[0].concepts` (for the legacy
+    readers). Every pass that RE-EMITS a plan — conformance, critic,
+    refinement — is shown the whole dict and told to return the same
+    structure, and those prompts name `proposed_experiments` explicitly. So
+    the nested copy is the one that reliably gets edited, while a stale
+    top-level `directions` would silently outrank it in plan_directions.
+
+    The nested copy therefore wins whenever both exist and differ. On the
+    authoring path they are identical and this is a no-op.
+    """
+    if not isinstance(plan, dict) or not plan.get("directions"):
+        return plan
+    nested = []
+    for exp in plan.get("proposed_experiments") or []:
+        if isinstance(exp, dict):
+            nested.extend(c for c in (exp.get("concepts") or [])
+                          if isinstance(c, dict))
+    if nested and nested != plan["directions"]:
+        plan["directions"] = nested
+    return plan

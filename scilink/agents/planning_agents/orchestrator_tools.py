@@ -5,7 +5,10 @@ Supports both Google Gemini (function objects) and OpenAI (JSON schemas).
 
 from datetime import datetime
 import json
+from .planning_rag import (author_technical_document,
+                           document_to_markdown)
 import logging
+import os
 import re
 import pandas as pd
 from pathlib import Path
@@ -22,8 +25,168 @@ from .instruct import (
     BO_OBJECTIVE_DISTILL_PROMPT,
     KNOWLEDGE_QUERY_CODEGEN_PROMPT,
     KNOWLEDGE_QUERY_DIRECTORY_CODEGEN_PROMPT,
+    SCREEN_DATABASE_CODEGEN_PROMPT,
 )
 from ..lit_agents.optimize_query import optimize_search_query, is_molecule_design_objective
+from ...utils.text_io import read_text_utf8, write_text_utf8
+from ...skills.loader import list_skills, load_skill
+
+
+# Progress-heartbeat cadence for long-running literature searches (seconds).
+_LIT_HEARTBEAT_SECONDS = 180
+# Wall-clock ceiling for ONE batch of concurrent literature searches. Deep
+# searches are advertised as 10-15 min; past this a straggler is abandoned
+# and whatever finished is returned, rather than holding the call open.
+# Kept ABOVE the agent's own per-task budget (1500s) so a stalled task
+# normally times itself out first and its worker exits cleanly — this
+# deadline is the backstop for when that does not happen.
+_LIT_BATCH_DEADLINE = 1800
+
+# Character budget for AUTO-LOADED multi-file literature context (issue
+# #425). A campaign accumulates literature across searches; unioning
+# without a cap turns the old silent-omission bug into a silent-truncation
+# bug (a refine prompt was measured at ~83k tokens with literature already
+# 85% of it). Applies ONLY when several files are unioned — a campaign's
+# single literature file is always loaded whole, and explicitly passed
+# literature_context is never capped. Over-budget WHOLE sections are
+# dropped (never mid-file truncation: a half-severed review paragraph
+# reads as complete) and the omission is logged.
+_LIT_AUTOLOAD_MAX_CHARS = int(os.environ.get(
+    "SCILINK_LIT_AUTOLOAD_MAX_CHARS", 400_000))
+
+# The question-heading template is the structural contract between the
+# literature write site and every reader that splits a saved corpus into
+# per-question sections (auto-load budgeting, the list_literature_searches
+# index, #q<N> section selection). Third-party search backends supply only
+# the prose INSIDE a section; these boundaries are SciLink-authored, so
+# writer and splitter must share one definition.
+_LIT_QUESTION_RE = re.compile(r"^# Question (\d+): (.*)$", re.MULTILINE)
+
+# '<path>#qN' — one question section of a saved literature file, the
+# selection unit surfaced by list_literature_searches (issue #425).
+_LIT_SECTION_REF_RE = re.compile(r"^(?P<base>.+?)#q(?P<n>\d+)$")
+
+
+def _format_lit_question_heading(n: int, objective: str) -> str:
+    """The one authoring point for '# Question N: <objective>' headings —
+    must stay in lockstep with _LIT_QUESTION_RE."""
+    return f"# Question {n}: {objective}"
+
+
+def _build_planning_skill_description(custom_skills: dict = None) -> str:
+    """Build the ``skill`` parameter description for ``generate_initial_plan``.
+
+    Auto-discovers built-in planning skill bundles (and any custom or
+    graduated skills) so the orchestrator LLM can see which skills are
+    available by name instead of having to be told. Mirrors the analyze-mode
+    ``_build_skill_description`` helper, scoped to ``domain="planning"``.
+    """
+    parts = [
+        "Optional domain skill: a built-in planning skill name or a path to "
+        "a custom .md skill file. When set, the skill's validated domain "
+        "rules are injected as mandatory constraints on the generated plan."
+    ]
+
+    try:
+        names = list_skills(domain="planning")
+    except Exception:
+        names = []
+
+    skill_descs = []
+    for name in names:
+        try:
+            parsed = load_skill(name, domain="planning")
+            desc = (parsed.get("meta") or {}).get("description")
+            if not desc:
+                desc = parsed.get("overview", "").split("\n")[0].strip()
+            # Trim trailing punctuation so the join below stays clean.
+            desc = desc.rstrip(".;,") if desc else desc
+            skill_descs.append(f"'{name}' — {desc}" if desc else f"'{name}'")
+        except Exception:
+            skill_descs.append(f"'{name}'")
+    if skill_descs:
+        parts.append(f"Built-in planning skills: {'; '.join(skill_descs)}.")
+
+    if custom_skills:
+        parts.append(f"Custom skills: {sorted(custom_skills.keys())}.")
+
+    return " ".join(parts)
+
+
+def _build_optimization_skill_description() -> str:
+    """Build the ``skill`` parameter description for ``run_optimization``.
+
+    Lists the available optimization skill bundles (``domain="optimization"``)
+    so the orchestrator LLM can activate one by name. Mirrors the planning
+    helper above, scoped to the optimization domain.
+    """
+    parts = [
+        "Optional optimization skill: a built-in optimization skill name. When "
+        "set, the skill's guidance is injected into the BO strategy and "
+        "inspection stages, and any surrogate/acquisition the skill contributes "
+        "becomes selectable. Pass when the user's problem matches a skill below."
+    ]
+    try:
+        names = list_skills(domain="optimization")
+    except Exception:
+        names = []
+
+    skill_descs = []
+    for name in names:
+        try:
+            parsed = load_skill(name, domain="optimization")
+            desc = (parsed.get("meta") or {}).get("description")
+            if not desc:
+                desc = parsed.get("overview", "").split("\n")[0].strip()
+            desc = desc.rstrip(".;,") if desc else desc
+            skill_descs.append(f"'{name}' — {desc}" if desc else f"'{name}'")
+        except Exception:
+            skill_descs.append(f"'{name}'")
+    if skill_descs:
+        parts.append(f"Available optimization skills: {'; '.join(skill_descs)}.")
+
+    return " ".join(parts)
+
+
+def resolve_n_candidates(requested, planner_state, new_campaign: bool = False) -> int:
+    """
+    Best-of-N default policy for ``generate_initial_plan`` (issue #377).
+
+    An explicit request always wins (clamped 1-4; pass 1 for a single plan).
+    When the caller omits it, a campaign's FIRST plan defaults to best-of-3 —
+    two rounds of live meta testing showed the opt-in default never fired
+    because upstream routing narrows the objective before delegating, so
+    "raise N when open-ended" prompt guidance never triggered. Any later
+    plan in the campaign defaults to 1: follow-ups iterate on a committed
+    strategy, and the runner-up fallback already covers plan replacement.
+
+    ``new_campaign`` marks a call that will START a new campaign in an
+    existing session (issue #396) — its plan is a campaign-first plan even
+    though ``current_plan`` still holds the previous campaign's plan.
+    """
+    if requested is not None:
+        try:
+            return max(1, min(int(requested), 4))
+        except (TypeError, ValueError):
+            return 1
+    is_first_plan = new_campaign or not (planner_state or {}).get("current_plan")
+    return 3 if is_first_plan else 1
+
+
+
+def _norm_level(v) -> str:
+    """Canonical label for a categorical level: numeric-looking values compare
+    as numbers ('3', '3.0', 3 -> '3'; '2.5' -> '2.5'), everything else as the
+    stripped string. Used for data, pool and decode so an integer code written
+    once as int and once as float still means the same level."""
+    sv = str(v).strip()
+    try:
+        f = float(sv)
+    except (TypeError, ValueError):
+        return sv
+    if f != f:  # NaN
+        return sv
+    return str(int(f)) if f.is_integer() else repr(f)
 
 
 class OrchestratorTools:
@@ -37,12 +200,12 @@ class OrchestratorTools:
             orchestrator_instance: Reference to the parent OrchestratorAgent
         """
         self.orch = orchestrator_instance
-        
+
         # Build function map and schemas
         self.functions_map: Dict[str, Callable] = {}
         self.openai_schemas: list = []
         self.gemini_functions: list = []
-        
+
         self._register_all_tools()
 
     def _get_human_feedback_enabled(self) -> bool:
@@ -77,13 +240,75 @@ class OrchestratorTools:
             out[col] = levels[idx]
         return out
 
+    def _apply_input_types(self, input_types, inputs) -> list:
+        """Merge caller-stated {input: categorical|continuous} into the
+        campaign's expected_input_types (caller wins; a pass-through feature
+        table never runs the scalarizer's classification, so without this a
+        numeric-coded categorical is modelled as continuous). Returns warnings
+        for ignored entries. Sticky and checkpointed."""
+        warns: list = []
+        if not input_types:
+            return warns
+        if not isinstance(input_types, dict):
+            return ["input_types must be a dict {column: 'categorical'|'continuous'}; ignored."]
+        known = list(inputs or [])
+        current = dict(getattr(self.orch, "expected_input_types", None) or {})
+        for col, t in input_types.items():
+            tn = str(t).strip().lower()
+            if tn in ("cat", "category", "discrete", "nominal"):
+                tn = "categorical"
+            if tn in ("cont", "numeric", "number", "float", "real"):
+                tn = "continuous"
+            if tn not in ("categorical", "continuous"):
+                warns.append(f"input_types['{col}']={t!r} ignored: use 'categorical' or 'continuous'.")
+                continue
+            if known and str(col) not in known:
+                warns.append(f"input_types['{col}'] ignored: not an input column (inputs are {known}).")
+                continue
+            current[str(col)] = tn
+        self.orch.expected_input_types = current
+        return warns
+
+    def _apply_directions(self, directions, targets) -> list:
+        """Merge caller-stated {target: maximize|minimize} into the campaign's
+        target_directions (caller wins). Returns warnings for entries that
+        were ignored (unknown target, bad value). Sticky on the orchestrator
+        and carried by its checkpoint."""
+        warns: list = []
+        if not directions:
+            return warns
+        if not isinstance(directions, dict):
+            return ["directions must be a dict {column: 'maximize'|'minimize'}; ignored."]
+        known = list(targets or [])
+        current = dict(self.orch.target_directions or {})
+        for col, d in directions.items():
+            dn = str(d).strip().lower()
+            if dn in ("max", "maximise"):
+                dn = "maximize"
+            if dn in ("min", "minimise"):
+                dn = "minimize"
+            if dn not in ("maximize", "minimize"):
+                warns.append(f"directions['{col}']={d!r} ignored: use 'maximize' or 'minimize'.")
+                continue
+            if known and str(col) not in known:
+                warns.append(f"directions['{col}'] ignored: not a target column "
+                             f"(targets are {known}).")
+                continue
+            current[str(col)] = dn
+        self.orch.target_directions = current
+        return warns
+
     def _capture_input_types(self, column_roles: Dict, input_columns: List[str]) -> None:
         """Persist scalarizer input_types onto the orchestrator state.
 
         Filters to declared input columns only; missing entries default to
         "continuous" downstream. No-op when column_roles has no input_types
-        field (backward-compat with older scalarizer outputs).
+        field (backward-compat with older scalarizer outputs). Also captures the
+        optional fidelity role (multi-fidelity) declared in the same column_roles.
         """
+        # Capture the optional fidelity role first — it is independent of
+        # input_types and must run even when input_types is absent.
+        self._capture_fidelity_spec(column_roles, input_columns)
         if not input_columns:
             return
         types_in = (column_roles or {}).get("input_types") or {}
@@ -92,6 +317,30 @@ class OrchestratorTools:
         filtered = {c: types_in[c] for c in input_columns if c in types_in}
         if filtered:
             self.orch.expected_input_types = filtered
+
+    def _capture_fidelity_spec(self, column_roles: Dict, input_columns: List[str]) -> None:
+        """Persist an optional scalarizer-declared fidelity column (multi-fidelity).
+
+        A fidelity column is a normal input that also indexes evaluation
+        cost/accuracy. Sets ``orch.fidelity_spec`` to a validated
+        {column, target_fidelity?, costs?} dict when the scalarizer declares one
+        whose column is among the inputs; otherwise resets it to None (standard
+        single-fidelity BO). Backward-compatible: older scalarizer outputs that
+        omit the field reset to None.
+        """
+        spec = (column_roles or {}).get("fidelity")
+        col = spec.get("column") if isinstance(spec, dict) else None
+        if col and input_columns and col in input_columns:
+            clean = {"column": col}
+            if spec.get("target_fidelity") is not None:
+                clean["target_fidelity"] = spec["target_fidelity"]
+            if isinstance(spec.get("costs"), dict) and spec["costs"]:
+                clean["costs"] = spec["costs"]
+            self.orch.fidelity_spec = clean
+            print(f"    📶  Fidelity axis declared: '{col}'"
+                  + (f" (target={clean['target_fidelity']})" if "target_fidelity" in clean else ""))
+        else:
+            self.orch.fidelity_spec = None
 
     def _compute_file_hash(self, file_path: str) -> str:
         """Compute MD5 hash of file content for deduplication."""
@@ -245,9 +494,759 @@ class OrchestratorTools:
             if paths:
                 return paths
         # Fallback: use orchestrator's configured knowledge directory
-        if self.orch.knowledge_dir and self.orch.knowledge_dir.exists():
-            return [str(self.orch.knowledge_dir)]
+        kd = self.orch.knowledge_dir
+        if kd and kd.exists():
+            # A store KB (marked by its manifest) is PREBUILT: its documents
+            # live under sources/ and are already embedded — handing the KB
+            # root to ingestion would re-embed them and swallow the index
+            # files themselves. Point the source-difference check at the
+            # sources/ dir (or nothing, for index-only imported KBs); plain
+            # knowledge dirs keep the legacy incremental-ingest behavior.
+            if (kd / "manifest.json").is_file():
+                src = kd / "sources"
+                return [str(src)] if src.is_dir() else None
+            return [str(kd)]
         return None
+
+    @staticmethod
+    def _resolve_section_ref(s: str) -> Optional[str]:
+        """Resolve a '<path>#qN' section reference (issue #425) to that
+        question section's text. Returns None when ``s`` is not a section
+        reference over an existing file; returns '' (resolved but empty)
+        when the file exists but holds no question N, so the caller can
+        warn instead of letting the ref string masquerade as raw text.
+        """
+        m = _LIT_SECTION_REF_RE.match(s)
+        if not m:
+            return None
+        base = Path(m.group("base"))
+        if not base.is_file():
+            return None
+        n = int(m.group("n"))
+        text = read_text_utf8(base)
+        sections = OrchestratorTools._split_literature_sections(text)
+        for _q, chunk in sections:
+            hm = _LIT_QUESTION_RE.match(chunk)
+            if hm and int(hm.group(1)) == n:
+                return chunk
+        if n == 1 and len(sections) == 1:
+            # A single-question corpus is written WITHOUT question
+            # headings; its whole body is section 1 (live: the model
+            # selected '<file>#q1' for exactly such a file, and a strict
+            # resolver skipped the campaign's most relevant corpus).
+            return text
+        return ""
+
+    @staticmethod
+    def _resolve_context_text(value) -> Optional[str]:
+        """Resolve a literature/molecule context argument to TEXT.
+
+        Accepts a file path, a '<path>#qN' section reference, a
+        comma-separated string of these, a list of them, or raw text.
+        File/section contents are read and concatenated; anything that
+        isn't resolvable as existing files is treated as raw text (the
+        historical behavior). This closes a live failure where a
+        comma-joined pair of paths fell through the single-path check and
+        the PATH STRING itself became the 'literature', leaving downstream
+        consumers (plan grounding, white-paper citations) with filenames
+        instead of content.
+        """
+        if value is None:
+            return None
+
+        def _read_one(s: str) -> Optional[str]:
+            """Text for one file path or section ref; None if neither."""
+            sec = OrchestratorTools._resolve_section_ref(s)
+            if sec is not None:
+                if not sec:
+                    print(f"    ⚠️  Section reference '{s}' names a "
+                          f"question that file does not contain — skipped")
+                return sec
+            p = Path(s)
+            return read_text_utf8(p) if p.is_file() else None
+
+        items = value if isinstance(value, list) else [value]
+        pieces = []
+        for item in items:
+            s = str(item).strip()
+            if not s:
+                continue
+            one = _read_one(s)
+            if one is not None:
+                if one:
+                    pieces.append(one)
+                continue
+            tokens = [t.strip() for t in s.split(",") if t.strip()]
+            if len(tokens) > 1:
+                texts = [_read_one(t) for t in tokens]
+                if all(t is not None for t in texts):
+                    pieces.extend(t for t in texts if t)
+                    continue
+            pieces.append(s)  # raw text
+        return "\n\n".join(pieces) if pieces else None
+
+    def _write_ideation_report(self) -> str:
+        """Render ALL best-of-N candidates into a detailed markdown dossier.
+
+        Deterministic (no LLM): rendered straight from the same campaign
+        state the white paper is generated from, so the two artifacts cannot
+        drift apart. In ideation, runner-up candidates are deliverables, not
+        rejects — the judge's pick designates the flagship, it does not
+        discard the rest.
+
+        The flagship is rendered from ``current_plan``, not from the stored
+        candidate: conformance correction and critic passes rewrite the
+        selected plan *after* the candidate set is frozen, and rendering the
+        stored copy shipped a dossier describing a plan the user never got
+        (live: the dossier carried none of the corrected portfolio's
+        directions while the white paper carried them all). Runner-ups are
+        still rendered as authored — nothing rewrites those.
+        """
+        state = self.orch.planner.state or {}
+        pc = state.get("plan_candidates") or {}
+        candidates = pc.get("candidates") or []
+        if not candidates:
+            raise ValueError("No candidate set in state — nothing to report.")
+        sel = pc.get("selected_index", 1)
+        judge = pc.get("judge") or {}
+        scores = {s.get("candidate"): s for s in judge.get("scores", [])}
+        findings = (state.get("current_plan") or {}).get("critic_findings")
+        override = pc.get("human_override")
+
+        lines = ["# Ideation Report", "",
+                 f"**Objective:** {state.get('objective', '')}", ""]
+        if override:
+            lines += [f"**Selection:** Candidate {sel} chosen by the PI, "
+                      f"overriding the judge's pick of Candidate "
+                      f"{judge.get('selected_candidate', '?')}.", ""]
+        if judge.get("reasoning"):
+            lines += ["## Comparative Assessment (judge)",
+                      judge["reasoning"], ""]
+        current = state.get("current_plan") or {}
+        for ci, cand in enumerate(candidates, 1):
+            exp = (cand.get("proposed_experiments") or [{}])[0]
+            revised = False
+            if ci == sel:
+                flag = (" — SELECTED (flagship, PI override)" if override
+                        else " — SELECTED (flagship)")
+                cur_exp = (current.get("proposed_experiments") or [{}])[0]
+                if cur_exp and cur_exp != exp:
+                    exp = cur_exp          # as-shipped, not as-authored
+                    revised = True
+            else:
+                flag = ""
+            lines += [f"## Candidate {ci}{flag}: "
+                      f"{exp.get('experiment_name', 'Untitled')}", ""]
+            if revised:
+                lines += ["*Shown as shipped: this flagship was revised after "
+                          "selection (conformance / reviewer passes). The "
+                          "judge's scores below refer to the version it "
+                          "compared.*", ""]
+            sc = scores.get(ci)
+            if sc:
+                crit = ", ".join(f"{k}: {v}" for k, v in sc.items()
+                                 if k not in ("candidate", "comment"))
+                lines += [f"*Judge scores — {crit}*",
+                          f"*Judge comment: {sc.get('comment', '')}*", ""]
+            concepts = exp.get("concepts")
+            if isinstance(concepts, list) and concepts:
+                lines.append(f"### Research directions ({len(concepts)})")
+                for n, c in enumerate(concepts, 1):
+                    if not isinstance(c, dict):
+                        lines += [f"**{n}.** {c}", ""]
+                        continue
+                    from .user_interface import concept_title, humanize_key
+                    tier = f" *(tier {c['tier']})*" if c.get("tier") else ""
+                    lines.append(f"**{c.get('id') or n}. "
+                                 f"{concept_title(c, n)}**{tier}")
+                    for key in ("hypothesis", "rationale", "novelty"):
+                        if c.get(key):
+                            lines.append(f"- *{key.capitalize()}:* {c[key]}")
+                    det = c.get("details")
+                    for d in (det if isinstance(det, list) else [det] if det
+                              else []):
+                        lines.append(f"- {d}")
+                    for k, v in c.items():
+                        if k not in ("id", "tier", "title", "hypothesis",
+                                     "rationale", "novelty", "details") and v:
+                            if isinstance(v, list):
+                                v = "; ".join(str(x) for x in v)
+                            lines.append(f"- *{humanize_key(k)}:* {v}")
+                    lines.append("")
+
+            for key, title in (("hypothesis", "Hypothesis"),
+                               ("experimental_steps",
+                                "Shared protocol" if concepts
+                                else "Proposed program"),
+                               ("required_equipment", "Key capabilities"),
+                               ("optimization_params",
+                                "Suggested exploration variables"),
+                               ("expected_outcome", "Expected outcomes"),
+                               ("justification", "Rationale"),
+                               ("source_documents", "Sources")):
+                val = exp.get(key)
+                if not val:
+                    continue
+                lines.append(f"### {title}")
+                if isinstance(val, list):
+                    for item in val:
+                        if isinstance(item, dict):
+                            lines.append("- " + ", ".join(
+                                f"{k}: {v}" for k, v in item.items()))
+                        else:
+                            lines.append(f"- {item}")
+                else:
+                    lines.append(str(val))
+                lines.append("")
+            if ci == sel and findings:
+                lines.append("### Reviewer caveats (on the flagship)")
+                for f in findings:
+                    lines.append(f"- [{f.get('severity', 'note')}] "
+                                 + str(f.get('note') or f.get('finding')
+                                       or f))
+                lines.append("")
+
+        path = self._output_dir() / "ideation_report.md"
+        write_text_utf8(path, "\n".join(lines))
+        from .user_interface import format_path, record_deliverable
+        record_deliverable(self.orch.base_dir, path,
+                           "Ideation report — all candidate directions",
+                           deliverable=True)
+        print(f"    📄 Ideation report saved: {format_path(path)}")
+        return str(path)
+
+    def _planner_state(self):
+        """Planner session state, or None when the planner has none (yet)."""
+        return getattr(getattr(self.orch, "planner", None), "state", None)
+
+    @property
+    def _pending_lit(self) -> list:
+        """Campaign-literature entries recorded before the planner has any
+        session state (e.g. search_literature before the first plan).
+        Folded into planner state on first access afterwards — see
+        _lit_registry(). Lazily created so partially-constructed tools
+        instances (tests build them via __new__) still work."""
+        if getattr(self, "_prestate_lit", None) is None:
+            self._prestate_lit = []
+        return self._prestate_lit
+
+    def _campaign_id(self) -> int:
+        """Current campaign id from planner state (1 when unset/legacy)."""
+        return int((self._planner_state() or {}).get("campaign_id") or 1)
+
+    def _lit_registry(self) -> list:
+        """The campaign-literature registry: [{'path', 'campaign_id'}, ...].
+
+        Lives in planner state (so it rides session checkpoints and meta
+        restores) once state exists; entries recorded before that are held
+        on the tools instance and folded in on first access afterwards.
+        ``campaign_id`` None marks a pending entry — literature saved
+        before any campaign was active, claimed by the next plan call.
+        """
+        st = self._planner_state()
+        if isinstance(st, dict) and st:
+            reg = st.setdefault("campaign_literature", [])
+            pending = self._pending_lit
+            if pending:
+                known = {(e.get("path"), e.get("campaign_id")) for e in reg}
+                reg.extend(e for e in pending
+                           if (e.get("path"), e.get("campaign_id")) not in known)
+                self._prestate_lit = []
+            return reg
+        return self._pending_lit
+
+    def _emit_plan_report(self, name: str = "plan.html", ideation=None):
+        """Render the campaign's protocol report — unless this is a dossier.
+
+        An ideation campaign gets no plan.html at all: the template renders
+        an ordered experimental-steps protocol, which misrepresents a
+        research portfolio. That suppression used to live on the
+        initial-plan path only, while the four refinement paths kept
+        regenerating the report — so a long ideation session (live: nine
+        delegations of cdoc use-case ideation) accumulated protocol reports
+        for a portfolio it had never planned. One helper, one rule.
+
+        `ideation` may be passed when the caller has already decided; it
+        defaults to asking the campaign. Returns the path, or None when
+        suppressed.
+        """
+        if ideation is None:
+            try:
+                ideation = self.orch.planner._is_ideation_campaign()
+            except Exception:  # noqa: BLE001
+                ideation = False
+        if ideation:
+            # Now that the generator has a portfolio template, an ideation
+            # campaign gets a real browser-readable report — under its own
+            # name, because "plan.html" is what this whole change is getting
+            # ideation out of. Not starred: the deliverables stay the dossier
+            # and the white paper (_record_plan_report is lab-only).
+            name = "portfolio.html" if name == "plan.html" else name
+        from .html_generator import HTMLReportGenerator
+        html_path = self._output_dir() / name
+        HTMLReportGenerator(self.orch.planner.state).generate(str(html_path))
+        self._record_plan_report(html_path)
+        return html_path
+
+    def _record_plan_report(self, html_path) -> None:
+        """Mark a generated plan report as the campaign's deliverable —
+        but only in LAB mode.
+
+        Lab produces no white paper or dossier, so plan.html is what the
+        user asked for. An IDEATION campaign is the opposite: its
+        deliverables are the dossier and the white paper, and plan.html is
+        suppressed at generation precisely because the protocol view
+        misrepresents a portfolio. Refinement regenerates it anyway, so
+        without this check a live ideation session starred three
+        "Experimental plan (report)" files beside its real artifacts.
+        """
+        try:
+            ideation = self.orch.planner._is_ideation_campaign()
+        except Exception:  # noqa: BLE001
+            ideation = False
+        if ideation:
+            return
+        from .user_interface import record_deliverable
+        record_deliverable(self.orch.base_dir, html_path,
+                           "Experimental plan (report)", deliverable=True)
+
+    def _record_literature_file(self, path, label: str = None,
+                                questions: list = None) -> None:
+        """Register a freshly saved literature file (issue #396).
+
+        Tagged to the current campaign when one is active (a plan exists);
+        otherwise left pending for the next plan call to claim.
+
+        ``label`` (search-type coverage, e.g. 'hypothesis_context
+        +cross_domain') and ``questions`` (the objectives the file
+        answers) record CONTENT coverage on the registry entry (issue
+        #425) so selection and indexing need not be made on filesystem
+        accident (mtime) or re-parsing — older entries simply lack the
+        fields and readers fall back to parsing the file.
+        """
+        st = self._planner_state() or {}
+        cid = (int(st.get("campaign_id") or 1)
+               if st.get("current_plan") else None)
+        entry = {"path": str(Path(path).resolve()), "campaign_id": cid}
+        if label:
+            entry["label"] = label
+        if questions:
+            entry["questions"] = [str(q) for q in questions]
+        self._lit_registry().append(entry)
+
+    def _adopt_literature(self, explicit_context=None) -> None:
+        """Claim literature for the CURRENT campaign: pending entries plus
+        any file paths explicitly passed as literature_context. Called
+        after a successful plan/refine so each campaign's corpus is exactly
+        what it searched for or was explicitly given (issue #396)."""
+        cid = self._campaign_id()
+        reg = self._lit_registry()
+        for e in reg:
+            if e.get("campaign_id") is None:
+                e["campaign_id"] = cid
+        for p in self._context_file_paths(explicit_context):
+            if not any(e.get("path") == p and e.get("campaign_id") == cid
+                       for e in reg):
+                reg.append({"path": p, "campaign_id": cid})
+        # Persist immediately. The planner's own state dump is written from
+        # inside generate_plan (after each _log_action), i.e. BEFORE this
+        # runs, so without a re-save the on-disk mirror shows a literature
+        # file still tagged to the previous campaign — a live session's
+        # planning_state.json and checkpoint.json disagreed exactly here.
+        saver = getattr(getattr(self.orch, "planner", None), "_save_state", None)
+        if callable(saver):
+            try:
+                saver()
+            except Exception as e:  # noqa: BLE001 - mirror only
+                logging.debug(f"Planner state re-save after adoption failed: {e}")
+
+    def _prior_campaign_literature(self, explicit_context) -> list:
+        """File paths in ``explicit_context`` that the registry attributes
+        ONLY to previous campaigns — candidate cross-topic contamination
+        when the current call starts a new campaign."""
+        cid = self._campaign_id()
+        owners: Dict[str, set] = {}
+        for e in self._lit_registry():
+            owners.setdefault(str(e.get("path")), set()).add(e.get("campaign_id"))
+        return [p for p in self._context_file_paths(explicit_context)
+                if p in owners and cid not in owners[p]
+                and None not in owners[p]]
+
+    @staticmethod
+    def _context_file_paths(value) -> list:
+        """Existing-file paths named by a literature_context argument —
+        mirrors _resolve_context_text's path resolution (single path,
+        '<path>#qN' section refs resolving to their base file,
+        comma-separated paths, or a list; raw text yields nothing)."""
+        if value is None:
+            return []
+
+        def _one_path(s: str) -> Optional[str]:
+            m = _LIT_SECTION_REF_RE.match(s)
+            if m and Path(m.group("base")).is_file():
+                return str(Path(m.group("base")).resolve())
+            p = Path(s)
+            return str(p.resolve()) if p.is_file() else None
+
+        items = value if isinstance(value, list) else [value]
+        out = []
+        for item in items:
+            s = str(item).strip()
+            if not s:
+                continue
+            one = _one_path(s)
+            if one is not None:
+                out.append(one)
+                continue
+            tokens = [t.strip() for t in s.split(",") if t.strip()]
+            if len(tokens) > 1:
+                token_paths = [_one_path(t) for t in tokens]
+                if all(tp is not None for tp in token_paths):
+                    out.extend(token_paths)
+        return out
+
+    def _outgoing_campaign_literature(self, explicit_context) -> list:
+        """Files in ``explicit_context`` that belong to the campaign this
+        call is LEAVING — [{'file', 'covers'}, ...], covers being the
+        questions the registry recorded for it (issue #425); empty when
+        nothing was passed or nothing is attributable.
+
+        Distinct from _prior_campaign_literature, which reports corpora
+        from campaigns strictly OLDER than the current one and is a hard
+        refusal. The outgoing campaign's own corpus can never appear there
+        — the transition has not been applied when the guard runs, so that
+        literature still reads as current — which is exactly the case a
+        new campaign is most likely to be handed, since its path is the
+        one sitting in the agent's recent context.
+
+        Reported rather than refused. The transition is decided by lexical
+        overlap against the previous objective, a heuristic that has been
+        observed comparing against a placeholder objective, and a hard gate
+        built on it would block legitimate work and push callers to pass
+        new_campaign=true reflexively — which disables the guard that does
+        catch older corpora. The agent has the topic in hand; it only
+        lacked the fact that the campaign moved.
+        """
+        cid = self._campaign_id()
+        owners: Dict[str, set] = {}
+        meta: Dict[str, dict] = {}
+        for e in self._lit_registry():
+            p = str(e.get("path"))
+            owners.setdefault(p, set()).add(e.get("campaign_id"))
+            meta.setdefault(p, e)
+        out = []
+        for p in self._context_file_paths(explicit_context):
+            if p in owners and cid in owners[p] and None not in owners[p]:
+                out.append({"file": Path(p).name,
+                            "covers": (meta[p].get("questions") or [])})
+        return out
+
+    def _campaign_literature_files(self) -> List[Path]:
+        """ALL literature files belonging to the CURRENT campaign, oldest
+        first (issue #425).
+
+        Campaign-scoped via the literature registry (issue #396): a session
+        can hold several unrelated campaigns, and the old session-wide
+        newest-file glob handed one campaign's corpus to another campaign's
+        refine / white paper. Only same-campaign entries are eligible here;
+        a campaign that supplied no literature gets an empty list — an
+        honest miss, never another topic's corpus.
+
+        Oldest-first because literature accumulates as a broad foundational
+        search followed by narrow top-ups: foundation leads, top-ups
+        append — the right reading order and the right truncation order.
+
+        Legacy fallback: a session restored from before the registry
+        existed has literature files on disk but no entries — for those,
+        and only while no campaign transition has ever happened, fall back
+        to the old session-wide glob (matched by GLOB, not exact name —
+        multi-type searches save under labels like
+        'literature_search_hypothesis_context+cross_domain.md'; recursive
+        from base_dir because under the meta each delegation writes into
+        its own delegations/<NN>_<slug>/).
+        """
+        cid = self._campaign_id()
+        reg = self._lit_registry()
+        seen: set = set()
+        files = []
+        for e in reg:
+            if e.get("campaign_id") != cid or not e.get("path"):
+                continue
+            p = Path(e["path"])
+            if str(p) not in seen and p.is_file():
+                seen.add(str(p))
+                files.append(p)
+        if files:
+            files.sort(key=lambda p: p.stat().st_mtime)
+            return files
+        if reg or cid > 1:
+            return []
+        roots = []
+        base = getattr(self.orch, "base_dir", None)
+        if base:
+            roots.append((Path(base), "rglob"))
+        roots.append((self._output_dir(), "glob"))
+        legacy = []
+        for root, mode in roots:
+            it = (root.rglob("literature_search_*.md") if mode == "rglob"
+                  else root.glob("literature_search_*.md"))
+            for p in it:
+                if str(p) not in seen:
+                    seen.add(str(p))
+                    legacy.append(p)
+        legacy.sort(key=lambda p: p.stat().st_mtime)
+        return legacy
+
+    def _latest_literature_file(self) -> Optional[Path]:
+        """Newest literature file of the CURRENT campaign (compat wrapper
+        over _campaign_literature_files, which is oldest-first)."""
+        files = self._campaign_literature_files()
+        return files[-1] if files else None
+
+    @staticmethod
+    def _split_literature_sections(text: str) -> list:
+        """Split a saved literature corpus into [(question, chunk), ...].
+
+        Boundaries are the SciLink-authored '# Question N: <objective>'
+        headings (_LIT_QUESTION_RE) — third-party search content only ever
+        appears INSIDE a section, so a format change upstream cannot move
+        them. A chunk includes its heading. Content before the first
+        heading (the file title, or the entire body of a single-question
+        file, which is written without question headings) is one chunk
+        with question=None. Rejoining all chunks reproduces the input
+        byte-for-byte.
+        """
+        matches = list(_LIT_QUESTION_RE.finditer(text))
+        if not matches:
+            return [(None, text)]
+        sections = []
+        if matches[0].start() > 0:
+            sections.append((None, text[:matches[0].start()]))
+        for i, m in enumerate(matches):
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            sections.append((m.group(2).strip(), text[m.start():end]))
+        return sections
+
+    def _campaign_literature_topics(self) -> List[Dict[str, Any]]:
+        """What the CURRENT campaign's literature COVERS.
+
+        Returns [{'file', 'section_ref', 'question'}, ...] — the question
+        each saved section answers, addressable as '<path>#qN'. The files
+        are read, but only QUESTIONS are returned, never answer bodies, so
+        the index stays small however large the corpus is.
+
+        Ref numbers come from each file's own '# Question N' headings, not
+        from list position: _resolve_section_ref matches a ref against the
+        heading number, and a campaign whose literature accumulated across
+        several searches (each file restarting at 1, each living in its own
+        delegation folder) would otherwise be handed refs that resolve to
+        the wrong section or to nothing. A headingless single-question file
+        is addressable as '#q1', matching the resolver's own special case.
+
+        This exists because the decision to ground a document in the
+        campaign's literature was being made blind — all the agent had
+        ever seen of a 200 KB corpus was one 300-character preview, so it
+        could not know that the corpus answered the very question the
+        document was about (live: a throughput document written from
+        priors while the corpus held a 45 KB section on exactly that).
+        """
+        by_path = {}
+        for e in self._lit_registry():
+            if e.get("path"):
+                by_path[str(Path(e["path"]).resolve())] = e.get("questions") or []
+        topics = []
+        for p in self._campaign_literature_files():
+            try:
+                sections = self._split_literature_sections(read_text_utf8(p))
+            except Exception as exc:  # noqa: BLE001 - the index is advisory
+                logging.debug(f"Literature topic scan failed for {p}: {exc}")
+                continue
+            reg_qs = by_path.get(str(p.resolve())) or []
+            for question, chunk in sections:
+                m = _LIT_QUESTION_RE.match(chunk)
+                if m:
+                    ref, label = f"{p}#q{m.group(1)}", question
+                elif len(sections) == 1 and reg_qs:
+                    ref, label = f"{p}#q1", reg_qs[0]
+                else:
+                    continue  # bare title chunk — nothing addressable
+                topics.append({"file": p.name, "section_ref": ref,
+                               "question": label})
+        return topics
+
+    def _load_campaign_literature(self) -> Optional[Dict[str, Any]]:
+        """Auto-load the CURRENT campaign's literature corpus (issue #425).
+
+        Returns {'text', 'files', 'n_files', 'dropped'} or None when the
+        campaign has no literature. Selection policy:
+
+        - ONE file: loaded whole, verbatim, uncapped — there is no choice
+          to make, and the single-search case is self-limiting. This path
+          is byte-identical to the historical newest-file behavior.
+        - SEVERAL files: oldest-first union. Verbatim-duplicate sections
+          (identical content — e.g. a re-recorded file or a search re-run
+          that returned the same text) are dropped first-occurrence-wins;
+          different prose about the same question is NEVER fused. Then a
+          character budget (_LIT_AUTOLOAD_MAX_CHARS) drops whole
+          over-budget sections (oldest-first fill, never mid-section
+          truncation), and every drop is reported — no silent caps.
+        """
+        files = self._campaign_literature_files()
+        if not files:
+            return None
+        if len(files) == 1:
+            text = read_text_utf8(files[0])
+            return {"text": text, "files": [files[0].name],
+                    "n_files": 1, "dropped": []}
+        chunks = []  # (file_name, question, chunk_text)
+        seen_content: set = set()
+        dup_dropped = []
+        for p in files:
+            for question, chunk in self._split_literature_sections(
+                    read_text_utf8(p)):
+                key = chunk.strip()
+                if key in seen_content:
+                    dup_dropped.append((p.name, question))
+                    continue
+                seen_content.add(key)
+                chunks.append((p.name, question, chunk))
+        kept, dropped, total = [], [], 0
+        for name, question, chunk in chunks:
+            if kept and total + len(chunk) > _LIT_AUTOLOAD_MAX_CHARS:
+                dropped.append((name, question))
+                continue
+            kept.append(chunk)
+            total += len(chunk)
+        if dup_dropped:
+            print(f"    📚 Literature union: skipped "
+                  f"{len(dup_dropped)} duplicate section(s) repeated "
+                  f"verbatim across files")
+        if dropped:
+            what = "; ".join(
+                f"{name}: {q or 'untitled section'}" for name, q in dropped)
+            print(f"    ⚠️  Literature budget "
+                  f"({_LIT_AUTOLOAD_MAX_CHARS:,} chars): dropped "
+                  f"{len(dropped)} whole section(s) — {what}")
+        return {"text": "\n\n".join(c.strip("\n") for c in kept),
+                "files": [p.name for p in files],
+                "n_files": len(files),
+                "dropped": dropped}
+
+    def _get_diagram_agent(self):
+        """Lazy DiagramAgent sharing the BO agent's model client (vision-
+        capable; no new credential plumbing)."""
+        if getattr(self, "_diagram_agent", None) is None:
+            from .diagram_agent import DiagramAgent
+            self._diagram_agent = DiagramAgent(
+                model=self.orch.bo.model, output_dir=str(self.orch.base_dir))
+        return self._diagram_agent
+
+    def _maybe_embed_workflow_diagram(self, text: str, out_dir,
+                                      stem: str = "campaign_workflow") -> str:
+        """Append a compact workflow diagram section to a document when the
+        renderer is available and the QC'd diagram succeeds. Any failure
+        returns the text unchanged — a document must never be lost to a
+        figure."""
+        try:
+            from ...utils.mermaid_render import mermaid_available
+            if not mermaid_available():
+                return text
+            plan = (self.orch.planner.state or {}).get("current_plan") or {}
+            if not plan:
+                # A roadmap or memo is often authored with no campaign
+                # state at all (that is the point of the document tool),
+                # so fall back to diagramming the document's own flow.
+                if len(text or "") < 400:
+                    return text
+                plan = {"objective": "Document workflow",
+                        "scientific_context": text[:4000]}
+            res = self._get_diagram_agent().generate_workflow_diagram(
+                plan=plan, out_dir=out_dir, stem=stem, detail="simple")
+            if res.get("status") == "success":
+                rel = Path(res["png_path"]).name
+                print(f"    🗺️  Workflow diagram embedded "
+                      f"({res['attempts']} attempt(s), "
+                      f"{res['qc_rounds']} QC round(s))")
+                # Recorded like the PDF twin — an ordinary produced file,
+                # not a second starred deliverable: the document is what
+                # the session points at. Without this the figure is
+                # invisible to the files listing and to a UI resume,
+                # which re-embeds from these manifests.
+                try:
+                    from .user_interface import record_deliverable
+                    record_deliverable(self.orch.base_dir, res["png_path"],
+                                       "Campaign workflow diagram")
+                except Exception:  # noqa: BLE001
+                    pass
+                return (f"{text}\n\n## Campaign Workflow\n\n"
+                        f"![Campaign workflow diagram]({rel})\n")
+        except Exception as exc:  # noqa: BLE001
+            print(f"    ⚠️  Workflow diagram skipped: {exc}")
+        return text
+
+    def _refresh_pdf_twin(self, md_path: Path) -> bool:
+        """Re-export a markdown document's PDF twin, if one exists.
+
+        Shared core in utils/file_edit (live: a diagram swap updated the
+        white paper's markdown while its forwarded PDF kept the old
+        image). Returns True when a twin was refreshed; failure must
+        never block the edit that triggered it — this wrapper only owns
+        the transcript prints.
+        """
+        from ...utils.file_edit import refresh_pdf_twin
+        refreshed, err = refresh_pdf_twin(md_path)
+        if refreshed:
+            from .user_interface import format_path
+            print(f"    📄 PDF twin refreshed: "
+                  f"{format_path(md_path.with_suffix('.pdf'))}")
+        elif err:
+            print(f"    ⚠️  PDF twin not refreshed: {err}")
+        return refreshed
+
+    def _write_white_paper(self, audience_context: str = None) -> str:
+        """Generate the sponsor-facing white paper from the current plan and
+        save it beside the plan artifacts. Returns the saved path."""
+        # Last-resort literature continuity: if neither the current plan nor
+        # the CURRENT CAMPAIGN's history carries literature, seed the state
+        # from the newest same-campaign saved search so citations survive
+        # plan restructuring. Other campaigns' literature is invisible here
+        # (issue #396): _latest_literature_file is campaign-scoped, and an
+        # earlier campaign's corpus in history must not mask this one's
+        # missing literature.
+        state = self.orch.planner.state or {}
+        cid = self._campaign_id()
+        has_lit = any(p.get("literature_search")
+                      for p in ([state.get("current_plan") or {}]
+                                + list(state.get("plan_history") or []))
+                      if int(p.get("campaign_id") or 1) == cid)
+        if not has_lit:
+            lit = self._load_campaign_literature()
+            if lit is not None and state.get("current_plan"):
+                state["current_plan"]["literature_search"] = lit["text"]
+                print(f"    📚 White paper literature restored from "
+                      f"{', '.join(lit['files'])}")
+        text = self.orch.planner.generate_white_paper(
+            audience_context=audience_context
+        )
+        text = self._maybe_embed_workflow_diagram(text, self._output_dir())
+        wp_path = self._output_dir() / "white_paper.md"
+        write_text_utf8(wp_path, text)
+        from .user_interface import format_path, record_deliverable
+        record_deliverable(self.orch.base_dir, wp_path,
+                           "White paper", deliverable=True)
+        print(f"    📄 White paper saved: {format_path(wp_path)}")
+        # A PDF twin, because this is the one document that gets forwarded.
+        # Recorded as an ordinary produced file, not a second deliverable —
+        # the markdown stays the single thing the session points at. Failure
+        # here must not lose the white paper that was just written.
+        try:
+            from ...utils.md_to_pdf import markdown_to_pdf
+            pdf_path = markdown_to_pdf(wp_path, title="White paper")
+            record_deliverable(self.orch.base_dir, pdf_path, "White paper PDF")
+            print(f"    📄 PDF version: {format_path(pdf_path)}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"    ⚠️  PDF version unavailable: {exc}")
+        return str(wp_path)
 
     @staticmethod
     def _build_objective_guidance(n_data: int, numeric_cols: list) -> dict:
@@ -299,6 +1298,21 @@ class OrchestratorTools:
                 if candidate.exists():
                     print(f"    🔍 Resolved: {path.name} → {candidate.name}")
                     return str(candidate), None
+
+        # Case 2b: a bare name that exists ANYWHERE in this session. Files
+        # written by save_file land in the delegation directory that was
+        # active at the time, so a later turn asking for them by name must
+        # be able to find them without knowing which delegation wrote them.
+        if not path.is_absolute() and len(path.parts) == 1:
+            try:
+                hits = sorted(self.orch.base_dir.rglob(path.name),
+                              key=lambda p: p.stat().st_mtime, reverse=True)
+                hits = [h for h in hits if h.is_file()]
+                if hits:
+                    print(f"    🔍 Resolved in session: {hits[0]}")
+                    return str(hits[0]), None
+            except Exception:  # noqa: BLE001 - fall through to the usual search
+                pass
         
         # Case 3: Try in common data folders (session dirs first, then cwd-relative)
         session = self.orch.base_dir
@@ -371,6 +1385,41 @@ class OrchestratorTools:
             "hint": "Check filename spelling or use /files command to see available files"
         })
     
+    def _source_document_texts(self, cap_chars: int = 400_000) -> List[str]:
+        """Text of the documents the session is grounded in — the KB's chunks
+        (uploads / knowledge dir) — for the acronym-fidelity check. Bounded;
+        best-effort; empty when no KB is loaded."""
+        try:
+            kb = getattr(self.orch.planner, "kb_docs", None)
+            chunks = getattr(kb, "chunks", None) or []
+            out, n = [], 0
+            for c in chunks:
+                txt = c.get("text") if isinstance(c, dict) else str(c)
+                if not txt:
+                    continue
+                out.append(txt)
+                n += len(txt)
+                if n > cap_chars:
+                    break
+            return out
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _output_dir(self):
+        """Directory for plan artifacts (plan.json, tea_analysis, output_scripts,
+        literature_search*, molecule_design, ...).
+
+        During a meta-agent delegation this is a per-delegation sub-directory
+        so a reused planning child does not overwrite an earlier delegation's
+        artifacts; for direct `scilink plan` use it is the campaign root
+        (``_active_output_subdir`` is None, so behaviour is unchanged).
+
+        Read defensively: file-writing tools now route through here, and a
+        partially-built orchestrator (tests, early construction) has no
+        delegation attribute yet — falling back to the campaign root is
+        always the right answer there."""
+        return getattr(self.orch, "_active_output_subdir", None) or self.orch.base_dir
+
     def _register_all_tools(self):
         """Register all tools with both OpenAI and Gemini formats."""
         
@@ -385,33 +1434,85 @@ class OrchestratorTools:
                  artifact_names = [f"analysis_artifacts/{f.name}" for f in artifacts_dir.iterdir() if f.is_file()]
             
             all_files = files + artifact_names
-            
+
             # Include data point count for optimization readiness
             data_count = 0
             if self.orch.bo_data_path.exists():
                 try:
                     df = pd.read_csv(self.orch.bo_data_path)
                     data_count = len(df)
-                except:
+                except Exception:
                     pass
-            
-            return json.dumps({
+
+            # Under a meta session every artifact lives in
+            # delegations/<slug>/, which the flat listing cannot see — live,
+            # an agent probed six guessed paths for a companion whose real
+            # filename it could not know (folders are named by task slug,
+            # files by the authoring turn) and only found it by reading
+            # deliverables.json as a last resort. Surface both halves of the
+            # answer here: the registry (title -> path, the semantic index)
+            # and a one-level listing of each delegation folder.
+            deliverables_index = []
+            try:
+                from .user_interface import load_deliverables
+                for e in load_deliverables(self.orch.base_dir):
+                    p = e.get("path")
+                    if not p or not Path(p).exists():
+                        continue
+                    deliverables_index.append({
+                        "title": e.get("title") or Path(p).name,
+                        "path": p,
+                        "deliverable": bool(e.get("deliverable")),
+                    })
+            except Exception:  # noqa: BLE001 - listing must never fail
+                pass
+
+            delegation_folders = {}
+            try:
+                droot = self.orch.base_dir / "delegations"
+                if droot.is_dir():
+                    for d in sorted(droot.iterdir()):
+                        if d.is_dir():
+                            delegation_folders[d.name] = sorted(
+                                f.name + ("/" if f.is_dir() else "")
+                                for f in d.iterdir())
+            except Exception:  # noqa: BLE001
+                pass
+
+            payload = {
                 "status": "success",
                 "files": all_files,
                 "data_points_collected": data_count,
                 "optimization_ready": data_count >= 3,
                 "active_analysis_script": Path(self.orch.active_scalarizer_script).name if self.orch.active_scalarizer_script else None
-            })
-        
+            }
+            if deliverables_index:
+                payload["deliverables_index"] = deliverables_index
+                payload["hint"] = ("deliverables_index maps document titles "
+                                   "to their real paths — use it instead of "
+                                   "guessing filenames.")
+            if delegation_folders:
+                payload["delegation_folders"] = delegation_folders
+            return json.dumps(payload)
+
         self._register_tool(
             func=list_workspace_files,
             name="list_workspace_files",
-            description="Lists files in the session directory (checkpoints, analysis artifacts, etc.). User data files may exist outside the session folder.",
+            description=(
+                "Lists files in the session directory (checkpoints, analysis "
+                "artifacts, etc.), plus — when present — a deliverables index "
+                "(document title -> real path) and the contents of each "
+                "delegations/ folder. To find a document produced earlier, "
+                "use this index rather than guessing paths: delegation "
+                "folders are named by task slug and filenames rarely match "
+                "a document's topic. User data files may exist outside the "
+                "session folder."
+            ),
             parameters={}
         )
         
         # --- LITERATURE SEARCH TOOL ---
-        def search_literature(objective: str, search_type: str = "hypothesis_context"):
+        def search_literature(objective, search_type: str = "hypothesis_context"):
             """
             Searches scientific literature using the FutureHouse Edison API.
             Call this BEFORE generate_initial_plan to enrich the plan with
@@ -423,69 +1524,558 @@ class OrchestratorTools:
                     "message": "Literature search not available (no FutureHouse API key configured)"
                 })
 
-            valid_types = ("hypothesis_context", "economic_data", "fitting_models")
-            if search_type not in valid_types:
+            search_methods = {
+                "hypothesis_context": self.orch.lit_agent.search_for_hypothesis_context,
+                "cross_domain": self.orch.lit_agent.search_for_cross_domain,
+                "technique_limitations": self.orch.lit_agent.search_for_technique_limitations,
+                "economic_data": self.orch.lit_agent.search_for_economic_data,
+                "fitting_models": self.orch.lit_agent.search_for_fitting_models,
+            }
+            # Multiple types — and multiple decomposed objectives — run
+            # CONCURRENTLY: each Edison call is minutes of waiting, so a
+            # serial pair doubles the user's wait for no reason.
+            # PER-TYPE objectives. `objective` may be a mapping
+            # {search_type: question(s)} — because a paired call otherwise
+            # cross-multiplies ONE text across every type, and the two legs
+            # want different text: grounding wants "what are the gaps in X",
+            # transfer wants the FUNCTION to transfer toward. A plain string
+            # or list keeps the historical cross-product.
+            per_type: Dict[str, List[str]] = {}
+            if isinstance(objective, dict):
+                for t, objs in objective.items():
+                    key = str(t).strip()
+                    vals = ([objs] if isinstance(objs, str)
+                            else [str(o) for o in (objs or [])])
+                    vals = [v.strip() for v in vals if v and v.strip()]
+                    if vals:
+                        per_type[key] = vals
+                types = list(per_type)
+            else:
+                types = [t.strip() for t in str(search_type).split(",")
+                         if t.strip()]
+            bad = [t for t in types if t not in search_methods]
+            if bad or not types:
                 return json.dumps({
                     "status": "error",
-                    "message": f"Invalid search_type '{search_type}'. Must be one of: {', '.join(valid_types)}"
+                    "message": (f"Invalid search_type '{bad or search_type}'. "
+                                f"Use one or more (comma-separated, or as the "
+                                f"keys of an objective mapping) of: "
+                                f"{', '.join(search_methods)}")
                 })
 
-            print(f"  ⚡ Tool: Searching literature ({search_type}) for '{objective[:80]}...'")
+            if per_type:
+                # objective index -> text, deduped so an identical question
+                # asked of two types is optimized once.
+                objectives = list(dict.fromkeys(
+                    o for objs in per_type.values() for o in objs))
+                idx = {o: i for i, o in enumerate(objectives)}
+                task_pairs = [(idx[o], t) for t in types for o in per_type[t]]
+            else:
+                objectives = ([objective] if isinstance(objective, str)
+                              else [str(o) for o in (objective or [])])
+                objectives = [o.strip() for o in objectives if o and o.strip()]
+                task_pairs = None
+            if not objectives:
+                return json.dumps({"status": "error",
+                                   "message": "No objective provided."})
+            # Concurrency is bounded by BATCHING inside this single call —
+            # up to MAX_CONCURRENT searches run in parallel, extras spill
+            # into the next back-to-back batch. This fills the parallel
+            # budget before going sequential, and keeps everything in ONE
+            # tool call so the LLM never splits across turns (which would
+            # serialize). MAX_TOTAL is a wall-clock guardrail (each batch is
+            # ~10-15 min), not a concurrency limit.
+            MAX_CONCURRENT = 6
+            MAX_TOTAL = 12
+            n_jobs = (len(task_pairs) if task_pairs is not None
+                      else len(objectives) * len(types))
+            if n_jobs > MAX_TOTAL:
+                return json.dumps({
+                    "status": "error",
+                    "message": (
+                        f"{n_jobs} searches requested, over the "
+                        f"{MAX_TOTAL}-per-"
+                        f"call ceiling (~{-(-n_jobs // MAX_CONCURRENT)} "
+                        f"sequential batches of {MAX_CONCURRENT} = too long). "
+                        f"Prioritize down to <= {MAX_TOTAL} searches in this "
+                        f"one call — do NOT split into separate calls."),
+                })
+
+            label = "+".join(types)
+            n_batches = -(-n_jobs // MAX_CONCURRENT)
+            # The Q-list below shows DISTINCT questions; when several search
+            # types are active each question runs once per type, so say that
+            # multiplication out loud — '5 questions but 10 searches' read
+            # as a mismatch in live sessions.
+            _q = f"{len(objectives)} question{'s' if len(objectives) != 1 else ''}"
+            if per_type:
+                # Each type has its OWN question(s); the multiplication line
+                # would be a lie here.
+                _mapping = (", ".join(
+                    f"{len(per_type[t])} for {t}" for t in types)
+                    + f" = {n_jobs} searches")
+            elif len(types) > 1:
+                _mapping = (f"{_q}, each searched {len(types)} ways "
+                            f"({', '.join(types)}) = {n_jobs} searches")
+            else:
+                _mapping = (f"{_q} x 1 search type ({label}) = {n_jobs} "
+                            f"search{'es' if n_jobs != 1 else ''}")
+            # Spell out the actual batch sizes — 'running 6 at a time in 2
+            # batches' reads as 6 x 2 = 12 when the last batch only carries
+            # the remainder.
+            _batch_sizes = [min(MAX_CONCURRENT, n_jobs - s)
+                            for s in range(0, n_jobs, MAX_CONCURRENT)]
+            _batch_note = (f", run in {n_batches} sequential batches of "
+                           + " then ".join(str(b) for b in _batch_sizes)
+                           if n_batches > 1 else "")
+            print(f"  ⚡ Tool: Searching literature: {_mapping}{_batch_note}")
+            for qi, o in enumerate(objectives, 1):
+                _for = ""
+                if per_type:
+                    _owners = [t for t in types if o in per_type[t]]
+                    _for = f" [{'+'.join(_owners)}]"
+                print(f"     Q{qi}{_for}: '{o[:90]}"
+                      f"{'...' if len(o) > 90 else ''}'")
+            if n_batches > 1:
+                print(f"     ⏱️  Deep literature searches typically take "
+                      f"10-15 minutes per batch — {n_batches} sequential "
+                      f"batches, so expect ~{10 * n_batches}-"
+                      f"{15 * n_batches} minutes total; progress is "
+                      f"reported every few minutes.")
+            else:
+                print("     ⏱️  Deep literature searches typically take 10-15 "
+                      "minutes — the system is working; progress is reported "
+                      "every few minutes.")
+
+            # Heartbeat so a minutes-long silent wait doesn't read as a hang
+            # (Edison jobs produce no output until they complete). Tracks LIVE
+            # completion — '1 of 5 still running', not a static total — via
+            # per-future done-callbacks updating the shared pending set.
+            import threading as _threading
+            import time as _time
+            _hb_stop = _threading.Event()
+            _hb_lock = _threading.Lock()
+            # `t0` is PER BATCH, not per call. Batches run back-to-back and
+            # each gets its own deadline, so a global clock made batch 2's
+            # first minute read as "17 min elapsed — longer than the usual
+            # 10-15" and threatened a give-up time that had already passed.
+            _hb_state = {"pending": None, "running": set(), "total": n_jobs,
+                         "t0": _time.time(), "batch": 0, "n_batches": 1}
+
+            def _hb_mark_running(label):
+                with _hb_lock:
+                    _hb_state["running"].add(label)
+
+            def _hb_mark_done(label):
+                with _hb_lock:
+                    if _hb_state["pending"] is not None:
+                        _hb_state["pending"].discard(label)
+                    _hb_state["running"].discard(label)
+
+            def _heartbeat():
+                # Batches are sequential, so 'remaining' includes jobs that
+                # have not been SUBMITTED yet — report running and queued
+                # separately ('10 still running' overstated concurrency in
+                # live multi-batch sessions).
+                _eta = ("typically 10-15 min total" if n_batches == 1
+                        else "~10-15 min per batch")
+                while not _hb_stop.wait(_LIT_HEARTBEAT_SECONDS):
+                    with _hb_lock:
+                        pending = (set(_hb_state["pending"])
+                                   if _hb_state["pending"] is not None
+                                   else None)
+                        running = len(_hb_state["running"])
+                    remaining = (len(pending) if pending is not None
+                                 else _hb_state["total"])
+                    if remaining == 0:
+                        continue
+                    queued = max(0, remaining - running)
+                    with _hb_lock:
+                        _t0 = _hb_state["t0"]
+                        _bi, _bn = _hb_state["batch"], _hb_state["n_batches"]
+                    mins = int((_time.time() - _t0) / 60)
+                    _of = f" [batch {_bi} of {_bn}]" if _bn > 1 else ""
+                    # Past the advertised window, stop repeating it: saying
+                    # "typically 10-15 min" at minute 45 reads as a hang
+                    # with no end in sight. Say when we will give up.
+                    if mins >= 16:
+                        give_up = _LIT_BATCH_DEADLINE // 60
+                        print(f"  ⏳ {running} still running after {mins} min{_of} "
+                              f"— longer than the usual 10-15; abandoning "
+                              f"stragglers at {give_up} min and returning "
+                              f"whatever finished")
+                        continue
+                    if queued:
+                        print(f"  ⏳ {running} running, {queued} queued of "
+                              f"{_hb_state['total']} literature searches "
+                              f"({mins} min elapsed{_of}; {_eta})")
+                    else:
+                        print(f"  ⏳ {remaining} of {_hb_state['total']} "
+                              f"literature search"
+                              f"{'es' if _hb_state['total'] != 1 else ''} still "
+                              f"running ({mins} min elapsed{_of}; {_eta})")
+
+            _threading.Thread(target=_heartbeat, daemon=True).start()
 
             try:
-                clean_query = optimize_search_query(
-                    objective=objective, model=self.orch.planner.model
-                )
+                clean_queries = [optimize_search_query(
+                    objective=o, model=self.orch.planner.model
+                ) for o in objectives]
 
-                search_methods = {
-                    "hypothesis_context": self.orch.lit_agent.search_for_hypothesis_context,
-                    "economic_data": self.orch.lit_agent.search_for_economic_data,
-                    "fitting_models": self.orch.lit_agent.search_for_fitting_models,
-                }
-                lit_res = search_methods[search_type](clean_query)
+                tasks = (task_pairs if task_pairs is not None
+                         else [(oi, t) for oi in range(len(objectives))
+                               for t in types])
 
-                if lit_res['status'] != 'success':
+                def _task_label(oi, t):
+                    return f"q{oi + 1}:{t}" if len(objectives) > 1 else t
+
+                with _hb_lock:
+                    _hb_state["pending"] = {_task_label(oi, t)
+                                            for oi, t in tasks}
+                results = {}
+                if len(tasks) == 1:
+                    oi, t = tasks[0]
+                    _hb_mark_running(_task_label(oi, t))
+                    results[(oi, t)] = search_methods[t](clean_queries[oi])
+                    _hb_mark_done(_task_label(oi, t))
+                else:
+                    from concurrent.futures import (
+                        ThreadPoolExecutor, TimeoutError as FuturesTimeout)
+                    # Greedy batches of <= MAX_CONCURRENT, back-to-back. A
+                    # 5-search request is ONE parallel batch; an 8-search
+                    # request is 6 concurrent then 2 concurrent — never 2+3
+                    # sub-optimal splits, and never sequential when it fits
+                    # the parallel budget.
+                    _n_batches = -(-len(tasks) // MAX_CONCURRENT)
+                    with _hb_lock:
+                        _hb_state["n_batches"] = _n_batches
+                    for start in range(0, len(tasks), MAX_CONCURRENT):
+                        batch = tasks[start:start + MAX_CONCURRENT]
+                        # Fresh clock: this batch's deadline starts here, so
+                        # the elapsed time reported against it must too.
+                        with _hb_lock:
+                            _hb_state["t0"] = _time.time()
+                            _hb_state["batch"] = start // MAX_CONCURRENT + 1
+                        # NOT a context manager: its __exit__ joins every
+                        # worker, so one wedged remote task would still hold
+                        # the call open after the deadline below fires.
+                        ex = ThreadPoolExecutor(max_workers=len(batch))
+                        try:
+                            futures = {}
+                            for oi, t in batch:
+                                _l = _task_label(oi, t)
+                                _hb_mark_running(_l)
+                                f = ex.submit(search_methods[t],
+                                              clean_queries[oi])
+                                f.add_done_callback(
+                                    lambda _f, _l=_l: _hb_mark_done(_l))
+                                futures[(oi, t)] = f
+                            # Bounded wait. One wedged remote task used to
+                            # pin the whole call (live: 45+ min on a
+                            # 5-search request) while four finished results
+                            # sat unusable behind it. Past the deadline the
+                            # stragglers are abandoned and reported as
+                            # failures — the merge below already handles a
+                            # partial result set.
+                            deadline = _time.time() + _LIT_BATCH_DEADLINE
+                            for k, f in futures.items():
+                                remaining = deadline - _time.time()
+                                try:
+                                    results[k] = f.result(
+                                        timeout=max(0.0, remaining))
+                                except FuturesTimeout:
+                                    label = _task_label(*k)
+                                    _hb_mark_done(label)
+                                    print(f"  ⚠️  {label} exceeded "
+                                          f"{_LIT_BATCH_DEADLINE // 60} min "
+                                          f"— abandoning it and returning "
+                                          f"the searches that finished.")
+                                    results[k] = {
+                                        "status": "timeout",
+                                        "message": (
+                                            f"abandoned after "
+                                            f"{_LIT_BATCH_DEADLINE}s"),
+                                    }
+                                except Exception as e:  # noqa: BLE001
+                                    results[k] = {"status": "error",
+                                                  "message": str(e)}
+                        finally:
+                            # Do not join: an abandoned worker keeps polling
+                            # until the agent's own max_wait_time ends it.
+                            ex.shutdown(wait=False, cancel_futures=True)
+
+                ok = {k: r for k, r in results.items()
+                      if r.get("status") == "success"}
+                if not ok:
+                    first = next(iter(results.values()))
                     return json.dumps({
-                        "status": lit_res['status'],
-                        "message": lit_res.get('message', 'Literature search did not succeed')
+                        "status": first.get("status", "error"),
+                        "message": first.get("message", "Literature search did not succeed")
                     })
 
-                # Save to file (distinct per search_type to avoid overwrites)
-                lit_path = self.orch.base_dir / f"literature_search_{search_type}.md"
-                with open(lit_path, 'w') as f:
-                    f.write(f"# Literature Search Results ({search_type})\n\n")
-                    f.write(lit_res['content'])
+                # Sections are LABELLED, not concatenated: candidates must be
+                # able to tell established results in this field (usable as
+                # constraints) from cross-domain analogies (usable as
+                # mechanism inspiration, but not established here).
+                SECTION = {
+                    "hypothesis_context": "## ESTABLISHED IN THIS FIELD (known methods, "
+                                          "parameter ranges, failure modes)",
+                    "cross_domain": "## TRANSFERABLE MECHANISMS FROM OTHER DOMAINS "
+                                    "(analogies — NOT established results in this field)",
+                    "economic_data": "## ECONOMIC CONTEXT",
+                    "fitting_models": "## MODELS AND EQUATIONS",
+                }
+                parts = []
+                for oi in range(len(objectives)):
+                    secs = [f"{SECTION.get(t, '## ' + t.upper())}\n{ok[(oi, t)]['content']}"
+                            for t in types if (oi, t) in ok]
+                    if not secs:
+                        continue
+                    if len(objectives) > 1:
+                        # Multi-question runs keep per-question grouping so
+                        # downstream readers see which evidence answers what.
+                        parts.append(
+                            _format_lit_question_heading(oi + 1,
+                                                         objectives[oi])
+                            + "\n\n" + "\n\n".join(secs))
+                    else:
+                        parts.extend(secs)
+                content = "\n\n".join(parts)
 
-                print(f"  ✅ Literature search completed. Saved to {lit_path.name}")
+                # The name is keyed only by search TYPE, so a second search
+                # of the same type in one output directory used to truncate
+                # the first — silently, since the registry then held two
+                # entries pointing at one surviving file. Under the meta
+                # each delegation has its own directory, so this bites the
+                # standalone campaign root hardest. Suffix only on
+                # collision: the first (overwhelmingly common) write keeps
+                # the historical name exactly.
+                lit_path = self._output_dir() / f"literature_search_{label}.md"
+                _n = 1
+                while lit_path.exists():
+                    _n += 1
+                    lit_path = (self._output_dir()
+                                / f"literature_search_{label}_{_n}.md")
+                write_text_utf8(
+                    lit_path,
+                    f"# Literature Search Results ({label})\n\n{content}")
+                self._record_literature_file(
+                    lit_path, label=label,
+                    questions=[objectives[oi]
+                               for oi in range(len(objectives))
+                               if any((oi, t) in ok for t in types)])
 
-                return json.dumps({
+                failed = [(f"q{oi + 1}:{t}" if len(objectives) > 1 else t)
+                          for oi, t in tasks if (oi, t) not in ok]
+                print(f"  ✅ Literature search completed ({len(ok)}/{len(tasks)}). "
+                      f"Saved to {lit_path.name}")
+
+                out = {
                     "status": "success",
+                    "searches_run": [
+                        (f"q{oi + 1}:{t}" if len(objectives) > 1 else t)
+                        for oi, t in tasks if (oi, t) in ok
+                    ],
                     "file_path": str(lit_path),
-                    "content_preview": lit_res['content'][:500] + "..." if len(lit_res['content']) > 500 else lit_res['content'],
-                    "hint": "Pass file_path as literature_context to generate_initial_plan()"
-                })
+                    "content_preview": content[:500] + "..." if len(content) > 500 else content,
+                    "hint": "Pass file_path as literature_context to generate_initial_plan()",
+                }
+                if failed:
+                    out["failed_searches"] = failed
+                if ok:
+                    out["caveat"] = ("Literature context of any type was measured to "
+                                     "reduce constraint COVERAGE — plans stay on-topic "
+                                     "but silently omit individual requirements. When "
+                                     "the objective carries hard equipment/process "
+                                     "constraints, pass them as additional_context so "
+                                     "each is mapped to a named step; do not withhold "
+                                     "the literature.")
+                return json.dumps(out)
 
             except Exception as e:
                 logging.error(f"Literature search error: {e}", exc_info=True)
                 return json.dumps({"status": "error", "message": str(e)})
+            finally:
+                _hb_stop.set()
 
         self._register_tool(
             func=search_literature,
             name="search_literature",
             description=(
                 "Searches scientific literature via FutureHouse Edison API. "
+                "A deep search takes ~10-15 minutes — tell the user before "
+                "calling so the wait is expected. "
                 "Call BEFORE generate_initial_plan() to enrich the plan with external context. "
-                "Pass the returned file_path as literature_context to generate_initial_plan()."
+                "Pass the returned file_path as literature_context to generate_initial_plan(). "
+                "DECOMPOSE, don't concatenate: each objective must be ONE "
+                "focused question — a query stuffed with several distinct "
+                "aspects returns a shallow synthesis of all of them. Pass a "
+                "LIST of objectives (and, if useful, multiple search types) "
+                "in a SINGLE call — put ALL the aspects you want covered "
+                "into this one call. The tool runs up to 6 searches "
+                "concurrently and automatically batches any extras into "
+                "back-to-back rounds, merging everything into one labelled "
+                "document. So do NOT make a second search_literature call to "
+                "cover more aspects (a second call is a later turn and runs "
+                "sequentially anyway) — just list them all here. Total "
+                "searches must be <= 12. When pairing grounding with "
+                "cross_domain, give each type its OWN objective via the "
+                "object form (see `objective`) rather than one shared "
+                "question."
             ),
             parameters={
-                "objective": {"type": "string", "description": "Research objective or question to search for"},
+                "objective": {
+                    "type": ["string", "array", "object"],
+                    "items": {"type": "string"},
+                    "description": (
+                        "ONE focused research question, or a LIST of them "
+                        "(run in parallel). Split a broad objective — or "
+                        "one containing too many distinct aspects — into "
+                        "separate entries; each entry should stand alone as "
+                        "a question one review could answer well. "
+                        "PER-TYPE form: pass an OBJECT keyed by search type, "
+                        "e.g. {\"hypothesis_context\": [\"what is known "
+                        "about X\"], \"cross_domain\": [\"capture a state "
+                        "that exists only under drive and relaxes in "
+                        "milliseconds\"]}. Use it whenever you pair the two: "
+                        "grounding wants the question about your field, "
+                        "transfer wants the FUNCTION to transfer toward, and "
+                        "a single shared string cannot be both. With the "
+                        "object form, search_type is taken from its keys."
+                    ),
+                },
                 "search_type": {
                     "type": "string",
-                    "description": "Type of search: 'hypothesis_context' (default, for planning), 'economic_data' (for TEA), or 'fitting_models' (for curve fitting)",
-                    "enum": ["hypothesis_context", "economic_data", "fitting_models"]
+                    "description": (
+                        "One type, or several comma-separated (run in parallel). "
+                        "'hypothesis_context' (default): established methods, "
+                        "parameter ranges and pitfalls in the problem's own field — "
+                        "the grounding a runnable plan needs. "
+                        "'cross_domain': mechanisms from ADJACENT/UNRELATED fields "
+                        "that could transfer — use for IDEATION (pair it with "
+                        "hypothesis_context: 'hypothesis_context,cross_domain'). "
+                        "cross_domain needs a FUNCTION or CHALLENGE to transfer "
+                        "toward, so phrase that objective as the thing to achieve "
+                        "or overcome; a survey question ('what are the frontiers "
+                        "in X', 'what is hard to measure in X') asks for X's own "
+                        "field and belongs to hypothesis_context — sending it to "
+                        "cross_domain asks for a review and forbids it in the "
+                        "same breath. "
+                        "'technique_limitations': the ADVERSARIAL leg — known "
+                        "limitations, artifacts and failure modes of the "
+                        "techniques, materials and calibration references the "
+                        "plan will rely on, under its operating conditions. "
+                        "Include it whenever a plan names its measurement "
+                        "techniques (as a per-type mapping: give it a question "
+                        "that NAMES those techniques and conditions); it is what "
+                        "the plan critic reads to catch a probe that cannot work "
+                        "in the stated medium or a reference that is not "
+                        "independent. "
+                        "'economic_data' (TEA); 'fitting_models' "
+                        "(curve fitting)."
+                    ),
                 }
             },
             required=["objective"]
+        )
+
+        # --- LITERATURE INDEX TOOL (issue #425) ---
+        def list_literature_searches():
+            """
+            Index of the CURRENT campaign's saved literature searches:
+            every file, the question each section answers, and the
+            beginning of each answer — the information needed to DECIDE
+            what a refine / plan call should read, without loading
+            hundreds of KB to find out.
+            """
+            print("  ⚡ Tool: Listing campaign literature searches...")
+            try:
+                files = self._campaign_literature_files()
+                if not files:
+                    return json.dumps({
+                        "status": "success", "count": 0, "files": [],
+                        "message": ("No literature saved for the current "
+                                    "campaign. Use search_literature() to "
+                                    "gather some.")})
+                meta = {}
+                for e in self._lit_registry():
+                    if e.get("path"):
+                        meta[str(Path(e["path"]).resolve())] = e
+                out_files = []
+                for p in files:
+                    text = read_text_utf8(p)
+                    entry = meta.get(str(p.resolve()), {})
+                    reg_qs = entry.get("questions") or []
+                    chunks = self._split_literature_sections(text)
+                    sections = []
+                    for question, chunk in chunks:
+                        m = _LIT_QUESTION_RE.match(chunk)
+                        body = (chunk[m.end():] if m else chunk).strip()
+                        if (question is None and len(body) < 200
+                                and body.startswith(
+                                    "# Literature Search Results")):
+                            continue  # bare title chunk, not content
+                        if question is None and len(reg_qs) == 1:
+                            # Single-question files are written without a
+                            # question heading; the registry knows the
+                            # objective.
+                            question = reg_qs[0]
+                        item = {"question": question,
+                                "chars": len(chunk),
+                                "answer_preview": body[:300]}
+                        # Headingless single-question files are addressable
+                        # as their one-and-only section, '#q1' — keep the
+                        # selection syntax uniform across file shapes.
+                        if m:
+                            item["section_ref"] = f"{p}#q{m.group(1)}"
+                        elif len(chunks) == 1:
+                            item["section_ref"] = f"{p}#q1"
+                        sections.append(item)
+                    out_files.append({
+                        "path": str(p),
+                        "label": entry.get("label"),
+                        "chars": len(text),
+                        "modified": datetime.fromtimestamp(
+                            p.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+                        "sections": sections,
+                    })
+                return json.dumps({
+                    "status": "success",
+                    "count": len(out_files),
+                    "files": out_files,
+                    "hint": (
+                        "Decide from the questions/previews what the next "
+                        "plan or refine call should read, then pass that "
+                        "selection as literature_context — whole files by "
+                        "path, or individual sections by their "
+                        "section_ref ('<path>#qN'), comma-separated. "
+                        "Omit literature_context to auto-load ALL of the "
+                        "above (oldest-first union, deduped, capped at "
+                        f"{_LIT_AUTOLOAD_MAX_CHARS:,} chars).")})
+            except Exception as e:
+                logging.error(f"Literature listing error: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=list_literature_searches,
+            name="list_literature_searches",
+            description=(
+                "Lists the current campaign's saved literature searches as "
+                "an index: each file's questions and the beginning of each "
+                "answer, with per-section sizes. Costs almost nothing — "
+                "it reads no corpus into context. Call it before "
+                "refine_plan_with_results() or write_technical_document() "
+                "WHENEVER YOU HAVE NOT YET SEEN WHAT THE CORPUS COVERS — "
+                "one file with several questions is as worth indexing as "
+                "several files, and you cannot judge whether literature "
+                "bears on a document without knowing what it answers. Then "
+                "pass the relevant selection (file paths, or '<path>#qN' "
+                "section refs) as literature_context. If you pass nothing, "
+                "ALL campaign literature is auto-loaded — safe, but larger "
+                "than a considered selection."
+            ),
+            parameters={},
+            required=[]
         )
 
         # --- MOLECULES QUERY TOOL ---
@@ -521,10 +2111,11 @@ class OrchestratorTools:
                     })
 
                 # Save to file
-                mol_path = self.orch.base_dir / "molecule_design.md"
-                with open(mol_path, 'w') as f:
-                    f.write("# Molecular Design & Synthesis Planning Results\n\n")
-                    f.write(mol_res['content'])
+                mol_path = self._output_dir() / "molecule_design.md"
+                write_text_utf8(
+                    mol_path,
+                    "# Molecular Design & Synthesis Planning Results\n\n"
+                    + mol_res['content'])
 
                 print(f"  ✅ Molecules query completed. Saved to {mol_path.name}")
 
@@ -561,7 +2152,12 @@ class OrchestratorTools:
             additional_context: str = None,
             skill: str = None,
             literature_context: str = None,
-            molecule_context: str = None
+            molecule_context: str = None,
+            n_candidates: int = None,
+            selection_profile: str = None,
+            white_paper: bool = None,
+            new_campaign: bool = None,
+            kind: str = "experiment"
         ):
             """
             Generates experimental plan (science strategy only, no code).
@@ -571,6 +2167,48 @@ class OrchestratorTools:
             """
             obj = specific_objective if specific_objective else self.orch.objective
             print(f"  ⚡ Tool: Generating Initial Plan for '{obj}'...")
+
+            # Campaign boundary (issue #396): decided up front so the
+            # best-of-N default and the stale-literature guard below see it.
+            _snc = getattr(self.orch.planner, "starts_new_campaign", None)
+            starts_new = bool(_snc(obj, new_campaign)) if _snc else False
+
+            # Guard: a NEW campaign fed literature that the registry
+            # attributes only to PREVIOUS campaigns is cross-topic
+            # contamination (live-confirmed: a chat-visible file path from
+            # an earlier brainstorm gets re-passed for an unrelated one) —
+            # unless the caller declares BOTH signals explicitly
+            # (new_campaign=true + the file), which marks deliberate reuse.
+            if starts_new and new_campaign is not True:
+                stale = self._prior_campaign_literature(literature_context)
+                if stale:
+                    return json.dumps({
+                        "status": "error",
+                        "message": (
+                            "literature_context points to literature from a "
+                            "PREVIOUS campaign on a different topic: "
+                            + ", ".join(Path(p).name for p in stale)
+                            + ". This objective starts a NEW campaign, and "
+                            "another topic's corpus must not ground it."
+                        ),
+                        "hint": (
+                            "Omit literature_context (or run "
+                            "search_literature for THIS topic first). If "
+                            "reusing that literature is deliberate, pass "
+                            "new_campaign=true together with the file."
+                        ),
+                    })
+
+            # Literature the OUTGOING campaign owns, captured here because
+            # _campaign_id() still reads the pre-transition value; once
+            # generate_plan applies the bump and _adopt_literature re-claims
+            # these files under the new id, the fact is unrecoverable.
+            # Reported on the result so the campaign boundary reaches the
+            # decision that grounds what comes next (see the helper).
+            carried_literature = (
+                self._outgoing_campaign_literature(literature_context)
+                if starts_new else [])
+            outgoing_campaign_id = self._campaign_id()
 
             # Resolve knowledge paths (with fallback to orchestrator dir)
             knowledge_list = self._resolve_knowledge_paths(knowledge_paths)
@@ -654,31 +2292,41 @@ class OrchestratorTools:
             external_context_parts = []
             saved_extras = []
             if literature_context:
-                lp = Path(literature_context)
-                if lp.is_file():
-                    lit_text = lp.read_text()
+                lit_text = self._resolve_context_text(literature_context)
+                if lit_text:
                     external_context_parts.append(lit_text)
-                    saved_extras.append(str(lp))
-                    print(f"    📚 Literature context from: {lp.name}")
-                else:
-                    external_context_parts.append(literature_context)
+                    print(f"    📚 Literature context resolved "
+                          f"({len(lit_text.split())} words)")
             if molecule_context:
-                mp = Path(molecule_context)
-                if mp.is_file():
-                    mol_text = mp.read_text()
+                mol_text = self._resolve_context_text(molecule_context)
+                if mol_text:
                     external_context_parts.append(
                         "## Molecular Design & Synthesis Planning\n" + mol_text
                     )
-                    saved_extras.append(str(mp))
-                    print(f"    🧪 Molecule context from: {mp.name}")
-                else:
-                    external_context_parts.append(
-                        "## Molecular Design & Synthesis Planning\n" + molecule_context
-                    )
+                    print("    🧪 Molecule context resolved")
 
             ext_ctx = "\n\n".join(external_context_parts) if external_context_parts else None
 
+            # DEPRECATED: ideation through the experiment tool. It is what
+            # the portfolio contract replaces, so forward rather than author
+            # a portfolio into the wrong schema one more time. Removed once
+            # no caller passes it.
+            if selection_profile == "ideation" and kind != "portfolio":
+                logging.warning(
+                    "selection_profile='ideation' on generate_initial_plan is "
+                    "deprecated — forwarding to the portfolio contract; call "
+                    "generate_ideation_portfolio directly.")
+                print("    ↪️  ideation profile is deprecated on this tool — "
+                      "authoring a portfolio instead.")
+                kind = "portfolio"
+
             try:
+                n_cand = resolve_n_candidates(
+                    n_candidates, self.orch.planner.state,
+                    new_campaign=starts_new)
+                if n_candidates is None and n_cand > 1:
+                    print(f"    🧭 New campaign — defaulting to best-of-{n_cand} "
+                          "candidate plans (pass n_candidates=1 for a single plan).")
                 plan = self.orch.planner.generate_plan(
                     objective=obj,
                     knowledge_paths=knowledge_list,
@@ -687,37 +2335,90 @@ class OrchestratorTools:
                     enable_human_feedback=self._get_human_feedback_enabled(),
                     reset_state=False,
                     skill=effective_skill,
-                    external_context=ext_ctx
+                    external_context=ext_ctx,
+                    n_candidates=n_cand,
+                    candidate_report_dir=(str(self._output_dir() / "plan_candidates")
+                                          if n_cand > 1 else None),
+                    selection_profile=(selection_profile
+                                       if selection_profile in ("lab", "ideation")
+                                       else "lab"),
+                    new_campaign=new_campaign,
+                    kind=kind,
                 )
+
+                # An explicit lab profile marks THIS plan a bench plan even
+                # inside an ideation campaign: the campaign ideated, the user
+                # picked a direction, and now wants the executable protocol
+                # for it. Without a way to say so the campaign stamp would
+                # hand a runnable protocol a research dossier. Omitting the
+                # profile inherits the campaign; only the explicit word
+                # overrides it. `_stamp_campaign` never overwrites a type
+                # that is already set, so this survives the later passes.
+                if selection_profile == "lab" and isinstance(plan, dict):
+                    plan.setdefault("type", "lab")
+                    _cur = (self.orch.planner.state or {}).get("current_plan")
+                    if isinstance(_cur, dict):
+                        _cur.setdefault("type", "lab")
 
                 # Store skill on orchestrator for downstream tools
                 if effective_skill:
                     self.orch._active_skill = effective_skill
 
-                if plan.get("error"):
+                # generate_plan signals failure as either `error` (RAG / parse
+                # failure) or `status="failed"` + `last_error` (a returned state
+                # dict) — check both so a failed plan never reports as success.
+                if plan.get("error") or plan.get("status") == "failed":
                     return json.dumps({
                         "status": "error",
-                        "message": plan.get("error")
+                        "message": (plan.get("error") or plan.get("last_error")
+                                    or "Plan generation failed")
                     })
 
+                # Claim literature for the (possibly new) campaign: pending
+                # searches plus explicitly passed files (issue #396).
+                self._adopt_literature(literature_context)
+
                 # Save
-                output_path = self.orch.base_dir / "plan.json"
-                with open(output_path, 'w') as f:
+                output_path = self._output_dir() / "plan.json"
+                with open(output_path, 'w', encoding="utf-8") as f:
                     json.dump(plan, f, indent=2)
 
-                # If literature came from the deprecated internal path, save it
+                # Persist external grounding that arrived without a literature
+                # file (molecule context / raw text stamped into the plan's
+                # literature_search), so the campaign registry can carry it
+                # into later refines. (The internal literature fallback that
+                # originally motivated this save is removed.)
                 if not literature_context and plan.get("literature_search"):
-                    lit_path = self.orch.base_dir / "literature_search.md"
-                    with open(lit_path, 'w') as f:
-                        f.write("# Literature Search Results\n\n")
-                        f.write(plan["literature_search"])
+                    lit_path = self._output_dir() / "literature_search.md"
+                    write_text_utf8(
+                        lit_path,
+                        "# Literature Search Results\n\n"
+                        + plan["literature_search"])
+                    self._record_literature_file(lit_path)
                     saved_extras.append(str(lit_path))
 
-                # Generate HTML
-                from .html_generator import HTMLReportGenerator
-                html_path = self.orch.base_dir / "plan.html"
-                generator = HTMLReportGenerator(self.orch.planner.state)
-                generator.generate(str(html_path))
+                # Generate HTML — except for ideation runs: the report
+                # template renders the plan as an executable protocol (an
+                # ordered experimental-steps list, pipe-rows merged into
+                # tables) with no ideation vocabulary, which misrepresents a
+                # free-form research dossier; there the white paper is the
+                # human-facing artifact and plan.json keeps the record.
+                # (see the deprecation forward above)
+                # Ask the PLAN what it is, not the best-of-N judge knob.
+                # `selection_profile` weights candidate selection and is a
+                # documented no-op with n_candidates=1 — so a consolidation
+                # call inside an ideation campaign (live: "consolidate the
+                # session's threads into one cross-cutting class") scored as
+                # a lab run and got a protocol report, no dossier, and no
+                # white paper, while the console it printed still used the
+                # ideation vocabulary. The plan's own `type` stamp, inherited
+                # from the campaign, is the honest signal; the profile clause
+                # remains for the first call, which establishes the stamp.
+                _ideation_run = (
+                    plan.get("type") == "ideation"
+                    or (selection_profile == "ideation" and n_cand > 1)
+                )
+                html_path = self._emit_plan_report(ideation=_ideation_run)
 
                 num_experiments = len(plan.get('proposed_experiments', []))
 
@@ -726,14 +2427,80 @@ class OrchestratorTools:
                     "iteration": plan.get('iteration'),
                     "num_experiments": num_experiments,
                     "output_path": str(output_path),
-                    "html_report": str(html_path),
                     "knowledge_used": knowledge_list is not None,
                     "primary_data_used": primary_dataset is not None,
                     "tea_context_included": self.orch.latest_tea_results is not None,
                     "hint": "Use generate_implementation_code() to add executable code"
                 }
+                if carried_literature:
+                    _now = self._campaign_id()
+                    result["campaign_transition"] = {
+                        "previous_campaign": outgoing_campaign_id,
+                        "new_campaign": _now,
+                        "literature_carried_over": carried_literature,
+                        "note": (
+                            f"This objective opened campaign {_now}. The "
+                            f"literature above was gathered for campaign "
+                            f"{outgoing_campaign_id} and is now also "
+                            f"registered to this one, so later refine and "
+                            f"document calls will auto-load it. If it does "
+                            f"not cover this topic, run search_literature "
+                            f"for THIS objective before grounding further "
+                            f"work on it."
+                        ),
+                    }
+                    print(f"    🧭 Literature carried over from campaign "
+                          f"{outgoing_campaign_id}: "
+                          + ", ".join(c["file"] for c in carried_literature))
+                if html_path is not None:
+                    result["html_report"] = str(html_path)
                 if saved_extras:
                     result["external_results_files"] = saved_extras
+                pc = (self.orch.planner.state or {}).get("plan_candidates")
+                if n_cand > 1 and pc:
+                    result["best_of_n"] = {
+                        "requested": n_cand,
+                        "produced": len(pc.get("candidates", [])),
+                        "selected_candidate": pc.get("selected_index"),
+                        "human_override": pc.get("human_override", False),
+                        "tier": pc.get("tier"),
+                        "judge_reasoning": (pc.get("judge") or {}).get("reasoning", ""),
+                        "candidate_reports": pc.get("reports", []),
+                    }
+
+                # Ideation runs get a detailed all-candidates dossier —
+                # runner-ups are deliverables there, and rendering it
+                # deterministically from the same state the white paper uses
+                # keeps the two consistent by construction.
+                # ...but the DOSSIER is a report over the candidate set, so it
+                # needs one from THIS call. `plan_candidates` survives in state
+                # across delegations, so a single-plan follow-up would render
+                # its own flagship beside an EARLIER question's runner-ups — a
+                # dossier answering a question the user has moved on from.
+                if _ideation_run and n_cand > 1:
+                    try:
+                        result["ideation_report"] = self._write_ideation_report()
+                    except Exception as e:  # noqa: BLE001 - plan result survives
+                        logging.warning(f"Ideation report failed: {e}")
+
+                # Ideation runs additionally produce a sponsor-facing white
+                # paper by default (white_paper=False opts out; =True forces
+                # one for any profile). Non-fatal: the plan already saved.
+                _wp_auto = (white_paper is None and _ideation_run)
+                if white_paper or _wp_auto:
+                    try:
+                        wp_path = self._write_white_paper()
+                        result["white_paper"] = str(wp_path)
+                        result["hint"] = (
+                            "White paper saved alongside the plan — adapt it "
+                            "for a pitch/pre-proposal; regenerate with "
+                            "generate_white_paper(audience_context=...) to "
+                            "target a specific sponsor. "
+                            + result.get("hint", "")
+                        )
+                    except Exception as e:  # noqa: BLE001 - plan result survives
+                        logging.warning(f"White paper generation failed: {e}")
+                        result["white_paper_error"] = str(e)
                 return json.dumps(result)
                 
             except Exception as e:
@@ -748,20 +2515,254 @@ class OrchestratorTools:
             func=generate_initial_plan,
             name="generate_initial_plan",
             description=(
-                "Generates experimental plan (science strategy only, no implementation code). "
+                "Generates an EXPERIMENTAL plan — a testable hypothesis with "
+                "the measurements that would test it (science strategy only, "
+                "no implementation code). "
+                "NOT for a document that merely contains the word plan: a "
+                "build/staging roadmap, a cost or footprint estimate, a "
+                "consolidation memo or a summary is authored with "
+                "write_technical_document. If the request has no hypothesis to "
+                "test and nothing to measure, it is not this tool. "
                 "Automatically includes previous TEA results if available. "
                 "Can use: papers/reports, experimental data, lab constraints."
             ),
             parameters={
                 "specific_objective": {"type": "string", "description": "Research objective"},
-                "knowledge_paths": {"type": "string", "description": "Comma-separated paths to papers/reports/docs folders"},
-                "primary_data_set": {"type": "string", "description": "Path to experimental data file or folder"},
+                "knowledge_paths": {"type": "string", "description": (
+                    "Comma-separated paths to papers/reports/docs folders — "
+                    "for document CORPORA too large to read directly "
+                    "(triggers a full embedding knowledge-base build for "
+                    "retrieval). A handful of documents you have ALREADY "
+                    "read this session belongs in additional_context, not "
+                    "here.")},
+                "primary_data_set": {
+                    "type": "string",
+                    "description": (
+                        "Path to a RAW EXPERIMENTAL data file or folder — "
+                        "instrument measurements, composition assays, isotherms "
+                        "the user collected. NOT for intermediate artifacts "
+                        "produced by upstream tool calls in this session "
+                        "(screening CSVs, scalarizer outputs, BO logs); those "
+                        "belong in `knowledge_paths` or `additional_context`."
+                    ),
+                },
                 "additional_context": {"type": "string", "description": "Lab constraints, equipment, reagents, budget, etc."},
-                "skill": {"type": "string", "description": "Domain skill name or path to custom .md skill file"},
-                "literature_context": {"type": "string", "description": "File path or text from search_literature() tool. Provides external scientific literature context."},
-                "molecule_context": {"type": "string", "description": "File path or text from query_molecules() tool. Provides molecular design / synthesis context."}
+                "skill": {
+                    "type": "string",
+                    "description": _build_planning_skill_description(
+                        getattr(self.orch, "_custom_skills", None)
+                    ),
+                },
+                "literature_context": {
+                    "type": ["string", "array"],
+                    "items": {"type": "string"},
+                    "description": (
+                        "Literature from search_literature(): a file path, a "
+                        "LIST of file paths (or comma-separated), or raw "
+                        "text. File contents are read and concatenated."
+                    ),
+                },
+                "molecule_context": {"type": "string", "description": "File path or text from query_molecules() tool. Provides molecular design / synthesis context."},
+                "new_campaign": {
+                    "type": "boolean",
+                    "description": (
+                        "Campaign boundary. Set true when this plan starts "
+                        "a NEW research topic unrelated to the current "
+                        "campaign (e.g. a second brainstorm in the same "
+                        "session) — the previous campaign's plans and "
+                        "literature stay archived and are NOT carried into "
+                        "the new topic's plans, white papers, or "
+                        "refinements. Set false to force continuation of "
+                        "the current campaign despite a reworded "
+                        "objective. Omit to auto-detect from objective "
+                        "similarity."
+                    ),
+                },
+                "n_candidates": {
+                    "type": "integer",
+                    "description": (
+                        "Best-of-N width (1-4). OMITTED: a campaign's FIRST "
+                        "plan defaults to best-of-3 (distinct candidate "
+                        "strategies, LLM judge picks, human can override); "
+                        "later plans default to 1. Pass 1 explicitly when "
+                        "the user wants a single plan; pass 2-4 to set the "
+                        "width. A cap, not a quota: generation stops early "
+                        "when the evidence supports no further distinct "
+                        "approach. Keep specific_objective about ONE "
+                        "scientific goal — do NOT ask for multiple "
+                        "plans/strategies in the objective text; this "
+                        "parameter provides the multiplicity."
+                    ),
+                },
+                "selection_profile": {
+                    "type": "string",
+                    "enum": ["lab", "ideation"],
+                    "description": (
+                        "How the best-of-N judge weights its pick. 'lab' "
+                        "(default): feasibility/actionability first — use "
+                        "when the plan will actually be executed on stated "
+                        "equipment. 'ideation': information gain and "
+                        "mechanistic novelty first, feasibility only as a "
+                        "tiebreaker — SWITCH to this when the user is "
+                        "brainstorming, ideating, or asking for the most "
+                        "scientifically interesting direction rather than "
+                        "tomorrow's runnable protocol. Same candidates and "
+                        "scores either way; only the authoring latitude and "
+                        "the pick's weighting change, and the human can "
+                        "still override. NOTE: ideation weighting requires "
+                        "n_candidates >= 2 — with a single plan there is "
+                        "nothing to select — so never pass n_candidates=1 "
+                        "together with ideation. OMIT this parameter inside "
+                        "an established campaign: the plan then inherits "
+                        "that campaign's kind, so a follow-up or "
+                        "consolidation in an ideation campaign still gets "
+                        "the dossier and white paper rather than a bench "
+                        "protocol report. Pass 'lab' EXPLICITLY to force a "
+                        "bench/engineering plan even inside an ideation "
+                        "campaign — the case is the user picking one ideated "
+                        "direction and asking for its runnable bench "
+                        "protocol. Note this tool is for EXPERIMENTAL "
+                        "design and measurements; a roadmap, estimate or "
+                        "summary document is not a plan and belongs in "
+                        "save_file. Ideation plans also produce a "
+                        "sponsor-facing white paper by default (see "
+                        "white_paper)."
+                    ),
+                },
+                "white_paper": {
+                    "type": "boolean",
+                    "description": (
+                        "Also distill the plan into a sponsor-facing "
+                        "technical white paper (pitch / pre-proposal). "
+                        "OMITTED: automatic for ideation-profile runs, off "
+                        "otherwise. Pass false to skip it on an ideation "
+                        "run; pass true to force one for any profile."
+                    ),
+                },
             },
             required=[]
+        )
+
+        # --- WHITE PAPER TOOL ---
+        def generate_white_paper(audience_context: str = None):
+            """Distill the current campaign plan into a sponsor-facing
+            white paper (technical pre-proposal)."""
+            print("  ⚡ Tool: Generating white paper...")
+            try:
+                wp_path = self._write_white_paper(audience_context)
+                text = read_text_utf8(wp_path)
+                return json.dumps({
+                    "status": "success",
+                    "white_paper": str(wp_path),
+                    "word_count": len(text.split()),
+                    "preview": text[:600],
+                })
+            except Exception as e:
+                logging.error(f"White paper error: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=generate_white_paper,
+            name="generate_white_paper",
+            description=(
+                "Distill the CURRENT campaign plan into a technical white "
+                "paper aimed at sponsors/program managers with technical "
+                "backgrounds — a pitch / pre-proposal: significance and "
+                "payoff forward, mechanisms rigorous, no bench-level "
+                "protocol detail. After a best-of-N run it weaves distinct "
+                "runner-up strategies in as secondary thrusts and turns the "
+                "reviewer caveats into a risks-and-mitigation section. "
+                "Requires an existing plan (generate_initial_plan first). "
+                "Ideation runs already produce one automatically — call "
+                "this to REGENERATE with sponsor targeting via "
+                "audience_context, or to add one to a lab-profile plan."
+            ),
+            parameters={
+                "audience_context": {
+                    "type": "string",
+                    "description": (
+                        "Optional sponsor targeting, e.g. 'emphasize "
+                        "fundamental-science significance and milestones' "
+                        "or 'lead with cost and scalability impact'."
+                    ),
+                },
+            },
+            required=[],
+        )
+
+        # --- WORKFLOW DIAGRAM TOOL ---
+        def generate_workflow_diagram(detail: str = "simple",
+                                      focus: str = None):
+            """QC'd Mermaid workflow diagram of the current campaign plan."""
+            print("  ⚡ Tool: Generating workflow diagram...")
+            from ...utils.mermaid_render import (
+                mermaid_available, INSTALL_HINT)
+            if not mermaid_available():
+                return json.dumps({"status": "error",
+                                   "message": INSTALL_HINT})
+            plan = (self.orch.planner.state or {}).get("current_plan") or {}
+            if not plan:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No campaign plan yet",
+                    "hint": "Run generate_initial_plan first."})
+            try:
+                # Detail-suffixed stem so an elaborate rerun does not
+                # silently overwrite the simple diagram (or vice versa).
+                _stem = ("campaign_workflow" if detail == "simple"
+                         else f"campaign_workflow_{detail}")
+                res = self._get_diagram_agent().generate_workflow_diagram(
+                    plan=plan, out_dir=self._output_dir(), detail=detail,
+                    stem=_stem, extra_instructions=focus)
+                if res.get("status") != "success":
+                    return json.dumps({"status": "error",
+                                       "message": res.get("error")})
+                from .user_interface import record_deliverable
+                record_deliverable(self.orch.base_dir, res["png_path"],
+                                   "Campaign workflow diagram")
+                return json.dumps({
+                    "status": "success",
+                    "diagram": res["png_path"],
+                    "mermaid_source": res["mmd_path"],
+                    "render_attempts": res["attempts"],
+                    "visual_qc_rounds": res["qc_rounds"],
+                })
+            except Exception as e:
+                logging.error(f"Workflow diagram error: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=generate_workflow_diagram,
+            name="generate_workflow_diagram",
+            description=(
+                "Draw a workflow diagram (rendered PNG) of the CURRENT "
+                "campaign plan — generated as Mermaid code, retried on "
+                "render errors, and passed through a visual quality gate "
+                "before acceptance. Diagrams are COMPACT stage-level "
+                "overviews by default; white papers already embed one "
+                "automatically. Call this when the user explicitly asks "
+                "for a (new or different) workflow/campaign diagram. "
+                "Requires an existing plan."
+            ),
+            parameters={
+                "detail": {
+                    "type": "string",
+                    "enum": ["simple", "elaborate"],
+                    "description": (
+                        "'simple' (default): compact stage-level overview. "
+                        "'elaborate' ONLY when the user explicitly asks "
+                        "for a detailed/step-by-step diagram."
+                    ),
+                },
+                "focus": {
+                    "type": "string",
+                    "description": (
+                        "Optional emphasis, e.g. 'highlight the "
+                        "optimization loop' or 'show the decision gates'."
+                    ),
+                },
+            },
+            required=[],
         )
 
         # 2. GENERATE IMPLEMENTATION CODE
@@ -795,8 +2796,7 @@ class OrchestratorTools:
             
             print(f"  ⚡ Tool: Generating implementation code for existing plan...")
 
-            kb_available = (self.orch.planner.kb_code.index and 
-                            self.orch.planner.kb_code.index.ntotal > 0)
+            kb_available = bool(self.orch.planner.kb_code.chunks)
 
             if not kb_available and not code_paths:
                 return json.dumps({
@@ -843,7 +2843,9 @@ class OrchestratorTools:
                 
                 print(f"    💻 Code sources: {code_list}")
             elif kb_available:
-                print(f"    💻 Using existing Code KB ({self.orch.planner.kb_code.index.ntotal} vectors)")
+                print(f"    💻 Using existing Code KB "
+                      f"({self.orch.planner.kb_code.index.ntotal if self.orch.planner.kb_code.index else 0} vectors, "
+                      f"{len(self.orch.planner.kb_code.chunks)} chunks)")
             
             try:
                 updated_plan = self.orch.planner.generate_implementation_code(
@@ -859,15 +2861,12 @@ class OrchestratorTools:
                     })
                 
                 # Save
-                output_path = self.orch.base_dir / "plan.json"
-                with open(output_path, 'w') as f:
+                output_path = self._output_dir() / "plan.json"
+                with open(output_path, 'w', encoding="utf-8") as f:
                     json.dump(updated_plan, f, indent=2)
                 
                 # Regenerate HTML
-                from .html_generator import HTMLReportGenerator
-                html_path = self.orch.base_dir / "plan.html"
-                generator = HTMLReportGenerator(self.orch.planner.state)
-                generator.generate(str(html_path))
+                html_path = self._emit_plan_report()
                 
                 # Check if any experiments actually got code
                 experiments = updated_plan.get("proposed_experiments", [])
@@ -882,11 +2881,11 @@ class OrchestratorTools:
                         "message": "Code generation failed — no executable code was produced for any experiment.",
                         "hint": "This may be due to an LLM API timeout or error. Try again.",
                         "output_path": str(output_path),
-                        "html_report": str(html_path)
+                        "html_report": str(html_path) if html_path else None
                     })
 
                 # Save scripts to output folder
-                final_out = str(self.orch.base_dir / "output_scripts")
+                final_out = str(self._output_dir() / "output_scripts")
                 print(f"\n--- Saving Scripts to: {final_out} ---")
                 write_experiments_to_disk(updated_plan, final_out)
 
@@ -894,7 +2893,7 @@ class OrchestratorTools:
                     "status": "success",
                     "message": "Implementation code added to plan",
                     "output_path": str(output_path),
-                    "html_report": str(html_path),
+                    "html_report": str(html_path) if html_path else None,
                     "scripts_saved_to": final_out,
                     "code_sources_used": code_list
                 })
@@ -999,14 +2998,15 @@ class OrchestratorTools:
                 ext_ctx = None
                 if literature_context:
                     lp = Path(literature_context)
-                    ext_ctx = lp.read_text() if lp.is_file() else literature_context
+                    ext_ctx = (read_text_utf8(lp) if lp.is_file()
+                               else literature_context)
                     print(f"    📚 Literature context from: {lp.name if lp.is_file() else 'inline text'}")
 
                 res = self.orch.planner.perform_technoeconomic_analysis(
                     objective=obj,
                     knowledge_paths=knowledge_list,
                     primary_data_set=primary_dataset,
-                    output_json_path=str(self.orch.base_dir / "tea_analysis.json"),
+                    output_json_path=str(self._output_dir() / "tea_analysis.json"),
                     external_context=ext_ctx
                 )
                 
@@ -1029,8 +3029,8 @@ class OrchestratorTools:
                 return json.dumps({
                     "status": "success",
                     "summary": summary,
-                    "output_path": str(self.orch.base_dir / "tea_analysis.json"),
-                    "html_report": str(self.orch.base_dir / "tea_analysis.html"),
+                    "output_path": str(self._output_dir() / "tea_analysis.json"),
+                    "html_report": str(self._output_dir() / "tea_analysis.html"),
                     "hint": "These results will automatically inform future generate_initial_plan calls"
                 })
                 
@@ -1108,21 +3108,30 @@ class OrchestratorTools:
                 else:
                     payload = [payload] + extras
 
-            # Build external context from literature/molecule files or raw text
-            ext_parts = []
+            # Build external context. Literature is tracked SEPARATELY from
+            # molecule/additional context so provenance stamping downstream
+            # never mistakes a critique or constraint note for literature.
+            lit_text = None
             if literature_context:
-                lp = Path(literature_context)
-                ext_parts.append(lp.read_text() if lp.is_file() else literature_context)
+                lit_text = self._resolve_context_text(literature_context)
                 print(f"    📚 Literature context provided")
             else:
-                # Auto-load hypothesis context from session if available
-                lit_path = self.orch.base_dir / "literature_search_hypothesis_context.md"
-                if lit_path.is_file():
-                    ext_parts.append(lit_path.read_text())
-                    print(f"    📚 Auto-loaded literature hypothesis context from session")
+                # Auto-load ALL saved literature from the CURRENT campaign
+                # (campaign-scoped registry, issue #396; plural union,
+                # issue #425 — the newest-file singular load silently
+                # dropped 77% of a live session's corpus). A campaign
+                # that supplied no literature refines without any; another
+                # topic's corpus is never injected.
+                lit = self._load_campaign_literature()
+                if lit is not None:
+                    lit_text = lit["text"]
+                    print(f"    📚 Auto-loaded literature context from "
+                          f"session ({lit['n_files']} file(s), "
+                          f"{len(lit_text):,} chars: "
+                          f"{', '.join(lit['files'])})")
+            ext_parts = [lit_text] if lit_text else []
             if molecule_context:
-                mp = Path(molecule_context)
-                mol_text = mp.read_text() if mp.is_file() else molecule_context
+                mol_text = self._resolve_context_text(molecule_context)
                 ext_parts.append("## Molecular Design & Synthesis Planning\n" + mol_text)
                 print(f"    🧪 Molecule context provided")
             if additional_context:
@@ -1135,7 +3144,8 @@ class OrchestratorTools:
                     results=payload,
                     enable_human_feedback=self._get_human_feedback_enabled(),
                     use_literature_rag=use_literature_rag,
-                    external_context=ext_ctx
+                    external_context=ext_ctx,
+                    literature_text=lit_text
                 )
                 
                 if plan.get("error"):
@@ -1143,24 +3153,30 @@ class OrchestratorTools:
                         "status": "error",
                         "message": plan.get("error")
                     })
-                
+
+                # Explicitly supplied literature files now belong to this
+                # campaign's corpus (issue #396).
+                self._adopt_literature(literature_context)
+
+                # (literature_search provenance is stamped inside
+                # refine_plan itself — the single point where the refined
+                # plan enters current_plan and history — from the
+                # literature_text passed above.)
+
                 # Save
-                output_path = self.orch.base_dir / "plan.json"
-                with open(output_path, 'w') as f:
+                output_path = self._output_dir() / "plan.json"
+                with open(output_path, 'w', encoding="utf-8") as f:
                     json.dump(plan, f, indent=2)
 
                 # Generate HTML
-                from .html_generator import HTMLReportGenerator
-                html_path = self.orch.base_dir / "plan.html"
-                generator = HTMLReportGenerator(self.orch.planner.state)
-                generator.generate(str(html_path))
+                html_path = self._emit_plan_report()
 
                 return json.dumps({
                     "status": "success",
                     "iteration": plan.get('iteration'),
                     "num_experiments": len(plan.get('proposed_experiments', [])),
                     "output_path": str(output_path),
-                    "html_report": str(html_path),
+                    "html_report": str(html_path) if html_path else None,
                     "hint": "Use refine_implementation_code() to update executable code"
                 })
                 
@@ -1191,7 +3207,17 @@ class OrchestratorTools:
                 },
                 "literature_context": {
                     "type": "string",
-                    "description": "File path or text from search_literature() tool. Provides external scientific literature context for refinement."
+                    "description": (
+                        "External scientific literature for refinement: "
+                        "file path(s) or '<path>#qN' section refs "
+                        "(comma-separated; see list_literature_searches), "
+                        "or raw text. OMITTED: all of the current "
+                        "campaign's saved literature is auto-loaded — the "
+                        "right default. When the campaign holds several "
+                        "literature files and the refinement is narrow, "
+                        "consider selecting via list_literature_searches "
+                        "first."
+                    )
                 },
                 "molecule_context": {
                     "type": "string",
@@ -1227,22 +3253,19 @@ class OrchestratorTools:
                     })
 
                 # Save
-                output_path = self.orch.base_dir / "plan.json"
-                with open(output_path, 'w') as f:
+                output_path = self._output_dir() / "plan.json"
+                with open(output_path, 'w', encoding="utf-8") as f:
                     json.dump(plan, f, indent=2)
 
                 # Generate HTML
-                from .html_generator import HTMLReportGenerator
-                html_path = self.orch.base_dir / "plan.html"
-                generator = HTMLReportGenerator(self.orch.planner.state)
-                generator.generate(str(html_path))
+                html_path = self._emit_plan_report()
 
                 return json.dumps({
                     "status": "success",
                     "iteration": plan.get('iteration'),
                     "num_experiments": len(plan.get('proposed_experiments', [])),
                     "output_path": str(output_path),
-                    "html_report": str(html_path),
+                    "html_report": str(html_path) if html_path else None,
                     "hint": "Use generate_implementation_code() or refine_implementation_code() to update executable code for the adjusted plan."
                 })
 
@@ -1308,18 +3331,15 @@ class OrchestratorTools:
                     })
                 
                 # Save
-                output_path = self.orch.base_dir / "plan_refined.json"
-                with open(output_path, 'w') as f:
+                output_path = self._output_dir() / "plan_refined.json"
+                with open(output_path, 'w', encoding="utf-8") as f:
                     json.dump(updated_plan, f, indent=2)
                 
                 # Regenerate HTML
-                from .html_generator import HTMLReportGenerator
-                html_path = self.orch.base_dir / "plan_refined.html"
-                generator = HTMLReportGenerator(self.orch.planner.state)
-                generator.generate(str(html_path))
+                html_path = self._emit_plan_report("plan_refined.html")
                 
                 # Save scripts
-                final_out = str(self.orch.base_dir / "output_scripts")
+                final_out = str(self._output_dir() / "output_scripts")
                 print(f"\n--- Saving Scripts to: {final_out} ---")
                 write_experiments_to_disk(updated_plan, final_out)
                 
@@ -1327,7 +3347,7 @@ class OrchestratorTools:
                     "status": "success",
                     "message": "Implementation code updated",
                     "output_path": str(output_path),
-                    "html_report": str(html_path),
+                    "html_report": str(html_path) if html_path else None,
                     "scripts_saved_to": final_out
                 })
                 
@@ -1355,7 +3375,9 @@ class OrchestratorTools:
                 extraction_goal: str = None,
                 force_regenerate: bool = False,
                 inputs: list[str] = None,
-                targets: list[str] = None):
+                targets: list[str] = None,
+                directions: dict = None,
+                input_types: dict = None):
             """
             Analyzes a raw data file (CSV/XLSX) to extract metrics.
             
@@ -1421,7 +3443,10 @@ class OrchestratorTools:
 
             # Pass schema to experiment context
             current_plan = self.orch.planner.state.get("current_plan", {})
-            exp_context = current_plan.get("proposed_experiments", [{}])[0] if current_plan else {}
+            # `or [{}]` — the dict default only fires on a MISSING key, so a plan
+            # carrying an empty experiments list would IndexError here.
+            _exps = (current_plan or {}).get("proposed_experiments") or [{}]
+            exp_context = _exps[0]
 
             # Inject schema requirements into context (only when generating new script)
             role_hints = None
@@ -1499,7 +3524,9 @@ class OrchestratorTools:
                         except Exception:
                             pass  # If sidecar can't be read, skip validation
 
-                if not self.orch.active_scalarizer_script or force_regenerate:
+                # Pass-through ingests (#366) carry no script to lock.
+                if res.get("source_script") and (
+                        not self.orch.active_scalarizer_script or force_regenerate):
                     self.orch.active_scalarizer_script = res["source_script"]
                     print(f"    ✅ Analysis Logic Locked: {Path(self.orch.active_scalarizer_script).name}")
 
@@ -1537,7 +3564,19 @@ class OrchestratorTools:
                     df_new = pd.DataFrame(metrics)
                     print(f"    📊 Processing {len(df_new)} data points from multi-well experiment")
                 elif isinstance(metrics, dict):
-                    df_new = pd.DataFrame([metrics])
+                    # A multi-row table pass-through (#366) returns columns
+                    # as equal-length lists; expand to one row per
+                    # experiment, broadcasting scalar sidecar conditions.
+                    _lens = {len(v) for v in metrics.values()
+                             if isinstance(v, list)}
+                    if res.get("passthrough") and len(_lens) == 1 and _lens != {1}:
+                        _n = next(iter(_lens))
+                        df_new = pd.DataFrame(
+                            {k: (v if isinstance(v, list) else [v] * _n)
+                             for k, v in metrics.items()})
+                        print(f"    📊 Processing {_n} data points from table pass-through")
+                    else:
+                        df_new = pd.DataFrame([metrics])
                 else:
                     return json.dumps({
                         "status": "error",
@@ -1710,7 +3749,13 @@ class OrchestratorTools:
                     opt_dir = column_roles.get("optimization_direction", {})
                     if opt_dir:
                         self.orch.target_directions = opt_dir
+                    # Caller-stated directions win: a pass-through feature table
+                    # never runs the scalarizer's classification, so without
+                    # this the optimizer silently defaulted to maximize — a
+                    # 'loss' target was maximized.
+                    _dir_warn = self._apply_directions(directions, targets)
                     self._capture_input_types(column_roles, inputs)
+                    _dir_warn = list(_dir_warn) + self._apply_input_types(input_types, inputs)
                     print(f"    📊 Schema Enforced (User-Specified):")
                     print(f"       Inputs: {self.orch.expected_input_columns}")
                     print(f"       Targets: {self.orch.expected_target_columns}")
@@ -1725,6 +3770,10 @@ class OrchestratorTools:
                         opt_dir = column_roles.get("optimization_direction", {})
                         if opt_dir:
                             self.orch.target_directions = opt_dir
+                    _dir_warn = self._apply_directions(
+                        directions, self.orch.expected_target_columns)
+                    _dir_warn = list(_dir_warn) + self._apply_input_types(
+                        input_types, self.orch.expected_input_columns)
                     if not getattr(self.orch, "expected_input_types", None):
                         self._capture_input_types(column_roles, self.orch.expected_input_columns)
                     print(f"    📊 Schema Enforced (From Previous Analysis):")
@@ -1769,7 +3818,7 @@ class OrchestratorTools:
                                     "available_columns": all_cols
                                 })
                             else:
-                                # SUPERVISED/AUTONOMOUS: accept directly
+                                # AUTOPILOT/AUTONOMOUS: accept directly
                                 self.orch.expected_input_columns = proposed_inputs
                                 self.orch.expected_target_columns = proposed_targets
                                 if opt_dir:
@@ -1858,6 +3907,38 @@ class OrchestratorTools:
                     if available:
                         df_to_append = df_to_append[available]
 
+                # Rows with a missing input or target cannot be optimized;
+                # admitting them only defers the failure to run_optimization
+                # ("Missing values detected"), by which point the caller can
+                # no longer tell which rows or why. Skip them here and say
+                # so (typical source: a per-unit re-analysis whose model
+                # named a quantity differently from the locked script).
+                _schema_cols = [
+                    c for c in ((self.orch.expected_input_columns or [])
+                                + (self.orch.expected_target_columns or []))
+                    if c in df_to_append.columns] or list(df_to_append.columns)
+                _n_before = len(df_to_append)
+                _keep = df_to_append[_schema_cols].notna().all(axis=1)
+                rows_skipped_missing = int((~_keep).sum())
+                if rows_skipped_missing:
+                    _bad_cols = [c for c in _schema_cols
+                                 if df_to_append.loc[~_keep, c].isna().any()]
+                    df_to_append = df_to_append[_keep]
+                    num_new = len(df_to_append)
+                    print(f"    ⚠️  Skipping {rows_skipped_missing}/{_n_before} row(s) "
+                          f"with missing values in {_bad_cols}")
+                    if df_to_append.empty:
+                        return json.dumps({
+                            "status": "error",
+                            "message": (f"All {_n_before} rows have missing values in "
+                                        f"{_bad_cols}; nothing to ingest."),
+                            "hint": ("Check the extraction: the target/input column "
+                                     "exists but is empty for every row. If this is a "
+                                     "feature table from an analysis run, the "
+                                     "quantity may be reported under another column "
+                                     "name — pass that name as the target."),
+                        })
+
                 # SCHEMA ENFORCEMENT ON SAVE
                 if df_existing is not None:
                     if set(df_to_append.columns) != set(df_existing.columns):
@@ -1880,20 +3961,40 @@ class OrchestratorTools:
                     'hash': current_hash,
                     'timestamp': datetime.now().isoformat()
                 }
-                with open(self.orch.analyzed_files_path, 'w') as f:
+                with open(self.orch.analyzed_files_path, 'w', encoding="utf-8") as f:
                     json.dump(self.orch.analyzed_files, f, indent=2)
                 
                 df_final = pd.read_csv(self.orch.bo_data_path)
                 data_count = len(df_final)
                 
-                return json.dumps({
+                _resp = {
                     "status": "success",
                     "data_points_collected": data_count,
                     "rows_added": num_new,
                     "optimization_ready": data_count >= 3,
                     "inputs": self.orch.expected_input_columns,
-                    "targets": self.orch.expected_target_columns
-                })
+                    "targets": self.orch.expected_target_columns,
+                    "target_directions": dict(self.orch.target_directions or {}),
+                    "input_types": dict(getattr(self.orch, "expected_input_types", None) or {}),
+                }
+                _missing_dir = [t for t in (self.orch.expected_target_columns or [])
+                                if t not in (self.orch.target_directions or {})]
+                if _missing_dir:
+                    _resp["direction_warning"] = (
+                        f"No optimization direction known for {_missing_dir}; the "
+                        f"optimizer will MAXIMIZE them unless you pass "
+                        f"directions={{col: 'minimize'|'maximize'}} (here or on "
+                        f"run_optimization).")
+                if locals().get("_dir_warn"):
+                    _resp["direction_warnings"] = _dir_warn
+                if rows_skipped_missing:
+                    _resp["rows_skipped_missing"] = rows_skipped_missing
+                    _resp["warning"] = (
+                        f"{rows_skipped_missing} row(s) skipped: missing values in "
+                        f"{_bad_cols}. If those units report the quantity under a "
+                        f"different column, re-ingest a table where it is filled in "
+                        f"under the target name.")
+                return json.dumps(_resp)
                 
             except Exception as e:
                 logging.error(f"Analyze file error: {e}", exc_info=True)
@@ -1936,6 +4037,31 @@ class OrchestratorTools:
                     "type": "array", 
                     "items": {"type": "string"}, 
                     "description": "List of column names to treat as OPTIMIZATION TARGETS"
+                },
+                "input_types": {
+                    "type": "object",
+                    "description": (
+                        "Input kind per column, {\"column\": \"categorical\"|\"continuous\"}. "
+                        "Pass when an input is a choice among discrete options (ligand, "
+                        "solvent, base, material id) — especially when it is stored as a "
+                        "numeric code, which a ready feature table would otherwise be "
+                        "modelled as a continuous knob. Categorical inputs are "
+                        "level-encoded for the surrogate and decoded in the "
+                        "recommendations. Sticky for the campaign; can also be set on "
+                        "run_optimization."
+                    )
+                },
+                "directions": {
+                    "type": "object",
+                    "description": (
+                        "Optimization direction per target, {\"column\": \"maximize\"|"
+                        "\"minimize\"}. Pass whenever the objective says minimize / "
+                        "reduce / lowest (loss, cost, overpotential, band gap, "
+                        "instability, error) — a ready feature table skips the "
+                        "automatic classification and the optimizer otherwise "
+                        "MAXIMIZES every target. Sticky for the campaign; can also be "
+                        "set or changed on run_optimization."
+                    )
                 }
             },
             required=["file_path"]
@@ -2062,7 +4188,10 @@ class OrchestratorTools:
                 enhanced_objective = f"{enhanced_objective}\n{schema_instruction}".strip()
 
             current_plan = self.orch.planner.state.get("current_plan", {})
-            exp_context = current_plan.get("proposed_experiments", [{}])[0] if current_plan else {}
+            # `or [{}]` — the dict default only fires on a MISSING key, so a plan
+            # carrying an empty experiments list would IndexError here.
+            _exps = (current_plan or {}).get("proposed_experiments") or [{}]
+            exp_context = _exps[0]
 
             if inputs and targets:
                 exp_context = exp_context.copy() if exp_context else {}
@@ -2252,7 +4381,7 @@ class OrchestratorTools:
                                 'row_count': 1, 'hash': current_hash,
                                 'timestamp': datetime.now().isoformat()
                             }
-                        with open(self.orch.analyzed_files_path, 'w') as f:
+                        with open(self.orch.analyzed_files_path, 'w', encoding="utf-8") as f:
                             json.dump(self.orch.analyzed_files, f, indent=2)
 
                         df_final = pd.read_csv(self.orch.bo_data_path)
@@ -2287,7 +4416,7 @@ class OrchestratorTools:
                     'hash': current_hash,
                     'timestamp': datetime.now().isoformat()
                 }
-            with open(self.orch.analyzed_files_path, 'w') as f:
+            with open(self.orch.analyzed_files_path, 'w', encoding="utf-8") as f:
                 json.dump(self.orch.analyzed_files, f, indent=2)
 
             df_final = pd.read_csv(self.orch.bo_data_path)
@@ -2420,7 +4549,13 @@ class OrchestratorTools:
             physical_constraints: str = None,
             experimental_budget: int = None,
             targets: list[str] = None,
-            strategy_hint: str = None
+            strategy_hint: str = None,
+            skill: str = None,
+            candidate_pool: str = None,
+            input_bounds: dict = None,
+            seed: int = None,
+            directions: dict = None,
+            input_types: dict = None,
         ):
             """
             Runs Bayesian Optimization to suggest next parameters.
@@ -2429,8 +4564,12 @@ class OrchestratorTools:
             """
             print(f"  ⚡ Tool: Running Bayesian Optimization...")
             
-            # --- PRE-FLIGHT CHECKS --- 
-            if not self.orch.active_scalarizer_script:
+            # --- PRE-FLIGHT CHECKS ---
+            # A campaign ingested purely via table pass-through (#366) has
+            # data and schema but never locks a script; only refuse when
+            # nothing has been ingested at all.
+            if (not self.orch.active_scalarizer_script
+                    and not self.orch.bo_data_path.exists()):
                 return json.dumps({
                     "status": "error",
                     "message": "No analysis script locked yet",
@@ -2462,11 +4601,20 @@ class OrchestratorTools:
                     "current_data_count": len(df)
                 })
             
+            _dir_warn = self._apply_directions(directions, self.orch.expected_target_columns)
+            _dir_warn = list(_dir_warn) + self._apply_input_types(
+                input_types, self.orch.expected_input_columns)
+
             if not self.orch.expected_target_columns or not self.orch.expected_input_columns:
                 return json.dumps({
                     "status": "error",
                     "message": "Schema not established",
-                    "hint": "This shouldn't happen. Try reset_analysis_logic."
+                    "hint": ("No analyze_file has established inputs/targets in "
+                             "this session. Ingest your data with analyze_file "
+                             "(inputs=[...], targets=[...]) first; if it reports "
+                             "the file as already analyzed, the session was "
+                             "reused from an earlier process — call analyze_file "
+                             "with force_regenerate=true.")
                 })
 
             # TARGET NARROWING — allows switching from MOO to SOO
@@ -2532,7 +4680,7 @@ class OrchestratorTools:
                         if ptype == "categorical":
                             levels = param.get("levels") or []
                             if levels:
-                                planner_levels[name] = [str(lv) for lv in levels]
+                                planner_levels[name] = [_norm_level(lv) for lv in levels]
                                 print(f"  🔬 Scientific Constraint Found: {name} ∈ {planner_levels[name]}")
                             continue
                         min_v = param.get("min_value")
@@ -2540,6 +4688,42 @@ class OrchestratorTools:
                         if min_v is not None and max_v is not None:
                             scientific_bounds[name] = (float(min_v), float(max_v))
                             print(f"  🔬 Scientific Constraint Found: {name} must be between {min_v} and {max_v}")
+
+            # Caller-stated ranges (instrument limits, safe operating window,
+            # allowed concentration range) — the strongest source: whoever
+            # runs the instrument knows what it can actually reach. Sticky:
+            # remembered on the orchestrator (and checkpointed) so later
+            # rounds inherit them until a call overrides them.
+            bounds_warnings: List[str] = []
+            if input_bounds:
+                cleaned: Dict[str, tuple] = {}
+                if not isinstance(input_bounds, dict):
+                    bounds_warnings.append(
+                        "input_bounds must be a dict {column: [min, max]}; ignored.")
+                else:
+                    known = list(self.orch.expected_input_columns or [])
+                    for name, rng in input_bounds.items():
+                        if str(name) not in known:
+                            bounds_warnings.append(
+                                f"input_bounds for unknown input column "
+                                f"'{name}' ignored; campaign inputs are {known}.")
+                            continue
+                        try:
+                            lo, hi = float(rng[0]), float(rng[1])
+                        except (TypeError, ValueError, IndexError):
+                            bounds_warnings.append(
+                                f"input_bounds['{name}'] must be [min, max]; ignored.")
+                            continue
+                        if not lo < hi:
+                            bounds_warnings.append(
+                                f"input_bounds['{name}'] needs min < max; ignored.")
+                            continue
+                        cleaned[str(name)] = (lo, hi)
+                if cleaned:
+                    prev = getattr(self.orch, "input_bounds_override", None) or {}
+                    self.orch.input_bounds_override = {**prev, **cleaned}
+            caller_bounds: Dict[str, tuple] = dict(
+                getattr(self.orch, "input_bounds_override", None) or {})
 
             # Resolve input types: scalarizer is the source of truth on type;
             # planner is the source of truth on the level universe (so BO can
@@ -2549,6 +4733,21 @@ class OrchestratorTools:
             optimization_inputs: List[str] = []
             level_maps: Dict[str, List[str]] = {}
             type_conflict_warnings: List[str] = []
+
+            # A candidate pool contributes to the categorical level universe:
+            # unmeasured candidates are its whole point, so their levels are
+            # legitimate even when no campaign row has them yet (a plan, when
+            # present, stays authoritative).
+            _pool_df = None
+            if candidate_pool:
+                _pool_path, _pool_err = self._resolve_data_path(candidate_pool)
+                if _pool_err:
+                    return _pool_err
+                try:
+                    _pool_df = pd.read_csv(_pool_path)
+                except Exception as _e:  # noqa: BLE001
+                    return json.dumps({"status": "error",
+                                       "message": f"candidate_pool unreadable: {_e}"})
 
             for col in self.orch.expected_input_columns:
                 if col not in df.columns:
@@ -2578,7 +4777,9 @@ class OrchestratorTools:
                     is_categorical = False
 
                 if is_categorical:
-                    observed = sorted(df[col].dropna().astype(str).unique().tolist())
+                    observed = sorted({_norm_level(v) for v in df[col].dropna().tolist()})
+                    if _pool_df is not None and col in _pool_df.columns and not planner_levels.get(col):
+                        observed = sorted(set(observed) | {_norm_level(v) for v in _pool_df[col].dropna().tolist()})
                     if planner_levels.get(col):
                         # Planner is authoritative on the level universe.
                         # Observed values that aren't in the planner-declared
@@ -2627,16 +4828,29 @@ class OrchestratorTools:
             self.orch.expected_input_columns = optimization_inputs
             self.orch.expected_input_levels = level_maps if level_maps else None
 
-            # Build bounds (continuous: scientific or data-derived; categorical: [0, n-1])
+            # Build bounds. Precedence per continuous input: caller-stated >
+            # planner (plan optimization_params) > data-derived (observed
+            # range +/-10%). Categorical inputs are index-encoded [0, n-1].
             input_bounds = []
+            bounds_sources: Dict[str, str] = {}
             for col in optimization_inputs:
                 if col in level_maps:
                     n = len(level_maps[col])
                     input_bounds.append([0.0, float(n - 1)])
+                    bounds_sources[col] = "categorical"
+                    if col in caller_bounds:
+                        bounds_warnings.append(
+                            f"input_bounds['{col}'] ignored: categorical input.")
                     print(f"     -> Bound for '{col}': [0, {n - 1}] (Source: CATEGORICAL — {n} levels)")
+                elif col in caller_bounds:
+                    lo, hi = caller_bounds[col]
+                    input_bounds.append([lo, hi])
+                    bounds_sources[col] = "caller"
+                    print(f"     -> Bound for '{col}': [{lo}, {hi}] (Source: CALLER)")
                 elif col in scientific_bounds:
                     sci_min, sci_max = scientific_bounds[col]
                     input_bounds.append([sci_min, sci_max])
+                    bounds_sources[col] = "planner"
                     print(f"     -> Bound for '{col}': [{sci_min}, {sci_max}] (Source: PLANNER)")
                 else:
                     data_min = float(df[col].min())
@@ -2651,7 +4865,10 @@ class OrchestratorTools:
                     safe_max = data_max + margin
 
                     input_bounds.append([safe_min, safe_max])
+                    bounds_sources[col] = "data"
                     print(f"     -> Bound for '{col}': [{safe_min:.2f}, {safe_max:.2f}] (Source: DATA)")
+            for w in bounds_warnings:
+                print(f"  ⚠️ {w}")
 
             # Build cat_dims (positional indices) and integer-encode CSV
             cat_dims = [
@@ -2662,7 +4879,7 @@ class OrchestratorTools:
                 df_encoded = df.copy()
                 for col, levels in level_maps.items():
                     idx = {lv: i for i, lv in enumerate(levels)}
-                    encoded = df[col].astype(str).map(idx)
+                    encoded = df[col].map(_norm_level).map(idx)
                     if encoded.isnull().any():
                         unknown = sorted(
                             df.loc[encoded.isnull(), col].astype(str).unique().tolist()
@@ -2767,6 +4984,61 @@ class OrchestratorTools:
                 bo_objective = self._distill_objective_for_bo(
                     self.orch.expected_target_columns
                 )
+
+                # Multi-fidelity: if the scalarizer declared a fidelity column
+                # (and it survives into the final input set), translate it to a
+                # fidelity_config keyed by the column's index in input_cols. None
+                # otherwise -> standard single-fidelity BO (unchanged behavior).
+                fidelity_config = None
+                fspec = getattr(self.orch, "fidelity_spec", None)
+                if fspec and fspec.get("column") in (self.orch.expected_input_columns or []):
+                    fidelity_config = {
+                        "fidelity_col": self.orch.expected_input_columns.index(fspec["column"])
+                    }
+                    if fspec.get("target_fidelity") is not None:
+                        fidelity_config["target_fidelity"] = fspec["target_fidelity"]
+                    if fspec.get("costs"):
+                        fidelity_config["fidelity_costs"] = fspec["costs"]
+                    print(f"    📶  Multi-fidelity active: column '{fspec['column']}' "
+                          f"(index {fidelity_config['fidelity_col']})")
+
+                # Candidate pool: resolve the CSV path here (fuzzy matching,
+                # clear error to the LLM); column matching / measured-row
+                # exclusion / degradation live in BOAgent._resolve_candidate_pool.
+                resolved_pool = None
+                if candidate_pool:
+                    resolved_pool, pool_err = self._resolve_data_path(candidate_pool)
+                    if pool_err:
+                        return pool_err
+                    print(f"    🎯 Candidate pool: {Path(resolved_pool).name}")
+                    if level_maps:
+                        # The campaign data was level-encoded above; the pool
+                        # must go through the SAME maps or its rows never match
+                        # the surrogate's space. Its levels were folded into the
+                        # universe above (unless a plan declares it), so a
+                        # leftover unknown is a genuine plan/data mismatch.
+                        pool_df = _pool_df.copy() if _pool_df is not None else pd.read_csv(resolved_pool)
+                        for col, levels in level_maps.items():
+                            if col not in pool_df.columns:
+                                continue
+                            idx = {lv: i for i, lv in enumerate(levels)}
+                            enc = pool_df[col].map(_norm_level).map(idx)
+                            if enc.isnull().any():
+                                unknown = sorted({_norm_level(v) for v in pool_df.loc[enc.isnull(), col].tolist()})
+                                return json.dumps({
+                                    "status": "error",
+                                    "message": (f"candidate_pool has levels for categorical input "
+                                                f"'{col}' outside the plan-declared level universe: "
+                                                f"{unknown[:10]}. Known levels: {levels}."),
+                                    "hint": "Encode the pool with the plan's level names, or "
+                                            "correct the plan's optimization_params.levels."})
+                            pool_df[col] = enc.astype(float)
+                        encoded_pool = self.orch.base_dir / "bo_artifacts" / "candidate_pool_encoded.csv"
+                        encoded_pool.parent.mkdir(parents=True, exist_ok=True)
+                        pool_df.to_csv(encoded_pool, index=False)
+                        resolved_pool = str(encoded_pool)
+                        print(f"    🔡 Candidate pool level-encoded → {encoded_pool.name}")
+
                 res = self.orch.bo.run_optimization_loop(
                     data_path=bo_data_path_for_run,
                     objective_text=bo_objective,
@@ -2782,6 +5054,10 @@ class OrchestratorTools:
                     plot_acq=True,
                     save_acq=True,
                     cat_dims=cat_dims if cat_dims else None,
+                    skill=skill,
+                    fidelity_config=fidelity_config,
+                    candidate_pool=resolved_pool,
+                    seed=seed,
                 )
                 
                 if res.get("status") != "success":
@@ -2832,10 +5108,54 @@ class OrchestratorTools:
                     response["trade_offs"] = cp.get("trade_offs", "")
                     if cp.get("validation_errors"):
                         response["constraint_warnings"] = cp["validation_errors"]
-                
+
+                # Candidate-pool provenance: how many library points were
+                # provided / still unmeasured (absent if the pool was
+                # ignored — the BO log warning explains why).
+                if res.get("candidate_pool"):
+                    response["candidate_pool"] = res["candidate_pool"]
+
+                # The search box actually used and where each range came
+                # from (caller / planner / data / categorical), so a caller
+                # can see a data-derived box and pass input_bounds next time.
+                response["input_bounds"] = {
+                    col: [float(lo), float(hi)]
+                    for col, (lo, hi) in zip(optimization_inputs, input_bounds)}
+                response["input_bounds_source"] = bounds_sources
+                response["input_types"] = {
+                    c: ("categorical" if c in level_maps else "continuous")
+                    for c in optimization_inputs}
+                _data_bounded = [c for c, src in bounds_sources.items() if src == "data"]
+                if _data_bounded:
+                    bounds_warnings = list(bounds_warnings) + [(
+                        f"Search box for {_data_bounded} was derived from the "
+                        f"observed data (range +/-10%): no plan or caller bounds "
+                        f"cover them, so recommendations may fall outside what "
+                        f"the instrument or process can reach. Pass "
+                        f"input_bounds={{col: [min, max]}} with the achievable "
+                        f"range to fix the box.")]
+                if bounds_warnings:
+                    response["input_bounds_warnings"] = bounds_warnings
+
                 # Include budget context
                 if res.get("budget"):
                     response["budget"] = res["budget"]
+                if res.get("seed") is not None:
+                    response["seed"] = res["seed"]
+                # Direction actually used per target; warn when it was assumed.
+                _td = dict(self.orch.target_directions or {})
+                _targets_used = list(self.orch.expected_target_columns or [])
+                response["target_directions"] = {
+                    t: _td.get(t, "maximize (assumed)") for t in _targets_used}
+                _assumed = [t for t in _targets_used if t not in _td]
+                if _assumed:
+                    response.setdefault("warnings", [])
+                    response["warnings"].append(
+                        f"No optimization direction was given for {_assumed}; "
+                        f"MAXIMIZE was assumed. If the goal is to minimize, pass "
+                        f"directions={{col: 'minimize'}} and re-run.")
+                if _dir_warn:
+                    response.setdefault("warnings", []).extend(_dir_warn)
                 
                 return json.dumps(response)
                 
@@ -2872,6 +5192,20 @@ class OrchestratorTools:
                     "description": (
                         "Number of parallel experiments (required if parallel_capable=True). "
                         "Infer from experimental plan (e.g., plate format, grid size, equipment capacity)."
+                    )
+                },
+                "candidate_pool": {
+                    "type": "string",
+                    "description": (
+                        "Path to a CSV of the finite candidate library to recommend from "
+                        "(columns must include the input parameter columns; extra columns are "
+                        "ignored). Recommendations are then restricted to unmeasured rows of "
+                        "this library — the right mode when experiments can only be drawn from "
+                        "a fixed set (a compound catalog, pre-made formulations, a measured "
+                        "design library). Pass ONLY when the user or calling system explicitly "
+                        "provided such a candidate file; otherwise omit — recommendations are "
+                        "continuous within the plan- or data-derived bounds. Single-objective "
+                        "campaigns only (ignored with a warning for multi-objective)."
                     )
                 },
                 "physical_constraints": {
@@ -2922,6 +5256,60 @@ class OrchestratorTools:
                         "'switch to Matern-1.5', 'use UCB with high exploration'. "
                         "The hint is respected unless it conflicts with budget constraints."
                     )
+                },
+                "skill": {
+                    "type": "string",
+                    "description": _build_optimization_skill_description()
+                },
+                "input_bounds": {
+                    "type": "object",
+                    "description": (
+                        "Hard search-box limits per input column, "
+                        "{\"column\": [min, max]} — the range the instrument or "
+                        "process can actually reach (e.g. {\"anneal_time_min\": "
+                        "[5, 60], \"temperature_C\": [300, 700]}). Pass whenever the "
+                        "user or calling system states an achievable / safe / "
+                        "allowed range for a parameter, in this call or earlier in "
+                        "the conversation. These take precedence over ranges from the "
+                        "campaign plan and over the default (observed data range "
+                        "+/-10%, which can extrapolate outside what is physically "
+                        "realizable). Sticky: once given they apply to every later "
+                        "call in this campaign until overridden. Only the columns "
+                        "given are affected; others keep their plan/data-derived "
+                        "range. Ignored for categorical inputs."
+                    )
+                },
+                "input_types": {
+                    "type": "object",
+                    "description": (
+                        "Input kind per column, {\"column\": \"categorical\"|\"continuous\"}. "
+                        "Declare categorical inputs (discrete choices — ligands, "
+                        "solvents, material ids — even when stored as numeric codes) so "
+                        "the surrogate treats them as levels, not a continuous axis. "
+                        "Sticky for the campaign; overrides what analyze_file inferred."
+                    )
+                },
+                "directions": {
+                    "type": "object",
+                    "description": (
+                        "Optimization direction per target, {\"column\": \"maximize\"|"
+                        "\"minimize\"}. Pass whenever the user or calling system "
+                        "states it (minimize loss / cost / overpotential / band gap; "
+                        "maximize yield / conductivity). Sticky for the campaign and "
+                        "overrides what analyze_file inferred; absent any statement "
+                        "the optimizer MAXIMIZES and says so in the response."
+                    )
+                },
+                "seed": {
+                    "type": "integer",
+                    "description": (
+                        "Random seed for the numeric part of this step (surrogate "
+                        "fitting restarts, acquisition optimisation). Pass when "
+                        "reproducible / comparable reruns are wanted (benchmarks, "
+                        "audits, re-running a step after fixing data); omit for "
+                        "normal campaigns. The strategy the agent chooses is not "
+                        "seeded — it is reported in the response."
+                    )
                 }
             },
             required=[]
@@ -2929,7 +5317,8 @@ class OrchestratorTools:
 
 
         # 9. SAVE FILE
-        def save_file(filename: str, content: str, subfolder: str = ""):
+        def save_file(filename: str, content: str, subfolder: str = "",
+                      deliverable: bool = False, title: str = ""):
             """
             Save text content (code, protocols, notes) to a file in the session
             directory.
@@ -2944,7 +5333,12 @@ class OrchestratorTools:
                     "message": "Invalid filename.",
                 })
 
-            target_dir = self.orch.base_dir
+            # Delegation-scoped, like every other artifact this turn writes
+            # (plan.json, white_paper.md, ...). Rooting at base_dir instead
+            # scattered LLM-saved files OUTSIDE the delegation directory —
+            # live, a white paper landed in planning/<slug>/ as a sibling of
+            # delegations/, duplicating the copy already written inside it.
+            target_dir = self._output_dir()
             if subfolder:
                 safe_sub = Path(subfolder).name
                 target_dir = target_dir / safe_sub
@@ -2953,11 +5347,22 @@ class OrchestratorTools:
 
             try:
                 dest.write_text(content, encoding="utf-8")
-                print(f"    💾 Saved: {dest}")
+                from .user_interface import format_path, record_deliverable
+                record_deliverable(self.orch.base_dir, dest, title,
+                                   deliverable)
+                print(f"    💾 Saved{' (deliverable)' if deliverable else ''}: "
+                      f"{format_path(dest)}")
+                # Same invariant as edit_file and the revision branch: a
+                # markdown write never leaves a stale PDF twin beside it
+                # (live, an agent rewrote a document via save_file and its
+                # forwarded PDF kept serving the old content).
+                pdf_refreshed = self._refresh_pdf_twin(dest)
                 return json.dumps({
                     "status": "success",
                     "path": str(dest),
                     "size_bytes": dest.stat().st_size,
+                    "deliverable": bool(deliverable),
+                    "pdf_refreshed": pdf_refreshed,
                 })
             except Exception as e:
                 logging.error(f"save_file failed: {e}")
@@ -2970,9 +5375,20 @@ class OrchestratorTools:
             func=save_file,
             name="save_file",
             description=(
-                "Save text content (code, protocols, scripts, notes) to a file "
-                "in the session directory. Use this to persist generated code, "
-                "instrument protocols, or any text artifact."
+                "Save text content (notes, small scripts, content you have "
+                "already composed) to a NEW file "
+                "in the session directory. To change an EXISTING document, "
+                "do not rewrite it with save_file — use edit_file for a "
+                "snippet swap, rename_file to change its filename, or "
+                "write_technical_document with revise_path "
+                "for a content revision; those paths keep the content "
+                "byte-safe and guard against accidental truncation. "
+                "Large content may not survive the "
+                "trip as a single tool-call argument — for anything long "
+                "(roughly >100 lines), save the first chunk with save_file and "
+                "the rest with append_file. For executable analysis/"
+                "optimization code, prefer generate_implementation_code, which "
+                "generates and persists the script itself."
             ),
             parameters={
                 "filename": {
@@ -2993,8 +5409,390 @@ class OrchestratorTools:
                         "e.g. 'protocols' or 'scripts'. Created if it doesn't exist."
                     ),
                 },
+                "deliverable": {
+                    "type": "boolean",
+                    "description": (
+                        "Set TRUE when this file IS the artifact the user "
+                        "asked for (a brief, a report, a protocol they "
+                        "requested) rather than a working note or "
+                        "intermediate. Deliverables are shown to the user "
+                        "directly — starred in the file list and previewed "
+                        "in the chat — so they do not have to hunt through "
+                        "the session folder for them."
+                    ),
+                },
+                "title": {
+                    "type": "string",
+                    "description": (
+                        "Short human label for the file, e.g. 'Top-3 "
+                        "priority brief'. Shown beside it in the file list "
+                        "and as the preview heading."
+                    ),
+                },
             },
             required=["filename", "content"],
+        )
+
+        # 9b. APPEND FILE
+        def append_file(filename: str, content: str, subfolder: str = ""):
+            """
+            Append text content to a file in the session directory (created
+            if it doesn't exist). Companion to save_file for chunked writes
+            of large content.
+            """
+            print(f"  ⚡ Tool: Appending to file '{filename}'...")
+
+            safe_name = Path(filename).name
+            if not safe_name:
+                return json.dumps({
+                    "status": "error",
+                    "message": "Invalid filename.",
+                })
+
+            # Delegation-scoped, like every other artifact this turn writes
+            # (plan.json, white_paper.md, ...). Rooting at base_dir instead
+            # scattered LLM-saved files OUTSIDE the delegation directory —
+            # live, a white paper landed in planning/<slug>/ as a sibling of
+            # delegations/, duplicating the copy already written inside it.
+            target_dir = self._output_dir()
+            if subfolder:
+                safe_sub = Path(subfolder).name
+                target_dir = target_dir / safe_sub
+            target_dir.mkdir(parents=True, exist_ok=True)
+            dest = target_dir / safe_name
+
+            try:
+                with open(dest, "a", encoding="utf-8") as f:
+                    f.write(content)
+                print(f"    💾 Appended: {dest}")
+                return json.dumps({
+                    "status": "success",
+                    "path": str(dest),
+                    "size_bytes": dest.stat().st_size,
+                })
+            except Exception as e:
+                logging.error(f"append_file failed: {e}")
+                return json.dumps({
+                    "status": "error",
+                    "message": str(e),
+                })
+
+        self._register_tool(
+            func=append_file,
+            name="append_file",
+            description=(
+                "Append text content to a file in the session directory "
+                "(created if it doesn't exist). Use together with save_file "
+                "to write large files in chunks — save_file for the first "
+                "chunk, then append_file for each subsequent chunk — keeping "
+                "every chunk small enough to pass reliably as a tool argument."
+            ),
+            parameters={
+                "filename": {
+                    "type": "string",
+                    "description": "Name of the file to append to.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The text content to append to the file.",
+                },
+                "subfolder": {
+                    "type": "string",
+                    "description": (
+                        "Optional subfolder within the session directory, "
+                        "e.g. 'protocols' or 'scripts'. Created if it doesn't exist."
+                    ),
+                },
+            },
+            required=["filename", "content"],
+        )
+
+        # 9c. EDIT FILE — surgical in-place replacement (single or batched)
+        def edit_file(path: str, old_text: str = None, new_text: str = None,
+                      replace_all: bool = False, edits: list = None):
+            """
+            Mechanical in-place edit of an existing session document:
+            replace exact text snippets — one old/new pair, or a batched
+            `edits` list applied atomically in one call. Content revisions
+            go through write_technical_document(revise_path=...).
+            """
+            print(f"  ⚡ Tool: Editing file '{path}'...")
+            try:
+                from ...utils.file_edit import apply_surgical_edits
+                from .user_interface import format_path, record_deliverable
+                if not edits:
+                    if old_text is None or new_text is None:
+                        return json.dumps({
+                            "status": "error",
+                            "message": ("Provide either old_text+new_text "
+                                        "or a non-empty edits list.")})
+                    edits = [{"old_text": old_text, "new_text": new_text,
+                              "replace_all": replace_all}]
+                rp = Path(path)
+                if not rp.is_absolute():
+                    rp = self._output_dir() / rp
+                rp = rp.resolve()
+                root = Path(self.orch.base_dir).resolve()
+                d = self._output_dir()
+                # Guards + backup live in the shared core; this wrapper owns
+                # path resolution, the planning-specific routing hint below,
+                # deliverable recording, and the PDF-twin invariant.
+                out = apply_surgical_edits(
+                    rp, edits,
+                    root=root, backup_dir=d,
+                    too_large_message=(
+                        "Edit too large for edit_file. For a content "
+                        "revision use write_technical_document with "
+                        "revise_path (whole-document rewrite under its "
+                        "length guard). For a VERBATIM insertion, split "
+                        "the text at unique boundaries into snippets under "
+                        "the cap and pass them TOGETHER as one `edits` "
+                        "list in a single call (each snippet inserted "
+                        "after the previous one) — not a chain of one-edit "
+                        "calls, which burns the turn's tool budget. Do not "
+                        "rewrite the whole file with save_file, which "
+                        "keeps no backup and has no truncation guard."),
+                )
+                if out["status"] != "success":
+                    return json.dumps(out)
+                # Audit trail: ONE chain-origin backup per file per
+                # delegation, recorded once (live: an 18-edit chain filed
+                # 18 near-identical backups, each re-embedded by the UI).
+                if out.get("backup_created") and out.get("previous_version"):
+                    who = ("" if d.resolve() == root
+                           else f" (edited by {d.name})")
+                    record_deliverable(self.orch.base_dir,
+                                       Path(out["previous_version"]),
+                                       f"Pre-edit copy of {rp.name}{who}")
+                n = out.get("n_edits", 1)
+                print(f"    ✏️  Edited in place"
+                      f"{f' ({n} edits)' if n > 1 else ''}: "
+                      f"{format_path(rp)}")
+                out["pdf_refreshed"] = self._refresh_pdf_twin(rp)
+                return json.dumps(out)
+            except Exception as e:
+                logging.error(f"edit_file failed: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=edit_file,
+            name="edit_file",
+            description=(
+                "Surgically edit an existing session document IN PLACE by "
+                "replacing exact text snippets — an image reference, a "
+                "path, a caption, a typo, a parameter value. Mechanical "
+                "edits only: copy old_text VERBATIM from the file (read_file "
+                "first), and each snippet is capped at 2000 characters. "
+                "Several changes to ONE file go in a single call as the "
+                "`edits` list (applied atomically, in order) — never as a "
+                "chain of one-edit calls, which burns the turn's tool "
+                "budget. A document-wide STYLE pass (readability, tone, "
+                "consistency) is a content revision even though each "
+                "change looks mechanical — use write_technical_document "
+                "with revise_path for that, as for any prose rewrite or "
+                "restructuring. If the document has a PDF twin beside it, "
+                "the PDF is re-exported automatically so it never goes "
+                "stale."
+            ),
+            parameters={
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Path of the file to edit — absolute, or relative "
+                        "to the current output directory. Must be inside "
+                        "the session directory."
+                    ),
+                },
+                "old_text": {
+                    "type": "string",
+                    "description": (
+                        "Single-edit form: the exact snippet to replace, "
+                        "copied VERBATIM from the file including "
+                        "whitespace. Must match exactly one place unless "
+                        "replace_all is true. Omit when passing `edits`."
+                    ),
+                },
+                "new_text": {
+                    "type": "string",
+                    "description": ("Single-edit form: the replacement "
+                                    "text. Omit when passing `edits`."),
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": (
+                        "Single-edit form: replace every occurrence "
+                        "instead of requiring the snippet to be unique. "
+                        "Default false."
+                    ),
+                },
+                "edits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_text": {"type": "string"},
+                            "new_text": {"type": "string"},
+                            "replace_all": {"type": "boolean"},
+                        },
+                        "required": ["old_text", "new_text"],
+                    },
+                    "description": (
+                        "Batched form: ALL the changes for this file in "
+                        "one call. Applied in order, each against the "
+                        "already-edited text; all-or-nothing — if one "
+                        "edit fails to match, nothing is applied and the "
+                        "error names which edit failed."
+                    ),
+                },
+            },
+            required=["path"],
+        )
+
+        # 9d. RENAME FILE — byte-exact, never through the LLM
+        def rename_file(path: str, new_name: str, copy: bool = False,
+                        deliverable: bool = False, title: str = ""):
+            """
+            Rename an existing session file byte-exactly in its own
+            directory, or COPY one into the current output directory.
+            Exists because the alternative was observed live: with no
+            rename tool, the agent reconstructed a 30 KB document via
+            save_file + append_file chunks, dropping content and leaving
+            divergent duplicates.
+            """
+            verb_now = "Copying" if copy else "Renaming"
+            print(f"  ⚡ Tool: {verb_now} file '{path}' → '{new_name}'...")
+            try:
+                from ...utils.file_edit import rename_or_copy_file
+                from .user_interface import format_path, record_deliverable
+                out_dir = Path(self._output_dir()).resolve()
+                rp = Path(path)
+                if not rp.is_absolute():
+                    rp = out_dir / rp
+                rp = rp.resolve()
+                # A bare target name keeps a RENAME where the file lives —
+                # it changes identity, not location (moving between
+                # delegation folders is how phantom nested copies happen).
+                # A COPY lands in the CURRENT output directory instead, so
+                # a consolidating delegation can bring a figure written by
+                # an earlier one alongside its own document and have the
+                # embed resolve. The destination is never agent-chosen:
+                # it is this delegation's folder or nowhere, which also
+                # stops a copy from writing into a sibling delegation.
+                safe_name = Path(new_name).name
+                if not safe_name:
+                    return json.dumps({"status": "error",
+                                       "message": "Invalid new_name."})
+                dest = ((out_dir if copy else rp.parent) / safe_name).resolve()
+                # An error here is a routing decision point: the agent
+                # asked to bring a file somewhere and needs to know which
+                # tool does that, not merely that two paths matched.
+                if rp == dest:
+                    if not copy and rp.parent != out_dir:
+                        return json.dumps({"status": "error", "message": (
+                            f"A rename keeps the file in its own folder "
+                            f"({rp.parent}), so this call changes nothing. "
+                            f"To bring it alongside the document you are "
+                            f"writing, call again with copy=true — it lands "
+                            f"in {out_dir}. To leave it where it is, "
+                            f"reference it by a relative path instead.")})
+                    if copy:
+                        # The file is already in this delegation's folder;
+                        # the agent usually wanted it beside a document
+                        # that lives ELSEWHERE (an earlier delegation's).
+                        # A copy can only land here, so route to the
+                        # relative-path embed instead of a dead end.
+                        return json.dumps({"status": "error", "message": (
+                            f"'{safe_name}' already lives in this "
+                            f"delegation's folder ({dest.parent}); a copy "
+                            f"only ever lands here. To embed it in a "
+                            f"document stored in ANOTHER folder, do not "
+                            f"copy — reference it with a relative path "
+                            f"from that document's folder (e.g. "
+                            f"../{dest.parent.name}/{safe_name}); the "
+                            f"PDF twin resolves it.")})
+                    return json.dumps({"status": "error", "message": (
+                        f"'{safe_name}' is already this file's name in "
+                        f"{dest.parent} — nothing to do. Give a different "
+                        f"new_name, or reference the file as it is.")})
+                out = rename_or_copy_file(
+                    rp, dest,
+                    root=Path(self.orch.base_dir).resolve(), copy=copy)
+                if out["status"] != "success":
+                    return json.dumps(out)
+                verb = "Copied" if copy else "Renamed"
+                print(f"    📛 {verb}: {format_path(Path(out['path']))}")
+                if out["pdf_twin_followed"]:
+                    print("    📄 PDF twin followed the "
+                          f"{'copy' if copy else 'rename'}")
+                record_deliverable(
+                    self.orch.base_dir, Path(out["path"]),
+                    title or f"{verb} from {rp.name}", deliverable)
+                return json.dumps(out)
+            except Exception as e:
+                logging.error(f"rename_file failed: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=rename_file,
+            name="rename_file",
+            description=(
+                "Rename or copy an existing session file BYTE-EXACTLY — "
+                "the content never passes through the model. Two uses: "
+                "RENAME (default) lands a document under its intended "
+                "filename, in its own folder; COPY (copy=true) brings a "
+                "file into the folder you are writing in now, which is "
+                "how you embed a figure an earlier delegation produced "
+                "and have the reference resolve beside your document. "
+                "Never reconstruct a file with save_file/append_file to "
+                "rename or move it: that loses content and leaves "
+                "divergent duplicates. A markdown document's PDF twin "
+                "follows automatically."
+            ),
+            parameters={
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "File to rename — absolute, or relative to the "
+                        "current output directory. Must be inside the "
+                        "session directory."
+                    ),
+                },
+                "new_name": {
+                    "type": "string",
+                    "description": (
+                        "Target filename (bare name, no directories). "
+                        "Keep the source's own name when copying a figure "
+                        "you are about to embed."
+                    ),
+                },
+                "copy": {
+                    "type": "boolean",
+                    "description": (
+                        "TRUE keeps the original and puts a copy in the "
+                        "folder you are writing in now — use it to bring "
+                        "an asset from an earlier delegation alongside "
+                        "your document. FALSE (default) renames in place; "
+                        "prefer a true rename for documents, since "
+                        "duplicates diverge."
+                    ),
+                },
+                "deliverable": {
+                    "type": "boolean",
+                    "description": (
+                        "Set TRUE when the renamed file IS the artifact "
+                        "the user asked for, so it is starred in the "
+                        "files list."
+                    ),
+                },
+                "title": {
+                    "type": "string",
+                    "description": (
+                        "Short human label for the file in the files "
+                        "list (e.g. its document title)."
+                    ),
+                },
+            },
+            required=["path", "new_name"],
         )
 
         # 10. SAVE CHECKPOINT
@@ -3011,7 +5809,7 @@ class OrchestratorTools:
                 try:
                     df = pd.read_csv(self.orch.bo_data_path)
                     data_points = len(df)
-                except:
+                except Exception:
                     pass
             
             # Get message count (handle both OpenAI and Gemini)
@@ -3022,7 +5820,7 @@ class OrchestratorTools:
                 # Gemini: history is in chat_session
                 try:
                     message_count = len(self.orch.chat_session.history) if hasattr(self.orch.chat_session, 'history') else 0
-                except:
+                except Exception:
                     message_count = 0
             
             state = {
@@ -3042,7 +5840,7 @@ class OrchestratorTools:
             }
             
             try:
-                with open(checkpoint_path, 'w') as f:
+                with open(checkpoint_path, 'w', encoding="utf-8") as f:
                     json.dump(state, f, indent=2)
                 
                 print(f"    💾 Checkpoint saved: {checkpoint_path}")
@@ -3245,11 +6043,34 @@ class OrchestratorTools:
         # =====================================================================
         # READ FILE (non-destructive inspection)
         # =====================================================================
-        def read_file(file_path: str, max_lines: int = 200) -> str:
+        # A literature report is read for its whole content, never its head:
+        # its questions sit in sequence, so a head-only read hides every
+        # question but the first. Live, an agent read one seven times, decided
+        # the file "repeats" Q1, and wrote the note without Q2-Q4 — 70% of the
+        # retrieval unused, recorded as [TBD] as though the literature were
+        # thin. These files get the whole body up to a cap.
+        # Cap sized against the real corpus: session lit reports run 89k-262k
+        # chars (median 169k), so a smaller cap would exclude precisely the
+        # multi-question reports that most need a whole read. Past the cap the
+        # read truncates but emits the section outline, so the agent can
+        # offset= to each question instead of being stuck at the head.
+        _FULL_READ_STEMS = ("literature_search",)
+        _FULL_READ_MAX_CHARS = 250_000
+
+        def read_file(file_path: str, max_lines: int = 200,
+                      tail: bool = False, search: str = None,
+                      offset: int = None) -> str:
             """
             Read and return the contents of a file. Use this to inspect
             plans, protocols, configs, logs, or any text/JSON file without
             triggering analysis pipelines.
+
+            Reading from the top was the only mode, and the truncation notice
+            named what was missing without naming a way to get it — so a
+            question about the END of a long document ("does this paper close
+            with a References section?") had no answer at any parameter value.
+            Live, an agent asked it five times and gave up. `tail` and
+            `search` answer those questions in one call.
             """
             print(f"  ⚡ Tool: Reading file '{file_path}'...")
 
@@ -3268,10 +6089,13 @@ class OrchestratorTools:
             try:
                 ext = path.suffix.lower()
 
-                # Size guard — skip for Excel/CSV since we cap at 50 rows × 40 cols
+                # Size guard — skip for Excel/CSV since we cap at 50 rows × 40 cols.
+                # Documents get more headroom: extraction is page-based and a
+                # figure-heavy PDF is megabytes of images, not of text.
                 if ext not in ('.xlsx', '.xls', '.csv'):
                     size_mb = path.stat().st_size / (1024 * 1024)
-                    if size_mb > 5:
+                    cap_mb = 25 if ext in ('.pdf', '.docx') else 5
+                    if size_mb > cap_mb:
                         return json.dumps({
                             "status": "error",
                             "message": f"File too large ({size_mb:.1f} MB)."
@@ -3319,13 +6143,127 @@ class OrchestratorTools:
                     trunc = f" (showing {', '.join(trunc_parts)})" if trunc_parts else ""
                     content = f"Shape: {total_rows} rows × {total_cols} columns{trunc}\n\n{preview_text}"
                 else:
-                    with open(path, 'r', encoding='utf-8', errors='replace') as f:
-                        lines = f.readlines()
-                    if len(lines) > max_lines:
-                        content = "".join(lines[:max_lines])
-                        content += f"\n... ({len(lines) - max_lines} more lines truncated)"
+                    doc_meta = {}
+                    if ext in ('.pdf', '.docx'):
+                        # #397 phase 0: opened as text, a PDF returns its
+                        # compressed byte streams — live, a delegation handed
+                        # a proposal PDF could not ground on it (one run
+                        # proceeded from the caller's paraphrase; another
+                        # refused an adversarial review outright). Extraction
+                        # is ALREADY shared infrastructure; route through it.
+                        from ...parsers.extract import extract_text
+                        info = extract_text(
+                            str(path),
+                            ocr_model=getattr(self.orch.planner, "model",
+                                              None))
+                        raw = info.get("text") or ""
+                        if not raw.strip():
+                            return json.dumps({
+                                "status": "error",
+                                "message": (
+                                    f"No extractable text in {path.name} "
+                                    "(empty or image-only document).")})
+                        lines = raw.splitlines(keepends=True)
+                        doc_meta = {k: info[k] for k in
+                                    ("n_pages", "n_ocr_pages", "n_paragraphs")
+                                    if info.get(k) is not None}
+                        doc_meta["extracted"] = ext.lstrip(".")
                     else:
-                        content = "".join(lines)
+                        with open(path, 'r', encoding='utf-8',
+                                  errors='replace') as f:
+                            lines = f.readlines()
+                    total = len(lines)
+
+                    if search:
+                        # The real question behind most repeat reads is "is X
+                        # in here, and where" — a search, not a read. Answering
+                        # it directly costs one call and stays cheap however
+                        # long the file is.
+                        try:
+                            rx = re.compile(search, re.I)
+                        except re.error as e:
+                            return json.dumps({
+                                "status": "error",
+                                "message": f"Invalid search pattern: {e}"})
+                        hits = [i for i, ln in enumerate(lines) if rx.search(ln)]
+                        CAP = 40
+                        shown, out = hits[:CAP], []
+                        for i in shown:
+                            lo, hi = max(0, i - 1), min(total, i + 2)
+                            out.append(f"@@ line {i + 1}\n"
+                                       + "".join(lines[lo:hi]).rstrip("\n"))
+                        body = "\n\n".join(out) if out else "(no matches)"
+                        note = (f"{len(hits)} matching line(s) in {total} total"
+                                + (f"; showing the first {CAP}" if len(hits) > CAP
+                                   else ""))
+                        return json.dumps({
+                            "status": "success",
+                            "file_path": str(path),
+                            "mode": "search",
+                            "pattern": search,
+                            "matches": len(hits),
+                            "match_lines": [i + 1 for i in shown],
+                            "total_lines": total,
+                            "content": f"{note}\n\n{body}",
+                            **doc_meta,
+                        })
+
+                    # A truncated read must say what it is missing and where,
+                    # or the agent cannot tell a short file from a short read.
+                    def _outline():
+                        heads = [(i + 1, ln.strip()) for i, ln in
+                                 enumerate(lines) if ln.startswith('#')]
+                        if len(heads) < 2:
+                            return ""
+                        return "\nSections: " + " · ".join(
+                            f"{h.lstrip('# ')[:44]} @ line {n}"
+                            for n, h in heads[:12]) + (
+                            " …" if len(heads) > 12 else "")
+
+                    # Files read for their whole content, not their head.
+                    whole = (any(s in path.name.lower()
+                                 for s in _FULL_READ_STEMS)
+                             and offset is None and not tail
+                             and len("".join(lines)) <= _FULL_READ_MAX_CHARS)
+
+                    truncated = True
+                    if whole or total <= max_lines:
+                        first, last, content = 1, total, "".join(lines)
+                        truncated = False
+                    elif offset is not None:
+                        start = max(0, offset - 1)
+                        shown = lines[start:start + max_lines]
+                        first, last = start + 1, min(total, start + max_lines)
+                        content = "".join(shown) + (
+                            f"\n... (showing lines {first}-{last} of {total}."
+                            f"{_outline()})")
+                    elif tail:
+                        shown = lines[-max_lines:]
+                        first, last = total - max_lines + 1, total
+                        more = (f"... ({first - 1} earlier lines not shown; "
+                                f"omit tail to read from the top)")
+                        content = more + "\n" + "".join(shown)
+                    else:
+                        shown = lines[:max_lines]
+                        first, last = 1, max_lines
+                        content = "".join(shown) + (
+                            f"\n... ({total - max_lines} more lines not "
+                            f"shown — this is a TRUNCATED READ, not the whole "
+                            f"file. Jump to any part with offset=<line>; read "
+                            f"the END with tail=true; find something with "
+                            f"search='<pattern>'; or raise max_lines."
+                            f"{_outline()})")
+
+                    return json.dumps({
+                        "status": "success",
+                        "file_path": str(path),
+                        "mode": "tail" if tail else "head",
+                        "total_lines": total,
+                        "shown_lines": f"{first}-{last}",
+                        "truncated": truncated,
+                        "content": content,
+                        **doc_meta,
+                    })
 
                 return json.dumps({
                     "status": "success",
@@ -3343,9 +6281,19 @@ class OrchestratorTools:
             func=read_file,
             name="read_file",
             description=(
-                "Read and return the contents of a text or JSON file. "
-                "Use this to inspect plans, protocols, scripts, configs, or logs. "
-                "Do NOT use analyze_file for reading — that triggers the scalarizer pipeline."
+                "Read a text or JSON file — plans, protocols, scripts, "
+                "configs, logs, documents. PDF and Word documents are "
+                "extracted to text automatically (tables preserved, scanned "
+                "pages OCR'd), so uploaded papers and proposals read like "
+                "any text file. Reads from the TOP by default; "
+                "literature-search reports are returned WHOLE. "
+                "For a long file do not read it repeatedly hoping to see more — "
+                "you will get the same lines back. A truncated read lists the "
+                "section headings and their line numbers: use offset=<line> to "
+                "jump to one, search='<pattern>' to find where something is "
+                "(and whether it is there at all), or tail=true to read the "
+                "END. Do NOT use analyze_file for reading — that triggers the "
+                "scalarizer pipeline."
             ),
             parameters={
                 "file_path": {
@@ -3354,8 +6302,41 @@ class OrchestratorTools:
                 },
                 "max_lines": {
                     "type": "integer",
-                    "description": "Maximum lines to return for large files (default: 200)"
-                }
+                    "description": "Maximum lines to return (default: 200)"
+                },
+                "tail": {
+                    "type": "boolean",
+                    "description": (
+                        "Read the LAST max_lines lines instead of the first. "
+                        "Use to check how a long document ENDS — that it "
+                        "closes with the References section you added, that a "
+                        "log ends in success, that a file was not truncated."
+                    ),
+                },
+                "search": {
+                    "type": "string",
+                    "description": (
+                        "Case-insensitive regex. Returns every matching line "
+                        "with its line number and one line of context either "
+                        "side, plus the total match count — instead of the "
+                        "file body. The right tool for 'is there a References "
+                        "section', 'which lines cite Boettiger', 'did this log "
+                        "raise'. Far cheaper than reading a long file, and it "
+                        "answers presence/absence definitively."
+                    ),
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": (
+                        "1-based line to start reading from — the way to read "
+                        "the MIDDLE of a file. A truncated read lists the "
+                        "section headings with their line numbers; pass one "
+                        "here to jump straight there (e.g. offset=198 to read "
+                        "a section beginning at line 198). Do NOT re-read from "
+                        "the top hoping to see more — you will get the same "
+                        "lines back."
+                    ),
+                },
             },
             required=["file_path"]
         )
@@ -3416,8 +6397,18 @@ class OrchestratorTools:
                 return summary
             return repr(data)[:2000]
 
+        from functools import lru_cache as _lru_cache
+
+        @_lru_cache(maxsize=32)
         def _inspect_directory(dir_path: str) -> dict:
-            """Summarize directory contents for LLM-driven querying."""
+            """Summarize directory contents for LLM-driven querying.
+
+            Memoized: per-orchestrator-instance cache keyed on `dir_path`.
+            The directory listing is static for the lifetime of a planning
+            session, so repeated qkd/screen_database calls on the same
+            database reuse the inspection (saves ~1-3s per call on large
+            directories). Callers must treat the return dict as read-only.
+            """
             from collections import Counter
 
             p = Path(dir_path)
@@ -3581,13 +6572,28 @@ class OrchestratorTools:
             return sorted(found.values(), key=lambda x: x["name"])
 
         def _resolve_knowledge_data_file(file_name: str):
-            """Resolve a file name to a path in the knowledge directory.
+            """Resolve a file name to a queryable target.
+
+            An absolute / relative path to an existing file or directory is
+            used directly — so a meta-delegated task, whose data lives outside
+            the knowledge directory, works (mirroring read_file / analyze_file).
+            Otherwise the name is matched within the knowledge directory.
 
             Returns (target, error) where target is either:
             - a file path string (for single files)
             - a dict with "type": "directory" (for directory databases)
             """
             from difflib import get_close_matches
+
+            # Direct path: an existing file/directory given by path is used
+            # as-is, without requiring knowledge-directory discovery.
+            p = Path(file_name).expanduser()
+            if p.is_file() and p.suffix.lower() in QUERYABLE_EXTENSIONS:
+                return str(p.resolve()), None
+            if p.is_dir():
+                return {"name": p.name, "path": str(p.resolve()),
+                        "type": "directory"}, None
+
             candidates = _discover_queryable_files()
             if not candidates:
                 return None, json.dumps({
@@ -3742,6 +6748,8 @@ class OrchestratorTools:
 
             scripts_dir = Path(self.orch.base_dir) / "knowledge_query_scripts"
             scripts_dir.mkdir(parents=True, exist_ok=True)
+            debug_dir = scripts_dir / "_debug"
+            debug_dir.mkdir(parents=True, exist_ok=True)
 
             last_error = None
             for attempt in range(2):
@@ -3750,14 +6758,14 @@ class OrchestratorTools:
                     current_prompt += f"\n\n**PREVIOUS ERROR:** {last_error}\nFix the script."
 
                 try:
-                    from .parser_utils import parse_json_from_response
+                    from scilink.knowledge import parse_json_from_response
                     response = self.orch.planner.model.generate_content(
                         [current_prompt],
                         generation_config={"max_output_tokens": 8192, "temperature": 0.0},
                     )
                     # Log raw response for debugging
-                    raw_log_path = scripts_dir / f"kq_dir_raw_{abs(hash(query)) % 10000:04d}_a{attempt}.txt"
-                    raw_log_path.write_text(response.text)
+                    raw_log_path = debug_dir / f"kq_dir_raw_{abs(hash(query)) % 10000:04d}_a{attempt}.txt"
+                    raw_log_path.write_text(response.text, encoding="utf-8")
                     # LLM returns JSON: {"code": "...TODO lines..."}
                     result, parse_error = parse_json_from_response(response)
                     if parse_error or not result or "code" not in result:
@@ -3776,7 +6784,7 @@ class OrchestratorTools:
                     return json.dumps({"status": "error", "message": f"Code generation failed: {e}"})
 
                 script_path = scripts_dir / f"kq_dir_{Path(dir_path).name}_{abs(hash(query)) % 10000:04d}.py"
-                script_path.write_text(code)
+                script_path.write_text(code, encoding="utf-8")
                 print(f"    - Running: {script_path.name} (attempt {attempt + 1})")
 
                 try:
@@ -3836,31 +6844,33 @@ class OrchestratorTools:
             """Query a knowledge data file or directory database with natural language."""
             import subprocess
 
-            print(f"  ⚡ Tool: Querying knowledge data: '{query[:80]}...'")
+            print(f"  ⚡ Tool: Querying knowledge data: '{query}'")
 
-            # 1. Discover queryable files and directory databases
+            # 1. Discover queryable files / directory databases. Informational
+            #    only — an explicit `file_name` path is resolved directly below,
+            #    so discovery being empty is not an error when a path is given.
             queryable = _discover_queryable_files()
-            if not queryable:
-                return json.dumps({
-                    "status": "error",
-                    "message": "No queryable data files or directories found in knowledge directory."
-                })
 
             # 2. Resolve target
-            if file_name is None:
-                if len(queryable) == 1:
-                    target = queryable[0]
-                    print(f"    - Auto-selected: {target['name']}")
-                else:
-                    return json.dumps({
-                        "status": "file_selection_needed",
-                        "message": "Multiple queryable sources found. Specify file_name.",
-                        "available_files": [f["name"] for f in queryable]
-                    })
-            else:
+            if file_name is not None:
                 target, error = _resolve_knowledge_data_file(file_name)
                 if error:
                     return error
+            elif not queryable:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No queryable data files or directories found by "
+                               "discovery. Pass the file's absolute path as `file_name`."
+                })
+            elif len(queryable) == 1:
+                target = queryable[0]
+                print(f"    - Auto-selected: {target['name']}")
+            else:
+                return json.dumps({
+                    "status": "file_selection_needed",
+                    "message": "Multiple queryable sources found. Specify file_name.",
+                    "available_files": [f["name"] for f in queryable]
+                })
 
             # 2b. Branch: directory database vs single file
             if isinstance(target, dict) and target.get("type") == "directory":
@@ -3907,7 +6917,7 @@ class OrchestratorTools:
                         generation_config={"max_output_tokens": 1024, "temperature": 0.0},
                     )
                     # LLM returns JSON: {"code": "...TODO lines..."}
-                    from .parser_utils import parse_json_from_response
+                    from scilink.knowledge import parse_json_from_response
                     result, parse_error = parse_json_from_response(response)
                     if parse_error or not result or "code" not in result:
                         # Fallback: treat response as raw code
@@ -3927,7 +6937,7 @@ class OrchestratorTools:
 
                 # Write and execute script
                 script_path = scripts_dir / f"kq_{Path(target_path).stem}_{abs(hash(query)) % 10000:04d}.py"
-                script_path.write_text(code)
+                script_path.write_text(code, encoding="utf-8")
                 print(f"    - Running: {script_path.name} (attempt {attempt + 1})")
 
                 try:
@@ -3979,10 +6989,12 @@ class OrchestratorTools:
             func=query_knowledge_data,
             name="query_knowledge_data",
             description=(
-                "Query knowledge data with natural language. Works with single "
+                "Query tabular data with natural language. Works with single "
                 "data files (CSV, XLSX) and directory databases (folders of "
                 "uniformly-structured files like JSON records). Generates and "
-                "executes a Python script to answer questions about the data."
+                "executes a Python script to answer questions about the data. "
+                "Accepts a file by an absolute path (preferred when the data "
+                "lives outside the knowledge directory) or by name."
             ),
             parameters={
                 "query": {
@@ -3991,10 +7003,304 @@ class OrchestratorTools:
                 },
                 "file_name": {
                     "type": "string",
-                    "description": "Name of knowledge file to query (e.g., 'PWSdatabase.xlsx'). If omitted, lists available files."
+                    "description": (
+                        "The data file to query, given as an absolute path to "
+                        "an existing file or directory, or as a bare file name "
+                        "to look up in the knowledge directory. If omitted, "
+                        "lists available files."
+                    )
                 }
             },
             required=["query"]
+        )
+
+        # ─── screen_database — production filter+rank, follow-up to qkd ────
+        def _thread_all_exploration_results(max_items: int = 20) -> str:
+            """Collect ALL prior `query_knowledge_data` tool results from the
+            session's chat history (regardless of which file/directory they
+            targeted) and format them as a PRIOR EXPLORATION FINDINGS block
+            for the screen_database codegen prompt. Returns "" when no
+            exploration history is available."""
+            try:
+                msgs = getattr(self.orch, "messages", None) or []
+                qkd_call_ids = set()
+                hits = []
+                for m in msgs:
+                    role = m.get("role") if isinstance(m, dict) else None
+                    if role == "assistant":
+                        for tc in (m.get("tool_calls") or []):
+                            fn = tc.get("function") if isinstance(tc, dict) else None
+                            fn_name = fn.get("name") if isinstance(fn, dict) else None
+                            tc_id = tc.get("id") if isinstance(tc, dict) else None
+                            if fn_name == "query_knowledge_data" and tc_id:
+                                qkd_call_ids.add(tc_id)
+                    elif role == "tool" and m.get("tool_call_id") in qkd_call_ids:
+                        try:
+                            content = m.get("content", "")
+                            payload = json.loads(content) if isinstance(content, str) else content
+                        except (json.JSONDecodeError, TypeError):
+                            continue
+                        if not isinstance(payload, dict) or payload.get("status") != "success":
+                            continue
+                        hits.append({
+                            "query":   payload.get("query", ""),
+                            "file":    payload.get("file", ""),
+                            "answer":  payload.get("answer"),
+                            "summary": payload.get("summary", ""),
+                        })
+                if not hits:
+                    return ""
+                hits = hits[-max_items:]
+                lines = [
+                    "",
+                    "PRIOR EXPLORATION FINDINGS (from earlier query_knowledge_data",
+                    "calls; treat as ground truth about schema and value ranges —",
+                    "do not re-discover):",
+                    "",
+                ]
+                for i, r in enumerate(hits, 1):
+                    ans_str = json.dumps(r["answer"], default=str)
+                    if len(ans_str) > 1500:
+                        ans_str = ans_str[:1500] + "... (truncated)"
+                    lines.append(f"  [{i}] file: {r['file']}")
+                    lines.append(f"      Q: {r['query']}")
+                    lines.append(f"      A: {ans_str}")
+                    if r["summary"]:
+                        lines.append(f"      summary: {r['summary']}")
+                    lines.append("")
+                return "\n".join(lines)
+            except Exception:
+                # Defensive — never let exploration-context wiring break screening.
+                return ""
+
+        def screen_database(query: str, database_path: str,
+                            top_k: int = 50, max_retries: int = 3) -> str:
+            """Production database screening — filter + rank → top-K JSON."""
+            import subprocess
+            from scilink.executors import require_sandbox_approval
+
+            print(f"  ⚡ Tool: screen_database  '{query}'  top_k={top_k}")
+
+            if not require_sandbox_approval(
+                interactive=True, allow_override=True,
+                context=f"Database screening over {database_path}",
+            ):
+                return json.dumps({"status": "error",
+                                   "message": "Sandbox approval denied — screening cannot run."})
+
+            # Resolve to an absolute directory path (direct → fallback discovery).
+            direct = Path(database_path).expanduser()
+            if direct.is_dir():
+                dir_path, dir_name = str(direct.resolve()), direct.name
+            else:
+                target, err = _resolve_knowledge_data_file(database_path)
+                if err:
+                    return err
+                if isinstance(target, dict) and target.get("type") == "directory":
+                    dir_path, dir_name = target["path"], target["name"]
+                elif isinstance(target, str) and Path(target).is_dir():
+                    dir_path, dir_name = target, Path(target).name
+                else:
+                    return json.dumps({
+                        "status": "error",
+                        "message": (f"screen_database requires a directory database; "
+                                    f"got '{database_path}'. For single CSV/XLSX "
+                                    f"files use query_knowledge_data."),
+                    })
+
+            print(f"    - Inspecting directory: {dir_name}")
+            try:
+                info = _inspect_directory(dir_path)
+            except Exception as e:
+                return json.dumps({"status": "error", "message": f"Failed to inspect directory: {e}"})
+            if not info["sample_files"]:
+                return json.dumps({"status": "error", "message": "Directory is empty or unreadable."})
+
+            scaffold = _build_directory_scaffold(info)
+            sample_sections = []
+            for s in info["sample_files"]:
+                sample_sections.append(f"--- {s['name']} ({s['ext']}) ---\n{s['content']}")
+            sample_text = "\nSAMPLE FILE CONTENTS:\n" + "\n\n".join(sample_sections) if sample_sections else ""
+
+            prior_context = _thread_all_exploration_results()
+
+            prompt = SCREEN_DATABASE_CODEGEN_PROMPT.format(
+                directory=info["directory"],
+                files_by_extension=info["files_by_extension"],
+                total_files=info["total_files"],
+                filenames=info["all_filenames_sample"],
+                sample_sections=sample_text,
+                prior_exploration_block=prior_context,
+                scaffold=scaffold,
+                query=query,
+                top_k=top_k,
+            )
+
+            scripts_dir = Path(self.orch.base_dir) / "knowledge_query_scripts"
+            scripts_dir.mkdir(parents=True, exist_ok=True)
+            debug_dir = scripts_dir / "_debug"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = re.sub(r'[^A-Za-z0-9._-]+', '_', dir_name)
+            hash_str  = f"{abs(hash((dir_name, query))) % 10000:04d}"
+            script_path = scripts_dir / f"screen_{safe_name}_{hash_str}.py"
+            result_path = scripts_dir / f"screen_{safe_name}_{hash_str}_result.json"
+
+            last_error = None
+            for attempt in range(max_retries):
+                current_prompt = prompt
+                if last_error:
+                    current_prompt += (
+                        f"\n\n**PREVIOUS ERROR (attempt {attempt}):** {last_error}\n"
+                        "Fix the script. If PRIOR EXPLORATION FINDINGS are above, "
+                        "re-read them — schema/field-name mistakes are the most common cause."
+                    )
+
+                try:
+                    from scilink.knowledge import parse_json_from_response
+                    # No max_output_tokens cap — screening codegen needs room for
+                    # legitimate complexity (filter + score + multiprocessing + sort).
+                    response = self.orch.planner.model.generate_content(
+                        [current_prompt],
+                        generation_config={"temperature": 0.0},
+                    )
+                    (debug_dir / f"screen_{safe_name}_{hash_str}_a{attempt}.txt").write_text(response.text, encoding="utf-8")
+                    parsed, parse_error = parse_json_from_response(response)
+                    if parse_error or not parsed or "code" not in parsed:
+                        body = _extract_code_block(response.text) or response.text.strip()
+                        body = re.sub(r'^```\w*\s*', '', body)
+                        body = re.sub(r'\s*```$', '', body)
+                    else:
+                        body = parsed["code"]
+                    # Force `fork` start method so the LLM-generated multiprocessing.Pool()
+                    # works on macOS without an `if __name__` guard (the alternative —
+                    # spawn — re-imports the script and recursively spawns workers).
+                    mp_preamble = (
+                        "import multiprocessing as _scilink_mp\n"
+                        "try: _scilink_mp.set_start_method('fork', force=True)\n"
+                        "except (RuntimeError, ValueError): pass\n"
+                    )
+                    code = (
+                        f"{scaffold}\n"
+                        f"{mp_preamble}"
+                        f"{body}\n"
+                        f"import json as _json\n"
+                        f"print(_json.dumps({{\n"
+                        f"    \"n_scanned\":       n_scanned,\n"
+                        f"    \"n_passed\":        len(results),\n"
+                        f"    \"results\":         results[:{top_k}],\n"
+                        f"    \"filters_applied\": filters_applied,\n"
+                        f"    \"ranking_metric\":  ranking_metric,\n"
+                        f"    \"summary\":         summary,\n"
+                        f"}}))\n"
+                    )
+                except Exception as e:
+                    return json.dumps({"status": "error", "message": f"Codegen failed: {e}"})
+
+                script_path.write_text(code, encoding="utf-8")
+                print(f"    - Running: {script_path.name} (attempt {attempt + 1}/{max_retries})")
+
+                try:
+                    proc = subprocess.run(
+                        ["python", str(script_path)],
+                        capture_output=True, text=True, timeout=120,
+                    )
+                    if proc.returncode != 0:
+                        last_error = proc.stderr.strip()[-800:]
+                        continue
+                    result_obj = None
+                    for line in reversed(proc.stdout.strip().splitlines()):
+                        line = line.strip()
+                        if line.startswith('{') and line.endswith('}'):
+                            try:
+                                cand = json.loads(line)
+                                if "n_scanned" in cand and "results" in cand:
+                                    result_obj = cand
+                                    break
+                            except json.JSONDecodeError:
+                                continue
+                    if not result_obj:
+                        last_error = f"No valid screening-result JSON in output: {proc.stdout[-400:]}"
+                        continue
+
+                    full = {
+                        "query": query,
+                        "database_path": dir_path,
+                        "n_scanned": result_obj.get("n_scanned"),
+                        "n_passed":  result_obj.get("n_passed"),
+                        "filters_applied": result_obj.get("filters_applied"),
+                        "ranking_metric":  result_obj.get("ranking_metric"),
+                        "results":   result_obj.get("results", []),
+                        "summary":   result_obj.get("summary", ""),
+                        "exploration_context_used": bool(prior_context),
+                        "top_k_requested": top_k,
+                        "script_path": str(script_path),
+                        "attempts_used": attempt + 1,
+                    }
+                    result_path.write_text(json.dumps(full, indent=2, default=str), encoding="utf-8")
+                    print(
+                        f"    - ✅ Screened: {full['n_passed']} of {full['n_scanned']} "
+                        f"passed; saved {result_path.name}"
+                    )
+                    preview = full["results"][:min(10, len(full["results"]))]
+                    return json.dumps({
+                        "status": "success",
+                        "output_path": str(result_path),
+                        "script_path": str(script_path),
+                        "n_scanned": full["n_scanned"],
+                        "n_passed":  full["n_passed"],
+                        "filters_applied": full["filters_applied"],
+                        "ranking_metric":  full["ranking_metric"],
+                        "summary":   full["summary"],
+                        "top_k_preview": preview,
+                    })
+                except subprocess.TimeoutExpired:
+                    last_error = "Script timed out (120s limit)."
+                    continue
+
+            return json.dumps({
+                "status": "error",
+                "message": f"Screening failed after {max_retries} attempts.",
+                "last_error": last_error,
+                "script_path": str(script_path),
+            })
+
+        self._register_tool(
+            func=screen_database,
+            name="screen_database",
+            description=(
+                "Production database screening — filter + rank an entire "
+                "directory database (folder of JSON / CSV records) by criteria "
+                "expressed in natural language, persist the ranked top-K to a "
+                "JSON file, and return a preview. Use as a follow-up to a few "
+                "exploratory `query_knowledge_data` calls — ALL prior "
+                "`query_knowledge_data` answers from this session are "
+                "auto-threaded into the screening codegen prompt as schema "
+                "ground truth, so call exploration FIRST. Scope: deterministic "
+                "local-file filter / rank only. Sandbox-gated."
+            ),
+            parameters={
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Filter criteria + ranking metric in natural language. "
+                        "Be explicit about numeric thresholds, the ranking "
+                        "direction, and any composite scoring formula."
+                    ),
+                },
+                "database_path": {
+                    "type": "string",
+                    "description": (
+                        "Absolute path to the directory database to screen, or "
+                        "the bare directory name if listed under the knowledge "
+                        "directory."
+                    ),
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Number of top-ranked entries to retain. Default 50.",
+                },
+            },
+            required=["query", "database_path"],
         )
 
         # =====================================================================
@@ -4106,7 +7412,7 @@ class OrchestratorTools:
             knowledge_dir = self.orch.base_dir / "knowledge"
             knowledge_dir.mkdir(parents=True, exist_ok=True)
             knowledge_file = knowledge_dir / f"{entry['id']}.json"
-            with open(knowledge_file, 'w') as f:
+            with open(knowledge_file, 'w', encoding="utf-8") as f:
                 json.dump(entry, f, indent=2)
 
             response = {
@@ -4259,7 +7565,11 @@ class OrchestratorTools:
             Convert a knowledge entry into a reusable planning skill (.md file).
             The skill is automatically registered for use in subsequent plan generation.
             """
-            from .instruct import PLANNING_KNOWLEDGE_TO_SKILL_INSTRUCTIONS
+            from .instruct import (
+                PLANNING_KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
+                PLANNING_SKILL_UPDATE_INSTRUCTIONS,
+            )
+            from scilink.skills._shared._graduation import graduate_to_skill_file
 
             print(f"  ⚡ Tool: Graduating knowledge '{knowledge_id}' to skill '{skill_name}'...")
 
@@ -4275,13 +7585,6 @@ class OrchestratorTools:
                     "status": "error",
                     "message": f"Knowledge ID not found: {knowledge_id}"
                 })
-
-            # Build knowledge text
-            knowledge_text = f"**Focus:** {knowledge_entry.get('focus', '')}\n"
-            knowledge_text += f"**Summary:** {knowledge_entry.get('summary', '')}\n"
-            knowledge_text += "**Key Findings:**\n"
-            for finding in knowledge_entry.get("key_findings", []):
-                knowledge_text += f"- {finding}\n"
 
             # Collect source planning details
             planning_details_parts = []
@@ -4311,31 +7614,43 @@ class OrchestratorTools:
 
             planning_details = "\n\n".join(planning_details_parts) if planning_details_parts else "No source planning details available."
 
-            # Call LLM to generate skill content
-            prompt = PLANNING_KNOWLEDGE_TO_SKILL_INSTRUCTIONS.format(
-                skill_name=skill_name,
-                domain=domain,
-                knowledge_text=knowledge_text,
-                planning_details=planning_details,
-            )
+            # Fold focus/summary/findings + source detail into a single
+            # knowledge_entry; the shared helper renders it into {knowledge_text}.
+            findings = knowledge_entry.get("key_findings", []) or []
+            distill_entry = {
+                "focus": knowledge_entry.get("focus", ""),
+                "summary": knowledge_entry.get("summary", ""),
+                "key_findings": "\n".join(f"- {f}" for f in findings),
+                "source_planning_details": planning_details,
+            }
 
-            try:
+            def _llm_call(prompt: str) -> str:
                 response = self.orch.planner.model.generate_content(
                     contents=[prompt],
                     generation_config=None,
                     safety_settings=None,
                 )
-                skill_content = response.text if hasattr(response, "text") else str(response)
+                return response.text if hasattr(response, "text") else str(response)
+
+            # Write to the persistent store (~/.scilink/graduated_skills) via
+            # the shared structured-JSON helper so the skill survives the
+            # session and a pip upgrade. The helper auto-detects
+            # create-vs-update by whether the bundle already exists.
+            try:
+                result = graduate_to_skill_file(
+                    knowledge_entry=distill_entry,
+                    skill_name=skill_name,
+                    domain=domain,
+                    llm_call=_llm_call,
+                    fresh_template=PLANNING_KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
+                    update_template=PLANNING_SKILL_UPDATE_INSTRUCTIONS,
+                )
             except Exception as e:
-                return json.dumps({"status": "error", "message": f"LLM call failed: {e}"})
+                return json.dumps({"status": "error", "message": f"Graduation failed: {e}"})
 
-            # Save skill file
-            skill_dir = self.orch.base_dir / "graduated_skills"
-            skill_dir.mkdir(parents=True, exist_ok=True)
-            skill_path = skill_dir / f"{skill_name}.md"
-            skill_path.write_text(skill_content)
+            skill_path = result["skill_path"]
 
-            # Register the skill
+            # Register the skill so the live session can use it immediately.
             self.orch.register_skill(str(skill_path))
 
             # Track the link
@@ -4345,8 +7660,9 @@ class OrchestratorTools:
                 "status": "success",
                 "skill_name": skill_name,
                 "skill_path": str(skill_path),
+                "method": result.get("method"),
                 "source_knowledge_id": knowledge_id,
-                "note": f"Skill '{skill_name}' has been registered and will be applied to future plan generation."
+                "note": f"Skill '{skill_name}' has been registered (persistent memory) and will be applied to future plan generation."
             })
 
         self._register_tool(
@@ -4376,25 +7692,28 @@ class OrchestratorTools:
         )
 
         # 16. UPDATE SKILL
-        def update_skill(skill_name: str, knowledge_ids: list = None) -> str:
+        def update_skill(skill_name: str, knowledge_ids: list = None, domain: str = "planning") -> str:
             """
             Update a graduated skill with new knowledge entries.
-            Preserves the old version as {name}.prev.md.
+            Merges into the persistent skill bundle in place.
             """
-            from .instruct import PLANNING_SKILL_UPDATE_INSTRUCTIONS
+            from .instruct import (
+                PLANNING_KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
+                PLANNING_SKILL_UPDATE_INSTRUCTIONS,
+            )
+            from scilink.skills._shared._graduation import graduate_to_skill_file
+            from scilink.skills.loader import graduated_skills_dir
 
             print(f"  ⚡ Tool: Updating skill '{skill_name}'...")
 
-            # Find the existing skill file
-            skill_dir = self.orch.base_dir / "graduated_skills"
-            skill_path = skill_dir / f"{skill_name}.md"
+            # The skill must already exist in the persistent store so the
+            # helper takes its merge (update) branch.
+            skill_path = graduated_skills_dir() / domain / skill_name / f"{skill_name}.md"
             if not skill_path.exists():
                 return json.dumps({
                     "status": "error",
-                    "message": f"Graduated skill not found: {skill_name}"
+                    "message": f"Graduated skill not found: {domain}/{skill_name}"
                 })
-
-            existing_skill = skill_path.read_text()
 
             # Determine source knowledge IDs
             tracked_ids = self.orch._graduated_skill_sources.get(skill_name, [])
@@ -4433,46 +7752,714 @@ class OrchestratorTools:
 
             new_knowledge = "\n\n".join(new_knowledge_parts)
 
-            # Call LLM to produce updated skill
-            prompt = PLANNING_SKILL_UPDATE_INSTRUCTIONS.format(
-                skill_name=skill_name,
-                existing_skill=existing_skill,
-                new_knowledge=new_knowledge,
-            )
-
-            try:
+            def _llm_call(prompt: str) -> str:
                 response = self.orch.planner.model.generate_content(
                     contents=[prompt],
                     generation_config=None,
                     safety_settings=None,
                 )
-                updated_content = response.text if hasattr(response, "text") else str(response)
+                return response.text if hasattr(response, "text") else str(response)
+
+            # Delegate to the shared helper; since the bundle exists it
+            # takes the structured-JSON merge (update) branch.
+            try:
+                result = graduate_to_skill_file(
+                    knowledge_entry={"new_knowledge": new_knowledge},
+                    skill_name=skill_name,
+                    domain=domain,
+                    llm_call=_llm_call,
+                    fresh_template=PLANNING_KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
+                    update_template=PLANNING_SKILL_UPDATE_INSTRUCTIONS,
+                )
             except Exception as e:
-                return json.dumps({"status": "error", "message": f"LLM call failed: {e}"})
-
-            # Save previous version
-            prev_path = skill_dir / f"{skill_name}.prev.md"
-            prev_path.write_text(existing_skill)
-
-            # Write updated skill
-            skill_path.write_text(updated_content)
+                return json.dumps({"status": "error", "message": f"Update failed: {e}"})
 
             # Update source tracking
             all_ids = list(set(tracked_ids + new_ids))
             self.orch._graduated_skill_sources[skill_name] = all_ids
 
             # Re-register the skill
-            self.orch.register_skill(str(skill_path))
+            self.orch.register_skill(str(result["skill_path"]))
 
             return json.dumps({
                 "status": "success",
                 "skill_name": skill_name,
-                "skill_path": str(skill_path),
-                "previous_version": str(prev_path),
+                "skill_path": str(result["skill_path"]),
+                "method": result.get("method"),
                 "new_knowledge_ids": new_ids,
                 "total_source_ids": all_ids,
-                "note": f"Skill '{skill_name}' has been updated. Previous version saved as {prev_path.name}."
+                "note": f"Skill '{skill_name}' has been updated in persistent memory."
             })
+
+        def write_technical_document(
+            request: str,
+            filename: str = None,
+            title: str = None,
+            source_files: str = None,
+            use_literature: bool = True,
+            revise_path: str = None,
+            literature_context: str = None,
+            style: str = "report",
+        ):
+            """Author a grounded technical document and save it.
+
+            style="memo" is the one-page house memo (header block, CORE
+            line, 3-5 lead-in sections, 350-550 words) with a .docx twin.
+
+            Not a plan: no experiment schema, no campaign state, no plan
+            report. A roadmap or estimate that went through the plan tool
+            came back with a build sequence as its `hypothesis` and invented
+            optimization ranges (live, cdoc facility roadmap).
+            """
+            try:
+                planner = self.orch.planner
+                # REVISION: read the document, rewrite it whole, put it back
+                # where it was. Without this, "revise the paper you wrote"
+                # authored into the CURRENT delegation folder while the
+                # original sat untouched — and the agent then tried to reach
+                # it with `../../`, which save_file's sandbox collapses to a
+                # subfolder name, so it rebuilt the file by hand in chunks
+                # and truncated it doing so (live).
+                from .user_interface import format_path, record_deliverable
+                current = None
+                if revise_path:
+                    rp = Path(revise_path)
+                    if not rp.is_absolute():
+                        rp = self._output_dir() / rp
+                    rp = rp.resolve()
+                    root = Path(self.orch.base_dir).resolve()
+                    if root not in rp.parents:
+                        return json.dumps({
+                            "status": "error",
+                            "message": (f"revise_path must be inside the "
+                                        f"session directory ({root}).")})
+                    if not rp.exists():
+                        return json.dumps({
+                            "status": "error",
+                            "message": f"No such document: {rp}"})
+                    current = rp.read_text(errors="replace")
+                # Literature grounding, in three tiers. An explicit
+                # selection wins (whole files, or '<path>#qN' sections —
+                # the targeted option the all-or-nothing boolean never
+                # offered, and the reason a 200 KB corpus read as too
+                # expensive to include at all). Otherwise the campaign
+                # corpus auto-loads, as before. Declining is still allowed;
+                # it is just no longer done blind.
+                lit = None
+                declined_topics = []
+                if literature_context:
+                    lit = self._resolve_context_text(literature_context)
+                    if lit:
+                        print(f"    📚 Literature selection resolved "
+                              f"({len(lit.split()):,} words)")
+                elif use_literature:
+                    _lit = self._load_campaign_literature()
+                    if _lit is not None:
+                        lit = _lit["text"]
+                else:
+                    # Declining is reported back with WHAT was declined, so
+                    # a wrong opt-out is visible and recoverable on the next
+                    # turn instead of silently shipping an ungrounded
+                    # document. Questions only — no answer bodies.
+                    declined_topics = self._campaign_literature_topics()
+
+                # Prior documents the agent names — this is how a revision or
+                # a merge builds on what the session already wrote instead of
+                # re-deriving it. Text documents only: a freshly rendered
+                # diagram PNG passed here read as raw bytes and the
+                # UnicodeDecodeError killed the whole authoring call (live).
+                # Images enter documents BY REFERENCE (![...](path) in the
+                # text — the PDF exporter already resolves them), so a
+                # non-text source is refused with that routing hint instead
+                # of crashing or being silently dropped.
+                _text_suffixes = {".md", ".txt", ".json", ".yaml", ".yml",
+                                  ".csv", ".py", ".html", ".mmd", ".tex",
+                                  ".rst", ""}
+                sources, missing, non_text = [], [], []
+                for raw in (source_files or "").split(","):
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    fp = Path(raw)
+                    if not fp.is_absolute():
+                        fp = self._output_dir() / raw
+                    if not fp.exists():
+                        # The agent names its own earlier file; that file
+                        # lives in a SIBLING delegation directory, so search
+                        # the session root by basename before giving up.
+                        hits = sorted(Path(self.orch.base_dir).rglob(fp.name))
+                        if not hits:
+                            missing.append(raw)
+                            continue
+                        fp = hits[0]
+                    if fp.suffix.lower() not in _text_suffixes:
+                        non_text.append(fp.name)
+                        continue
+                    # errors="replace": a stray non-UTF-8 byte in an
+                    # otherwise-text file must not kill authoring either.
+                    sources.append(f"### {fp.name}\n"
+                                   f"{fp.read_text(errors='replace')}")
+
+                # A revision inherits the document's OWN name: falling back
+                # to the request titled the deliverable with the instruction
+                # ("Revise this brief with two targeted changes...") and
+                # replaced its real name in the files list. Live.
+                doc_title = title
+                if not doc_title and current:
+                    m = re.search(r"^#\s+(.+)$", current, re.M)
+                    doc_title = (m.group(1).strip() if m
+                                 else rp.stem.replace("_", " "))
+                doc_title = doc_title or (request[:70].strip()
+                                          or "Technical document")
+                memo = (style or "report").strip().lower() == "memo"
+                # A memo has a hard length budget. The prompt states it; the
+                # guard enforces it with ONE re-ask that names the overshoot,
+                # then ships with a warning rather than looping.
+                MEMO_MAX_WORDS = 600
+                date_note = None
+                if memo:
+                    from datetime import datetime as _dt
+                    date_note = (f"## TODAY (for the memo's Date line): "
+                                 f"{_dt.now():%B %-d, %Y}")
+                result = author_technical_document(
+                    request=request,
+                    kb_docs=planner.kb_docs,
+                    model=planner.model,
+                    generation_config=planner.generation_config,
+                    external_context=lit,
+                    source_documents=("\n\n".join(sources) if sources else None),
+                    additional_context=date_note,
+                    skill_context=planner._build_skill_context("planning"),
+                    revise_document=current,
+                    style="memo" if memo else "report",
+                    task_name=(("Technical Memo" if memo
+                                else "Technical Document")
+                               + (" (revision)" if current else "")),
+                )
+                if result.get("error"):
+                    return json.dumps({"status": "error",
+                                       "message": result["error"]})
+                sections = result.get("sections") or []
+                if not sections:
+                    return json.dumps({
+                        "status": "error",
+                        "message": "The author returned no sections."})
+                text = document_to_markdown(doc_title, sections)
+                n_words = len(text.split())
+                if memo and n_words > MEMO_MAX_WORDS:
+                    # Structural support for the length rule: condense
+                    # passes over the DRAFT ALONE (no sources, no
+                    # retrieval) — at most two, each keeping the shorter
+                    # text. If they fail or it is still long, the draft
+                    # ships with a warning; the guard never fails the call.
+                    from .planning_rag import condense_memo
+                    for _pass in range(2):
+                        print(f"    ✂️  Memo draft is {n_words} words — over "
+                              f"the one-page budget; condensing")
+                        tight = condense_memo(text, planner.model,
+                                              planner.generation_config,
+                                              max_words=400)
+                        tsecs = ([] if not isinstance(tight, dict)
+                                 or tight.get("error")
+                                 else (tight.get("sections") or []))
+                        if not tsecs:
+                            print("    ⚠️  Condense pass failed; keeping "
+                                  "the draft")
+                            break
+                        ttext = document_to_markdown(doc_title, tsecs)
+                        tn = len(ttext.split())
+                        if tn >= n_words:
+                            # A "condense" that grew is a failed pass.
+                            break
+                        text, sections, n_words = ttext, tsecs, tn
+                        print(f"    ✂️  Condensed to {tn} words")
+                        if n_words <= MEMO_MAX_WORDS:
+                            break
+                if revise_path:
+                    out = rp
+                    # Revising in place crosses delegation isolation, which
+                    # exists so a reused child cannot clobber earlier outputs
+                    # by accident. An explicit revision is not that — but the
+                    # audit trail still matters, so the delegation MAKING the
+                    # change keeps the version it replaced. The canonical file
+                    # stays canonical; the evidence lives where the edit
+                    # happened.
+                    bak = None
+                    try:
+                        d = self._output_dir()
+                        d.mkdir(parents=True, exist_ok=True)
+                        # Never clobber an earlier backup: revising the same
+                        # document twice from one delegation would otherwise
+                        # leave only the second-to-last version, and the
+                        # original — the one the user actually approved —
+                        # would be the copy that vanished.
+                        n, bak = 1, d / f"{rp.stem}.before_revision{rp.suffix}"
+                        while bak.exists():
+                            n += 1
+                            bak = d / f"{rp.stem}.before_revision{n}{rp.suffix}"
+                        bak.write_text(current or "", encoding="utf-8")
+                        # Listed (not starred) so the replaced version shows
+                        # up in the files block rather than only on disk.
+                        # Under the meta this is the delegation slug; in a
+                        # standalone session it is just the session dir, and
+                        # "revised by session" says nothing.
+                        who = ("" if d.resolve() == root
+                               else f" (revised by {d.name})")
+                        record_deliverable(
+                            self.orch.base_dir, bak,
+                            f"Pre-revision copy of {rp.name}{who}")
+                    except Exception as e:  # noqa: BLE001 - never block the edit
+                        logging.warning(f"Pre-revision copy failed: {e}")
+                        bak = None
+                    # A revision that came back shorter than the original is
+                    # nearly always the model summarising instead of
+                    # revising. Refuse rather than overwrite the good copy.
+                    if not memo and len(text) < 0.5 * len(current or ""):
+                        return json.dumps({
+                            "status": "error",
+                            "message": (
+                                f"Revision aborted: the rewritten document is "
+                                f"{len(text)} chars against the original's "
+                                f"{len(current)}. A revision must return the "
+                                "WHOLE document with untouched sections "
+                                "verbatim. The original is unchanged — retry, "
+                                "reproducing every section."),
+                        })
+                else:
+                    name = filename or "technical_document.md"
+                    if not name.endswith(".md"):
+                        name += ".md"
+                    out = self._output_dir() / name
+                out.parent.mkdir(parents=True, exist_ok=True)
+                # A roadmap or staging memo carries the same campaign flow a
+                # white paper does. Skipped on a revision: the document
+                # already has its figure, and a second pass would append a
+                # duplicate section.
+                if not revise_path and not memo:
+                    text = self._maybe_embed_workflow_diagram(
+                        text, out.parent, stem=f"{out.stem}_workflow")
+                out.write_text(text, encoding="utf-8")
+                # The memo's circulating form is .docx (house style: label,
+                # header block, Heading 1 sections). Deterministic, no LLM.
+                docx_path = None
+                if memo:
+                    try:
+                        from ...utils.md_to_docx import markdown_to_docx
+                        docx_path = markdown_to_docx(out)
+                        print(f"    📝 Memo .docx: {format_path(docx_path)}")
+                        record_deliverable(self.orch.base_dir, docx_path,
+                                           f"{doc_title} (.docx)",
+                                           deliverable=True)
+                    except Exception as e:  # noqa: BLE001 - never block the write
+                        logging.warning(f"Memo .docx export failed: {e}")
+                # A revised document's exported PDF twin (the white paper's
+                # forwarded copy) must not keep serving the pre-revision
+                # content; re-export is deterministic, so it does not touch
+                # the content freeze a revision may be operating under.
+                pdf_refreshed = self._refresh_pdf_twin(out) if revise_path \
+                    else False
+
+                # Advisory hygiene review of what was just written — figure
+                # links, agent meta-language, design arithmetic, acronym
+                # fidelity to the source documents. Deterministic; the notes
+                # are returned to the agent and printed, never applied.
+                review_notes = []
+                try:
+                    from ...utils.doc_hygiene import check_document_hygiene
+                    _src_texts = [s for s in sources]
+                    if lit:
+                        _src_texts.append(lit)
+                    _src_texts.extend(self._source_document_texts())
+                    review_notes = check_document_hygiene(text, out.parent, _src_texts)
+                    if review_notes:
+                        print(f"    🔎 Review notes ({len(review_notes)}):")
+                        for n in review_notes[:8]:
+                            print(f"       - [{n['lens']}/{n['severity']}] {n['note']}")
+                except Exception as e:  # noqa: BLE001 - advisory, never blocks
+                    logging.warning(f"Document hygiene review skipped: {e}")
+                record_deliverable(self.orch.base_dir, out, doc_title,
+                                   deliverable=True)
+                if revise_path:
+                    # The transcript is the first place anyone looks, so the
+                    # cross-delegation edit is named there, not just on disk.
+                    print(f"    ✏️  Revised IN PLACE: {format_path(out)}")
+                    if bak:
+                        print(f"    ↩️  Previous version kept: "
+                              f"{format_path(bak)}")
+                else:
+                    print(f"    📄 Document saved: {format_path(out)}")
+                res = {"status": "success", "path": str(out),
+                       "revised_in_place": bool(revise_path),
+                       "previous_version": (str(bak) if revise_path and bak
+                                            else None),
+                       "revised_by": (self._output_dir().name if revise_path
+                                      else None),
+                       "pdf_refreshed": pdf_refreshed,
+                       "title": doc_title,
+                       "sections": [s.get("heading") for s in sections
+                                    if isinstance(s, dict)],
+                       "words": len(text.split()),
+                       "style": "memo" if memo else "report",
+                       "docx": (str(docx_path) if docx_path else None),
+                       "literature_used": bool(lit),
+                       "sources_used": len(sources)}
+                if review_notes:
+                    res["review_notes"] = review_notes[:8]
+                    res["review_note"] = ("Advisory checks on the saved document; "
+                                          "fix with edit_file or revise_path if "
+                                          "warranted — nothing was changed.")
+                if missing:
+                    res["source_files_not_found"] = missing
+                if non_text:
+                    res["source_files_skipped"] = non_text
+                    res["source_files_note"] = (
+                        f"{', '.join(non_text)}: not text — an image or "
+                        "other binary cannot be inlined as source text. To "
+                        "include a figure, reference it IN the document "
+                        "body instead: ![caption](<filename>) — the "
+                        "renderer resolves it from the file's directory.")
+                if memo and len(text.split()) > MEMO_MAX_WORDS:
+                    res["length_warning"] = (
+                        f"Memo is {len(text.split())} words after "
+                        f"condensing; the one-page budget is ~550. Do NOT "
+                        f"add content. If it must be shorter, name what to "
+                        f"cut in a revise_path pass with style='memo'; "
+                        f"otherwise ship it as is.")
+                if declined_topics:
+                    res["literature_declined"] = {
+                        "available_sections": declined_topics,
+                        "note": ("This document was written WITHOUT the "
+                                 "campaign literature above. If any section "
+                                 "answers what this document argues, re-run "
+                                 "with literature_context set to those "
+                                 "section_refs (comma-separated) — the "
+                                 "document is rewritten, not appended to."),
+                    }
+                return json.dumps(res)
+            except Exception as e:
+                logging.error(f"Document authoring error: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=write_technical_document,
+            name="write_technical_document",
+            description=(
+                "Author a grounded technical DOCUMENT and save it as the "
+                "deliverable: a roadmap, staging or build plan, cost or "
+                "footprint estimate, consolidation memo, brief, summary or "
+                "review. For a ONE-PAGE memo / one-pager / brief — a "
+                "'short memo on X', 'one page for the director' — pass "
+                "style='memo': the house memo template (header block, one "
+                "CORE line, 3-5 lead-in sections, 350-550 words) with a "
+                ".docx twin. USE THIS — not generate_initial_plan — whenever the "
+                "user says 'plan' in the everyday sense of a course of "
+                "action ('plan how we build the facility', 'outline the "
+                "stages', 'estimate the space we need'). "
+                "generate_initial_plan is only for an EXPERIMENT: a testable "
+                "hypothesis with measurements. Grounds the document in the "
+                "campaign's literature and in prior session documents you "
+                "name, so you get retrieval-backed authoring rather than "
+                "writing it unaided into save_file. Use save_file for short "
+                "notes and for content you have already composed. "
+                "NOT for an EXPERIMENTAL PROTOCOL: a procedure with a "
+                "hypothesis and measurements — including 'the runnable bench "
+                "protocol for direction X' — is generate_initial_plan with "
+                "selection_profile='lab', which gives it conformance "
+                "checking, the critic, and refinement against results later. "
+                "A document cannot be refined with results. NOT for editing "
+                "a research portfolio either — 'drop the weakest direction', "
+                "'harden this one', 'consolidate these' all change the "
+                "portfolio itself and belong in refine_portfolio; a document "
+                "about the revised portfolio leaves the portfolio unrevised."
+            ),
+            parameters={
+                "request": {
+                    "type": "string",
+                    "description": (
+                        "What the document must cover, in full — the user's "
+                        "ask plus any structure, constraints, audience or "
+                        "sections it must have. This is the authoring brief."
+                    ),
+                },
+                "filename": {
+                    "type": "string",
+                    "description": (
+                        "File to write, e.g. 'build_roadmap.md'. Defaults to "
+                        "technical_document.md; give it a descriptive name."
+                    ),
+                },
+                "title": {
+                    "type": "string",
+                    "description": (
+                        "Document title, also the label shown beside the "
+                        "file, e.g. 'cdoc staged build roadmap'."
+                    ),
+                },
+                "source_files": {
+                    "type": "string",
+                    "description": (
+                        "Comma-separated TEXT files this document should "
+                        "build on — a roadmap you are revising, two "
+                        "documents you are merging. Names of files in the "
+                        "session are resolved for you. Do NOT list images "
+                        "here: a figure goes in the document body by "
+                        "reference (![caption](file.png)). Omit for a "
+                        "fresh document."
+                    ),
+                },
+                "literature_context": {
+                    "type": "string",
+                    "description": (
+                        "The PART of the campaign's literature this document "
+                        "should be grounded in: comma-separated section refs "
+                        "('<path>#qN') or file paths, as listed by "
+                        "list_literature_searches. Prefer this over "
+                        "use_literature when the corpus is large and only "
+                        "some of it bears on this document — it is cheaper "
+                        "and sharper than loading everything. Omit to "
+                        "auto-load the whole campaign corpus."
+                    ),
+                },
+                "use_literature": {
+                    "type": "boolean",
+                    "description": (
+                        "Ground in the campaign's literature, already "
+                        "retrieved and free to include (default true). Set "
+                        "false only when the document asserts nothing the "
+                        "literature could support or contradict — building "
+                        "on earlier work, or needing no NEW search, is not "
+                        "itself a reason. Decide from what the corpus "
+                        "actually covers, not from how the request is "
+                        "phrased: call list_literature_searches first if you "
+                        "have not seen its index, or pass literature_context "
+                        "to take just the sections that bear on this "
+                        "document."
+                    ),
+                },
+                "revise_path": {
+                    "type": "string",
+                    "description": (
+                        "REVISE an existing document IN PLACE: pass its path "
+                        "(any document in this session, including one written "
+                        "by an earlier delegation). The file is read, the "
+                        "whole document is rewritten with your change "
+                        "applied, and it is written back over the SAME path — "
+                        "so use this for 'add references to the paper you "
+                        "wrote', 'tighten section 3', 'split this in two'. "
+                        "Do NOT rebuild an existing document by hand with "
+                        "save_file/append_file chunks: that writes into the "
+                        "current delegation folder instead, and a save_file "
+                        "call truncates what is already there. Omit for a new "
+                        "document; `filename` is ignored when this is set."
+                    ),
+                },
+                "style": {
+                    "type": "string",
+                    "enum": ["report", "memo"],
+                    "description": (
+                        "'report' (default): unconstrained document — white "
+                        "paper, roadmap, review. 'memo': ONE-PAGE technical "
+                        "memo in the house template — header block "
+                        "(subtitle, Purpose, Scope, Date), one CORE line, "
+                        "3-5 short sections of bold-lead-in paragraphs, a "
+                        "closing decision section, 350-550 words, exported "
+                        "as .md + .docx. Use whenever the user asks for a "
+                        "memo, one-pager, brief or 'a page on'. With "
+                        "revise_path, style='memo' CONDENSES the existing "
+                        "document into a memo (the verbatim-revision rule "
+                        "yields to the length budget)."
+                    ),
+                },
+            },
+            required=["request"]
+        )
+
+        def generate_ideation_portfolio(
+            specific_objective: str,
+            knowledge_paths: str = None,
+            additional_context: str = None,
+            skill: str = None,
+            literature_context: str = None,
+            n_candidates: int = None,
+            white_paper: bool = None,
+            new_campaign: bool = None,
+            selection_profile: str = None,   # accepted, ignored — see below
+        ):
+            """Author a PORTFOLIO of research directions (ideation).
+
+            The ideation twin of generate_initial_plan: same grounding,
+            best-of-N, judge, critic and campaign machinery, different
+            contract — directions, not a bench protocol.
+            """
+            # `selection_profile` is NOT in this tool's schema, but its
+            # description has to name the lab profile to say where a chosen
+            # direction goes next — which puts the parameter in scope, and a
+            # model duly passed it (live). The profile is meaningless here:
+            # a portfolio is ideation by construction. Accept and ignore
+            # rather than spend a round trip on a TypeError.
+            if selection_profile:
+                logging.info("generate_ideation_portfolio ignoring "
+                             "selection_profile=%r (always ideation)",
+                             selection_profile)
+            # Same implementation, different contract — see `kind`.
+            return generate_initial_plan(
+                specific_objective=specific_objective,
+                knowledge_paths=knowledge_paths,
+                additional_context=additional_context,
+                skill=skill,
+                literature_context=literature_context,
+                n_candidates=n_candidates,
+                selection_profile="ideation",
+                white_paper=white_paper,
+                new_campaign=new_campaign,
+                kind="portfolio",
+            )
+
+        self._register_tool(
+            func=generate_ideation_portfolio,
+            name="generate_ideation_portfolio",
+            description=(
+                "Generate a PORTFOLIO of research directions — brainstorming, "
+                "ideation, 'what should we work on', a slate of use cases, a "
+                "hedge against one direction failing, or consolidating earlier "
+                "threads into a standalone class. Each direction carries its "
+                "own hypothesis, rationale and novelty; the portfolio carries "
+                "an organizing thesis. USE THIS INSTEAD OF "
+                "generate_initial_plan whenever the ask is which directions "
+                "are worth pursuing rather than how to run one on the bench — "
+                "generate_initial_plan designs a lab experiment, and a "
+                "portfolio forced into that schema comes back with its "
+                "directions flattened into protocol steps. Produces a "
+                "sponsor-facing white paper by default, and an all-candidates "
+                "dossier when several candidate portfolios were generated. "
+                "Once the user PICKS a direction and wants the runnable "
+                "bench protocol for it, that is generate_initial_plan with "
+                "selection_profile='lab' — an experimental plan, NOT a "
+                "written document."
+            ),
+            parameters={
+                "specific_objective": {
+                    "type": "string",
+                    "description": (
+                        "What to ideate on, in full — the domain, what makes "
+                        "a direction interesting here, any structure the user "
+                        "asked for (how many directions, how to rank or "
+                        "cluster them, elements each must carry)."
+                    ),
+                },
+                "knowledge_paths": {
+                    "type": "string",
+                    "description": (
+                        "Comma-separated paths to papers/reports/docs "
+                        "folders — for document CORPORA too large to read "
+                        "directly (triggers a full embedding KB build). "
+                        "Documents already read this session belong in "
+                        "additional_context, not here."),
+                },
+                "additional_context": {
+                    "type": "string",
+                    "description": "Constraints, prior findings, or user preferences to honour",
+                },
+                "skill": {
+                    "type": "string",
+                    "description": "Optional planning skill to load for domain guidance",
+                },
+                "literature_context": {
+                    "type": "string",
+                    "description": (
+                        "Path to a literature search file to ground the "
+                        "portfolio in (from search_literature)."
+                    ),
+                },
+                "n_candidates": {
+                    "type": "integer",
+                    "description": (
+                        "How many DISTINCT candidate portfolios to author "
+                        "before the judge picks one. Defaults to best-of-3 on "
+                        "a campaign's first portfolio and 1 for follow-ups. "
+                        "Only a multi-candidate run produces the "
+                        "all-candidates dossier, since that dossier IS the "
+                        "report over the candidate set."
+                    ),
+                },
+                "white_paper": {
+                    "type": "boolean",
+                    "description": (
+                        "Force (true) or suppress (false) the sponsor-facing "
+                        "white paper. Omit for the default, which produces one."
+                    ),
+                },
+                "new_campaign": {
+                    "type": "boolean",
+                    "description": (
+                        "TRUE when this starts a NEW line of work unrelated to "
+                        "the current campaign, so its literature and history "
+                        "do not leak in. Omit to continue the current campaign."
+                    ),
+                },
+            },
+            required=["specific_objective"]
+        )
+
+        def refine_portfolio(request: str, literature_context: str = None,
+                             additional_context: str = None):
+            """Revise a research PORTFOLIO: harden, drop, add, re-rank,
+            consolidate.
+
+            Same refinement engine as refine_plan_with_results — which is
+            reachable but not FINDABLE for this: its name promises results,
+            and dropping a direction has none. Live, "drop the weakest
+            direction" went to write_technical_document instead, which wrote
+            a document ABOUT the revised portfolio and left the portfolio
+            itself untouched.
+            """
+            return refine_plan_with_results(
+                result_data=request,
+                use_literature_rag=False,
+                literature_context=literature_context,
+                additional_context=additional_context,
+            )
+
+        self._register_tool(
+            func=refine_portfolio,
+            name="refine_portfolio",
+            description=(
+                "Revise the current research PORTFOLIO in place. Use for any "
+                "edit to the set of directions, none of which needs "
+                "experimental results: HARDEN one (sharpen its hypothesis, "
+                "name its failure mode), DROP one, ADD one, RE-RANK them, or "
+                "CONSOLIDATE several into a single class. Directions the "
+                "request does not touch are preserved verbatim. This is the "
+                "tool for 'drop the weakest', 'harden class 2', 'consolidate "
+                "these threads into one class' — do NOT write a document "
+                "about the revised portfolio instead, and do not re-author "
+                "the whole portfolio with generate_ideation_portfolio, which "
+                "would lose the directions you are keeping. Use "
+                "refine_plan_with_results instead when actual experimental "
+                "results are what is driving the change."
+            ),
+            parameters={
+                "request": {
+                    "type": "string",
+                    "description": (
+                        "What to change, naming the directions by id where "
+                        "the user did — e.g. 'harden DIR-1: sharpen its "
+                        "hypothesis and name its dominant failure mode; "
+                        "leave the others unchanged' or 'drop DIR-4 and "
+                        "re-rank the rest by feasibility'."
+                    ),
+                },
+                "literature_context": {
+                    "type": "string",
+                    "description": "Optional path to a literature file to ground the revision in.",
+                },
+                "additional_context": {
+                    "type": "string",
+                    "description": "Constraints or preferences to honour in the revision.",
+                },
+            },
+            required=["request"]
+        )
 
         self._register_tool(
             func=update_skill,
@@ -4491,6 +8478,10 @@ class OrchestratorTools:
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Specific knowledge IDs to incorporate (omit to auto-detect from matching focus area)"
+                },
+                "domain": {
+                    "type": "string",
+                    "description": "Domain the skill was graduated under (default: 'planning')"
                 }
             },
             required=["skill_name"]
@@ -4528,7 +8519,25 @@ class OrchestratorTools:
             }
         }
         self.openai_schemas.append(openai_schema)
-    
+
+    def _update_skill_description(self, custom_skills: dict = None) -> None:
+        """Refresh the ``skill`` parameter description in ``generate_initial_plan``.
+
+        Called after a skill is registered at runtime (e.g. ``graduate_to_skill``)
+        so newly available skills become visible to the orchestrator LLM. The
+        schema dict is mutated in place, so the change propagates to
+        ``tools_for_model`` (which is the same ``openai_schemas`` list object).
+        """
+        new_desc = _build_planning_skill_description(custom_skills)
+        for schema in self.openai_schemas:
+            fn = schema.get("function", {})
+            if fn.get("name") != "generate_initial_plan":
+                continue
+            skill_prop = fn.get("parameters", {}).get("properties", {}).get("skill")
+            if skill_prop is not None:
+                skill_prop["description"] = new_desc
+            break
+
     def execute_tool(self, tool_name: str, **kwargs) -> str:
         """
         Execute a tool by name with given arguments.
@@ -4545,9 +8554,47 @@ class OrchestratorTools:
                 "status": "error",
                 "message": f"Tool '{tool_name}' not found in registry"
             })
-        
+
+        # A tool call whose arguments hit the output-token cap mid-generation
+        # can arrive as VALID but incomplete JSON (later keys dropped), which
+        # slips past the malformed-JSON guard in the chat loop. Check the
+        # schema's required list here so the model gets a clean, actionable
+        # error instead of a TypeError traceback.
+        missing = [p for p in self._required_params(tool_name) if p not in kwargs]
+        if missing:
+            return json.dumps({
+                "status": "error",
+                "tool": tool_name,
+                "message": self._missing_args_message(missing, kwargs),
+            })
+
         try:
             return self.functions_map[tool_name](**kwargs)
+        except TypeError as e:
+            # An unexpected keyword reaches here as a bare TypeError whose
+            # message names the offending argument but not the valid ones,
+            # so the model has to guess its way back. Name them.
+            if "unexpected keyword argument" in str(e):
+                import inspect as _inspect
+                try:
+                    accepted = [n for n in _inspect.signature(
+                        self.functions_map[tool_name]).parameters]
+                except (TypeError, ValueError):
+                    accepted = []
+                logging.warning(f"Tool {tool_name}: {e}")
+                return json.dumps({
+                    "status": "error",
+                    "tool": tool_name,
+                    "message": (f"{e}. Accepted arguments: "
+                                f"{', '.join(accepted) or 'unknown'}. "
+                                "Re-send the call using only those."),
+                })
+            logging.error(f"Tool execution error ({tool_name}): {e}", exc_info=True)
+            return json.dumps({
+                "status": "error",
+                "message": str(e),
+                "tool": tool_name
+            })
         except Exception as e:
             logging.error(f"Tool execution error ({tool_name}): {e}", exc_info=True)
             return json.dumps({
@@ -4555,5 +8602,50 @@ class OrchestratorTools:
                 "message": str(e),
                 "tool": tool_name
             })
+
+    def _required_params(self, tool_name: str) -> list:
+        """Return the schema-declared required parameter names for a tool."""
+        for schema in self.openai_schemas:
+            fn = schema.get("function", {})
+            if fn.get("name") == tool_name:
+                return fn.get("parameters", {}).get("required", []) or []
+        return []
+
+    def _missing_args_message(self, missing: list, kwargs: dict) -> str:
+        """Explain a missing required argument without guessing the cause.
+
+        Two wrong versions preceded this one. The first asserted the
+        arguments "were likely truncated by the response length limit" and
+        sent the model to save_file/append_file chunks — a cause it never
+        checked and a remedy that abandons the tool. The second inferred
+        the opposite from schema order: a key declared AFTER the missing one
+        having arrived was taken as proof the call was complete.
+
+        That inference is unsound, and instrumentation caught it. A live
+        save_file call came back finish_reason='length' — genuinely cut —
+        as VALID JSON missing `content` (declared second) while
+        `deliverable` and `title` (declared fourth and fifth) were present.
+        Arguments are emitted in the model's chosen order, not the schema's,
+        and when the response is cut the LONG value is the casualty while
+        short ones already emitted survive. Declaration order proves
+        nothing.
+
+        The decisive signal, finish_reason, is not visible here — it lives
+        at the dispatch site. So this states what is known, names the
+        mechanism as a possibility rather than a fact, and asks for the same
+        call again.
+        """
+        arrived = sorted(k for k in kwargs if k not in missing)
+        return (
+            f"Missing required argument(s): {', '.join(missing)}. "
+            + (f"The call did arrive with {', '.join(arrived)}. " if arrived
+               else "")
+            + "The tool was NOT run. Resend the SAME call with the missing "
+            "argument included — do not switch to another tool, which would "
+            "lose what this one does. A long value is the likeliest thing to "
+            "go missing, so if the argument you omitted was large, send a "
+            "shorter one: it is a specification of what is wanted, not the "
+            "finished text."
+        )
 
 

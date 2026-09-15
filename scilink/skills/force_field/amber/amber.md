@@ -19,8 +19,8 @@ convert to a LAMMPS data file that embeds all coefficients and charges.
 - Carbohydrates / glycans: GLYCAM06j-1
 - Small organic molecules, ligands, solvents: GAFF2 (preferred) or GAFF
 - Solvated systems with explicit water: TIP3P, SPC/E, OPC, TIP4P-Ew
-- Monovalent ions (Na+, K+, Cl-): Joung-Cheatham (auto-loaded with water model)
-- Divalent ions (Mg2+, Ca2+, Zn2+): 12-6 LJ sets from Aqvist or Li-Merz
+- Ions, monovalent through trivalent — see "Ion parameter selection" under
+  Planning
 
 ### When NOT to use AMBER
 
@@ -65,6 +65,36 @@ file is needed -- the read_data command loads everything.
 
 Decision rule: Use OPC with ff19SB. Use TIP3P with ff14SB. Avoid TIP4P
 in LAMMPS unless specifically needed (virtual site handling adds complexity).
+
+### Ion parameter selection
+
+Ion parameters are a separate choice from the biomolecular force field and the
+water model, and the right set depends on the ion's CHARGE.
+
+| Ion charge | Recommended set | Notes |
+|---|---|---|
+| Monovalent (Na+, K+, Li+, Cl-, Br-) | Joung-Cheatham | Auto-loaded with the water model; matched per water model |
+| Divalent (Mg2+, Ca2+, Zn2+, Cu2+, ...) | Li-Merz **12-6-4**, else Li-Merz/Aqvist 12-6 | A 12-6 set is fitted to EITHER the hydration free energy OR the ion-oxygen distance, not both |
+| Trivalent (Al3+, Fe3+, lanthanides) | Li-Merz **12-6-4** | 12-6 is worst here; charge-induced polarisation dominates |
+
+Decision rule: For monovalent ions use Joung-Cheatham matched to the water
+model. For divalent and trivalent cations the Li-Merz **12-6-4** set is the
+physically right answer whenever the research goal involves coordination
+number, hydration structure, ion-water distances, or binding free energies —
+the r^-4 term represents charge-induced dipole and is what lets one parameter
+set reproduce hydration free energy and coordination geometry simultaneously.
+A plain 12-6 set is fine when the ion is a spectator (bulk neutralising
+counter-ions).
+
+**12-6-4 needs a C4 term this pipeline does not currently carry.** The AMBER
+to LAMMPS route here is `lj/charmm/coul/long` / `lj/cut/coul/long`, both 12-6
+forms, and the ParmEd conversion does not transport `LENNARD_JONES_CCOEF`.
+Selecting 12-6-4 where it cannot be implemented is worse than not selecting
+it: the run proceeds on plain 12-6 while carrying parameters fitted on the
+assumption that C4 is present. So when the workflow cannot implement C4,
+choose the 12-6 set fitted to the ION-OXYGEN DISTANCE rather than the
+HFE-fitted one — the goals above are structural — and record both the
+substitution and its consequence for the target observable in `cautions`.
 
 ### Charge method selection for small molecules
 

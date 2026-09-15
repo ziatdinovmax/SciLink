@@ -81,6 +81,38 @@ METADATA_SCHEMA_DICT = {
                 "units": {"type": ["string", "null"], "description": "Units like 'nm', 'eV', 'cm^-1'."}
             },
         },
+        # --- Generic Axis Spec (Optional, for non-energy 3D hyperspectral) ---
+        # Used when the dataset is 3D but the axes are not the standard
+        # (x_spatial, y_spatial, energy) layout — e.g. (force, distance, frequency),
+        # (x, y, voltage), (x, y, time). When absent, downstream code synthesizes
+        # axis_spec from legacy spatial_info + energy_range for backward compatibility.
+        "axis_spec": {
+            "type": ["object", "null"],
+            "description": (
+                "Optional per-axis description for 3D hyperspectral data. Keys "
+                "are 'axis_0', 'axis_1', 'axis_2'. Each value is an object with "
+                "'name' (e.g. 'x', 'time', 'voltage'), 'units' (e.g. 'nm', 's', "
+                "'V'), 'kind' (one of 'spatial', 'parameter', 'signal', 'time'), "
+                "and for the signal-like axis also 'start' and 'end' (physical "
+                "range endpoints). When absent, the system uses legacy "
+                "spatial_info + energy_range as if the layout were "
+                "(x_spatial, y_spatial, energy)."
+            ),
+            "properties": {
+                "axis_0": {"type": ["object", "null"]},
+                "axis_1": {"type": ["object", "null"]},
+                "axis_2": {"type": ["object", "null"]},
+                "signal_is_nonnegative": {
+                    "type": ["boolean", "null"],
+                    "description": (
+                        "Whether the signal-like axis is physically non-negative "
+                        "(e.g. photon counts). Defaults to true. Set to false for "
+                        "signed signals like derivative or difference spectra so "
+                        "preprocessing does not clip negative values."
+                    ),
+                },
+            },
+        },
         # --- 1D Curve Specific (Conditional) ---
         "title": {
             "type": ["string", "null"], # Optional
@@ -140,11 +172,13 @@ Identify Experiment Type: First, determine the general experiment_type (e.g., Mi
 
 Fill Core Fields: Populate the required fields: experiment_type, experiment (including technique), and sample (including material). Extract other details like instrument or conditions into experiment.details or sample.description if available.
 
+Faithful Extraction — DO NOT FABRICATE (CRITICAL): Record ONLY information stated in the description. Do NOT add, infer, or enrich the metadata with domain knowledge the source text does not contain — in particular, do NOT invent expected/characteristic peak positions, known phase transitions, typical parameter values, or literature constants for the named material. Downstream analysis treats sample.description and experiment.details as factual experimental context and will try to act on any peaks/features named there, so fabricated expectations actively mislead it. If the author explicitly provided such details (expected peaks, transitions, prior values), preserve them verbatim — the rule is to neither invent nor drop. When unsure whether a detail came from the text or from your own knowledge, leave it out.
+
 Fill Conditional Fields based on Type:
 
 If Microscopy: Focus on extracting spatial_info (field of view and units). Omit or use null for spectroscopy/curve fields if not relevant.
 
-If Spectroscopy/Hyperspectral: Focus on extracting energy_range (start, end, units). Omit or use null for microscopy/curve fields if not relevant.
+If Spectroscopy/Hyperspectral: Focus on extracting energy_range (start, end, units). Omit or use null for microscopy/curve fields if not relevant. If the third (channel) axis of a 3D hyperspectral dataset is NOT energy/wavelength (e.g. it is time, voltage, force, frequency, or another parameter), populate the optional axis_spec object (with axis_0, axis_1, axis_2 entries — each having name, units, kind, and for the signal axis also start/end) instead of energy_range. The signal axis's start/end are REQUIRED for datacube analysis, so extract them from whatever evidence states the sweep/scan range — dedicated fields, a comment string, or a filename — rather than omitting them when no field is explicitly named "range". Use axis_spec.signal_is_nonnegative=false when the signal can be signed (e.g. derivative spectra, difference spectra).
 
 If 1D Curve Data (PL, XRD, etc.): Focus on extracting title, data_columns (determining X and Y column names/units), xlabel, and ylabel. energy_range might also apply if the x-axis represents energy. Omit or use null for microscopy fields.
 
@@ -210,6 +244,42 @@ def _ci_pop(d: dict, aliases: list[str]):
     return None
 
 
+def _describes_spectral_imaging(metadata: dict) -> bool:
+    """True when the metadata describes a spectral-imaging / hyperspectral
+    datacube — a dataset whose defining third axis is an energy/spectral axis.
+
+    For such data the energy axis is *required* (downstream builds the channel
+    axis from it); for 1D curves or plain microscopy it is optional. Heuristic
+    on the free-text ``experiment_type`` + ``experiment.technique`` so a dict
+    that only names the technique in prose still routes correctly.
+    """
+    exp = metadata.get("experiment")
+    technique = exp.get("technique", "") if isinstance(exp, dict) else ""
+    blob = f"{metadata.get('experiment_type') or ''} {technique}".lower()
+    if "hyperspectral" in blob or "datacube" in blob:
+        return True
+    # "spectral/spectroscopy ... imaging/mapping/spectrum-image/cube/grid".
+    # "grid" covers grid spectroscopy (STS/CITS-style spectra on an x-y
+    # grid), which is a datacube even though nothing in its prose says so.
+    return ("spectr" in blob
+            and any(w in blob for w in ("imag", "map", "cube", "spectrum image",
+                                        "grid")))
+
+
+def _has_resolvable_energy_axis(metadata: dict) -> bool:
+    """True when an energy/signal axis with both endpoints can be resolved —
+    either legacy ``energy_range`` or ``axis_spec.axis_2`` carries start+end."""
+    er = metadata.get("energy_range")
+    if isinstance(er, dict) and er.get("start") is not None and er.get("end") is not None:
+        return True
+    ax = metadata.get("axis_spec")
+    if isinstance(ax, dict):
+        a2 = ax.get("axis_2")
+        if isinstance(a2, dict) and a2.get("start") is not None and a2.get("end") is not None:
+            return True
+    return False
+
+
 def check_schema_conformance(metadata: dict) -> tuple[bool, list[str]]:
     """Check whether *metadata* conforms to the canonical schema.
 
@@ -244,6 +314,17 @@ def check_schema_conformance(metadata: dict) -> tuple[bool, list[str]]:
         val = metadata.get(key)
         if val is not None and not isinstance(val, dict):
             issues.append(f"'{key}' should be a dict or null")
+
+    # A spectral-imaging / hyperspectral datacube MUST carry a resolvable energy
+    # axis (energy_range.start/end or axis_spec.axis_2.start/end). Without it
+    # the analysis hard-fails when the axis is first built (deliberate — no
+    # silent channel-index fallback), so flag it non-conformant here and let
+    # the LLM normalizer re-extract it while the evidence is still in front of it.
+    if _describes_spectral_imaging(metadata) and not _has_resolvable_energy_axis(metadata):
+        issues.append(
+            "Spectral-imaging/hyperspectral metadata is missing a resolvable "
+            "energy axis (energy_range.start/end or axis_spec.axis_2.start/end)"
+        )
 
     return (len(issues) == 0, issues)
 
@@ -360,6 +441,106 @@ def normalize_metadata_dict(metadata: dict) -> tuple[dict, bool]:
         modified = True
 
     return (d, True) if modified else (metadata, False)
+
+
+# =====================================================================
+# Axis spec resolution (used by hyperspectral pipeline)
+# =====================================================================
+# The hyperspectral analysis agent traditionally assumed a (x, y, energy)
+# layout. axis_spec generalizes that to 3D datasets where the axes can be
+# anything (e.g. (force, distance, frequency)). resolve_axis_spec is the
+# single point of truth: every downstream consumer reads through it so
+# legacy energy-style metadata and new generic metadata coexist.
+
+_AXIS_SPATIAL_DEFAULTS = [
+    {"name": "x", "units": "pixel", "kind": "spatial"},
+    {"name": "y", "units": "pixel", "kind": "spatial"},
+]
+_AXIS_SIGNAL_DEFAULT = {"name": "energy", "units": "eV", "kind": "signal"}
+
+
+def resolve_axis_spec(system_info: dict | None) -> dict:
+    """Return a fully-populated axis_spec for a 3D hyperspectral dataset.
+
+    If ``system_info['axis_spec']`` is present, missing per-axis fields are
+    filled with defaults. Otherwise the spec is synthesized from legacy
+    ``spatial_info`` and ``energy_range`` so that an existing (x, y, energy)
+    call site sees identical behavior.
+
+    The returned dict always has keys ``axis_0``, ``axis_1``, ``axis_2``
+    (each an object with at least ``name``, ``units``, ``kind``) plus
+    ``signal_is_nonnegative`` (bool). The signal-like axis additionally
+    carries ``start`` and ``end`` when known; downstream callers raise if
+    they need those values and they are absent — same behavior as today.
+    """
+    system_info = system_info or {}
+    provided = system_info.get("axis_spec") or {}
+
+    spec: dict = {}
+
+    # axis_0, axis_1 — default to spatial; legacy spatial_info supplies units
+    spatial_info = system_info.get("spatial_info") or {}
+    spatial_units = spatial_info.get("field_of_view_units") or _AXIS_SPATIAL_DEFAULTS[0]["units"]
+    for idx in (0, 1):
+        key = f"axis_{idx}"
+        user_axis = provided.get(key) or {}
+        default = dict(_AXIS_SPATIAL_DEFAULTS[idx])
+        if spatial_units:
+            default["units"] = spatial_units
+        spec[key] = {
+            "name": user_axis.get("name", default["name"]),
+            "units": user_axis.get("units", default["units"]),
+            "kind": user_axis.get("kind", default["kind"]),
+        }
+
+    # axis_2 — default to signal (energy). Legacy energy_range supplies
+    # start/end/units when axis_spec.axis_2 doesn't.
+    user_axis_2 = provided.get("axis_2") or {}
+    energy_range = system_info.get("energy_range") or {}
+    axis_2 = {
+        "name": user_axis_2.get("name", _AXIS_SIGNAL_DEFAULT["name"]),
+        "units": user_axis_2.get("units", energy_range.get("units") or _AXIS_SIGNAL_DEFAULT["units"]),
+        "kind": user_axis_2.get("kind", _AXIS_SIGNAL_DEFAULT["kind"]),
+    }
+    start = user_axis_2.get("start", energy_range.get("start"))
+    end = user_axis_2.get("end", energy_range.get("end"))
+    if start is not None:
+        axis_2["start"] = start
+    if end is not None:
+        axis_2["end"] = end
+    spec["axis_2"] = axis_2
+
+    # Signal sign assumption — default True (counts-like) for backward compat
+    nonneg = provided.get("signal_is_nonnegative")
+    if nonneg is None:
+        nonneg = True
+    spec["signal_is_nonnegative"] = bool(nonneg)
+
+    return spec
+
+
+def describe_axes_for_prompt(shape, axis_spec: dict) -> str:
+    """Render a short human-friendly axes description for LLM prompts.
+
+    For the legacy (x_spatial, y_spatial, energy) layout this returns the
+    historical wording ("{h}x{w} spatial pixels, {e} spectral channels") so
+    existing prompts are unchanged. For generic layouts it switches to an
+    axis-name-driven phrasing.
+    """
+    n0, n1, n2 = shape
+    a0, a1, a2 = axis_spec["axis_0"], axis_spec["axis_1"], axis_spec["axis_2"]
+    legacy_layout = (
+        a0.get("kind") == "spatial"
+        and a1.get("kind") == "spatial"
+        and a2.get("kind") == "signal"
+        and a2.get("name") == "energy"
+    )
+    if legacy_layout:
+        return f"{n0}x{n1} spatial pixels, {n2} spectral channels"
+    return (
+        f"{n0}x{n1} samples along ({a0['name']}, {a1['name']}), "
+        f"{n2} channels along {a2['name']}"
+    )
 
 
 def _run_metadata_llm(text: str, model) -> dict | None:

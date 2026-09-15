@@ -19,9 +19,8 @@ agent should resolve identity from the spectral fingerprint alone.
 scilink ui
 ```
 
-— upload `spectrum.npy` and `spectrum.json` (requires
-`pip install scilink[ui]`), then ask the agent in chat to run in
-identification mode.
+— upload `spectrum.npy` and `spectrum.json`, then ask the agent in
+chat to run in identification mode.
 
 **CLI**:
 

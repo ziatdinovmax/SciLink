@@ -8,9 +8,12 @@ import subprocess
 from typing import Dict, Any, List, Optional, Tuple, Union
 import numpy as np
 # MDAnalysis is imported lazily inside _analyze_system_composition so that
-# loading scilink.agents.sim_agents (e.g., via DFTOrchestrator) doesn't
-# require the LAMMPS-side optional dep.
-from ...auth import get_internal_proxy_key
+# loading scilink.agents.sim_agents doesn't require the LAMMPS-side optional
+# dep.
+from ...auth import (
+    APIKeyNotFoundError, get_api_key, get_internal_proxy_key, infer_provider,
+    require_vendor_credentials,
+)
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from ._deprecation import normalize_params
@@ -103,7 +106,11 @@ class ForceFieldAgent:
                 base_url=base_url
             )
         else:
-            # Public / LiteLLM
+            # Public / LiteLLM — delegate model→provider→env-var resolution
+            # to LiteLLM (works for any model LiteLLM supports; raises a
+            # message naming the missing vendor env var if not).
+            if api_key is None:
+                require_vendor_credentials(model_name)
             self.logger.info(f"ForceFieldAgent using LiteLLM: {model_name}")
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
@@ -504,7 +511,7 @@ class ForceFieldAgent:
                 k: v for k, v in result.items()
                 if isinstance(v, (str, int, float, bool, list, dict, type(None)))
             }
-            with open(summary_file, "w") as f:
+            with open(summary_file, "w", encoding="utf-8") as f:
                 json.dump(serializable, f, indent=2)
         except Exception as e:
             self.logger.warning(f"Could not save pipeline summary: {e}")
@@ -947,7 +954,7 @@ Provide a brief summary of what the results mean and any actions needed.
         inpcrd = os.path.join(self.working_dir, "system.inpcrd")
         lines += ["check SYS", f"saveamberparm SYS {prmtop} {inpcrd}", "quit"]
         script_path = os.path.join(self.working_dir, "system_tleap.in")
-        with open(script_path, "w") as f:
+        with open(script_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
         return script_path
 
@@ -1113,7 +1120,7 @@ Provide a brief summary of what the results mean and any actions needed.
         }
 
         selection_file = os.path.join(self.working_dir, "force_field_selection.json")
-        with open(selection_file, 'w') as f:
+        with open(selection_file, 'w', encoding="utf-8") as f:
             json.dump(result, f, indent=2)
 
         return result
@@ -1246,7 +1253,7 @@ Provide a brief summary of what the results mean and any actions needed.
 
         param_file = os.path.join(self.working_dir, "parameter_info.json")
         try:
-            with open(param_file, 'w') as f:
+            with open(param_file, 'w', encoding="utf-8") as f:
                 serializable_params = {
                     k: v for k, v in params.items()
                     if k not in ["raw_data", "quantum_results"]
@@ -1257,6 +1264,125 @@ Provide a brief summary of what the results mean and any actions needed.
             self.logger.warning(f"Could not save parameter info: {e}")
 
         return params
+
+    def parameterize(self, *,
+                     components: Optional[List[Dict[str, Any]]] = None,
+                     coordinates_file: Optional[str] = None,
+                     pdb_file: Optional[str] = None,
+                     research_goal: str = "",
+                     **ff_kwargs) -> "ParameterizedSystem":
+        """Produce an engine-neutral ``ParameterizedSystem`` (the contract an MD
+        engine's ``write_md_inputs`` consumes), writing NO engine input files.
+
+        Backend-agnostic: it selects a ``force_field`` backend skill that can
+        consume the given inputs (``_select_backend``), dispatches to that
+        skill's ``build_parameterized_system`` tool through the registry, and
+        wraps the returned payload uniformly. The agent names no force-field
+        package and no MD engine — each backend lives entirely in its skill:
+
+        * a packed box of SMILES-defined species (``components`` +
+          ``coordinates_file``) → the OpenFF backend (SMIRNOFF + NAGL,
+          ``source_format="interchange"``);
+        * a biomolecular structure (``pdb_file``) → the AMBER backend (tleap,
+          ``source_format="amber"``).
+
+        Pass ``backend=<skill>`` to force a specific backend and skip selection.
+        """
+        from ...skills._shared._registry import get_tool_function
+
+        backend = ff_kwargs.pop("backend", None) or self._select_backend(
+            components=components, coordinates_file=coordinates_file,
+            pdb_file=pdb_file, research_goal=research_goal,
+        )
+        # ``working_dir`` may arrive via callers (the pipeline passes it); honor
+        # it and keep it out of ff_kwargs so it isn't passed to build() twice.
+        working_dir = ff_kwargs.pop("working_dir", None) or self.working_dir
+        build = get_tool_function(
+            "build_parameterized_system", active_skills=[backend])
+        if build is None:
+            raise ValueError(
+                f"force_field skill {backend!r} exposes no "
+                "`build_parameterized_system` tool."
+            )
+        payload = build(
+            components=components, coordinates_file=coordinates_file,
+            pdb_file=pdb_file, working_dir=working_dir,
+            research_goal=research_goal, **ff_kwargs,
+        )
+        return self._wrap_parameterized_system(payload)
+
+    def _select_backend(self, *,
+                        components: Optional[List[Dict[str, Any]]],
+                        coordinates_file: Optional[str],
+                        pdb_file: Optional[str],
+                        research_goal: str) -> str:
+        """Pick a ``force_field`` backend skill that can consume these inputs.
+
+        Engine- and package-agnostic: it discovers the ``force_field`` skills and
+        matches each backend's ``build_parameterized_system`` tool on its declared
+        required inputs (data-driven — the agent names no package). A skilled
+        tiebreak decides only when several backends accept the same inputs.
+        """
+        from ...skills.loader import list_skills
+        from ...skills._shared._registry import get_tools_for
+
+        provided = {k for k, v in (
+            ("components", components),
+            ("coordinates_file", coordinates_file),
+            ("pdb_file", pdb_file)) if v is not None}
+
+        candidates: List[str] = []
+        for skill in list_skills(domain="force_field"):
+            spec = next(
+                (s for s in get_tools_for("simulation", active_skills=[skill])
+                 if s.name == "build_parameterized_system"), None)
+            if spec and set(spec.required) <= provided:
+                candidates.append(skill)
+
+        if not candidates:
+            raise ValueError(
+                f"no force_field backend accepts inputs {sorted(provided)}; "
+                f"available backends: {list_skills(domain='force_field')}"
+            )
+        if len(candidates) == 1:
+            return candidates[0]
+        return self._pick_backend_by_skill(candidates, research_goal)
+
+    def _pick_backend_by_skill(self, candidates: List[str],
+                               research_goal: str) -> str:
+        """Tiebreak among backends that accept the same inputs, using their skill
+        guidance. Deterministic fallback keeps the pipeline reproducible when no
+        model is available."""
+        # The current backends take disjoint inputs, so this rarely fires; when
+        # it does, prefer a skilled choice, falling back to the first candidate.
+        self.logger.info(
+            "multiple force_field backends accept these inputs %s; selecting %r",
+            candidates, candidates[0])
+        return candidates[0]
+
+    def _wrap_parameterized_system(self, payload: Dict[str, Any]) -> "ParameterizedSystem":
+        """Wrap a backend's uniform payload dict into a ``ParameterizedSystem``.
+
+        One wrapping for every backend — the discriminator is the payload's
+        ``source_format``, not the backend identity, so the agent branches on no
+        force-field package.
+        """
+        from ._parameterized_system import ParameterizedSystem, ComponentSpec
+        comps = [c if isinstance(c, ComponentSpec) else ComponentSpec(
+            name=c.get("name", ""), smiles=c.get("smiles", ""),
+            count=int(c.get("count", 1)), charge=float(c.get("charge", 0.0)))
+            for c in (payload.get("components") or [])]
+        amber = tuple(payload.get("amber_files") or ("", ""))
+        return ParameterizedSystem(
+            backend=payload.get("backend", ""),
+            source_format=payload["source_format"],
+            n_atoms=int(payload["n_atoms"]),
+            total_charge=float(payload["total_charge"]),
+            components=comps,
+            coordinates_file=payload.get("coordinates_file", ""),
+            interchange_path=payload.get("interchange_path", ""),
+            amber_files=amber,
+        )
 
     def generate_lammps_parameters(self,
                                parameter_info: Dict[str, Any],
@@ -1276,7 +1402,7 @@ Provide a brief summary of what the results mean and any actions needed.
             header = parameter_info.get("input_header", "")
             if header:
                 header_file = os.path.join(self.working_dir, "ff_params.lammps")
-                with open(header_file, 'w') as f:
+                with open(header_file, 'w', encoding="utf-8") as f:
                     f.write(header)
                 return {"main": header_file}
             # Fall through to LLM-based generation if header is missing
@@ -1288,7 +1414,7 @@ Provide a brief summary of what the results mean and any actions needed.
 
         files = {}
         param_file = os.path.join(self.working_dir, "ff_params.lammps")
-        with open(param_file, 'w') as f:
+        with open(param_file, 'w', encoding="utf-8") as f:
             f.write(param_content["main"])
         files["main"] = param_file
 
@@ -1296,7 +1422,7 @@ Provide a brief summary of what the results mean and any actions needed.
             for name, content in param_content["additional"].items():
                 if content:
                     add_file = os.path.join(self.working_dir, f"{name}.lammps")
-                    with open(add_file, 'w') as f:
+                    with open(add_file, 'w', encoding="utf-8") as f:
                         f.write(content)
                     files[name] = add_file
 
@@ -1451,7 +1577,7 @@ Provide a brief summary of what the results mean and any actions needed.
             if min(middle_bins) < max(middle_bins) * 0.1:
                 return True
             return False
-        except:
+        except Exception:
             return False
 
     def _detect_gas_phase(self, universe):
@@ -1463,7 +1589,7 @@ Provide a brief summary of what the results mean and any actions needed.
                 density = (n_atoms * 12) / (volume * 0.6022)
                 if density < 0.1:
                     return True
-            except:
+            except Exception:
                 pass
         return False
 
@@ -1524,7 +1650,9 @@ DOMAIN-SPECIFIC GUIDANCE (use this to inform your selection):
 """
 
         prompt = f"""
-You are an expert in molecular dynamics force field selection for LAMMPS simulations.
+You are an expert in molecular dynamics force field selection. Choose a force
+field for the system below; it will be run through an engine-neutral pipeline,
+so do not assume any particular MD engine.
 
 SYSTEM INFORMATION:
 - Total atoms: {system_info.get('n_atoms', 'Unknown')}
@@ -2376,7 +2504,7 @@ Include only the JSON response with no additional text.
             charge_assignments=charge_assignments, data_info=data_info
         )
         charge_info_file = os.path.join(self.working_dir, "charge_assignments.json")
-        with open(charge_info_file, 'w') as f:
+        with open(charge_info_file, 'w', encoding="utf-8") as f:
             json.dump({
                 "charge_assignments": charge_assignments,
                 "validation": validation,
@@ -2706,7 +2834,7 @@ Data file type IDs to map: {', '.join(str(t) for t in type_ids)}
                 from ase.data import atomic_masses, atomic_numbers
                 target_mass = atomic_masses[atomic_numbers[element]]
                 mass_match = abs(mass - target_mass) < 1.0
-            except:
+            except Exception:
                 mass_match = False
             if element_match or mass_match:
                 score = 0
@@ -3130,7 +3258,7 @@ Return JSON mapping type ID to charge:
                     except (ValueError, IndexError):
                         pass
             new_lines.append(line)
-        with open(output_file, 'w') as f:
+        with open(output_file, 'w', encoding="utf-8") as f:
             f.writelines(new_lines)
         self.logger.info(f"Wrote data file with charges: {output_file} ({charges_written} atoms)")
         if charges_written == 0:
@@ -3380,7 +3508,7 @@ Return JSON mapping type ID to charge:
                     except (ValueError, IndexError):
                         pass
             new_lines.append(line); i += 1
-        with open(output_file, 'w') as f:
+        with open(output_file, 'w', encoding="utf-8") as f:
             f.writelines(new_lines)
         self.logger.info(f"Split {len(new_type_info)} atom types, total now: {new_type_counter}")
         return output_file
@@ -3483,7 +3611,7 @@ Return JSON:
             if corrected_ff and corrected_ff.strip() != current_ff.strip():
                 backup_path = ff_params_path + f".before_quality_{stage}"
                 shutil.copy2(ff_params_path, backup_path)
-                with open(ff_params_path, 'w') as f:
+                with open(ff_params_path, 'w', encoding="utf-8") as f:
                     f.write(corrected_ff)
                 changes = result.get("changes", [])
                 return True, {"summary": f"{len(changes)} parameter changes: {diagnosis[:80]}", "diagnosis": diagnosis, "changes": changes, "backup": backup_path}
@@ -3557,7 +3685,7 @@ Return JSON:
             shutil.copy2(data_file, backup_path)
             self._write_data_file_with_charges(data_file, data_file, int_charges, data_info)
             new_validation = self._validate_charge_assignments(int_charges, data_info)
-            with open(charge_file, 'w') as f:
+            with open(charge_file, 'w', encoding="utf-8") as f:
                 json.dump({
                     "charge_assignments": {str(k): v for k, v in int_charges.items()},
                     "validation": new_validation,

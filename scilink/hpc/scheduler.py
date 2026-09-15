@@ -91,6 +91,30 @@ class Scheduler(ABC):
     @abstractmethod
     def partitions(self) -> list[dict]: ...
 
+    @abstractmethod
+    def batch_directives(self, resources: dict) -> list[str]:
+        """Scheduler directive lines for a batch script.
+
+        Translates an engine-neutral ``resources`` dict into the scheduler's
+        own directive syntax (``#SBATCH`` / ``#PBS`` / ``#BSUB``). Recognized
+        keys (all optional): ``job_name``, ``partition``, ``nodes``,
+        ``ntasks``, ``time`` (HH:MM:SS), ``account``, ``gres``, and
+        ``extra_directives`` (a list of raw directive lines passed through
+        verbatim). Keeping this on the scheduler is what lets a new scheduler
+        be one subclass with zero changes elsewhere.
+        """
+
+    def workdir_prelude(self) -> list[str]:
+        """Shell lines that move the job to its submit directory.
+
+        Schedulers differ on a job's starting directory: SLURM and LSF begin
+        in the submit directory, but PBS/Torque starts in ``$HOME``. A batch
+        script that writes relative output paths therefore needs a scheduler-
+        specific ``cd`` first. The default is empty (submit dir is already the
+        CWD); a scheduler that needs otherwise overrides this.
+        """
+        return []
+
     def tail_output(
         self,
         job: HPCJob,
@@ -289,6 +313,23 @@ class SlurmScheduler(Scheduler):
             ))
         return parts
 
+    def batch_directives(self, resources: dict) -> list[str]:
+        r = resources or {}
+        d = [
+            f"#SBATCH --job-name={r.get('job_name', 'scilink')}",
+            f"#SBATCH --nodes={r.get('nodes', 1)}",
+            f"#SBATCH --ntasks={r.get('ntasks', 1)}",
+            f"#SBATCH --time={r.get('time', '01:00:00')}",
+        ]
+        if r.get("partition"):
+            d.append(f"#SBATCH --partition={r['partition']}")
+        if r.get("account"):
+            d.append(f"#SBATCH --account={r['account']}")
+        if r.get("gres"):
+            d.append(f"#SBATCH --gres={r['gres']}")
+        d.extend(r.get("extra_directives", []))
+        return d
+
 
 # ══════════════════════════════════════════════════════════════
 # PBS / Torque
@@ -373,6 +414,24 @@ class PBSScheduler(Scheduler):
             for line in out.strip().splitlines()[2:]
             if line.split()
         ]
+
+    def batch_directives(self, resources: dict) -> list[str]:
+        r = resources or {}
+        d = [
+            f"#PBS -N {r.get('job_name', 'scilink')}",
+            f"#PBS -l nodes={r.get('nodes', 1)}:ppn={r.get('ntasks', 1)}",
+            f"#PBS -l walltime={r.get('time', '01:00:00')}",
+        ]
+        if r.get("partition"):
+            d.append(f"#PBS -q {r['partition']}")
+        if r.get("account"):
+            d.append(f"#PBS -A {r['account']}")
+        d.extend(r.get("extra_directives", []))
+        return d
+
+    def workdir_prelude(self) -> list[str]:
+        # PBS/Torque starts the job in $HOME, not the submit directory.
+        return ["cd $PBS_O_WORKDIR"]
 
 
 # ══════════════════════════════════════════════════════════════
@@ -462,6 +521,21 @@ class LSFScheduler(Scheduler):
             for line in out.strip().splitlines()
             if line.strip()
         ]
+
+    def batch_directives(self, resources: dict) -> list[str]:
+        r = resources or {}
+        # LSF -W wants [hours:]minutes; callers targeting LSF pass that format.
+        d = [
+            f"#BSUB -J {r.get('job_name', 'scilink')}",
+            f"#BSUB -n {r.get('ntasks', 1)}",
+            f"#BSUB -W {r.get('time', '01:00')}",
+        ]
+        if r.get("partition"):
+            d.append(f"#BSUB -q {r['partition']}")
+        if r.get("account"):
+            d.append(f"#BSUB -P {r['account']}")
+        d.extend(r.get("extra_directives", []))
+        return d
 
 # ── helpers ───────────────────────────────────────────────────
 

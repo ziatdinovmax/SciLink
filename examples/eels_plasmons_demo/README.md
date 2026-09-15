@@ -14,8 +14,7 @@ The example exercises the hyperspectral agent.
 scilink ui
 ```
 
-— upload `datacube.npy` and `datacube.json` (requires
-`pip install scilink[ui]`).
+— upload `datacube.npy` and `datacube.json`.
 
 **CLI**:
 

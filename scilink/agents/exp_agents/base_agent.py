@@ -135,6 +135,35 @@ class LLMAgentMixin:
                 "details": str(e)
             }
     
+    def _parse_codegen_response(self, response: Any, field: str = "script") -> Tuple[Optional[dict], Optional[dict]]:
+        """Parse a codegen (script-generation) response — see ``utils.codegen_parse``.
+
+        Script-first + compile-checked, with distinct truncation detection. Use
+        this instead of ``_parse_llm_response`` for script/code generation;
+        structured-JSON responses (plans, validation, conformance) keep using
+        ``_parse_llm_response``.
+        """
+        from ...utils.codegen_parse import parse_codegen_response
+        return parse_codegen_response(response, field=field, logger=self.logger)
+
+    def _salvage_synthesis_fields(self, response: Any) -> Optional[dict]:
+        """Best-effort recovery of synthesis fields — see ``utils.synthesis_parse``.
+
+        When the synthesis step's strict ``_parse_llm_response`` fails (commonly
+        an unescaped quote/newline in the long ``detailed_analysis`` narrative),
+        this recovers the narrative (and the claims list when clean) instead of
+        dropping the whole payload to ``{"error": …}`` — which would yield a
+        ``success`` result with empty findings and, under the meta agent, a
+        re-delegation loop. Returns ``None`` when nothing usable is recovered, so
+        the caller keeps the original parse error.
+        """
+        from ...utils.synthesis_parse import salvage_synthesis_fields
+        try:
+            raw = self._extract_text_from_response(response) or ""
+        except Exception:
+            return None
+        return salvage_synthesis_fields(raw)
+
     def _extract_text_from_response(self, response: Any) -> str:
         """Extract text content from various LLM response formats."""
         if hasattr(response, 'text'):
@@ -265,29 +294,35 @@ class LLMAgentMixin:
         - dict with top-level keys (e.g., {"sample": "...", "technique": "..."}) -> returned as-is
         - dict with nested "system_info" key -> extracts the nested dict
         - str (file path to JSON) -> loads and processes as above
-        
+        - str (free-text metadata, not a file) -> {"description": <text>}
+
         This allows users to pass either:
         - A flat system_info dict directly
         - A full metadata file that contains a "system_info" key
         - A path to either type of JSON file
+        - A plain descriptive string (e.g. "17O NMR of D2O, shift vs intensity")
         """
         if system_info is None:
             return {}
-        
-        # Load from file if string path provided
+
+        # A string is either a path to a JSON metadata file or free-text
+        # metadata. Try to load it as a file; if it is not a readable path,
+        # PRESERVE it as free text rather than discarding it — a descriptive
+        # string is a natural metadata input, and dropping it silently blinds
+        # skill selection and every downstream metadata-dependent prompt.
         if isinstance(system_info, str):
             try:
                 with open(system_info, 'r') as f:
                     system_info = json.load(f)
-            except FileNotFoundError:
-                self.logger.error(f"system_info file not found: {system_info}")
-                return {}
             except json.JSONDecodeError as e:
+                # An existing file that is not valid JSON — a genuine error.
                 self.logger.error(f"Invalid JSON in system_info file {system_info}: {e}")
                 return {}
-            except Exception as e:
-                self.logger.error(f"Error loading system_info from {system_info}: {e}")
-                return {}
+            except (FileNotFoundError, OSError, ValueError):
+                # Not a readable path (missing file, name too long, null byte,
+                # ordinary prose) -> treat the string as free-text metadata.
+                self.logger.debug("system_info is free-text (not a file path); preserving as description")
+                return {"description": system_info}
         
         # Ensure we have a dict at this point
         if not isinstance(system_info, dict):
@@ -328,6 +363,38 @@ class LLMAgentMixin:
             system_info = dict(system_info)          # shallow copy to avoid mutating caller's dict
             series_metadata = system_info.pop("series")
         return system_info, series_metadata
+
+    @staticmethod
+    def _normalize_series_values(
+        series_metadata: dict | None,
+        ordered_paths: list | None,
+    ) -> dict | None:
+        """Coerce ``series_metadata['values']`` from a filename-keyed dict into
+        a list aligned to *ordered_paths* (file order) — the contract every
+        downstream consumer assumes (``values[idx]``, ``min``/``max``, the trend
+        codegen). The orchestrator normalizes this when it sorts a series, but
+        sidecar / continuation paths can hand the agent the raw
+        ``{filename: value}`` dict; a dict reaching a list-expecting consumer
+        raises ``'<' not supported between instances of 'dict' and 'dict'``
+        (min/max) or a ``KeyError`` (``values[int]``).
+
+        Idempotent: a list passes through unchanged. Only rewrites when every
+        spectrum finds a value — a partial/mismatched map is left as-is so the
+        caller's existing fallbacks (and the defensive consumer guards) handle
+        it rather than silently mis-aligning values to spectra.
+        """
+        if not series_metadata or not ordered_paths:
+            return series_metadata
+        values = series_metadata.get("values")
+        if not isinstance(values, dict):
+            return series_metadata
+        import os
+        by_name = {os.path.basename(str(k)): v for k, v in values.items()}
+        aligned = [by_name.get(os.path.basename(str(p))) for p in ordered_paths]
+        if aligned and all(v is not None for v in aligned):
+            series_metadata = dict(series_metadata)
+            series_metadata["values"] = aligned
+        return series_metadata
 
     def _build_system_info_prompt_section(self, system_info: Dict[str, Any]) -> str:
         """Build the system information section for LLM prompts."""
@@ -667,26 +734,33 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
         system_info: Dict[str, Any] | str | None = None,
         novelty_context: str | None = None,
         novelty_assessment: Dict[str, Any] | None = None,
+        measurement_history: List[Any] | None = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
         Generate measurement recommendations based on analysis.
-        
+
         This is an optional post-processing step that builds on analyze() results.
         If no analysis_result is provided, runs analyze() first.
-        
+
         Args:
             analysis_result: Output from analyze(). If None, runs analyze() first.
             data: Input data (required if analysis_result is None)
             system_info: Metadata (passed to analyze() if running it)
             novelty_context: Optional context from literature review
+            measurement_history: Optional list describing measurements already
+                performed this session (e.g. energy windows / conditions).
+                Recommendations exclude covered ground unless re-measuring
+                under different conditions is explicitly justified.
             **kwargs: Additional arguments passed to analyze() if needed
-        
+
         Returns:
             dict containing:
                 - "status": "success" | "error"
                 - "analysis_integration": str (how analysis informed recommendations)
-                - "measurement_recommendations": list[dict]
+                - "measurement_recommendations": list[dict]; each item may carry
+                  a machine-readable "target" ({"setting", "expected_signature"}
+                  or null) alongside the free-text fields
         """
         # If no analysis provided, run it first
         if analysis_result is None:
@@ -713,7 +787,8 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
                 }
         
         # Generate recommendations from analysis
-        return self._generate_recommendations(analysis_result, system_info, novelty_context, novelty_assessment)
+        return self._generate_recommendations(analysis_result, system_info, novelty_context, novelty_assessment,
+                                              measurement_history=measurement_history)
 
     # =========================================================================
     # BACKWARD COMPATIBLE ALIASES
@@ -798,6 +873,7 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
         system_info: Dict[str, Any] | str | None = None,
         novelty_context: str | None = None,
         novelty_assessment: Dict[str, Any] | None = None,
+        measurement_history: List[Any] | None = None,
     ) -> Dict[str, Any]:
         """Internal method to generate recommendations from analysis results."""
         system_info = self._handle_system_info(system_info)
@@ -831,7 +907,7 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
                 for img_data in stored_images[:5]:
                     if isinstance(img_data, dict) and 'label' in img_data and 'data' in img_data:
                         prompt_parts.append(f"\n**{img_data['label']}:**")
-                        prompt_parts.append({"mime_type": "image/jpeg", "data": img_data['data']})
+                        prompt_parts.append({"mime_type": self._image_mime_type(img_data['data']), "data": img_data['data']})
             
             if novelty_context:
                 prompt_parts.append(f"\n\n## Novelty Context\n{novelty_context}")
@@ -842,7 +918,16 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
             
             if system_info:
                 prompt_parts.append(f"\n\n## System Information\n{json.dumps(system_info, indent=2)}")
-            
+
+            if measurement_history:
+                prompt_parts.append(
+                    "\n\n## Measurements Already Performed This Session\n"
+                    f"{json.dumps(measurement_history, indent=2, default=str)}\n"
+                    "Do not recommend re-acquiring these; recommend a covered "
+                    "setting again only if different acquisition conditions are "
+                    "scientifically justified, and state what must change."
+                )
+
             prompt_parts.append("\n\nProvide measurement recommendations in JSON format.")
             
             self.logger.info("📋 Generating measurement recommendations...")
@@ -1175,7 +1260,7 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
         """Persist state to disk."""
         state_file = self.output_dir / self._get_state_filename()
         try:
-            with open(state_file, 'w') as f:
+            with open(state_file, 'w', encoding="utf-8") as f:
                 json.dump(self.state, f, indent=2, default=str)
         except Exception as e:
             self.logger.warning(f"Failed to save {self.agent_type} state: {e}")
@@ -1213,6 +1298,30 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
     def _get_stored_analysis_images(self) -> List[Dict[str, Any]]:
         """Retrieve stored analysis images."""
         return self._stored_analysis_images.copy()
+
+    @staticmethod
+    def _image_mime_type(data) -> str:
+        """Best-effort media type from magic bytes; stored figures are PNGs
+        more often than JPEGs, and strict providers (Bedrock) reject a
+        declared type that doesn't match the payload. Handles raw bytes and
+        base64 strings; defaults to JPEG when unrecognized."""
+        if isinstance(data, (bytes, bytearray)):
+            head = bytes(data[:8])
+            if head.startswith(b"\x89PNG"):
+                return "image/png"
+            if head.startswith(b"GIF8"):
+                return "image/gif"
+            if head.startswith(b"RIFF"):
+                return "image/webp"
+        else:
+            s = str(data)
+            if s.startswith("iVBOR"):       # base64 of \x89PNG
+                return "image/png"
+            if s.startswith("R0lGO"):       # base64 of GIF8
+                return "image/gif"
+            if s.startswith("UklGR"):       # base64 of RIFF (webp)
+                return "image/webp"
+        return "image/jpeg"
 
     def _clear_stored_images(self) -> None:
         """Clear stored images to free memory."""
@@ -1260,6 +1369,9 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
             if isinstance(rec, dict) and all(k in rec for k in required_keys):
                 priority = rec.get("priority")
                 if isinstance(priority, int) and 1 <= priority <= 5:
+                    # normalize the optional machine-readable target: dict or None
+                    if not isinstance(rec.get("target"), dict):
+                        rec["target"] = None
                     valid_recommendations.append(rec)
         
         return sorted(valid_recommendations, key=lambda x: x.get("priority", 5))
@@ -1340,6 +1452,101 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
         return pixel_size, fov
 
     # =========================================================================
+    # SYNTHESIS RE-ENTRY (issue #322, Tier A)
+    # =========================================================================
+
+    @staticmethod
+    def surface_features_for_reentry(analysis_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Collect the quantitative features of a completed analysis result.
+
+        Modality-agnostic: picks up whichever of the known feature fields are
+        present (curve: model/fit params/trends; image & hyperspectral:
+        ``extracted_features``). Used to ground Tier-A interpretation
+        re-entry in what was actually measured.
+        """
+        features: Dict[str, Any] = {}
+        for key in ("model_type", "fit_quality"):
+            if analysis_result.get(key):
+                features[key] = analysis_result[key]
+        trends = analysis_result.get("parameter_trends")
+        if trends:
+            features["parameter_trends"] = trends
+        elif analysis_result.get("fitting_parameters"):
+            features["fitting_parameters"] = analysis_result["fitting_parameters"]
+        if analysis_result.get("extracted_features"):
+            features["extracted_features"] = analysis_result["extracted_features"]
+        return features
+
+    def reenter_interpretation(
+        self,
+        analysis_result: Dict[str, Any],
+        critique,
+        system_info: Dict[str, Any] | str | None = None,
+        include_stored_images: bool = True,
+    ) -> Dict[str, Any]:
+        """Tier-A synthesis re-entry (issue #322): revise ONLY the
+        interpretation of a completed analysis with an injected critique.
+
+        ``critique`` is a :class:`~scilink.agents.exp_agents._critique.CritiquePayload`
+        or a plain string (wrapped as a human critique). The revision is
+        APPENDED to ``analysis_result["interpretation_revisions"]`` — the
+        original ``detailed_analysis`` / ``scientific_claims`` are never
+        overwritten. No per-unit re-analysis happens (the expensive upstream
+        results are reused as-is).
+
+        Returns ``{"status": "success", "revision": {...}}`` or
+        ``{"status": "error", "error": {...}}``.
+        """
+        from datetime import datetime as _dt
+
+        from ._critique import CritiquePayload
+        from .controllers.base_controllers import SynthesisReEntryController
+
+        if isinstance(critique, str):
+            payload = CritiquePayload(source="human", critique=critique)
+        else:
+            payload = critique
+
+        features = self.surface_features_for_reentry(analysis_result)
+        features_block = json.dumps(features, indent=2, default=str)[:4000] if features else ""
+
+        images = self._get_stored_analysis_images() if include_stored_images else []
+
+        controller = SynthesisReEntryController(
+            model=self.model,
+            logger=self.logger,
+            generation_config=self.generation_config,
+            safety_settings=self.safety_settings,
+            parse_fn=self._parse_llm_response,
+        )
+        revision, error = controller.revise(
+            analysis_result, payload,
+            features_block=features_block,
+            images=images,
+            system_info=self._handle_system_info(system_info) or None,
+        )
+        if error:
+            return {"status": "error", "error": error}
+
+        entry = {
+            "timestamp": _dt.now().isoformat(),
+            "source": payload.source,
+            "critique": payload.critique,
+            # Key name matches the orchestrator's refine_interpretation
+            # revisions so _effective_full_result-style consumers overlay
+            # both kinds uniformly.
+            "revised_analysis": revision["detailed_analysis"],
+            "revision_summary": revision.get("revision_summary", ""),
+        }
+        revised_claims = self._validate_scientific_claims(
+            revision.get("scientific_claims", [])
+        )
+        if revised_claims:
+            entry["revised_claims"] = revised_claims
+        analysis_result.setdefault("interpretation_revisions", []).append(entry)
+        return {"status": "success", "revision": entry}
+
+    # =========================================================================
     # REFINEMENT WITH FEEDBACK
     # =========================================================================
     
@@ -1379,7 +1586,7 @@ Maintain the same JSON output format with "detailed_analysis" and "scientific_cl
                 for img_data in stored_images:
                     if isinstance(img_data, dict) and 'label' in img_data and 'data' in img_data:
                         prompt_parts.append(f"\n{img_data['label']}:")
-                        prompt_parts.append({"mime_type": "image/jpeg", "data": img_data['data']})
+                        prompt_parts.append({"mime_type": self._image_mime_type(img_data['data']), "data": img_data['data']})
             
             if system_info:
                 prompt_parts.append(self._build_system_info_prompt_section(system_info))

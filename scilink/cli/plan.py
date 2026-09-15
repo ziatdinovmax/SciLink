@@ -23,8 +23,8 @@ Examples:
   # Start with default settings (co-pilot mode)
   scilink plan
   
-  # Use supervised mode (AI leads, human reviews plans/code)
-  scilink plan --autonomy supervised --data-dir ./experimental_results
+  # Use autopilot mode (AI leads, human reviews plans/code)
+  scilink plan --autonomy autopilot --data-dir ./experimental_results
   
   # Full autonomous mode (no human review)
   scilink plan --autonomy autonomous --data-dir ./data --knowledge-dir ./papers --code-dir ./code
@@ -41,12 +41,18 @@ Examples:
   # Use internal proxy with custom endpoint
   scilink plan --base-url https://my-proxy.example.com/v1 --model my-model
 
+  # Save to a named session directory
+  scilink plan --session-dir ./my_campaign
+
+  # Resume the most recent campaign session (or a named one with --session-dir)
+  scilink plan --restore
+
 Autonomy Levels:
   co-pilot (default)  Human leads, AI assists. Reviews every step.
-  supervised          AI leads, human supervises. Human reviews plans/code only.
+  autopilot           AI leads, human monitors. Human reviews plans/code only.
   autonomous          Full autonomy. No human review, AI chains all tools.
 
-  Note: supervised and autonomous modes require --data-dir to be specified.
+  Note: autopilot and autonomous modes require --data-dir to be specified.
 
 Environment Variables:
   SCILINK_API_KEY          API key for internal proxy
@@ -94,11 +100,27 @@ Supported Models:
         help='API key for LLM provider (overrides environment variables)'
     )
 
+    parser.add_argument(
+        '--embedding-api-key',
+        type=str,
+        dest='embedding_api_key',
+        help='API key for the embedding model (defaults to --api-key / env). '
+             'Ignored when --base-url is set (the proxy key is reused).'
+    )
+
+    parser.add_argument(
+        '--futurehouse-api-key',
+        type=str,
+        dest='futurehouse_api_key',
+        help='FutureHouse API key for literature search (or set '
+             'FUTUREHOUSE_API_KEY env var). Optional.'
+    )
+
     # Autonomy arguments
     parser.add_argument(
         '--autonomy',
         type=str,
-        choices=['co-pilot', 'supervised', 'autonomous'],
+        choices=['co-pilot', 'autopilot', 'autonomous'],
         default='co-pilot',
         help='Autonomy level (default: co-pilot). Higher levels require --data-dir.'
     )
@@ -107,14 +129,15 @@ Supported Models:
         '--data-dir',
         type=str,
         dest='data_dir',
-        help='Path to experimental data directory (required for supervised/autonomous)'
+        help='Path to experimental data directory (required for autopilot/autonomous)'
     )
     
     parser.add_argument(
         '--knowledge-dir',
         type=str,
         dest='knowledge_dir',
-        help='Path to papers/literature or file-based database directory (optional)'
+        help='Papers/literature directory, OR the name of a knowledge '
+             'base from the persistent store (see: scilink kb list)'
     )
     
     parser.add_argument(
@@ -143,6 +166,15 @@ Supported Models:
         )
     )
 
+    parser.add_argument(
+        '--skills',
+        type=str,
+        nargs='+',
+        dest='skill_files',
+        metavar='SKILL_FILE',
+        help='Path(s) to custom skill .md files.'
+    )
+
     # MCP server arguments
     parser.add_argument(
         '--mcp',
@@ -152,11 +184,31 @@ Supported Models:
         metavar='MCP_CONFIG',
         help=(
             'MCP server configurations. Each entry can be:\n'
-            '  - A JSON config file ({"name":"...", "command":["..."], "env":{}})\n'
+            '  - A JSON config file ({"name":"...", "command":["..."], "url":"...", '
+            '"transport":"sse|http", "headers":{...}, "env":{}}; ${VAR} in header '
+            'values is expanded from the environment)\n'
             '  - stdio shorthand:  stdio:name:command,arg1,arg2\n'
             '  - SSE shorthand:    sse:name:http://host:port/sse\n'
+            '  - Streamable HTTP shorthand: http:name:https://host/mcp\n'
             'Example: scilink plan --mcp stdio:fs:npx,-y,@modelcontextprotocol/server-filesystem,/tmp'
         )
+    )
+
+    # Session arguments
+    parser.add_argument(
+        '--session-dir',
+        type=str,
+        dest='session_dir',
+        help='Session directory for outputs (default: prompted interactively, '
+             'or auto-generated when combined with --autonomy autopilot/autonomous)'
+    )
+
+    parser.add_argument(
+        '--restore',
+        action='store_true',
+        help='Restore from a previous checkpoint. With --session-dir, restores '
+             'that session; otherwise restores the most recent campaign_session_* '
+             'directory in the current folder.'
     )
 
     # Deprecated arguments (hidden but functional)
@@ -201,7 +253,7 @@ Supported Models:
             api_key = args.google_api_key
 
     # Validate: higher autonomy requires data-dir
-    if args.autonomy in ('supervised', 'autonomous') and not args.data_dir:
+    if args.autonomy in ('autopilot', 'autonomous') and not args.data_dir:
         parser.error(
             f"--data-dir is required for {args.autonomy} mode.\n"
             f"Example: scilink plan --autonomy {args.autonomy} --data-dir ./experimental_results"
@@ -211,9 +263,14 @@ Supported Models:
     if args.data_dir and not Path(args.data_dir).exists():
         parser.error(f"--data-dir path does not exist: {args.data_dir}")
     
-    # Validate optional dirs if provided
-    if args.knowledge_dir and not Path(args.knowledge_dir).exists():
-        parser.error(f"--knowledge-dir path does not exist: {args.knowledge_dir}")
+    # Validate optional dirs if provided (a knowledge dir may also be a
+    # named KB from the persistent store — resolve either, error on typos)
+    if args.knowledge_dir:
+        from scilink.knowledge.kb_store import resolve_knowledge_source
+        try:
+            resolve_knowledge_source(args.knowledge_dir)
+        except FileNotFoundError as e:
+            parser.error(str(e))
     if args.code_dir and not Path(args.code_dir).exists():
         parser.error(f"--code-dir path does not exist: {args.code_dir}")
     
@@ -223,12 +280,17 @@ Supported Models:
         'base_url': base_url,
         'embedding_model': args.embedding_model,
         'api_key': api_key,
+        'embedding_api_key': args.embedding_api_key,
+        'futurehouse_api_key': args.futurehouse_api_key,
         'autonomy_level': args.autonomy,
         'data_dir': args.data_dir,
         'knowledge_dir': args.knowledge_dir,
         'code_dir': args.code_dir,
         'tool_files': args.tool_files,
+        'skill_files': args.skill_files,
         'mcp_servers': args.mcp_servers,
+        'session_dir': args.session_dir,
+        'restore': args.restore,
     }
     
     # Run the interactive orchestrator
@@ -263,7 +325,12 @@ class OrchestratorPlayground:
         self.knowledge_dir = None
         self.code_dir = None
         self._tool_files = self.config.get('tool_files')
+        self._skill_files = self.config.get('skill_files')
         self._mcp_servers = self.config.get('mcp_servers')
+        self._embedding_api_key = self.config.get('embedding_api_key')
+        self._futurehouse_api_key = self.config.get('futurehouse_api_key')
+        self._session_dir_arg = self.config.get('session_dir')
+        self._restore = self.config.get('restore', False)
         
     def _infer_provider(self, model_name: str) -> tuple:
         """
@@ -321,7 +388,7 @@ class OrchestratorPlayground:
         # Convert autonomy level string to enum
         autonomy_map = {
             'co-pilot': AutonomyLevel.CO_PILOT,
-            'supervised': AutonomyLevel.SUPERVISED,
+            'autopilot': AutonomyLevel.AUTOPILOT,
             'autonomous': AutonomyLevel.AUTONOMOUS,
         }
         autonomy_level = autonomy_map.get(autonomy_level_str, AutonomyLevel.CO_PILOT)
@@ -383,7 +450,8 @@ class OrchestratorPlayground:
                         api_key = user_key
 
         # === FUTUREHOUSE API KEY (Optional) ===
-        futurehouse_key = os.getenv("FUTUREHOUSE_API_KEY")
+        # Flag takes priority, then env; only prompt when neither is set.
+        futurehouse_key = self._futurehouse_api_key or os.getenv("FUTUREHOUSE_API_KEY")
         if not futurehouse_key:
             print("\n📚 FutureHouse API Key (Optional - for literature search)")
             print("   Enables scientific literature queries if you have a key.")
@@ -410,13 +478,31 @@ class OrchestratorPlayground:
         self._objective = objective
         
         # === SESSION DIRECTORY ===
-        default_dir = f"./campaign_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        print(f"\n📁 Where should I save session data?")
-        session_dir = input(f"   Path (default: {default_dir}): ").strip()
-        if not session_dir:
-            session_dir = default_dir
-        
-        self.session_dir = Path(session_dir)
+        if self._session_dir_arg:
+            # Explicit --session-dir wins; skip the interactive prompt.
+            self.session_dir = Path(self._session_dir_arg)
+            if self._restore:
+                print(f"\n📂 Restoring session: {self.session_dir}")
+        elif self._restore:
+            # Discover the most recent campaign session to restore.
+            import glob
+            sessions = sorted(glob.glob("./campaign_session_*"), reverse=True)
+            if sessions:
+                self.session_dir = Path(sessions[0])
+                print(f"\n📂 Found session to restore: {self.session_dir}")
+            else:
+                self._restore = False
+                default_dir = f"./campaign_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                print("\n⚠️  No existing campaign sessions found. Creating a new session.")
+                self.session_dir = Path(default_dir)
+        else:
+            default_dir = f"./campaign_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            print(f"\n📁 Where should I save session data?")
+            session_dir = input(f"   Path (default: {default_dir}): ").strip()
+            if not session_dir:
+                session_dir = default_dir
+            self.session_dir = Path(session_dir)
+
         self.session_dir.mkdir(parents=True, exist_ok=True)
         
         # === INITIALIZE AGENT ===
@@ -429,11 +515,13 @@ class OrchestratorPlayground:
                 model_name=model_name,
                 base_url=base_url,
                 embedding_model=embedding_model,
+                embedding_api_key=self._embedding_api_key,
                 futurehouse_api_key=futurehouse_key,
                 autonomy_level=autonomy_level,
                 data_dir=self.data_dir,
                 knowledge_dir=self.knowledge_dir,
                 code_dir=self.code_dir,
+                restore_checkpoint=self._restore,
             )
             print("✅ Agent ready!")
 
@@ -445,12 +533,16 @@ class OrchestratorPlayground:
             print("   1. Check that planning_agents package is installed")
             print("   2. Verify all dependencies are installed")
             print("   3. Check your API key is valid")
-            print("   4. For supervised/autonomous: ensure directories exist")
+            print("   4. For autopilot/autonomous: ensure directories exist")
             sys.exit(1)
 
         # === LOAD CUSTOM TOOL FILES ===
         if self._tool_files:
             self._load_custom_tools(self._tool_files)
+
+        # === REGISTER CUSTOM SKILLS ===
+        if self._skill_files:
+            self._register_custom_skills(self._skill_files)
 
         # === CONNECT MCP SERVERS ===
         if self._mcp_servers:
@@ -477,7 +569,7 @@ class OrchestratorPlayground:
         print(f"Literature Search: {'Enabled' if futurehouse_key else 'Disabled'}")
         
         # Directory info for higher autonomy
-        if autonomy_level in (AutonomyLevel.SUPERVISED, AutonomyLevel.AUTONOMOUS):
+        if autonomy_level in (AutonomyLevel.AUTOPILOT, AutonomyLevel.AUTONOMOUS):
             print(f"\nWorkspace Directories:")
             print(f"  Data: {self.data_dir}")
             print(f"  Knowledge: {self.knowledge_dir or 'not configured'}")
@@ -561,6 +653,17 @@ class OrchestratorPlayground:
             count = sum(1 for s in schemas if s.get('type') == 'function')
             print(f"   ✅ Registered {count} tool(s) from {path.name}")
 
+    def _register_custom_skills(self, skill_files: list) -> None:
+        """Register user-supplied .md skill bundles into the orchestrator."""
+        for file_path in skill_files:
+            path = Path(file_path).resolve()
+            print(f"\n📖 Registering custom skill: {path}")
+            try:
+                name = self.agent.register_skill(str(path))
+                print(f"   ✅ Registered skill '{name}'")
+            except Exception as e:
+                print(f"   ❌ Failed to register {path.name}: {e}")
+
     def _connect_mcp_servers(self, mcp_configs: list) -> None:
         """Parse MCP server configs and connect to each."""
         import json as _json
@@ -585,17 +688,38 @@ class OrchestratorPlayground:
                     count = self.agent.connect_mcp_server(name, url=url)
                     print(f"   ✅ Registered {count} tool(s) from '{name}'")
 
+                elif entry.startswith("http:"):
+                    parts = entry[len("http:"):].split(":", 1)
+                    name = parts[0]
+                    url = parts[1] if len(parts) > 1 else ""
+                    print(f"\n🔌 Connecting to MCP server '{name}' "
+                          "(streamable HTTP)...")
+                    count = self.agent.connect_mcp_server(
+                        name, url=url, transport="http"
+                    )
+                    print(f"   ✅ Registered {count} tool(s) from '{name}'")
+
                 else:
                     path = Path(entry).resolve()
                     with open(path) as f:
                         cfg = _json.load(f)
                     name = cfg.get("name", path.stem)
+                    headers = cfg.get("headers")
+                    if headers:
+                        # ${VAR} in header values is expanded so tokens stay
+                        # in the environment, not in the JSON file.
+                        headers = {
+                            k: os.path.expandvars(v)
+                            for k, v in headers.items()
+                        }
                     print(f"\n🔌 Connecting to MCP server '{name}'...")
                     count = self.agent.connect_mcp_server(
                         name,
                         command=cfg.get("command"),
                         url=cfg.get("url"),
                         env=cfg.get("env"),
+                        transport=cfg.get("transport"),
+                        headers=headers,
                     )
                     print(f"   ✅ Registered {count} tool(s) from '{name}'")
 
@@ -694,21 +818,21 @@ class OrchestratorPlayground:
                 # Show current level
                 print(f"\n🎛️  Current Autonomy Level: {self.agent.autonomy_level.value}")
                 print(f"   Human Feedback: {'Enabled' if self.agent._enable_human_feedback else 'Disabled'}")
-                print("\n   To change: /autonomy <co-pilot|supervised|autonomous>")
+                print("\n   To change: /autonomy <co-pilot|autopilot|autonomous>")
                 print("   Note: Higher autonomy works best when started with --data-dir")
             else:
                 # Change level
                 level_map = {
                     'co-pilot': AutonomyLevel.CO_PILOT,
                     'copilot': AutonomyLevel.CO_PILOT,
-                    'supervised': AutonomyLevel.SUPERVISED,
+                    'autopilot': AutonomyLevel.AUTOPILOT,
                     'autonomous': AutonomyLevel.AUTONOMOUS,
                 }
                 new_level = level_map.get(parts[1].lower())
                 
                 if new_level:
                     # Warn if switching to higher autonomy without directories
-                    if new_level in (AutonomyLevel.SUPERVISED, AutonomyLevel.AUTONOMOUS):
+                    if new_level in (AutonomyLevel.AUTOPILOT, AutonomyLevel.AUTONOMOUS):
                         if not self.data_dir:
                             print(f"\n   ⚠️  Warning: No data directory configured.")
                             print(f"   For best results, restart with: scilink plan --autonomy {new_level.value} --data-dir ./your_data")
@@ -719,7 +843,7 @@ class OrchestratorPlayground:
                     print(f"   Human Feedback: {'Enabled' if self.agent._enable_human_feedback else 'Disabled'}")
                 else:
                     print(f"\n   ❌ Unknown level: {parts[1]}")
-                    print("   Valid options: co-pilot, supervised, autonomous")
+                    print("   Valid options: co-pilot, autopilot, autonomous")
             return True
         
         elif cmd == "/checkpoint":
@@ -744,7 +868,7 @@ class OrchestratorPlayground:
         
         Behavior by mode:
         - co-pilot: Do nothing (human leads, full backward compatibility)
-        - supervised: Survey workspace, analyze available data, suggest next steps
+        - autopilot: Survey workspace, analyze available data, suggest next steps
         - autonomous: Execute full pipeline (survey → TEA → plan → checkpoint)
         """
         from scilink.agents.planning_agents.planning_orchestrator import AutonomyLevel
@@ -761,7 +885,7 @@ class OrchestratorPlayground:
         has_code = self.code_dir is not None
         
         # Nothing to process if no directories configured
-        # (This shouldn't happen for supervised/autonomous due to CLI validation,
+        # (This shouldn't happen for autopilot/autonomous due to CLI validation,
         # but we handle it gracefully anyway)
         if not has_data and not has_knowledge:
             return
@@ -837,9 +961,9 @@ class OrchestratorPlayground:
             print("-"*60)
             return
         
-        # === SUPERVISED MODE: Survey and recommend ===
-        if autonomy == AutonomyLevel.SUPERVISED:
-            print("🔄 SUPERVISED MODE: Surveying workspace and preparing recommendations...")
+        # === AUTOPILOT MODE: Survey and recommend ===
+        if autonomy == AutonomyLevel.AUTOPILOT:
+            print("🔄 AUTOPILOT MODE: Surveying workspace and preparing recommendations...")
             print(f"   Objective: {self.agent.objective}")
             print(f"   Data: {self.data_dir}")
             print(f"   Knowledge: {self.knowledge_dir or 'not provided'}")
@@ -893,8 +1017,13 @@ class OrchestratorPlayground:
         print("Type /help for commands, or just chat naturally!\n")
         
         # Process initial workspace based on autonomy level ===
-        # Note: This does nothing for co-pilot mode (backward compatible)
-        self._process_initial_inputs()
+        # Note: This does nothing for co-pilot mode (backward compatible).
+        # Skip on restore — the campaign state is already loaded and we must
+        # not re-run the autopilot/autonomous pipeline over it.
+        if self._restore:
+            print("📂 Session restored from checkpoint. Continuing where you left off.\n")
+        else:
+            self._process_initial_inputs()
         
         # === Main chat loop ===
         while True:

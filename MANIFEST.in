@@ -1,3 +1,17 @@
 include README.md
 include requirements.txt
 graft scilink
+
+prune meta_session_*
+prune analysis_session_*
+prune planning_session_*
+prune simulate_session_*
+prune annealing_demo_*
+prune annealing_schematic_*
+prune kb_storage
+prune output_scripts
+prune misc
+prune dist
+prune build
+global-exclude __pycache__
+global-exclude *.pyc

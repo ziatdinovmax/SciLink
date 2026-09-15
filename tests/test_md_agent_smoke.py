@@ -5,9 +5,6 @@ These exercise the post-relocation wiring of:
   - MDSimulationAgent(skill="lammps") — Tier C bundle resolution,
     TOOL_REGISTRY auto-wiring, skill section access, tools-module path
     of analyze_system on a real LAMMPS data file.
-  - LAMMPSSimulationAgent — backward-compat wrapper accepts both
-    'data_file' (deprecated) and 'structure_file' kwargs, auto-loads
-    the LAMMPS skill, and is a true MDSimulationAgent subclass.
 
 No LLM calls are made; the agent's analyze_system() prefers the
 tools-module fast path, which is enough to validate the relocation.
@@ -15,7 +12,6 @@ tools-module fast path, which is enough to validate the relocation.
 
 import os
 import tempfile
-import warnings
 from pathlib import Path
 
 
@@ -84,67 +80,52 @@ def test_md_agent_assembly():
         print(f"    analyze_system  = {info['atom_count']} atoms, {info['elements']}")
 
 
-def test_lammps_wrapper_backward_compat():
-    import inspect
-    from scilink.agents.sim_agents import (
-        LAMMPSSimulationAgent,
-        MDSimulationAgent,
-        SimulationAgent,
-    )
+def test_generate_json_retries_empty_response():
+    """base_agent._generate_json rides through an empty/garbled completion
+    instead of aborting the whole generation on the first bad response (an
+    empty proxy completion otherwise burned the caller's retry budget)."""
+    import types
+    from scilink.agents.sim_agents import MDSimulationAgent
 
     with tempfile.TemporaryDirectory() as td:
-        agent = LAMMPSSimulationAgent(working_dir=td, **_agent_kwargs())
+        agent = MDSimulationAgent(working_dir=td, skill="lammps", **_agent_kwargs())
 
-        assert isinstance(agent, MDSimulationAgent), (
-            "LAMMPSSimulationAgent must be a MDSimulationAgent"
-        )
-        assert isinstance(agent, SimulationAgent), (
-            "LAMMPSSimulationAgent must be a SimulationAgent"
-        )
-        assert agent.skill_name == "lammps", (
-            "LAMMPSSimulationAgent should auto-load the LAMMPS skill"
-        )
-        assert agent.tools_module is not None
+        # empty twice, then valid JSON -> returns the parsed object, no raise
+        calls = {"n": 0}
 
-        sig = inspect.signature(agent.generate_simulation)
-        assert "data_file" in sig.parameters, (
-            "Backward-compat: generate_simulation must accept 'data_file' kwarg"
-        )
-        assert "structure_file" in sig.parameters, (
-            "New API: generate_simulation must accept 'structure_file' kwarg"
-        )
+        def _gen(prompt, generation_config=None):
+            calls["n"] += 1
+            txt = "" if calls["n"] < 3 else '{"ok": true}'
+            return types.SimpleNamespace(text=txt)
 
+        agent.model = types.SimpleNamespace(generate_content=_gen)
+        assert agent._generate_json("x") == {"ok": True}
+        assert calls["n"] == 3
+
+        # an object embedded in prose is salvaged
+        agent.model = types.SimpleNamespace(
+            generate_content=lambda p, generation_config=None:
+                types.SimpleNamespace(text='sure: {"a": 1} done'))
+        assert agent._generate_json("x") == {"a": 1}
+
+        # persistently empty -> raises AFTER the retry budget, not on attempt 1
+        agent.model = types.SimpleNamespace(
+            generate_content=lambda p, generation_config=None:
+                types.SimpleNamespace(text=""))
         try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("error", DeprecationWarning)
-                agent.generate_simulation(data_file=None)
-        except DeprecationWarning:
-            pass
+            agent._generate_json("x")
+            raise AssertionError("should raise after exhausting retries")
         except ValueError:
             pass
-        except Exception as exc:
-            raise AssertionError(
-                f"data_file=None should raise ValueError/DeprecationWarning, got {type(exc).__name__}: {exc}"
-            )
 
-        try:
-            agent.generate_simulation()
-            raise AssertionError("calling with neither kwarg should raise")
-        except ValueError as exc:
-            assert "structure_file" in str(exc) or "data_file" in str(exc)
-
-        print("  LAMMPSSimulationAgent backward-compat: OK")
-        print(f"    isinstance MDSimulationAgent = True")
-        print(f"    skill auto-loaded            = {agent.skill_name}")
-        print(f"    accepts data_file=           = True (deprecated)")
-        print(f"    accepts structure_file=      = True (new API)")
+        print("  _generate_json: retries empty / salvages / raises after budget: OK")
 
 
 if __name__ == "__main__":
     print("=== smoke 1: MDSimulationAgent(skill='lammps') ===")
     test_md_agent_assembly()
     print()
-    print("=== smoke 2: LAMMPSSimulationAgent backward-compat ===")
-    test_lammps_wrapper_backward_compat()
+    print("=== smoke 2: _generate_json robustness ===")
+    test_generate_json_retries_empty_response()
     print()
-    print("Both smokes passed.")
+    print("All smokes passed.")

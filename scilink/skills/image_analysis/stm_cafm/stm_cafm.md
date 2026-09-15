@@ -39,6 +39,16 @@ bias, tip state, and contact geometry. Use them when the objective
 explicitly calls for lattice characterization and the image is
 genuinely atomic-resolution and stable.
 
+When the objective *is* point defects in a stable periodic lattice
+(adsorbates/protrusions or vacancies on an atomic surface, defects in
+a charge-ordered or moire superlattice), `fft_defect_map`
+(`scilink.skills._shared.fft_defect`) maps both signs — `excess`
+(adatom/adsorbate) and `deficit` (vacancy) — against a noise null
+without atom finding. It requires square pixels and a leveled
+background first (it does neither itself); pass the square-pixel size
+in nm. Heed its dense-disorder / single-cluster warnings — a charge
+domain or cluster is not a set of point defects.
+
 **Do not try to pre-filter LDOS modulations out of the lattice
 signal.** In STM/cAFM the lattice contrast is genuinely modulated by
 the LDOS envelope — that modulation is real signal, not noise. Avoid

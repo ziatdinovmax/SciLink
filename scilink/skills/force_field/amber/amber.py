@@ -368,7 +368,7 @@ def generate_tleap_script(
     ]
 
     script_path = os.path.join(working_dir, f"{output_prefix}_tleap.in")
-    with open(script_path, "w") as f:
+    with open(script_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
     logger.info(f"tleap script → {script_path}")
@@ -578,7 +578,7 @@ def _write_lammps_data(system, output_path: str):
     valid_impropers = [i for i in impropers if i.type is not None]
 
     # ── Write the file ───────────────────────────────────────────
-    with open(output_path, "w") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         # Header
         f.write("LAMMPS data file via ParmEd/SciLink\n\n")
         f.write(f"{len(atoms)} atoms\n")

@@ -446,7 +446,7 @@ def save_enhanced_novelty_results(assessment: Dict[str, Any], output_dir: str,
             }
         }
         
-        with open(output_path, 'w') as f:
+        with open(output_path, 'w', encoding="utf-8") as f:
             json.dump(enhanced_assessment, f, indent=2, default=str)
         
         logger.info(f"Enhanced novelty assessment saved to: {output_path}")

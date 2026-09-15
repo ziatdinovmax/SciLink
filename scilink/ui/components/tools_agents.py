@@ -2,6 +2,8 @@
 
 import importlib.util
 import inspect
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -171,7 +173,10 @@ def _render_mcp_section(agent) -> None:
 
     # Connection form
     transport = st.radio(
-        "Transport", ["stdio", "sse"], horizontal=True, key="mcp_transport"
+        "Transport", ["stdio", "sse", "http"], horizontal=True,
+        key="mcp_transport",
+        help="'http' is streamable HTTP — the standard transport for "
+             "remote/hosted MCP servers (e.g. platform APIs with token auth).",
     )
     col_name, col_addr = st.columns([1, 2])
     with col_name:
@@ -183,21 +188,50 @@ def _render_mcp_section(agent) -> None:
                 placeholder="npx -y @modelcontextprotocol/server-name /path",
                 key="mcp_addr",
             )
-        else:
+        elif transport == "sse":
             mcp_addr = st.text_input(
                 "URL",
                 placeholder="http://localhost:8080/sse",
                 key="mcp_addr",
             )
+        else:
+            mcp_addr = st.text_input(
+                "URL",
+                placeholder="https://host/mcp",
+                key="mcp_addr",
+            )
+
+    mcp_headers_raw = ""
+    if transport in ("sse", "http"):
+        mcp_headers_raw = st.text_input(
+            "Headers (JSON, optional)",
+            placeholder='{"Authorization": "Bearer ${MY_API_KEY}"}',
+            key="mcp_headers",
+            help="Sent with every request. ${VAR} in values is expanded "
+                 "from the environment, so tokens can stay out of the form.",
+        )
 
     col_connect, _ = st.columns([1, 2])
     with col_connect:
         connect_clicked = st.button("Connect", key="mcp_connect_btn", type="primary", width="stretch")
     if connect_clicked:
+        headers = None
+        headers_error = None
+        if mcp_headers_raw.strip():
+            try:
+                headers = {
+                    k: os.path.expandvars(v)
+                    for k, v in json.loads(mcp_headers_raw).items()
+                }
+            except (ValueError, AttributeError) as e:
+                headers_error = f"Headers must be a JSON object: {e}"
+
         if not mcp_name or not mcp_addr:
             st.warning("Provide both a server name and a command/URL.")
         elif mcp_name in mcp_connections:
             st.warning(f"'{mcp_name}' is already connected.")
+        elif headers_error:
+            st.error(headers_error)
         else:
             try:
                 with st.spinner(f"Connecting to '{mcp_name}'..."):
@@ -207,7 +241,8 @@ def _render_mcp_section(agent) -> None:
                         )
                     else:
                         count = agent.connect_mcp_server(
-                            mcp_name, url=mcp_addr
+                            mcp_name, url=mcp_addr,
+                            transport=transport, headers=headers,
                         )
                 st.success(f"Connected to '{mcp_name}': {count} tool(s)")
                 st.rerun()
@@ -221,8 +256,12 @@ def _render_mcp_section(agent) -> None:
                 tool_count = len(conn.tool_schemas) if hasattr(conn, "tool_schemas") else 0
                 col_info, col_btn = st.columns([5, 1])
                 with col_info:
+                    conn_transport = (
+                        "stdio" if conn.command
+                        else getattr(conn, "transport", "sse")
+                    )
                     st.caption(
-                        f"Transport: {'stdio' if conn.command else 'sse'} · "
+                        f"Transport: {conn_transport} · "
                         f"{tool_count} tool(s)"
                     )
                 with col_btn:

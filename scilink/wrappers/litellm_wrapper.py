@@ -31,6 +31,7 @@ import re
 import base64
 import json
 import logging
+import time
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Union
 
@@ -46,10 +47,59 @@ def _is_openai_reasoning_model(model: str) -> bool:
     name = model.split('/', 1)[-1]
     return bool(_REASONING_MODEL_RE.match(name))
 
+
+# Anthropic deprecated the temperature/top_p sampling knobs starting with Claude
+# Opus 4.8; assume every Opus at or beyond 4.8 (4.9, 5.x, …) does the same.
+# Bedrock 400s on these ("`temperature` is deprecated for this model"); other
+# providers may ignore rather than error. Like the OpenAI reasoning models, omit
+# the params for them. Earlier Opus (<=4.7) and other families are untouched.
+# Version parsed from the name so it covers every provider prefix
+# (bedrock/us.anthropic.claude-opus-4-8, anthropic/claude-opus-4-9, …) and a
+# trailing variant tag (…-4-8-1m).
+_OPUS_VERSION_RE = re.compile(r'claude-opus-(\d+)(?:-(\d+))?', re.IGNORECASE)
+
+
+def _model_deprecates_sampling(model: str) -> bool:
+    if not model:
+        return False
+    m = _OPUS_VERSION_RE.search(model)
+    if not m:
+        return False
+    major = int(m.group(1))
+    minor = int(m.group(2)) if m.group(2) else 0
+    return (major, minor) >= (4, 8)
+
 try:
     from PIL import Image
 except ImportError:
     Image = None
+
+
+# Model image APIs (Bedrock, direct Anthropic) reject any image whose larger
+# dimension exceeds 8000 px. A tall multi-panel synthesis montage can exceed it
+# and the whole request fails. Downscale only such oversized images; everything
+# at or under the limit is returned BYTE-IDENTICAL so normal requests are
+# unchanged.
+_MAX_IMAGE_DIM = 8000
+
+
+def _cap_image_bytes(raw: bytes) -> bytes:
+    """Return ``raw`` unchanged unless it is an image larger than
+    ``_MAX_IMAGE_DIM`` on a side, in which case return a downscaled PNG. Any
+    failure (no PIL, non-image, undecodable) returns the input untouched."""
+    if not Image or not raw:
+        return raw
+    try:
+        im = Image.open(io.BytesIO(raw))
+        if max(im.size) <= _MAX_IMAGE_DIM:  # common case: identical passthrough
+            return raw
+        im = im.copy()
+        im.thumbnail((_MAX_IMAGE_DIM, _MAX_IMAGE_DIM))
+        out = io.BytesIO()
+        im.save(out, format="PNG")
+        return out.getvalue()
+    except Exception:  # noqa: BLE001 - never let capping break a request
+        return raw
 
 try:
     import litellm
@@ -57,6 +107,48 @@ try:
 except ImportError:
     LITELLM_AVAILABLE = False
     litellm = None
+
+
+# Fallback output ceiling for Bedrock models litellm cannot map (e.g. opus-4-6 in
+# litellm 1.83.10). Matches the known Bedrock opus-4-1 ceiling; ~5-8x the headroom
+# a generated analysis/fit script needs and within modern Claude-on-Bedrock limits.
+DEFAULT_MAX_OUTPUT_TOKENS = 32000
+
+
+def _registered_max_output_tokens(model: str):
+    """litellm's registered output ceiling for ``model``, or None when it has
+    no entry for it.
+
+    The None is the point. :func:`_resolve_max_output_tokens` substitutes
+    ``DEFAULT_MAX_OUTPUT_TOKENS`` for unknown models, which is the right
+    trade where a number must be produced; callers that would rather send
+    nothing than send a guess use this instead.
+    """
+    try:
+        mt = litellm.get_max_tokens(model)
+    except Exception:  # noqa: BLE001 - unknown model is the normal miss here
+        return None
+    return int(mt) if mt else None
+
+
+def _resolve_max_output_tokens(model: str) -> int:
+    """Best-effort max output tokens for a model (bedrock/ and anthropic/ paths).
+
+    The Bedrock converse transform omits ``maxTokens`` when unset, so Bedrock
+    falls back to a low server-side default and truncates large generations
+    (#238). Direct Anthropic fills the registered ceiling for mapped models but
+    falls back to a 4096 default for names missing from litellm's registry
+    (custom deployments). Returns litellm's registered ceiling when the model is
+    mapped (e.g. Bedrock opus-4-1 -> 32000), else ``DEFAULT_MAX_OUTPUT_TOKENS``. A
+    litellm upgrade that maps the model makes this resolve to the true ceiling.
+    """
+    try:
+        mt = litellm.get_max_tokens(model)
+        if mt:
+            return int(mt)
+    except Exception:
+        pass
+    return DEFAULT_MAX_OUTPUT_TOKENS
 
 
 def _ensure_gemini_api_key():
@@ -102,6 +194,33 @@ def _normalize_model_name(model: str) -> str:
     # Default: return as-is, let LiteLLM figure it out
     return model
 
+
+def _record_trace(model: str, messages, response, latency_s: float) -> None:
+    """Record one completed LLM call to the opt-in global tracer (no-op if disabled)."""
+    try:
+        from .. import tracing
+        if not tracing.is_enabled():
+            return
+        text, finish = "", None
+        choices = getattr(response, "choices", None) or []
+        if choices:
+            message = getattr(choices[0], "message", None)
+            text = (getattr(message, "content", None) or "") if message else ""
+            finish = getattr(choices[0], "finish_reason", None)
+        usage = None
+        u = getattr(response, "usage", None)
+        if u is not None:
+            usage = {
+                "prompt_tokens": getattr(u, "prompt_tokens", None),
+                "completion_tokens": getattr(u, "completion_tokens", None),
+                "total_tokens": getattr(u, "total_tokens", None),
+            }
+        tracing.record(model=model, messages=messages, response_text=text,
+                       finish_reason=finish, usage=usage, latency_s=latency_s)
+    except Exception:
+        pass  # tracing must never break a generation
+
+
 def _check_litellm():
     """Raise ImportError if LiteLLM is not available."""
     if not LITELLM_AVAILABLE:
@@ -116,8 +235,63 @@ def _check_litellm():
     import logging
     logging.getLogger("LiteLLM").setLevel(logging.WARNING)
     logging.getLogger("litellm").setLevel(logging.WARNING)
-    
+
     litellm.suppress_debug_info = True
+
+
+def _scope_drop_params(model) -> None:
+    """Enable LiteLLM param-dropping only for Bedrock models.
+
+    Bedrock rejects OpenAI-style params (e.g. ``tool_choice``) that Anthropic /
+    OpenAI / Gemini accept. Scoping ``drop_params`` to ``bedrock/*`` keeps the
+    strict error-on-unsupported behavior for every other provider, so a typo or
+    a genuinely-unsupported param still surfaces as an error there. Set per call
+    (not once globally) so a mixed-model session — e.g. a Bedrock chat model
+    alongside a Gemini/OpenAI embedding model — routes each call correctly.
+    """
+    if litellm is not None:
+        litellm.drop_params = str(model or "").startswith("bedrock/")
+
+
+def litellm_completion(*args, **kwargs):
+    """``litellm.completion`` with Bedrock-scoped param dropping and the
+    output ceiling #238 asks for.
+
+    Drop-in replacement for direct ``litellm.completion`` calls; see
+    :func:`_scope_drop_params`. Reads the target model from the ``model`` kwarg
+    (or first positional arg) and scopes param-dropping to it before the call.
+
+    The ``max_tokens`` injection mirrors :class:`LiteLLMGenerativeModel`, which
+    has had it since #238. This function did not, and it is what every
+    chat-driven orchestrator calls — so their loops ran on Bedrock's low
+    server-side default while the fix appeared to be in place. Caught live: a
+    tool call came back ``finish_reason='length'`` at exactly 4096 completion
+    tokens with a required argument missing, and the model then "recovered"
+    into a second tool whose content hit the same wall.
+
+    Deliberately narrower than :func:`_resolve_max_output_tokens`, which
+    substitutes a flat default for models litellm does not know. A ceiling is
+    sent ONLY when the registry actually reports one; an unrecognised name —
+    a custom deployment, or simply a model litellm has not mapped yet, which
+    includes ordinary Bedrock names like
+    ``bedrock/us.anthropic.claude-sonnet-4-5-v1:0`` — is left alone rather
+    than asked for a number nobody verified. Guessing high on an unknown
+    deployment trades a silent truncation for an outright rejection, and this
+    function sits under every orchestrator chat loop.
+
+    An explicit ``max_tokens`` from the caller still wins, and non-Bedrock /
+    non-Anthropic models are untouched — litellm already gives those a sane
+    ceiling.
+    """
+    model = kwargs.get("model") or (args[0] if args else None)
+    _scope_drop_params(model)
+    kwargs.setdefault("num_retries", 4)   # retry transient provider errors w/ backoff
+    if ("max_tokens" not in kwargs
+            and str(model or "").startswith(("bedrock/", "anthropic/"))):
+        ceiling = _registered_max_output_tokens(model)
+        if ceiling:
+            kwargs["max_tokens"] = ceiling
+    return litellm.completion(*args, **kwargs)
 
 
 class LiteLLMGenerativeModel:
@@ -233,6 +407,8 @@ class LiteLLMGenerativeModel:
         params = self._build_params(generation_config, tools or self.tools)
         
         try:
+            _t0 = time.perf_counter()
+            _scope_drop_params(self.model)
             response = litellm.completion(
                 model=self.model,
                 messages=messages,
@@ -240,14 +416,20 @@ class LiteLLMGenerativeModel:
                 api_base=self.base_url,
                 stream=stream,
                 timeout=self.timeout,
+                # Retry transient provider errors (Bedrock ServiceUnavailable /
+                # InternalServer / RateLimit / Timeout) with LiteLLM's exponential
+                # backoff, so a momentary hiccup during e.g. a verification call is
+                # not mistaken for a failed step (which would tag the iteration 0.0).
+                num_retries=params.pop("num_retries", 4),
                 **params
             )
             
             if stream:
                 return self._handle_stream(response)
             
+            _record_trace(self.model, messages, response, time.perf_counter() - _t0)
             return self._to_legacy_response(response)
-            
+
         except Exception as e:
             logging.error(f"LiteLLM generation error: {e}")
             raise
@@ -311,17 +493,24 @@ class LiteLLMGenerativeModel:
             
             elif Image and isinstance(part, Image.Image):
                 buf = io.BytesIO()
-                part.save(buf, format="PNG")
+                img = part
+                if max(part.size) > _MAX_IMAGE_DIM:   # downscale only if oversized
+                    img = part.copy()
+                    img.thumbnail((_MAX_IMAGE_DIM, _MAX_IMAGE_DIM))
+                img.save(buf, format="PNG")
                 b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
                 converted.append({
                     "type": "image_url",
                     "image_url": {"url": f"data:image/png;base64,{b64}"}
                 })
-            
+
             elif isinstance(part, dict):
                 if "mime_type" in part and "data" in part:
                     data = part["data"]
                     if isinstance(data, bytes):
+                        # Cap oversized image bytes (no-op / identical otherwise).
+                        if str(part.get("mime_type", "")).startswith("image/"):
+                            data = _cap_image_bytes(data)
                         b64 = base64.b64encode(data).decode("utf-8")
                     else:
                         b64 = data
@@ -365,17 +554,27 @@ class LiteLLMGenerativeModel:
                 "frequency_penalty": "frequency_penalty",
             }
 
-            reasoning = _is_openai_reasoning_model(self.model)
+            omit_sampling = (_is_openai_reasoning_model(self.model)
+                             or _model_deprecates_sampling(self.model))
             for old, new in mapping.items():
-                if reasoning and old in ("temperature", "top_p"):
+                if omit_sampling and old in ("temperature", "top_p"):
                     continue
                 val = cfg.get(old)
                 if val is not None:
                     params[new] = val
-        
+
+        # Bedrock omits maxTokens when unset -> a low server-side default truncates
+        # large outputs (#238). Direct Anthropic has the same trap for model names
+        # missing from litellm's registry (custom deployments): litellm falls back
+        # to a 4096 default and silently caps output. Request the model's max on
+        # both paths; other providers already get a sane ceiling from litellm.
+        # An explicit max_output_tokens above still wins.
+        if "max_tokens" not in params and str(self.model or "").startswith(("bedrock/", "anthropic/")):
+            params["max_tokens"] = _resolve_max_output_tokens(self.model)
+
         if tools:
             params["tools"] = tools
-        
+
         return params
     
     def _to_legacy_response(self, response, is_stream: bool = False):
@@ -402,10 +601,12 @@ class LiteLLMGenerativeModel:
                 message = getattr(choice, "delta", None)
             
             text = ""
+            raw_text = ""
             if message:
                 content = getattr(message, "content", None)
                 if content:
-                    text = self._clean_text(str(content))
+                    raw_text = str(content)
+                    text = self._clean_text(raw_text)
             
             tool_calls = getattr(message, "tool_calls", None) if message else None
             if tool_calls:
@@ -425,22 +626,29 @@ class LiteLLMGenerativeModel:
                         ))
             
             if text:
-                parts.append(SimpleNamespace(text=text, function_call=None))
-            
+                parts.append(SimpleNamespace(text=text, function_call=None, raw_text=raw_text))
+
             finish_reason = getattr(choice, "finish_reason", "stop")
             finish_map = {"stop": 1, "length": 0, "tool_calls": 2, "content_filter": 3}
             fr_int = finish_map.get(finish_reason, 1) if finish_reason else 1
-            
+
             content = SimpleNamespace(parts=parts, role="model")
             candidates.append(SimpleNamespace(content=content, finish_reason=fr_int))
-        
+
         first_text = ""
+        first_raw = ""
         if candidates and candidates[0].content.parts:
             for part in candidates[0].content.parts:
                 if hasattr(part, "text") and part.text:
                     first_text += part.text
-        
-        return SimpleNamespace(text=first_text, candidates=candidates)
+                if getattr(part, "raw_text", None):
+                    first_raw += part.raw_text
+
+        # raw_text preserves the model's UNCLEANED output. Codegen parsing must use
+        # it: _clean_text's embedded-JSON extraction (Pattern 3) greedily slices from
+        # the first '{' to the last '}', which mangles a raw script containing
+        # f-string/dict braces before the codegen parser ever sees it (#238).
+        return SimpleNamespace(text=first_text, candidates=candidates, raw_text=first_raw)
     
     def _clean_text(self, text: str) -> str:
         """
@@ -561,6 +769,8 @@ class LiteLLMChatSession:
         
         params = self._model._build_params(generation_config, self._model.tools)
         
+        _t0 = time.perf_counter()
+        _scope_drop_params(self._model.model)
         response = litellm.completion(
             model=self._model.model,
             messages=messages,
@@ -575,6 +785,7 @@ class LiteLLMChatSession:
         
         self._history.append({"role": "user", "content": user_content})
         
+        _record_trace(self._model.model, messages, response, time.perf_counter() - _t0)
         legacy_response = self._model._to_legacy_response(response)
         
         if legacy_response.text:

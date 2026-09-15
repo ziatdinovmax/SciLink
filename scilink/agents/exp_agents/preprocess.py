@@ -10,12 +10,13 @@ import matplotlib.pyplot as plt
 from io import BytesIO
 
 from .base_agent import BaseUtilityAgent
+from .metadata_converter import resolve_axis_spec
 
 from .instruct import (
     PRE_PROCESSING_STRATEGY_INSTRUCTIONS,
     CUSTOM_PREPROCESSING_SCRIPT_INSTRUCTIONS,
     CUSTOM_SCRIPT_CORRECTION_INSTRUCTIONS,
-    CUSTOM_PREPROCESSING_SCRIPT_1D_INSTRUCTIONS, 
+    CUSTOM_PREPROCESSING_SCRIPT_1D_INSTRUCTIONS,
     CUSTOM_SCRIPT_CORRECTION_1D_INSTRUCTIONS,
     CURVE_PREPROCESSING_STRATEGY_INSTRUCTIONS,
     PREPROCESSING_QUALITY_ASSESSMENT_INSTRUCTIONS
@@ -26,6 +27,19 @@ from ...executors import ScriptExecutor, require_sandbox_approval
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 
+class FitDomainInstruction(Exception):
+    """Raised when a custom preprocessing instruction changes the point count
+    (e.g. "fit only the decay region", "exclude the dark counts").
+
+    Such an instruction is a *fit-domain* / region-of-interest decision, not a
+    length-preserving data transform — it belongs to the planner and the fit
+    script, not to the preprocessing step (whose output must align point-for-
+    point with the input). The 1D preprocessor raises this so ``run_preprocessing``
+    can defer the instruction to the fit stage instead of failing silently and
+    returning unprocessed data. See docs/preprocessing_in_fit_loop.md.
+    """
+
+
 class HyperspectralPreprocessingAgent(BaseUtilityAgent):
     """
     An agent that uses an LLM to determine the optimal pre-processing strategy
@@ -33,10 +47,13 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
     """
 
     MAX_SCRIPT_ATTEMPTS = 3
+    # Cumulative wall-clock budget for the custom-script retry
+    # loop (#358); falsy disables.
+    SCRIPT_LOOP_TIME_BUDGET_S = 900.0
 
     def __init__(self, *args,
                  output_dir: str = "preprocessing_output",
-                 executor_timeout: int = 300,
+                 executor_timeout: int = 600,
                  **kwargs):
         """Initialize the pre-processing agent."""
 
@@ -101,19 +118,22 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
         
         signal = stats["p99"]
         noise = stats["p50"]
-        
-        # Avoid division by zero if median is 0
-        if noise > 1e-9:
-            snr = (signal - noise) / noise
-            reasoning = f"Calculated as (P99 - P50) / P50: ({signal:.2e} - {noise:.2e}) / {noise:.2e}"
+
+        # Zero-only division guards, on purpose: an absolute epsilon here
+        # (1e-9) declares real but tiny-scale data (amperes-scale STS,
+        # normalized signals) "signalless" — the same absolute-threshold
+        # trap as the unmixer mask (#381). |P50| so a signed-signal median
+        # scales the ratio without flipping its sign.
+        if abs(noise) > 0:
+            snr = (signal - noise) / abs(noise)
+            reasoning = f"Calculated as (P99 - P50) / |P50|: ({signal:.2e} - {noise:.2e}) / {abs(noise):.2e}"
+        elif stats["std"] > 0:
+            # Fallback if median is exactly zero: use std dev
+            snr = signal / stats["std"]
+            reasoning = f"Calculated as P99 / Std (P50 was zero): {signal:.2e} / {stats['std']:.2e}"
         else:
-            # Fallback if median is zero: use std dev (less ideal but won't crash)
-            if stats["std"] > 1e-9:
-                snr = signal / stats["std"]
-                reasoning = f"Calculated as P99 / Std (P50 was zero): {signal:.2e} / {stats['std']:.2e}"
-            else:
-                snr = 0.0 # No signal or no variance
-                reasoning = "SNR is 0.0 (no variance or signal)"
+            snr = 0.0  # truly constant data
+            reasoning = "SNR is 0.0 (no variance or signal)"
 
         # Cap SNR at a reasonable max to avoid infinity/huge numbers
         snr = min(max(snr, 0.0), 1000.0) 
@@ -166,12 +186,15 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
 
         else:
             self.logger.info("No custom instruction. Running standard LLM strategy selection.")
-            
+
             # 4. Get cleaning strategy from LLM
             strategy = self._llm_select_preprocessing_strategy(stats, system_info)
-            
-            # 5. Apply the LLM's cleaning strategy
-            processed_data, mask_2d = self._apply_preprocessing(hspy_data, strategy)
+
+            # 5. Apply the LLM's cleaning strategy. axis_spec gates the
+            # legacy "clip negatives" and "(k, k, 1) despike kernel" choices
+            # so non-(spatial, spatial, signal-counts) layouts work correctly.
+            axis_spec = resolve_axis_spec(system_info)
+            processed_data, mask_2d = self._apply_preprocessing(hspy_data, strategy, axis_spec)
 
         # 6. Return all results
         return processed_data, mask_2d, data_quality
@@ -230,25 +253,81 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
               "reasoning": "Fallback: Default clipping and masking strategy."
             }
 
-    def _apply_preprocessing(self, hspy_data: np.ndarray, strategy: dict) -> tuple[np.ndarray, np.ndarray]:
+    def _apply_preprocessing(
+        self,
+        hspy_data: np.ndarray,
+        strategy: dict,
+        axis_spec: dict | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
         Applies a robust pre-processing pipeline.
-        
+
+        ``axis_spec`` (from ``resolve_axis_spec``) controls layout-dependent
+        steps:
+        * the despike kernel uses a 2D (k, k, 1) shape when both leading
+          axes are spatial (default) and a 1D (1, 1, k) shape otherwise, so
+          unrelated parameter samples are not medianed together;
+        * the "clip negatives" step runs only when the signal axis is
+          declared non-negative (default true — preserves legacy behavior).
+        ``axis_spec=None`` is equivalent to the legacy defaults.
         """
         #self.logger.info("\n\n🤖 --- DATA AGENT STEP: APPLYING PRE-PROCESSING --- 🤖")
         data_to_process = hspy_data.copy()
         mask_2d = None
 
+        leading_axes_are_spatial = True
+        signal_is_nonnegative = True
+        if axis_spec is not None:
+            leading_axes_are_spatial = (
+                axis_spec.get("axis_0", {}).get("kind") == "spatial"
+                and axis_spec.get("axis_1", {}).get("kind") == "spatial"
+            )
+            signal_is_nonnegative = bool(axis_spec.get("signal_is_nonnegative", True))
+
         # 1. Apply Despiking
         if strategy.get('apply_despike', False):
             kernel_size = int(strategy.get('despike_kernel_size', 3))
-            kernel_tuple = (kernel_size, kernel_size, 1)
+            if leading_axes_are_spatial:
+                kernel_tuple = (kernel_size, kernel_size, 1)
+            else:
+                # Non-spatial leading axes have no neighborhood structure, so
+                # median over the signal axis only.
+                kernel_tuple = (1, 1, kernel_size)
             self.logger.info(f"Applying 3D Median Filter (despike) with kernel {kernel_tuple}...")
             data_to_process = median_filter(data_to_process, size=kernel_tuple)
-        
-        # 2. Clip all negative values to zero
-        self.logger.info("Clipping all negative data points to 0.0...")
-        np.clip(data_to_process, 0, None, out=data_to_process)
+
+        # 2. Clip negatives — only when signal is physically non-negative.
+        if signal_is_nonnegative:
+            self.logger.info("Clipping all negative data points to 0.0...")
+            np.clip(data_to_process, 0, None, out=data_to_process)
+        else:
+            self.logger.info(
+                "axis_spec.signal_is_nonnegative is False — preserving signed values."
+            )
+
+        # 2b. Spatial binning (the SIZE GUARD): mean-bin the two spatial axes
+        # by the strategy's factor so downstream decomposition / per-pixel
+        # fitting scale with the science, not the sensor. Spectra are never
+        # binned; skipped when the leading axes are not spatial.
+        bin_f = int(strategy.get('spatial_bin_factor', 1) or 1)
+        if bin_f > 1 and leading_axes_are_spatial:
+            h0, w0, e0 = data_to_process.shape
+            hb, wb = (h0 // bin_f) * bin_f, (w0 // bin_f) * bin_f
+            data_to_process = data_to_process[:hb, :wb].reshape(
+                hb // bin_f, bin_f, wb // bin_f, bin_f, e0).mean(axis=(1, 3))
+            self.logger.info(
+                f"Applied {bin_f}x{bin_f} spatial mean-binning (size guard): "
+                f"({h0}, {w0}, {e0}) -> {data_to_process.shape}; "
+                "spectra unmodified")
+        elif bin_f > 1:
+            self.logger.info(
+                "spatial_bin_factor > 1 ignored: leading axes are not spatial.")
+        else:
+            # Log the no-binning decision too — otherwise "guard chose 1" and
+            # "preprocessing never ran" are indistinguishable in a session log.
+            self.logger.info(
+                f"Size guard: spatial_bin_factor=1 (no binning) for shape "
+                f"{data_to_process.shape}.")
 
         # 3. Calculate Masking strategy
         if strategy.get('apply_masking', False):
@@ -304,7 +383,7 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
         
         prompt = CUSTOM_PREPROCESSING_SCRIPT_INSTRUCTIONS.format(
             instruction=instruction,
-            stats_json=json.dumps(stats, indent=2),
+            stats_json=json.dumps(stats, indent=2, default=str),
             input_filename=input_filename
         )
         
@@ -322,7 +401,20 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
         last_error = "No script generated yet."
         custom_script = None
 
+        # Cumulative wall-clock budget across ALL attempts (#358): each
+        # attempt can run up to the executor timeout, so the attempt cap
+        # alone does not bound total time.
+        import time as _time
+        _t0 = _time.monotonic()
+
         for attempt in range(1, self.MAX_SCRIPT_ATTEMPTS + 1):
+            if (attempt > 1 and self.SCRIPT_LOOP_TIME_BUDGET_S
+                    and _time.monotonic() - _t0 > self.SCRIPT_LOOP_TIME_BUDGET_S):
+                last_error = (f"custom-script wall-clock budget exceeded "
+                              f"({int(self.SCRIPT_LOOP_TIME_BUDGET_S)}s) "
+                              f"after {attempt - 1} attempt(s)")
+                self.logger.warning(last_error)
+                break
             try:
                 if attempt == 1:
                     self.logger.info(f"Attempt {attempt}/{self.MAX_SCRIPT_ATTEMPTS}: Generating initial script...")
@@ -388,7 +480,7 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
         final_script = script_bundle.get("final_script", "# No script was returned.")
         script_save_path = os.path.join(self.output_dir, "custom_preprocessing_script.py")
         try:
-            with open(script_save_path, "w") as f:
+            with open(script_save_path, "w", encoding="utf-8") as f:
                 f.write(f"# --- SciLink Auto-Generated Preprocessing Script ---\n")
                 f.write(f"# Original Instruction: {instruction}\n")
                 f.write(f"# --------------------------------------------------\n\n")
@@ -442,11 +534,14 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
     """
     
     MAX_SCRIPT_ATTEMPTS = 5
+    # Cumulative wall-clock budget for the custom-script retry
+    # loop (#358); falsy disables.
+    SCRIPT_LOOP_TIME_BUDGET_S = 900.0
     MAX_MODEL_ATTEMPTS = 5
 
     def __init__(self, *args,
                  output_dir: str = "preprocessing_output",
-                 executor_timeout: int = 300,
+                 executor_timeout: int = 600,
                  **kwargs):
         """Initialize the 1D pre-processing agent."""
         # Pass output_dir to BaseAnalysisAgent for state management
@@ -505,7 +600,13 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
         # Check for a custom, overriding instruction
         custom_instruction = system_info.get("custom_processing_instruction")
         
-        # Check if we have a locked custom script strategy from a previous spectrum
+        # A custom instruction (or locked custom script) that changes the point
+        # count is a region-of-interest / fit-domain decision, not a length-
+        # preserving transform. The planner and fit script already receive the
+        # instruction via metadata, so we defer it there and apply standard
+        # preprocessing here instead of failing. See docs/preprocessing_in_fit_loop.md.
+
+        # Locked custom script from a previous spectrum (series consistency)
         if (locked_strategy is not None
                 and locked_strategy.get("type") == "custom_script"):
             self.logger.info("Replaying locked custom preprocessing script for series consistency.")
@@ -515,16 +616,19 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
                 )
                 data_quality["strategy"] = locked_strategy
                 data_quality["reasoning"] = "Locked custom script replayed for series consistency."
+                return processed_data, data_quality
+            except FitDomainInstruction as e:
+                self.logger.info(f"   ↪ Locked custom script implies a fit-domain change; deferring to the fit stage. ({e})")
+                data_quality["deferred_to_fit_domain"] = True
+                # fall through to standard preprocessing
             except Exception as e:
                 self.logger.error(f"Locked custom script replay failed: {e}. Returning original data.")
-                processed_data = curve_data
                 data_quality["reasoning"] = f"LOCKED CUSTOM SCRIPT REPLAY FAILED: {e}"
-            return processed_data, data_quality
+                return curve_data, data_quality
 
-        if custom_instruction:  # Custom script path
-            self.logger.info(f"Detected custom 1D processing instruction. Diverting to script executor.")
+        elif custom_instruction:  # Custom script path
+            self.logger.info("Detected custom 1D processing instruction.")
             self.logger.info(f"Instruction: {custom_instruction}")
-
             try:
                 processed_data, script_path, script_content = (
                     self._run_custom_script_processing_1d(
@@ -541,32 +645,50 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
                         "script_content": script_content,
                         "reasoning": f"Custom preprocessing: {custom_instruction[:100]}",
                     }
+                return processed_data, data_quality
+            except FitDomainInstruction as e:
+                self.logger.info(
+                    "   ↪ Custom instruction implies a region-of-interest / "
+                    "fit-domain change. The planner and fit script own this "
+                    "(the instruction is already passed to them via metadata); "
+                    "applying standard length-preserving preprocessing instead."
+                )
+                self.logger.info(f"      ({e})")
+                data_quality["deferred_to_fit_domain"] = True
+                # fall through to standard preprocessing
             except Exception as e:
                 self.logger.error(f"Custom 1D script processing failed: {e}. Returning original data.")
-                processed_data = curve_data
                 data_quality["reasoning"] = f"CUSTOM 1D SCRIPT FAILED: {e}"
+                return curve_data, data_quality
 
-        else:  # Standard LLM-guided path
-            self.logger.info("Running LLM-guided standard 1D processing.")
+        # Standard (length-preserving) path — also the deferral target above.
+        return self._run_standard_1d(curve_data, system_info, locked_strategy, data_quality)
 
-            # 1. Calculate stats (needed for the LLM if no locked strategy)
-            stats = self._calculate_statistics_1d(curve_data)
+    def _run_standard_1d(
+        self,
+        curve_data: np.ndarray,
+        system_info: dict,
+        locked_strategy: Dict[str, Any] | None,
+        data_quality: dict,
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Standard, length-preserving 1D preprocessing (clip/smooth).
 
-            # 2. Use locked strategy if provided, otherwise ask LLM
-            if locked_strategy is not None:
-                self.logger.info("Using locked preprocessing strategy for series consistency.")
-                strategy = locked_strategy
-            else:
-                self.logger.info("No locked strategy - asking LLM for preprocessing strategy.")
-                strategy = self._llm_select_1d_strategy(stats, system_info)
-
-            # 3. Apply the strategy
-            processed_data = self._apply_1d_strategy(curve_data, strategy)
-
-            # 4. Return strategy in data_quality so it can be locked for series
-            data_quality["reasoning"] = strategy.get('reasoning', 'LLM-guided standard processing applied.')
-            data_quality["strategy"] = strategy
-
+        Used both as the default path and as the deferral target when a custom
+        instruction turns out to be a fit-domain change. A locked *custom_script*
+        strategy is ignored here (it is not a standard strategy); only a standard
+        locked strategy is reused for series consistency.
+        """
+        self.logger.info("Running LLM-guided standard 1D processing.")
+        stats = self._calculate_statistics_1d(curve_data)
+        if locked_strategy is not None and locked_strategy.get("type") != "custom_script":
+            self.logger.info("Using locked preprocessing strategy for series consistency.")
+            strategy = locked_strategy
+        else:
+            self.logger.info("No locked strategy - asking LLM for preprocessing strategy.")
+            strategy = self._llm_select_1d_strategy(stats, system_info)
+        processed_data = self._apply_1d_strategy(curve_data, strategy)
+        data_quality["reasoning"] = strategy.get('reasoning', 'LLM-guided standard processing applied.')
+        data_quality["strategy"] = strategy
         return processed_data, data_quality
 
     def _llm_select_1d_strategy(self, stats: Dict[str, Any], system_info: dict) -> dict:
@@ -706,7 +828,7 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
         
         prompt = CUSTOM_PREPROCESSING_SCRIPT_1D_INSTRUCTIONS.format(
             instruction=instruction,
-            stats_json=json.dumps(stats, indent=2),
+            stats_json=json.dumps(stats, indent=2, default=str),
             input_filename=input_filename
         )
         
@@ -726,7 +848,20 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
         last_error = "No script generated yet."
         custom_script = None
 
+        # Cumulative wall-clock budget across ALL attempts (#358): each
+        # attempt can run up to the executor timeout, so the attempt cap
+        # alone does not bound total time.
+        import time as _time
+        _t0 = _time.monotonic()
+
         for attempt in range(1, self.MAX_SCRIPT_ATTEMPTS + 1):
+            if (attempt > 1 and self.SCRIPT_LOOP_TIME_BUDGET_S
+                    and _time.monotonic() - _t0 > self.SCRIPT_LOOP_TIME_BUDGET_S):
+                last_error = (f"custom-script wall-clock budget exceeded "
+                              f"({int(self.SCRIPT_LOOP_TIME_BUDGET_S)}s) "
+                              f"after {attempt - 1} attempt(s)")
+                self.logger.warning(last_error)
+                break
             try:
                 if attempt == 1:
                     custom_script = self._generate_custom_script_1d(stats, instruction, input_filename)
@@ -808,9 +943,12 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
                     f"a valid (N, 2) curve"
                 )
             if processed_data.shape[0] != curve_data.shape[0]:
-                raise RuntimeError(
+                raise FitDomainInstruction(
                     f"Custom script output has {processed_data.shape[0]} points, "
-                    f"expected {curve_data.shape[0]} to match input"
+                    f"expected {curve_data.shape[0]} to match input — the "
+                    f"instruction implies a region-of-interest / fit-domain "
+                    f"change, which is handled by the planner and fit script, "
+                    f"not by length-preserving preprocessing."
                 )
 
             # 3. Validation step (LLM quality check)
@@ -832,7 +970,7 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
                 # Save the final script and return the good data
                 final_script = script_bundle.get("final_script", "# No script was returned.")
                 try:
-                    with open(script_save_path, "w") as f:
+                    with open(script_save_path, "w", encoding="utf-8") as f:
                         f.write(f"# --- SciLink Auto-Generated 1D Preprocessing Script ---\n")
                         f.write(f"# Original Instruction: {instruction}\n")
                         f.write(f"# Final Validation: {assessment['critique']}\n")
@@ -908,9 +1046,10 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
                     f"a valid (N, 2) curve"
                 )
             if processed_data.shape[0] != curve_data.shape[0]:
-                raise RuntimeError(
+                raise FitDomainInstruction(
                     f"Locked script output has {processed_data.shape[0]} points, "
-                    f"expected {curve_data.shape[0]} to match input"
+                    f"expected {curve_data.shape[0]} to match input — region-of-"
+                    f"interest / fit-domain change, deferred to the fit stage."
                 )
 
             return processed_data

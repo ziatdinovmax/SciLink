@@ -1,0 +1,45 @@
+{
+  "llm_calls": [],
+  "result": {
+    "detailed_analysis": "Realtime frame: locked script from 'prior' reused; R² = 0.995; gate verdict: good; drift: none (fingerprint similarity 1.0). Interpretation is deferred to the post-experiment sweep.",
+    "fit_quality": {
+      "r_squared": 0.995,
+      "rmse": 0.01
+    },
+    "fitting_parameters": {
+      "amplitude": 5.0,
+      "center": 4.0,
+      "sigma": 0.8
+    },
+    "literature_files": null,
+    "model_type": "Gaussian + linear background",
+    "output_directory": "<OUTDIR>",
+    "profile": "realtime",
+    "quality_history": {
+      "produced_under_profile": "realtime"
+    },
+    "reuse_validity": {
+      "drift": "none",
+      "fingerprint_similarity": 1.0,
+      "message": "Reused the locked fitting script from prior run 'prior'; R² = 0.9950 meets the acceptance threshold 0.950.",
+      "r_squared": 0.995,
+      "reused": true,
+      "source": "prior",
+      "threshold": 0.95,
+      "verdict": "good"
+    },
+    "scientific_claims": [],
+    "status": "success",
+    "task_mode": "fitting"
+  },
+  "reuse_validity": {
+    "drift": "none",
+    "fingerprint_similarity": 1.0,
+    "message": "Reused the locked fitting script from prior run 'prior'; R² = 0.9950 meets the acceptance threshold 0.950.",
+    "r_squared": 0.995,
+    "reused": true,
+    "source": "prior",
+    "threshold": 0.95,
+    "verdict": "good"
+  }
+}

@@ -34,8 +34,8 @@ Examples:
   # Seed the session with an initial structure request
   scilink simulate --request "Build a rutile TiO2 supercell with one O vacancy"
 
-  # Supervised mode (AI proceeds with reasonable defaults; surfaces big decisions)
-  scilink simulate --mode supervised
+  # Autopilot mode (AI proceeds with reasonable defaults; surfaces big decisions)
+  scilink simulate --mode autopilot
 
   # Use a different model
   scilink simulate --model gemini-2.0-flash
@@ -45,7 +45,7 @@ Examples:
 
 Modes (matching `scilink analyze` / `scilink plan` for consistent UX):
   co-pilot (default)   Human leads, AI assists. Confirms before each tool call.
-  supervised           AI leads with defaults; surfaces significant decisions.
+  autopilot           AI leads with defaults; surfaces significant decisions.
   autonomous           Full autonomy. AI executes without confirmation.
 
 Environment Variables:
@@ -80,7 +80,7 @@ Scope (for now):
 
     # Mode
     parser.add_argument('--mode', type=str, dest='mode',
-                        choices=['co-pilot', 'supervised', 'autonomous'],
+                        choices=['co-pilot', 'autopilot', 'autonomous'],
                         default='co-pilot',
                         help='Autonomy mode (default: co-pilot)')
 
@@ -191,7 +191,7 @@ class SimulatePlayground:
 
         mode_map = {
             'co-pilot': SimulationMode.CO_PILOT,
-            'supervised': SimulationMode.SUPERVISED,
+            'autopilot': SimulationMode.AUTOPILOT,
             'autonomous': SimulationMode.AUTONOMOUS,
         }
         simulation_mode = mode_map.get(mode_str, SimulationMode.CO_PILOT)
@@ -402,9 +402,10 @@ planned follow-up work; see CLAUDE.md.
             print(f"\n🏗️  Structures generated this session: {len(structures)}")
             for s in structures:
                 print(f"  • {s.get('slug')}: {s.get('description')}")
-                print(f"      POSCAR: {s.get('poscar_path')}")
-                if s.get('incar_path'):
-                    print(f"      INCAR/KPOINTS: ✓")
+                print(f"      structure: {s.get('structure_path')}")
+                files = s.get('input_files') or {}
+                if files:
+                    print(f"      inputs: {', '.join(sorted(files))}")
             return True
 
         if cmd == "/status":
@@ -422,11 +423,11 @@ planned follow-up work; see CLAUDE.md.
             parts = cmd.split()
             if len(parts) == 1:
                 print(f"\n🎛️  Current Simulation Mode: {self.agent.simulation_mode.value}")
-                print("\n   To change: /mode <co-pilot|supervised|autonomous>")
+                print("\n   To change: /mode <co-pilot|autopilot|autonomous>")
             else:
                 mode_map = {
                     'co-pilot': SimulationMode.CO_PILOT,
-                    'supervised': SimulationMode.SUPERVISED,
+                    'autopilot': SimulationMode.AUTOPILOT,
                     'autonomous': SimulationMode.AUTONOMOUS,
                 }
                 new_mode = mode_map.get(parts[1].lower())
@@ -435,7 +436,7 @@ planned follow-up work; see CLAUDE.md.
                     print(f"\n   ✅ Simulation mode changed to: {new_mode.value}")
                 else:
                     print(f"\n   ❌ Unknown mode: {parts[1]}")
-                    print("   Valid options: co-pilot, supervised, autonomous")
+                    print("   Valid options: co-pilot, autopilot, autonomous")
             return True
 
         if cmd == "/clear":

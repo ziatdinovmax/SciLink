@@ -354,7 +354,7 @@ def save_sam_visualization(
         # Save parameters to companion file
         params_filename = f"{stage}_cycle{cycle:02d}_params_{timestamp}.txt"
         params_filepath = os.path.join(output_dir, params_filename)
-        with open(params_filepath, 'w') as f:
+        with open(params_filepath, 'w', encoding="utf-8") as f:
             f.write(f"Stage: {stage}\n")
             f.write(f"Cycle: {cycle}\n")
             f.write(f"Particle Count: {particle_count}\n")

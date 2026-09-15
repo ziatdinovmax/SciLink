@@ -1,4 +1,4 @@
-# agents/sim_agents/base_simulation_agent.py
+# agents/sim_agents/base_agent.py
 """
 Base class for all simulation agents.
 
@@ -23,7 +23,10 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
-from ...auth import get_internal_proxy_key
+from ...auth import (
+    APIKeyNotFoundError, get_api_key, get_internal_proxy_key, infer_provider,
+    require_vendor_credentials,
+)
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from ...skills.loader import load_skill, list_skills
@@ -90,6 +93,11 @@ class SimulationAgent(ABC):
                 model=model_name, api_key=api_key, base_url=base_url
             )
         else:
+            # Public / LiteLLM — delegate model→provider→env-var resolution
+            # to LiteLLM (works for any model LiteLLM supports; raises a
+            # message naming the missing vendor env var if not).
+            if api_key is None:
+                require_vendor_credentials(model_name)
             self.logger.info(f"Using LiteLLM: {model_name}")
             self.model = LiteLLMGenerativeModel(
                 model=model_name, api_key=api_key
@@ -184,23 +192,45 @@ class SimulationAgent(ABC):
     # LLM HELPERS
     # ================================================================
 
-    def _generate_json(self, prompt: str) -> Dict[str, Any]:
-        try:
+    def _generate_json(self, prompt: str, _attempts: int = 3) -> Dict[str, Any]:
+        """Generate a JSON object from the model, robust to a bad completion.
+
+        An occasional empty or non-JSON response — a proxy hiccup, a
+        content-filter stop, a stray prose wrapper — otherwise raises on the
+        first try and aborts the whole generation, which is expensive mid-workflow
+        (it burns the caller's retry budget without ever reaching the real work).
+        So retry a few times, nudging explicitly for JSON on the retries, and
+        salvage an embedded object before giving up.
+        """
+        attempts = max(1, _attempts)
+        last_err: Any = None
+        for i in range(attempts):
+            p = prompt if i == 0 else (
+                prompt + "\n\nRespond with ONLY a single valid JSON object — "
+                "no prose, no code fences.")
             response = self.model.generate_content(
-                prompt,
+                p,
                 generation_config={"response_mime_type": "application/json"},
             )
-            return json.loads(response.text)
-        except json.JSONDecodeError as e:
-            self.logger.error(f"JSON parse failed: {e}")
-            text = response.text
-            match = re.search(r'\{.*\}', text, re.DOTALL)
-            if match:
+            text = (getattr(response, "text", None) or "").strip()
+            if text:
                 try:
-                    return json.loads(match.group(0))
-                except Exception:
-                    pass
-            raise ValueError(f"Could not parse JSON: {e}")
+                    return json.loads(text)
+                except json.JSONDecodeError as e:
+                    last_err = e
+                    match = re.search(r'\{.*\}', text, re.DOTALL)
+                    if match:
+                        try:
+                            return json.loads(match.group(0))
+                        except json.JSONDecodeError as e2:
+                            last_err = e2
+            else:
+                last_err = ValueError("empty model response")
+            self.logger.warning(
+                "JSON parse attempt %d/%d failed (%s); retrying",
+                i + 1, attempts, last_err)
+        self.logger.error(f"JSON parse failed after {attempts} attempts: {last_err}")
+        raise ValueError(f"Could not parse JSON after {attempts} attempts: {last_err}")
 
     def _generate_text(self, prompt: str) -> str:
         response = self.model.generate_content(prompt)
@@ -309,7 +339,7 @@ class SimulationAgent(ABC):
             "Return ONLY the file. No markdown."
         )
         updated = self._clean_output(self._generate_text(prompt))
-        script_path.write_text(updated)
+        script_path.write_text(updated, encoding="utf-8")
         self.logger.info(f"Refined: {script_path}")
         return {
             "script_path": str(script_path),
@@ -342,7 +372,7 @@ class SimulationAgent(ABC):
             "Return ONLY the file. No markdown."
         )
         fixed = self._clean_output(self._generate_text(prompt))
-        script_path.write_text(fixed)
+        script_path.write_text(fixed, encoding="utf-8")
         self.logger.info(f"Fixed: {script_path}")
         return {
             "script_path": str(script_path),
