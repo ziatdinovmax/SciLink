@@ -128,10 +128,28 @@ class counts or a dominant-orientation summary. Deliver all three:
    0°≡180°); a color map with no legend cannot be read as angles.
 **Fold orientation to the lattice symmetry.** A 2D lattice's orientation is
 only defined modulo its symmetry — square/p4 folds mod 90°, hexagonal/p6 mod
-60°, oblique mod 180°. Establish the symmetry (e.g. from the FFT spot geometry)
-before reporting angles; using the wrong modulus makes a single grain's
-symmetry-equivalent lattice directions read as different orientations, so the
-per-grain mean is meaningless and its within-grain spread balloons.
+60°, oblique mod 180°. Establish the symmetry (from the FFT spot geometry — spot
+count and angular spacing: 4 spots 90° apart = square/rectangular, 6 spots 60°
+apart = hexagonal) before reporting angles; using the wrong modulus makes a
+single grain's symmetry-equivalent lattice directions read as different
+orientations, so the per-grain mean is meaningless and its within-grain spread
+balloons.
+
+**Determine symmetry from a single-orientation region, never the whole-field
+FFT of a grain mosaic.** When the field is many grains at different
+orientations, the global FFT superimposes each grain's reflections into a
+smeared *ring* — the azimuthal spot count and spacing that distinguish 4-fold
+from 6-fold are exactly what the smearing destroys, so the global FFT cannot be
+trusted for the point group (it also readily mis-reads a square lattice's
+diagonal (11) reflections as extra spots → a false hexagon). Instead FFT each
+grain's *interior* (single orientation → discrete, countable spots), classify
+its symmetry, and take the cross-grain consensus; the global FFT is for the
+average *period* only, never the symmetry. **When there are no grains** — a
+single-domain / single-crystal field, or segmentation returns one region — the
+whole image is already single-orientation, so read the symmetry from its FFT
+directly; the smearing problem is specific to multiple co-present orientations.
+State the symmetry with the evidence (spot count/spacing) and, if the spots are
+too smeared or sparse to decide, say so rather than committing to one.
 
 **Report orientation with a per-grain confidence — do not fabricate, and do
 not cull with an absolute threshold.** Give *every* grain an angle *and* a
