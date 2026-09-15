@@ -3,7 +3,7 @@ import ast, json, re, sys, tempfile, textwrap
 from pathlib import Path
 import pandas as pd
 
-SRC = Path("/Users/maxim.ziatdinov/Code/SciLink/scilink/agents/planning_agents/orchestrator_tools.py")
+SRC = Path(__file__).resolve().parents[1] / "scilink/agents/planning_agents/orchestrator_tools.py"
 tree = ast.parse(SRC.read_text())
 
 # pull the nested read_file def and the module-level constants it closes over
@@ -17,16 +17,28 @@ assert fn and consts, "could not locate read_file / constants in source"
 
 lines = SRC.read_text().split("\n")
 def grab(n, end):  return textwrap.dedent("\n".join(lines[n.lineno-1:end]))
-ns = {"json": json, "re": re, "Path": Path, "pd": pd}
+# The wrapper does a package-relative import of the shared engine, so the
+# exec namespace needs the wrapper's real package identity.
+ns = {"json": json, "re": re, "Path": Path, "pd": pd,
+      "__name__": "scilink.agents.planning_agents.orchestrator_tools",
+      "__package__": "scilink.agents.planning_agents"}
 exec(grab(consts, consts.lineno + 1), ns)          # _FULL_READ_STEMS, _FULL_READ_MAX_CHARS
 exec(grab(consts, consts.end_lineno + 1), ns)
 exec(grab(fn, fn.end_lineno), ns)
 read_file = ns["read_file"]
-ns["self"] = type("S", (), {"_resolve_data_path": staticmethod(lambda p: (p, None))})()
+from types import SimpleNamespace as _NS
+ns["self"] = type("S", (), {"_resolve_data_path": staticmethod(lambda p: (p, None)),
+                            "orch": _NS(planner=_NS(model=None))})()
 
-LIT = ("/Users/maxim.ziatdinov/Code/SciLink/meta_session_20260729_141649/planning/"
-       "delegations/37_answer_a_quantitative_estimate_question_/"
-       "literature_search_hypothesis_context.md")
+# The live file this was written against (792 lines, four "# Question"
+# sections at lines 3 / 198 / 389 / 579) is reconstructed with the same
+# shape so the test runs on any checkout.
+_lit_dir = Path(tempfile.mkdtemp())
+LIT = str(_lit_dir / "literature_search_hypothesis_context.md")
+_starts = {3: 1, 198: 2, 389: 3, 579: 4}
+Path(LIT).write_text("".join(
+    (f"# Question {_starts[n]}: topic\n" if n in _starts else f"text line {n}\n")
+    for n in range(1, 793)))
 
 def call(**kw):
     r = json.loads(read_file(**kw)); return r, r.get("content", "")
@@ -81,4 +93,8 @@ r8 = json.loads(read_file(file_path="/nope/missing.md"))
 check(r8["status"] == "error", "missing file still errors cleanly")
 
 print("\n" + ("ALL PASSED" if not fails else f"{len(fails)} FAILURE(S): {fails}"))
-sys.exit(1 if fails else 0)
+# Runs as a script (exit code) and under pytest (a failed check fails
+# collection; a SystemExit at import would abort the whole run instead).
+assert not fails, fails
+if __name__ == "__main__":
+    sys.exit(0)

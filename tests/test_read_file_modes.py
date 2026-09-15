@@ -83,10 +83,11 @@ def test_search_returns_context_and_line_numbers(read):
 
 def test_search_is_capped_so_a_broad_pattern_cannot_dump_the_file(read):
     out = read(search="line")
-    assert out["matches"] == 500
-    assert len(out["match_lines"]) == 40
-    assert "showing the first 40" in out["content"]
-    assert len(out["content"]) < 6000
+    assert out["matches"] > 40 and len(out["match_lines"]) == 40
+    # #644: the cap is structured and actionable, not a soft aside.
+    assert out["truncated"] is True and out["next_match_offset"] == 41
+    assert "TRUNCATED" in out["content"] and "match_offset=41" in out["content"]
+    assert "showing the first 40" not in out["content"]
 
 
 def test_a_bad_pattern_is_reported_not_raised(read):

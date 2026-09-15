@@ -1989,7 +1989,7 @@ class MetaOrchestratorTools:
 
         def read_file(file_path: str, max_lines: int = 200,
                       tail: bool = False, search: str = None,
-                      offset: int = None) -> str:
+                      offset: int = None, match_offset: int = None) -> str:
             print(f"  ⚡ Tool: Reading file '{file_path}'...")
             path = Path(str(file_path)).expanduser()
             if not path.is_absolute():
@@ -1997,7 +1997,8 @@ class MetaOrchestratorTools:
             from ...utils.file_io import read_file_content
             return json.dumps(read_file_content(
                 path, max_lines=max_lines, tail=tail, search=search,
-                offset=offset, full_read_stems=_FULL_READ_STEMS,
+                offset=offset, match_offset=match_offset,
+                full_read_stems=_FULL_READ_STEMS,
                 full_read_max_chars=_FULL_READ_MAX_CHARS,
                 ocr_model=getattr(self.orch, "model", None),
                 display_path=str(file_path)))
@@ -2028,10 +2029,31 @@ class MetaOrchestratorTools:
                               "description": "Maximum lines to return (default: 200)."},
                 "tail": {"type": "boolean", "description": (
                     "Read the LAST max_lines lines instead of the first.")},
-                "search": {"type": "string", "description": (
-                    "Case-insensitive regex: returns matching lines with line "
-                    "numbers and one line of context, plus the match count, "
-                    "instead of the file body.")},
+                "search": {
+                    "type": "string",
+                    "description": (
+                        "Case-insensitive regex. Returns up to 40 matching lines per "
+                        "call (each with its line number and one line of context "
+                        "either side), plus the TOTAL match count and where in the "
+                        "file the matches fall — instead of the file body. A search "
+                        "with more than 40 matches is TRUNCATED: the result says so "
+                        "('truncated': true) and names the next page "
+                        "('next_match_offset'). A truncated search has NOT read the "
+                        "document — narrow the pattern to what you actually need, or "
+                        "page with match_offset, before citing it. Far cheaper than "
+                        "reading a long file, and it answers presence/absence "
+                        "definitively."
+                    ),
+                },
+                "match_offset": {
+                    "type": "integer",
+                    "description": (
+                        "Search paging: 1-based rank of the first match to return "
+                        "(default 1). A truncated search returns 'next_match_offset' "
+                        "— pass it here to see the next 40 matches. Prefer narrowing "
+                        "the pattern; page when you need to see every hit."
+                    ),
+                },
                 "offset": {"type": "integer", "description": (
                     "1-based line to start reading from — the way to read the "
                     "MIDDLE of a file.")},
