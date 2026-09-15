@@ -82,6 +82,20 @@ done first: it does **no** leveling or resampling, and a tilted or
 anisotropic input gives wrong geometry. Pass the square-pixel size in
 nm. Read `pattern_period_nm` for the self-assembly lattice parameter.
 
+The excess (extra unit / adsorbate) and deficit (missing unit / vacancy) sides
+of the residual need not be equal in amplitude, so the tool's single symmetric
+gate can bias detection toward one sign. Check the residual distribution — the
+excess vs deficit tails, or the ± extremes of `residual_sigma_map` — and whether
+one sign is under-counted relative to what is visibly present; if so, move
+*that* sign's gate (`deficit_null_percentile` / `deficit_k_min` for the missing
+units) and visually verify recall vs new false positives. Do **not** assume a
+direction: a single-layer height map on a substrate often has shallower
+vacancies than adsorbates (missing units only drop to the substrate floor while
+adsorbates pile up unbounded), but non-topographic channels (KPFM / PFM /
+current), multilayer or pit-forming films, and arrays whose adsorbates are just
+single extra units can be symmetric or reversed. Read the asymmetry off the
+data, don't apply a fixed rule.
+
 **3. Intensity is physical — track the mapping.**
 AFM intensity is not arbitrary. It is height (nm), voltage (V),
 phase (deg), current (A), etc. Whenever the image is stored or
