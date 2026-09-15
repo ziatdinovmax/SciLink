@@ -93,13 +93,19 @@ def _log_to_html(text: str) -> str:
 
 
 def _escape_tildes(text: str) -> str:
-    """Escape tildes outside LaTeX ($...$, $$...$$) to prevent Markdown strikethrough."""
-    # Split on LaTeX delimiters, preserving them
-    parts = re.split(r"(\$\$[\s\S]*?\$\$|\$[^$]+?\$)", text)
+    """Escape tildes (strikethrough) and single dollars (inline math) outside
+    ``$$...$$`` display math.
+
+    ``st.markdown`` typesets ``$...$`` with KaTeX, and LLM-authored answers
+    use ``$`` for currency ("~$0.79/m³", "$300/t"): everything between two
+    prices became italic math and the tilde escape mis-classified those
+    spans (#636). Only display math is math here, mirroring the React UI.
+    """
+    parts = re.split(r"(\$\$[\s\S]*?\$\$)", text)
     for i, part in enumerate(parts):
-        # Odd indices are LaTeX blocks — leave them untouched
+        # Odd indices are display-math blocks — leave them untouched
         if i % 2 == 0:
-            parts[i] = part.replace("~", "\\~")
+            parts[i] = part.replace("~", "\\~").replace("$", "\\$")
     return "".join(parts)
 
 

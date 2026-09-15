@@ -317,6 +317,7 @@ function MdPreview({ sessionId, path }: { sessionId: string; path: string }) {
       {mode === "rendered" ? (
         <MarkdownBody
           text={demoteHeadings(text)}
+          escapeTilde
           transformImageUri={(src) =>
             /^(https?:|data:)/.test(src) ? src : api.fileUrl(sessionId, dir + src)
           }
