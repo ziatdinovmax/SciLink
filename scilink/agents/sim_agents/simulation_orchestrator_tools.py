@@ -1943,7 +1943,7 @@ class SimulationOrchestratorTools:
 
         def read_file(file_path: str, max_lines: int = 200,
                       tail: bool = False, search: str = None,
-                      offset: int = None) -> str:
+                      offset: int = None, match_offset: int = None) -> str:
             """Read and return the contents of a text/JSON/CSV/log file — an
             INCAR, a POSCAR, a LAMMPS deck, an OUTCAR/log, a job script, a
             generated report — without triggering any simulation. PDF/DOCX are
@@ -1961,7 +1961,8 @@ class SimulationOrchestratorTools:
             from ...utils.file_io import read_file_content
             return json.dumps(read_file_content(
                 path, max_lines=max_lines, tail=tail, search=search,
-                offset=offset, full_read_stems=_FULL_READ_STEMS,
+                offset=offset, match_offset=match_offset,
+                full_read_stems=_FULL_READ_STEMS,
                 full_read_max_chars=_FULL_READ_MAX_CHARS,
                 ocr_model=getattr(self.orch, "model", None),
                 display_path=file_path))
@@ -2004,13 +2005,26 @@ class SimulationOrchestratorTools:
                 "search": {
                     "type": "string",
                     "description": (
-                        "Case-insensitive regex. Returns every matching line "
-                        "with its line number and one line of context either "
-                        "side, plus the total match count — instead of the "
-                        "file body. The right tool for 'did this run raise an "
-                        "error', 'which lines set ENCUT', 'is NELM in here'. "
-                        "Far cheaper than reading a long file, and it answers "
-                        "presence/absence definitively."
+                        "Case-insensitive regex. Returns up to 40 matching lines per "
+                        "call (each with its line number and one line of context "
+                        "either side), plus the TOTAL match count and where in the "
+                        "file the matches fall — instead of the file body. A search "
+                        "with more than 40 matches is TRUNCATED: the result says so "
+                        "('truncated': true) and names the next page "
+                        "('next_match_offset'). A truncated search has NOT read the "
+                        "document — narrow the pattern to what you actually need, or "
+                        "page with match_offset, before citing it. Far cheaper than "
+                        "reading a long file, and it answers presence/absence "
+                        "definitively."
+                    ),
+                },
+                "match_offset": {
+                    "type": "integer",
+                    "description": (
+                        "Search paging: 1-based rank of the first match to return "
+                        "(default 1). A truncated search returns 'next_match_offset' "
+                        "— pass it here to see the next 40 matches. Prefer narrowing "
+                        "the pattern; page when you need to see every hit."
                     ),
                 },
                 "offset": {

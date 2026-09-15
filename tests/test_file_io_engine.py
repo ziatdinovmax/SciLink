@@ -50,7 +50,8 @@ def test_tail_offset_search(doc):
     assert none["matches"] == 0 and "(no matches)" in none["content"]
     broad = read_file_content(doc, search="line")
     assert broad["matches"] == 500 and len(broad["match_lines"]) == 40
-    assert "showing the first 40" in broad["content"]
+    assert broad["truncated"] and broad["next_match_offset"] == 41
+    assert "TRUNCATED" in broad["content"] and "match_offset=41" in broad["content"]
     bad = read_file_content(doc, search="[unclosed")
     assert bad["status"] == "error" and "Invalid search pattern" in bad["message"]
 

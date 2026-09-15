@@ -47,6 +47,7 @@ MAX_PREVIEW_ROWS = 100
 MAX_PREVIEW_COLS = 40
 MAX_PREVIEW_CHARS = 30_000
 SEARCH_HIT_CAP = 40
+SEARCH_DENSITY_BANDS = 10
 DEFAULT_FULL_READ_MAX_CHARS = 250_000
 
 
@@ -107,10 +108,83 @@ def _outline(lines: Sequence[str]) -> str:
         " …" if len(heads) > 12 else "")
 
 
+def _match_density(hits: Sequence[int], total: int,
+                   bands: int = SEARCH_DENSITY_BANDS) -> List[Dict[str, Any]]:
+    """Where the matches fall, in ``bands`` equal line bands of the file —
+    so a truncated search says where the rest is instead of only that it
+    is missing (a broad pattern over a 22,000-line document showed its
+    first 40 hits, all front matter, and nothing said the other 990 were
+    deeper — #644)."""
+    if total <= 0 or not hits:
+        return []
+    bands = max(1, min(bands, total))
+    size = -(-total // bands)
+    out = []
+    for b in range(bands):
+        lo, hi = b * size, min(total, (b + 1) * size)
+        if lo >= total:
+            break
+        n = sum(1 for h in hits if lo <= h < hi)
+        out.append({"lines": f"{lo + 1}-{hi}", "matches": n})
+    return out
+
+
+def _search_window(lines: List[str], search: str,
+                   match_offset: Optional[int]) -> Dict[str, Any]:
+    """The search mode of ``window_lines``: up to ``SEARCH_HIT_CAP`` matches
+    per call starting at match rank ``match_offset`` (1-based), with the
+    total count, a density map, and an unmissable truncation notice that
+    names the next page. ``truncated`` / ``next_match_offset`` are
+    structured so a caller cannot glide past prose."""
+    total = len(lines)
+    try:
+        rx = re.compile(search, re.I)
+    except re.error as e:
+        return {"status": "error", "message": f"Invalid search pattern: {e}"}
+    hits = [i for i, ln in enumerate(lines) if rx.search(ln)]
+    start = max(0, int(match_offset or 1) - 1)
+    shown = hits[start:start + SEARCH_HIT_CAP]
+    remaining = len(hits) - (start + len(shown))
+    truncated = remaining > 0
+    next_off = start + len(shown) + 1 if truncated else None
+    out = []
+    for i in shown:
+        lo, hi = max(0, i - 1), min(total, i + 2)
+        out.append(f"@@ line {i + 1}\n" + "".join(lines[lo:hi]).rstrip("\n"))
+    body = "\n\n".join(out) if out else "(no matches)"
+    if not hits:
+        note = f"0 matching line(s) in {total} total"
+    elif not shown:
+        note = (f"{len(hits)} matching line(s) in {total} total; "
+                f"match_offset={start + 1} is past the last match "
+                f"(#{len(hits)}, line {hits[-1] + 1})")
+    else:
+        note = (f"{len(hits)} matching line(s) in {total} total; showing "
+                f"matches {start + 1}-{start + len(shown)} of {len(hits)} "
+                f"(lines {shown[0] + 1}-{shown[-1] + 1})")
+        if truncated:
+            note += (f". TRUNCATED: {remaining} more match(es), up to line "
+                     f"{hits[-1] + 1}, are NOT shown — this is a partial "
+                     f"result, not the document. Narrow the pattern to what "
+                     f"you actually need, or continue with "
+                     f"match_offset={next_off}")
+    density = _match_density(hits, total) if len(hits) > SEARCH_HIT_CAP else []
+    if density:
+        note += ("\nWhere the matches are (equal line bands): "
+                 + " · ".join(f"lines {d['lines']}: {d['matches']}"
+                              for d in density))
+    return {"mode": "search", "pattern": search, "matches": len(hits),
+            "match_offset": start + 1, "shown": len(shown),
+            "match_lines": [i + 1 for i in shown], "truncated": truncated,
+            "next_match_offset": next_off, "match_density": density,
+            "total_lines": total, "content": f"{note}\n\n{body}"}
+
+
 def window_lines(lines: List[str], *, max_lines: int = 200,
                  tail: bool = False, search: Optional[str] = None,
                  offset: Optional[int] = None,
-                 whole: bool = False) -> Dict[str, Any]:
+                 whole: bool = False,
+                 match_offset: Optional[int] = None) -> Dict[str, Any]:
     """The windowing half of ``read_file`` over an already-loaded list of
     lines (``keepends`` style): search / offset / tail / head, with the
     truncation notices that name the way to the rest. Returns the result
@@ -120,23 +194,7 @@ def window_lines(lines: List[str], *, max_lines: int = 200,
     if search:
         # The real question behind most repeat reads is "is X in here, and
         # where" — a search, not a read. Answer it in one cheap call.
-        try:
-            rx = re.compile(search, re.I)
-        except re.error as e:
-            return {"status": "error",
-                    "message": f"Invalid search pattern: {e}"}
-        hits = [i for i, ln in enumerate(lines) if rx.search(ln)]
-        shown, out = hits[:SEARCH_HIT_CAP], []
-        for i in shown:
-            lo, hi = max(0, i - 1), min(total, i + 2)
-            out.append(f"@@ line {i + 1}\n" + "".join(lines[lo:hi]).rstrip("\n"))
-        body = "\n\n".join(out) if out else "(no matches)"
-        note = (f"{len(hits)} matching line(s) in {total} total"
-                + (f"; showing the first {SEARCH_HIT_CAP}"
-                   if len(hits) > SEARCH_HIT_CAP else ""))
-        return {"mode": "search", "pattern": search, "matches": len(hits),
-                "match_lines": [i + 1 for i in shown], "total_lines": total,
-                "content": f"{note}\n\n{body}"}
+        return _search_window(lines, search, match_offset)
 
     truncated = True
     if whole or total <= max_lines:
@@ -224,6 +282,7 @@ def list_directory(path: Path, *, display_path: Optional[str] = None,
 def read_file_content(path: Path, *, max_lines: int = 200,
                       tail: bool = False, search: Optional[str] = None,
                       offset: Optional[int] = None,
+                      match_offset: Optional[int] = None,
                       full_read_stems: Iterable[str] = (),
                       full_read_max_chars: int = DEFAULT_FULL_READ_MAX_CHARS,
                       ocr_model: Any = None,
@@ -286,7 +345,8 @@ def read_file_content(path: Path, *, max_lines: int = 200,
                  and offset is None and not tail
                  and len("".join(lines)) <= full_read_max_chars)
         win = window_lines(lines, max_lines=max_lines, tail=tail,
-                           search=search, offset=offset, whole=whole)
+                           search=search, offset=offset, whole=whole,
+                           match_offset=match_offset)
         if win.get("status") == "error":
             return win
         return {"status": "success", "file_path": shown_path, **win, **doc_meta}
