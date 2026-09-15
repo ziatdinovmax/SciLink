@@ -3336,7 +3336,7 @@ class OrchestratorTools:
             - File path: "./data.csv" or "./plot.png"
             - Comma-separated files: "./data.csv,./plot.png"
             """
-            print(f"  ⚡ Tool: Refining Plan based on Results...")
+            print(f"  ⚡ Tool: Refining Plan based on Results / Feedback...")
 
             # Parse input - handle both single paths and comma-separated lists
             payload = self._parse_result_input(result_data)
