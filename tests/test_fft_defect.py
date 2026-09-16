@@ -212,11 +212,15 @@ class TestSignAwareDeficitGate:
         assert res["threshold_deficit"] == pytest.approx(res["threshold"])
 
     def test_deficit_knob_recovers_more_vacancies_without_touching_excess(self):
-        # a lattice with shallow vacancies AND tall interstitials: the symmetric
-        # gate favors the tall excess; a lower deficit gate must recover more
-        # deficits while leaving the excess count unchanged.
+        # SHALLOW deficits (dim sites at 70% contrast — the bounded-depth case
+        # the knob exists for; a full atom removal already clears the
+        # symmetric gate) next to tall interstitials: the symmetric gate
+        # misses some of the shallow deficits, a lower deficit gate recovers
+        # them, and the excess count is unchanged. Asserting strict recovery
+        # is what makes this test fail if the knob ever becomes a no-op.
         img, _ = make_defective_lattice((512, 512), a_px=14.0, kind="hex",
-                                        n_vacancies=10, n_interstitials=6,
+                                        n_vacancies=0, n_dopants=10,
+                                        dopant_contrast=0.7, n_interstitials=6,
                                         noise=0.06, seed=5)
         base = fft_defect_map(img)
         lowered = fft_defect_map(
@@ -225,5 +229,7 @@ class TestSignAwareDeficitGate:
         e1, d1 = self._counts(lowered)
         assert lowered["threshold_deficit"] < base["threshold_deficit"]
         assert lowered["threshold"] == pytest.approx(base["threshold"])
+        assert d0 < 10             # the symmetric gate misses shallow deficits
+        assert d1 > d0             # the lower deficit gate recovers some
+        assert d1 == 10            # ... all of them here, with no false positive
         assert e1 == e0            # excess side untouched
-        assert d1 >= d0            # deficit recall does not drop
