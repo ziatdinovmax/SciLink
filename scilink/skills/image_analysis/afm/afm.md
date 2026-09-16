@@ -142,12 +142,14 @@ class counts or a dominant-orientation summary. Deliver all three:
    0°≡180°); a color map with no legend cannot be read as angles.
 **Fold orientation to the lattice symmetry.** A 2D lattice's orientation is
 only defined modulo its symmetry — square/p4 folds mod 90°, hexagonal/p6 mod
-60°, oblique mod 180°. Establish the symmetry (from the FFT spot geometry — spot
-count and angular spacing: 4 spots 90° apart = square/rectangular, 6 spots 60°
-apart = hexagonal) before reporting angles; using the wrong modulus makes a
-single grain's symmetry-equivalent lattice directions read as different
-orientations, so the per-grain mean is meaningless and its within-grain spread
-balloons.
+60°, rectangular and oblique mod 180°. Establish the symmetry from the FFT
+spot geometry — spot count, angular spacing *and* radii: 6 spots 60° apart =
+hexagonal; 4 spots 90° apart at **equal** radii = square (mod 90°); 4 spots
+90° apart at **unequal** radii = rectangular, whose two axes are inequivalent,
+so it folds mod 180°, not 90° — before reporting angles; using the wrong
+modulus makes a single grain's symmetry-equivalent lattice directions read as
+different orientations, so the per-grain mean is meaningless and its
+within-grain spread balloons.
 
 **Determine symmetry from a single-orientation region, never the whole-field
 FFT of a grain mosaic.** When the field is many grains at different
