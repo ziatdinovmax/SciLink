@@ -96,6 +96,11 @@ current), multilayer or pit-forming films, and arrays whose adsorbates are just
 single extra units can be symmetric or reversed. Read the asymmetry off the
 data, don't apply a fixed rule.
 
+Report the tool's defects faithfully — both signs. Cross-check: if your reported
+excess or deficit count falls well below the number of `residual_sigma_map`
+peaks above the gate, that's over-filtering, not honest detection. Report both
+signs even when one dominates.
+
 **3. Intensity is physical — track the mapping.**
 AFM intensity is not arbitrary. It is height (nm), voltage (V),
 phase (deg), current (A), etc. Whenever the image is stored or
