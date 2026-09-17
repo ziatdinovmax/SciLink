@@ -233,3 +233,19 @@ class TestSignAwareDeficitGate:
         assert d1 > d0             # the lower deficit gate recovers some
         assert d1 == 10            # ... all of them here, with no false positive
         assert e1 == e0            # excess side untouched
+
+
+class TestPerSignCounts:
+    """n_excess / n_deficit are per-sign tallies of the gated defects, so a
+    caller reports both signs by reading a field, not re-deriving them."""
+
+    def test_per_sign_counts_partition_n_defects(self):
+        img, _ = make_defective_lattice((512, 512), a_px=14.0, kind="hex",
+                                        n_vacancies=8, n_interstitials=6, seed=7)
+        res = fft_defect_map(img)
+        assert "n_excess" in res and "n_deficit" in res
+        assert res["n_excess"] + res["n_deficit"] == res["n_defects"]
+        assert res["n_excess"] == sum(1 for d in res["defects"]
+                                      if d["sign"] == "excess")
+        assert res["n_deficit"] == sum(1 for d in res["defects"]
+                                       if d["sign"] == "deficit")

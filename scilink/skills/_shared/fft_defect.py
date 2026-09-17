@@ -337,6 +337,11 @@ def fft_defect_map(image_array, pixel_size_nm=None, params=None):
                 "(fourier_reflection_map) instead of counting sites.")
     out.update(
         n_defects=len(merged),
+        # per-sign tallies over the gated+merged defects, so a caller reports
+        # both signs by reading a field rather than re-deriving (and possibly
+        # over-filtering) the counts from the residual itself.
+        n_excess=sum(1 for c in merged if c["sign"] == "excess"),
+        n_deficit=sum(1 for c in merged if c["sign"] == "deficit"),
         defects=merged,
         defects_per_1000_sites=round(1000.0 * len(merged) / max(n_sites, 1.0), 2),
         n_sites_estimate=int(n_sites),
@@ -525,11 +530,13 @@ TOOL_SPEC = ToolSpec(
         "'note' then reports the best candidate snr vs the gate so you can "
         "decide whether to lower min_peak_snr or conclude the image is not "
         "periodic), 'reflections' (ALL candidates: period_px, snr, "
-        "significant), 'pattern_period_px' (and _nm), 'n_defects', 'defects' "
-        "(list of {y, x, sign='deficit'|'excess', strength_sigma, area_px, "
-        "coherence_dip} — deficit + coherence_dip is the vacancy / missing-"
-        "unit signature; excess without dip suggests an adatom/dopant on an "
-        "intact lattice), 'defects_per_1000_sites', 'anomaly_area_fraction', "
+        "significant), 'pattern_period_px' (and _nm), 'n_defects', 'n_excess' "
+        "and 'n_deficit' (per-sign tallies of the gated defects — report BOTH "
+        "of these directly; do not re-derive or aggregate the counts yourself), "
+        "'defects' (list of {y, x, sign='deficit'|'excess', strength_sigma, "
+        "area_px, coherence_dip} — deficit + coherence_dip is the vacancy / "
+        "missing-unit signature; excess without dip suggests an adatom/dopant "
+        "on an intact lattice), 'defects_per_1000_sites', 'anomaly_area_fraction', "
         "'valid_fraction', 'clark_evans_index' and 'largest_cluster_fraction' "
         "(candidate spatial statistics), 'residual_sigma_map' / "
         "'lattice_amplitude_map' / 'valid_mask' (arrays for overlay plots), "
