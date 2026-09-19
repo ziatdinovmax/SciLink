@@ -785,9 +785,12 @@ def test_replay_map_gate_rules():
     # coverage judged within the fit mask when scoped
     mask = np.zeros((8, 8), bool); mask[6:, :] = True
     assert _replay_map_gate(holes, mask, {**ref, "coverage": 0.9}, True)[0]
-    # collapsed map
-    ok, why = _replay_map_gate(np.full((8, 8), 461.1), None, None, True)
-    assert not ok and "constant" in why
+    # a constant map collapses only relative to an anchor whose map varied
+    const = np.full((8, 8), 461.1)
+    assert _replay_map_gate(const, None, None, True)[0]                       # no reference: accepted
+    assert _replay_map_gate(const, None, {"min": 461.1, "max": 461.1, "mean": 461.1}, True)[0]
+    ok, why = _replay_map_gate(const, None, ref, True)
+    assert not ok and "constant" in why and "anchor's varied" in why
     # out of the plausible range: anchor [458, 460] widened by one span → [456, 462]
     ok, why = _replay_map_gate(good + 4.0, None, ref, True)
     assert not ok and "plausible range" in why

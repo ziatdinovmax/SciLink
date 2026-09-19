@@ -1080,8 +1080,19 @@ def _replay_map_gate(result_map, fit_mask, reference: dict | None,
                            f"anchor's {float(ref_cov):.0%}) — the locked method did not "
                            "converge here")
     vals = m[finite]
-    if vals.size > 8 and float(np.ptp(vals)) == 0.0:
-        return False, "map is constant across the frame (fit collapsed to a bound)"
+    # A constant map is a collapse only if the SAME method varied on the
+    # anchor: a synthetic emitter with one exact centre, or a channel-
+    # quantized position, is legitimately constant (observed live on a
+    # mask-scoped follower the LLM review used to accept).
+    if vals.size > 8 and float(np.ptp(vals)) == 0.0 and isinstance(reference, dict):
+        try:
+            ref_spread = float(reference.get("max")) - float(reference.get("min"))
+        except (TypeError, ValueError):
+            ref_spread = None
+        if ref_spread is not None and ref_spread > 0:
+            return False, ("map is constant across the frame while the anchor's varied "
+                           f"over [{float(reference['min']):.4g}, {float(reference['max']):.4g}] "
+                           "(fit collapsed to a bound)")
     if required and isinstance(reference, dict) and all(
             isinstance(reference.get(k), (int, float)) for k in ("min", "max")):
         lo, hi = float(reference["min"]), float(reference["max"])
