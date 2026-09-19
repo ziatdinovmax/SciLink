@@ -31,7 +31,7 @@ def test_an_invariant_recipe_travels(tmp_path):
     rep = check_portability(replay, _reference(tmp_path), 0.97, str(tmp_path / "w"))
     assert rep["portable"] and [t["signal_scale"] for t in rep["trials"]] == [3.0, 0.35]
     assert seen[0] > 1200 and seen[1] < 150                       # the data really was scaled
-    assert "travels" in describe(rep)
+    assert "travels" in describe(rep) and "—" not in describe(rep)
 
 
 def test_a_baked_in_ceiling_is_named(tmp_path):
@@ -40,12 +40,12 @@ def test_a_baked_in_ceiling_is_named(tmp_path):
     rep = check_portability(replay, _reference(tmp_path), 0.97, str(tmp_path / "w"))
     assert rep["portable"] is False
     assert [t["ok"] for t in rep["trials"]] == [False, True]
-    assert "×3 signal → R² 0.8" in describe(rep) and "baked in" in describe(rep)
+    assert "at ×3 signal R² 0.8" in describe(rep) and "baked in" in describe(rep)
 
 
 def test_a_recipe_that_cannot_run_on_the_scaled_copy_fails_the_check(tmp_path):
     rep = check_portability(lambda p, t: None, _reference(tmp_path), 0.97, str(tmp_path / "w"))
-    assert rep["portable"] is False and "did not run" in describe(rep)
+    assert rep["portable"] is False and "it did not run" in describe(rep)
 
 
 def test_nothing_to_compare_is_no_verdict(tmp_path):

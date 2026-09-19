@@ -173,6 +173,51 @@ def test_a_failed_run_reports_the_error(session):
     assert "objective" in snap["error"]
 
 
+# ── the reference: first frame, or a past analysis ───────────────
+
+def test_a_past_analysis_in_the_session_can_be_the_reference(session, tmp_path):
+    past = Path(session.session_dir) / "analysis" / "results" / "analysis_ref_CurveFit_001"
+    (past / "scripts").mkdir(parents=True)
+    (past / "scripts" / "fitting_script.py").write_text(SCRIPT)
+    (past / "series_fit_results.json").write_text(json.dumps(
+        {"results": [{"model_type": "one peak"}], "locked_config": {"physical_model": "Lorentzian + linear"}}))
+    (past / "analysis_results.json").write_text(json.dumps({
+        "status": "success", "fitting_parameters": {"peak_1": {"center": 6.0}},
+        "fit_quality": {"r_squared": 0.99}}))
+    [cand] = live_api.snapshot(session)["analyses"]
+    assert cand["path"] == "analysis/results/analysis_ref_CurveFit_001"
+    assert cand["model"] == "Lorentzian + linear" and cand["has_data"] is False
+
+    live_api.start(session, {**CONFIG, "reference_source": "analysis", "reference_analysis": cand["path"]})
+    snap = _wait(session, lambda s: s["state"] in ("done", "error"))
+    assert snap["state"] == "done", snap.get("error")
+    setup = next(e for e in snap["events"] if e["event"] == "setup")
+    assert setup["source"] == "anchor"                       # adopted: no reference analysis was run
+    assert not (Path(snap["run_dir"]) / "reference").exists()
+    assert len(snap["frames"]) == 4
+
+
+def test_the_reference_must_be_inside_the_session(session, tmp_path):
+    live_api.start(session, {**CONFIG, "reference_source": "analysis", "reference_analysis": "../.."})
+    snap = _wait(session, lambda s: s["state"] == "error")
+    assert "not a curve-fit run in this session" in snap["error"]
+
+
+def test_open_ended_until_stopped_and_the_log_is_read_incrementally(session):
+    live_api.start(session, {**CONFIG, "n_frames": None, "interval_s": 0.01})
+    snap = _wait(session, lambda s: s["state"] == "running" and len(s["frames"]) >= 3)
+    assert snap["n_frames_total"] is None
+    run = live_api._RUNS[session.id]
+    offset = run._tail.offset
+    assert offset > 0
+    _wait(session, lambda s: s["status"]["frames"] >= 6)
+    assert run._tail.offset > offset                         # continued from where it stopped
+    live_api.stop(session)
+    done = _wait(session, lambda s: s["state"] == "stopped")
+    assert done["status"]["frames"] == len(done["frames"]) == done["status"]["clean_frames"]
+    assert done["output_keys"] == ["peak_1_center"]          # nothing pinned: the recipe's own names
+
+
 # ── replaying a folder of recorded measurements ──────────────────
 
 def _recording(tmp_path, n=5):

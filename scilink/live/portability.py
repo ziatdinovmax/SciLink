@@ -58,11 +58,11 @@ def check_portability(replay_r2: Callable[[str, str], Optional[float]], referenc
 def describe(report: Dict[str, Any]) -> str:
     bad = [t for t in report.get("trials", []) if not t["ok"]]
     if not bad:
-        return "the recipe travels: same fit quality with the signal scaled up and down"
-    parts = [f"×{t['signal_scale']:g} signal → " + ("did not run" if t["r_squared"] is None
-                                                   else f"R² {t['r_squared']}") for t in bad]
-    return (f"the recipe may not travel (reference R² {report['reference_r_squared']}; "
-            + "; ".join(parts) + ") — a constant read off the reference is probably baked in")
+        return "The recipe travels. Same fit quality with the signal scaled up and down."
+    parts = [f"at ×{t['signal_scale']:g} signal " + ("it did not run" if t["r_squared"] is None
+                                                    else f"R² {t['r_squared']}") for t in bad]
+    return (f"The recipe may not travel. Reference R² {report['reference_r_squared']}, "
+            + ", ".join(parts) + ". A constant read off the reference is probably baked in.")
 
 
 def agent_replay_r2(agent_factory: Callable[[str], Any], anchor_dir: str, system_info: Any,

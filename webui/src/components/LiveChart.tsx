@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 /** A small SVG line chart for the Live tab: one measured series, an optional
- * neutral reference line (a simulator's ground truth), point markers for
- * flagged frames and vertical rules for events. One y-axis, a crosshair that
- * snaps to the nearest x, and a tooltip that lists every series at that x. */
+ * overlay in the second series colour (the fitted model over the data), an
+ * optional neutral dashed reference (a known value, when there is one), point
+ * markers for flagged frames and vertical rules for events. One y-axis, a
+ * crosshair that snaps to the nearest x, and a tooltip that lists every series
+ * at that x. `compact` is the small-multiple form: several of these stacked,
+ * one quantity each, instead of several quantities on one axis. */
 
 export interface ChartPoint {
   x: number;
@@ -14,7 +17,9 @@ export interface ChartMarker {
   label: string;
 }
 
-const M = { top: 12, right: 14, bottom: 30, left: 58 };
+const MARGIN = { top: 12, right: 14, bottom: 30, left: 58 };
+const MARGIN_COMPACT = { top: 6, right: 14, bottom: 18, left: 58 };
+const MARGIN_COMPACT_LABELLED = { top: 6, right: 14, bottom: 30, left: 58 };
 
 function niceTicks(lo: number, hi: number, n: number): number[] {
   if (!isFinite(lo) || !isFinite(hi)) return [];
@@ -26,6 +31,12 @@ function niceTicks(lo: number, hi: number, n: number): number[] {
   for (let v = Math.ceil(lo / step) * step; v <= hi + step * 1e-9; v += step)
     out.push(Math.abs(v) < step * 1e-9 ? 0 : v);
   return out;
+}
+
+/** An uncertainty or a fit statistic: two or three significant figures, not five. */
+export function fmtShort(v: number | null | undefined, digits = 2): string {
+  if (v === null || v === undefined || !isFinite(v)) return "";
+  return String(parseFloat(v.toPrecision(digits)));
 }
 
 export function fmt(v: number | null | undefined): string {
@@ -52,19 +63,29 @@ function useWidth(): [React.RefObject<HTMLDivElement>, number] {
 export function LiveChart({
   series,
   seriesLabel,
+  overlay,
+  overlayLabel,
   reference,
   referenceLabel,
+  legend = true,
+  compact = false,
   flagged = [],
   rules = [],
   xLabel,
   yLabel,
   xInteger = false,
-  height = 220,
+  height,
 }: {
   series: ChartPoint[];
   seriesLabel: string;
+  /** A second solid line over the series, e.g. the fitted model over the data. */
+  overlay?: ChartPoint[];
+  overlayLabel?: string;
   reference?: ChartPoint[];
   referenceLabel?: string;
+  /** Small multiples share one legend above the stack. */
+  legend?: boolean;
+  compact?: boolean;
   /** x positions of flagged frames (drawn as status markers on the series). */
   flagged?: ChartMarker[];
   /** vertical event rules (a re-anchor, a scripted change). */
@@ -76,27 +97,30 @@ export function LiveChart({
 }) {
   const [ref, width] = useWidth();
   const [hover, setHover] = useState<number | null>(null);
+  const M = compact ? (xLabel ? MARGIN_COMPACT_LABELLED : MARGIN_COMPACT) : MARGIN;
+  const H = height ?? (compact ? 104 : 220);
 
   const geo = useMemo(() => {
     const pts = series.filter((p) => p.y !== null && isFinite(p.y as number));
     const refPts = (reference ?? []).filter((p) => p.y !== null && isFinite(p.y as number));
+    const ovPts = (overlay ?? []).filter((p) => p.y !== null && isFinite(p.y as number));
     if (!pts.length || width < 120) return null;
     const xs = pts.map((p) => p.x);
-    const ys = [...pts, ...refPts].map((p) => p.y as number);
+    const ys = [...pts, ...refPts, ...ovPts].map((p) => p.y as number);
     let x0 = Math.min(...xs), x1 = Math.max(...xs);
     if (x0 === x1) { x0 -= 1; x1 += 1; }
     let y0 = Math.min(...ys), y1 = Math.max(...ys);
     const pad = (y1 - y0 || Math.abs(y1) || 1) * 0.08;
     y0 -= pad; y1 += pad;
-    const iw = width - M.left - M.right, ih = height - M.top - M.bottom;
+    const iw = width - M.left - M.right, ih = H - M.top - M.bottom;
     const sx = (v: number) => M.left + ((v - x0) / (x1 - x0)) * iw;
     const sy = (v: number) => M.top + (1 - (v - y0) / (y1 - y0)) * ih;
     const path = (p: ChartPoint[]) =>
       p.map((q, i) => `${i ? "L" : "M"}${sx(q.x).toFixed(1)},${sy(q.y as number).toFixed(1)}`).join("");
     let xt = niceTicks(x0, x1, Math.max(2, Math.floor(iw / 90)));
     if (xInteger) xt = xt.filter((v) => Number.isInteger(v));
-    return { pts, refPts, sx, sy, path, x0, x1, iw, ih, xt, yt: niceTicks(y0, y1, 4) };
-  }, [series, reference, width, height, xInteger]);
+    return { pts, refPts, ovPts, sx, sy, path, x0, x1, iw, ih, xt, yt: niceTicks(y0, y1, compact ? 3 : 4) };
+  }, [series, reference, overlay, width, H, M, compact, xInteger]);
 
   const onMove = (e: React.PointerEvent<SVGRectElement>) => {
     if (!geo) return;
@@ -111,22 +135,24 @@ export function LiveChart({
 
   const hp = geo && hover !== null ? geo.pts[Math.min(hover, geo.pts.length - 1)] : null;
   const hRef = hp && geo ? geo.refPts.find((p) => p.x === hp.x) : undefined;
+  const hOv = hp && geo ? geo.ovPts.find((p) => p.x === hp.x) : undefined;
   const hFlag = hp ? flagged.find((f) => f.x === hp.x) : undefined;
   const dense = (geo?.pts.length ?? 0) > 120;
 
   return (
     <div className="live-chart" ref={ref}>
-      {reference && reference.length > 0 && (
+      {legend && ((reference && reference.length > 0) || (overlay && overlay.length > 0)) && (
         <div className="live-legend">
           <span><i className="key series" /> {seriesLabel}</span>
-          <span><i className="key reference" /> {referenceLabel}</span>
-          {flagged.length > 0 && <span><i className="key flag">▲</i> flagged frame</span>}
+          {overlay && overlay.length > 0 && <span><i className="key overlay" /> {overlayLabel}</span>}
+          {reference && reference.length > 0 && <span><i className="key reference" /> {referenceLabel}</span>}
+          {flagged.length > 0 && <span><i className="key flag">▲</i> flagged</span>}
         </div>
       )}
       {!geo ? (
-        <div className="live-chart-empty caption" style={{ height }}>No data yet</div>
+        <div className="live-chart-empty caption" style={{ height: H }}>No data yet</div>
       ) : (
-        <svg width={width} height={height} role="img" aria-label={`${seriesLabel} chart`}>
+        <svg width={width} height={H} role="img" aria-label={`${seriesLabel} chart`}>
           {geo.yt.map((v) => (
             <g key={`y${v}`}>
               <line className="grid" x1={M.left} x2={width - M.right} y1={geo.sy(v)} y2={geo.sy(v)} />
@@ -134,13 +160,13 @@ export function LiveChart({
             </g>
           ))}
           {geo.xt.map((v) => (
-            <text key={`x${v}`} className="tick" x={geo.sx(v)} y={height - M.bottom + 14} textAnchor="middle">
+            <text key={`x${v}`} className="tick" x={geo.sx(v)} y={H - M.bottom + 14} textAnchor="middle">
               {fmt(v)}
             </text>
           ))}
-          <line className="axis" x1={M.left} x2={width - M.right} y1={height - M.bottom} y2={height - M.bottom} />
+          <line className="axis" x1={M.left} x2={width - M.right} y1={H - M.bottom} y2={H - M.bottom} />
           {xLabel && (
-            <text className="axis-label" x={M.left + geo.iw / 2} y={height - 3} textAnchor="middle">{xLabel}</text>
+            <text className="axis-label" x={M.left + geo.iw / 2} y={H - 3} textAnchor="middle">{xLabel}</text>
           )}
           {yLabel && (
             <text className="axis-label" transform={`translate(11,${M.top + geo.ih / 2}) rotate(-90)`} textAnchor="middle">
@@ -149,7 +175,7 @@ export function LiveChart({
           )}
           {rules.filter((r) => r.x >= geo.x0 && r.x <= geo.x1).map((r, i) => (
             <g key={`r${i}`}>
-              <line className="rule" x1={geo.sx(r.x)} x2={geo.sx(r.x)} y1={M.top} y2={height - M.bottom} />
+              <line className="rule" x1={geo.sx(r.x)} x2={geo.sx(r.x)} y1={M.top} y2={H - M.bottom} />
               <text
                 className="rule-label" y={M.top + 9 + (i % 2) * 11}
                 x={geo.sx(r.x) + (geo.sx(r.x) > M.left + geo.iw / 2 ? -4 : 4)}
@@ -160,7 +186,8 @@ export function LiveChart({
             </g>
           ))}
           {geo.refPts.length > 1 && <path className="reference" d={geo.path(geo.refPts)} />}
-          <path className="series" d={geo.path(geo.pts)} />
+          <path className={geo.ovPts.length > 1 ? "series thin" : "series"} d={geo.path(geo.pts)} />
+          {geo.ovPts.length > 1 && <path className="overlay" d={geo.path(geo.ovPts)} />}
           {!dense && geo.pts.length <= 60 && geo.pts.map((p) => (
             <circle key={p.x} className="dot" cx={geo.sx(p.x)} cy={geo.sy(p.y as number)} r={2.5} />
           ))}
@@ -172,7 +199,7 @@ export function LiveChart({
           })}
           {hp && (
             <g>
-              <line className="crosshair" x1={geo.sx(hp.x)} x2={geo.sx(hp.x)} y1={M.top} y2={height - M.bottom} />
+              <line className="crosshair" x1={geo.sx(hp.x)} x2={geo.sx(hp.x)} y1={M.top} y2={H - M.bottom} />
               <circle className="hover-dot" cx={geo.sx(hp.x)} cy={geo.sy(hp.y as number)} r={4} />
             </g>
           )}
@@ -191,6 +218,7 @@ export function LiveChart({
         >
           <div className="tt-head">{xLabel ? `${xLabel} ` : ""}{fmt(hp.x)}</div>
           <div><i className="key series" /> <b>{fmt(hp.y)}</b> <span>{seriesLabel}</span></div>
+          {hOv && <div><i className="key overlay" /> <b>{fmt(hOv.y)}</b> <span>{overlayLabel}</span></div>}
           {hRef && <div><i className="key reference" /> <b>{fmt(hRef.y)}</b> <span>{referenceLabel}</span></div>}
           {hFlag && <div className="tt-flag">▲ {hFlag.label}</div>}
         </div>

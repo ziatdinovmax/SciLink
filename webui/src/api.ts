@@ -364,6 +364,16 @@ export interface LiveInstrumentInfo {
   outputs: Record<string, string>;
   targets: string[];
   events: { frame: number; what: string }[];
+  simulated?: boolean;
+}
+/** A curve analysis already in the session that a live loop can adopt as its reference. */
+export interface LiveReferenceAnalysis {
+  path: string;
+  name: string;
+  model: string;
+  modified: number;
+  from_live_run: boolean;
+  has_data: boolean;
 }
 export interface LiveFrame {
   step: number;
@@ -398,7 +408,11 @@ export interface LiveEvent {
 export interface LiveSnapshot {
   state: "idle" | "arming" | "running" | "stopped" | "done" | "error";
   error?: string | null;
+  note?: string | null;
   simulators?: LiveInstrumentInfo[];
+  analyses?: LiveReferenceAnalysis[];
+  /** What to trace: the named outputs, else the recipe's own quantities. */
+  output_keys?: string[];
   run_dir?: string;
   elapsed_s?: number;
   config?: Record<string, unknown>;
@@ -414,15 +428,19 @@ export interface LiveSnapshot {
     recipe?: { id?: string; source?: string } | null;
   };
   current_params?: Record<string, number | string>;
-  n_frames_total?: number;
+  /** null for an open-ended run (until stopped). */
+  n_frames_total?: number | null;
   frames?: LiveFrame[];
   events?: LiveEvent[];
   recommendation?: LiveRecommendation | null;
-  latest?: { step: number; x: number[]; y: number[] } | null;
+  latest?: { step: number; x: number[]; y: number[]; fit?: (number | null)[] } | null;
 }
 export interface LiveConfig {
   instrument: string;
-  n_frames: number;
+  /** null runs until stopped. */
+  n_frames: number | null;
+  reference_source?: "first_frame" | "analysis";
+  reference_analysis?: string;
   interval_s: number;
   apply: "never" | "approved" | "valid";
   recommender: "none" | "gp" | "llm";

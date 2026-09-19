@@ -745,8 +745,8 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 /* ── Live tab ────────────────────────────────────────────────── */
 /* Chart roles: one measured series, a neutral reference, reserved status
    colours (always paired with a ▲ / icon and words, never colour alone). */
-[data-theme="dark"] { --viz-series: #3987e5; --viz-reference: #9aa5b1; --viz-warning: #fab219; --viz-good: #0ca30c; --viz-critical: #e66767; }
-[data-theme="light"] { --viz-series: #2a78d6; --viz-reference: #6b747d; --viz-warning: #b97a00; --viz-good: #006300; --viz-critical: #d03b3b; }
+[data-theme="dark"] { --viz-series: #3987e5; --viz-series-2: #d95926; --viz-reference: #9aa5b1; --viz-warning: #fab219; --viz-good: #0ca30c; --viz-critical: #e66767; }
+[data-theme="light"] { --viz-series: #2a78d6; --viz-series-2: #eb6834; --viz-reference: #6b747d; --viz-warning: #b97a00; --viz-good: #006300; --viz-critical: #d03b3b; }
 .live-panel { flex: 1; overflow: auto; padding: 16px 5%; }
 .live-form { display: flex; flex-direction: column; gap: 12px; margin-top: 10px; }
 .live-form label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
@@ -756,29 +756,18 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .live-row { display: flex; flex-wrap: wrap; gap: 12px 16px; }
 .live-row label { min-width: 170px; }
 .live-panel input[type="number"] { width: 100%; background: var(--bg-panel); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font: inherit; }
-.live-about { border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); padding: 10px 14px; font-size: 13px; }
-.live-about p { margin: 0 0 8px; color: var(--text-muted); }
-.live-about-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
-.live-about h4, .live-card h4 { margin: 0; font-size: 13px; font-weight: 600; }
-.live-about ul { margin: 4px 0 0; padding-left: 16px; }
-.live-about li { margin: 2px 0; }
+.live-card h4 { margin: 0; font-size: 13px; font-weight: 600; }
 .live-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
 .live-head h3 { margin: 0; font-size: 15px; }
 .live-head-actions { margin-left: auto; }
 .live-state { font-size: 12px; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border-strong); color: var(--text-muted); }
 .live-state.running { color: var(--text); border-color: var(--viz-good); }
 .live-state.error { color: var(--text); border-color: var(--viz-critical); }
-.live-stats { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
-.live-stats > div { flex: 1 1 120px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); padding: 8px 12px; display: flex; flex-direction: column; }
-.live-stats b { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.live-stats span { font-size: 11px; color: var(--text-dim); }
 .live-flags { border: 1px solid var(--viz-warning); border-radius: 8px; padding: 6px 12px; margin-bottom: 10px; font-size: 13px; }
 .live-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 10px; margin-bottom: 10px; }
 .live-card { border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); padding: 10px 12px; min-width: 0; }
-.live-reference { margin-bottom: 10px; }
 .live-card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
 .live-card-head select { margin-left: auto; width: auto; padding: 2px 6px; font-size: 12px; }
-.live-card-head .caption { margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
 .live-chart { position: relative; width: 100%; }
 .live-chart svg { display: block; }
 .live-chart-empty { display: flex; align-items: center; justify-content: center; }
@@ -786,6 +775,8 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .live-chart .axis { stroke: var(--border-strong); stroke-width: 1; }
 .live-chart .tick, .live-chart .axis-label, .live-chart .rule-label { fill: var(--text-dim); font-size: 11px; font-variant-numeric: tabular-nums; }
 .live-chart .series { fill: none; stroke: var(--viz-series); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.live-chart .series.thin { stroke-width: 1.25; opacity: 0.85; }
+.live-chart .overlay { fill: none; stroke: var(--viz-series-2); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 .live-chart .dot { fill: var(--viz-series); stroke: var(--bg-card); stroke-width: 1; }
 .live-chart .reference { fill: none; stroke: var(--viz-reference); stroke-width: 1.5; stroke-dasharray: 5 4; }
 .live-chart .flag { fill: var(--viz-warning); stroke: var(--bg-card); stroke-width: 2; paint-order: stroke; }
@@ -794,15 +785,14 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .live-chart .hover-dot { fill: var(--viz-series); stroke: var(--bg-card); stroke-width: 2; }
 .live-legend { display: flex; gap: 14px; font-size: 11px; color: var(--text-muted); margin-bottom: 2px; }
 .live-legend .key, .live-tooltip .key { display: inline-block; width: 14px; height: 0; border-top: 2px solid var(--viz-series); vertical-align: middle; margin-right: 4px; }
+.live-legend .key.overlay, .live-tooltip .key.overlay { border-top-color: var(--viz-series-2); }
+.live-legend.inline { margin: 0 0 0 auto; }
 .live-legend .key.reference, .live-tooltip .key.reference { border-top: 2px dashed var(--viz-reference); }
 .live-legend .key.flag { border: 0; height: auto; width: auto; color: var(--viz-warning); font-style: normal; font-size: 10px; }
 .live-tooltip { position: absolute; pointer-events: none; background: var(--bg-panel); border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 8px; font-size: 12px; white-space: nowrap; z-index: 2; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
 .live-tooltip .tt-head { color: var(--text-dim); font-size: 11px; margin-bottom: 2px; }
 .live-tooltip span { color: var(--text-muted); }
 .live-tooltip .tt-flag { color: var(--text-muted); margin-top: 2px; white-space: normal; max-width: 240px; }
-.live-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.live-table th { text-align: left; font-weight: 500; color: var(--text-dim); font-size: 11px; padding: 2px 6px; border-bottom: 1px solid var(--border); }
-.live-table td { padding: 4px 6px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
 .live-params { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; }
 .live-params label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; flex: 1 1 130px; }
 .live-params label em { color: var(--text-dim); font-style: normal; }
@@ -815,6 +805,24 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .live-events { list-style: none; margin: 0; padding: 0; font-size: 13px; max-height: 180px; overflow: auto; }
 .live-events li { padding: 3px 0; border-bottom: 1px solid var(--border); display: flex; gap: 10px; }
 .live-events li .caption { flex: 0 0 70px; }
+
+.live-meta { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.live-info { position: relative; display: inline-flex; margin-left: 6px; vertical-align: middle; }
+.live-info > button { width: 16px; height: 16px; padding: 0; border-radius: 50%; border: 1px solid var(--border-strong); background: transparent; color: var(--text-dim); font: italic 600 11px/1 Georgia, serif; cursor: pointer; }
+.live-info > button:hover, .live-info > button[aria-expanded="true"] { color: var(--text); border-color: var(--accent); }
+.live-info-pop { position: absolute; top: 22px; left: -8px; z-index: 5; width: min(420px, 70vw); padding: 10px 12px; border-radius: 8px; background: var(--bg-panel); border: 1px solid var(--border-strong); box-shadow: 0 4px 14px rgba(0,0,0,.3); font-size: 12px; font-weight: 400; line-height: 1.5; color: var(--text); white-space: normal; text-align: left; overflow-wrap: anywhere; }
+.live-info-pop ul { margin: 6px 0 0; padding-left: 16px; }
+.live-info-pop li { margin: 2px 0; }
+.live-row label.grow { flex: 1 1 260px; }
+.live-track { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted); }
+.live-options { font-size: 13px; }
+.live-options > summary { cursor: pointer; color: var(--text-muted); font-size: 12px; padding: 4px 0; }
+.live-options > .live-row { margin-top: 8px; }
+.live-multiple + .live-multiple { margin-top: 4px; }
+.live-multiple-head { display: flex; align-items: baseline; gap: 8px; font-size: 12px; }
+.live-multiple-head b { font-size: 14px; font-variant-numeric: tabular-nums; }
+.live-controls { border-top: 1px solid var(--border); margin-top: 10px; padding-top: 8px; }
+.live-params button { flex: 0 0 auto; }
 
 /* ── Tools tab ───────────────────────────────────────────────── */
 .tools-panel { flex: 1; overflow: auto; padding: 16px 8%; }

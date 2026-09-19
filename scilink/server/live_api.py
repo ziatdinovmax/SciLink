@@ -33,19 +33,31 @@ class LiveError(Exception):
         self.status, self.message = status, message
 
 
+def _plain(text: Any) -> str:
+    """Display copy for the page: one paragraph, no em dashes or semicolons."""
+    t = " ".join(str(text or "").replace("``", "").split())
+    return t.replace(" — ", ", ").replace("; ", ", ")
+
+
 def _instrument_info(inst: Any) -> Dict[str, Any]:
+    schema = inst.schema.to_dict() if inst.schema is not None else {}
+    for spec in schema.values():
+        if spec.get("description"):
+            spec["description"] = _plain(spec["description"])
     return {
         "name": inst.name,
         "technique": (inst.system_info or {}).get("technique"),
         "sample": (inst.system_info or {}).get("sample"),
         "x_axis": (inst.system_info or {}).get("x_axis"),
         "y_axis": (inst.system_info or {}).get("y_axis"),
-        "about": " ".join((inst.__class__.__doc__ or "").replace("``", "").split()),
-        "schema": inst.schema.to_dict() if inst.schema is not None else {},
+        "about": _plain(inst.__class__.__doc__),
+        "simulated": inst.__class__.__module__.endswith(".simulators"),
+        "schema": schema,
         "defaults": dict(inst.defaults or {}),
-        "outputs": dict(inst.outputs or {}),
+        "outputs": {k: _plain(v) for k, v in (inst.outputs or {}).items()},
         "targets": list(inst.targets or []),
-        "events": list(getattr(inst, "events", []) or []),
+        "events": [{**e, "what": _plain(e.get("what"))}
+                   for e in (getattr(inst, "events", []) or [])],
     }
 
 
@@ -63,8 +75,8 @@ def _replay_instrument(config: Dict[str, Any]) -> Any:
     info = {k: str(v).strip() for k, v in (config.get("system_info") or {}).items()
             if str(v or "").strip()}
     if not info.get("technique"):
-        raise LiveError(400, "Replay needs at least the measurement technique — the analysis "
-                             "is only as good as what it is told about the data.")
+        raise LiveError(400, "Replay needs the measurement technique. The analysis is only as "
+                             "good as what it is told about the data.")
     outputs = {str(k).strip(): str(v).strip() for k, v in (config.get("outputs") or {}).items()
                if str(k).strip() and str(v or "").strip()}
     try:
@@ -111,6 +123,105 @@ def _make_instrument(spec: str, seed: int, allow_custom: bool = True,
         raise LiveError(400, f"Could not construct {spec!r}: {type(e).__name__}: {e}")
 
 
+def list_reference_analyses(session_dir: str, limit: int = 40) -> List[Dict[str, Any]]:
+    """Curve-fit runs in this session that a live loop can adopt as its
+    reference (a saved script plus its results): chat analyses, and the
+    references of earlier live runs. Newest first, paths relative to the session."""
+    root = Path(session_dir)
+    found = []
+    for marker in root.rglob("series_fit_results.json"):
+        d = marker.parent
+        rel = d.relative_to(root)
+        if len(rel.parts) > 8 or "frames" in rel.parts or "portability" in rel.parts \
+                or "pinning" in rel.parts or "escalations" in rel.parts:
+            continue
+        if not any((d / "scripts").glob("*.py")):
+            continue
+        model = ""
+        try:
+            data = json.loads(marker.read_text())
+            model = str((data.get("locked_config") or {}).get("physical_model")
+                        or ((data.get("results") or [{}])[0]).get("model_type") or "")
+        except (OSError, ValueError, AttributeError, IndexError):
+            pass
+        found.append({"path": str(rel), "name": d.name if d.name != "reference" else str(rel),
+                      "model": model[:160], "modified": marker.stat().st_mtime,
+                      "from_live_run": "live" in rel.parts,
+                      "has_data": (d / "spectrum_0000" / "data.npy").exists()})
+    found.sort(key=lambda r: -r["modified"])
+    return found[:limit]
+
+
+def _anchor_reference_csv(anchor: Path, dest: Path) -> Optional[str]:
+    """The data a past analysis was run on, as a CSV the loop can check pinned
+    outputs (and portability) against. None when the run kept no arrays."""
+    try:
+        import numpy as np
+        data = np.asarray(np.load(anchor / "spectrum_0000" / "data.npy"), dtype=float)
+        if data.ndim != 2:
+            return None
+        if data.shape[0] == 2 and data.shape[1] != 2:
+            data = data.T
+        dest.mkdir(parents=True, exist_ok=True)
+        path = dest / "reference_000000.csv"
+        np.savetxt(path, data[:, :2], delimiter=",", header="x,y", comments="")
+        return str(path)
+    except (OSError, ValueError):
+        return None
+
+
+class _LogTail:
+    """Incremental reader of ``loop_log.jsonl``. An open-ended run can last for
+    hours; re-reading the whole log on every poll would grow without bound, so
+    this keeps a file offset, running counters and the last ``keep`` frames."""
+
+    def __init__(self, keep: int = 600) -> None:
+        self.keep, self.offset = keep, 0
+        self.frames: List[Dict[str, Any]] = []
+        self.events: List[Dict[str, Any]] = []
+        self.n_frames = self.n_clean = self.llm_calls = self.reanchors = 0
+        self.flag_counts: Dict[str, int] = {}
+        self.latencies: List[float] = []
+        self.max_latency = 0.0
+
+    def read(self, path: Path) -> None:
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                fh.seek(self.offset)
+                chunk = fh.read()
+        except OSError:
+            return
+        end = chunk.rfind("\n")
+        if end < 0:
+            return
+        self.offset += len(chunk[:end + 1].encode("utf-8"))
+        for line in chunk[:end].splitlines():
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("event") != "frame":
+                self.events = (self.events + [e])[-80:]
+                self.reanchors += e.get("event") == "reanchor"
+                continue
+            self.n_frames += 1
+            self.n_clean += not e.get("flags")
+            self.llm_calls += int(e.get("llm_calls") or 0)
+            for f in e.get("flags") or []:
+                self.flag_counts[f] = self.flag_counts.get(f, 0) + 1
+            lat = float(e.get("latency_s") or 0.0)
+            self.max_latency = max(self.max_latency, lat)
+            self.latencies = (self.latencies + [lat])[-200:]
+            self.frames = (self.frames + [e])[-self.keep:]
+
+    def status(self) -> Dict[str, Any]:
+        lat = sorted(self.latencies) or [0.0]
+        return {"frames": self.n_frames, "clean_frames": self.n_clean,
+                "flag_counts": dict(self.flag_counts), "llm_calls_in_frames": self.llm_calls,
+                "latency_s": {"median": lat[len(lat) // 2], "max": self.max_latency},
+                "reanchors": self.reanchors}
+
+
 class LiveRun:
     """One background live run: arm the loop, then acquire → step → recommend."""
 
@@ -120,12 +231,20 @@ class LiveRun:
         self.config = config
         self.state = "arming"
         self.error: Optional[str] = None
+        self.note: Optional[str] = None
         self.started_at = time.time()
         self.instrument = _make_instrument(str(config.get("instrument") or ""),
                                            int(config.get("seed") or 0), allow_custom, config)
-        if hasattr(self.instrument, "remaining"):       # a recording is finite; one file is the reference
-            config["n_frames"] = max(1, min(int(config.get("n_frames") or 10 ** 6),
-                                            len(self.instrument) - 1))
+        # Frames to collect. None = open-ended, until Stop — the normal case
+        # at an instrument. A recording is finite whatever was asked.
+        n = config.get("n_frames")
+        self.n_frames: Optional[int] = int(n) if n not in (None, "", 0, "0") else None
+        self.from_analysis = str(config.get("reference_source") or "first_frame") == "analysis"
+        if hasattr(self.instrument, "remaining"):
+            left = len(self.instrument) - (0 if self.from_analysis else 1)   # one file may be the reference
+            self.n_frames = max(1, min(self.n_frames or left, left))
+        self._tail = _LogTail()
+        self._session_dir = Path(session_dir).resolve()
         root = Path(session_dir) / "live"
         root.mkdir(parents=True, exist_ok=True)
         n = len([p for p in root.glob("run_*") if p.is_dir()]) + 1
@@ -186,13 +305,28 @@ class LiveRun:
                 breach_patience=int(cfg.get("breach_patience") or 3),
                 closed_loop=(cfg.get("apply") == "valid"),
                 frame_deadline_s=float(cfg.get("frame_deadline_s") or 10.0), **creds)
-            reference = inst.acquire({}).save(str(self.run_dir / "reference"), 0, stem="reference")
-            self.loop.setup(reference=reference,
-                            profile=(cfg.get("reference_profile") or None))
+            if self.from_analysis:
+                anchor = (self._session_dir / str(cfg.get("reference_analysis") or "")).resolve()
+                if not (anchor.is_dir() and anchor.is_relative_to(self._session_dir)
+                        and (anchor / "series_fit_results.json").exists()):
+                    raise LiveError(400, "That analysis is not a curve-fit run in this session.")
+                ref_csv = _anchor_reference_csv(anchor, self.run_dir / "reference")
+                if outputs and ref_csv is None:
+                    # Named outputs are checked on the data the analysis saw;
+                    # without it the recipe's own names are reported instead.
+                    self.loop.outputs, self.note = {}, (
+                        "This analysis kept no data arrays, so outputs are reported "
+                        "under the recipe's own names.")
+                self.loop.setup(anchor=str(anchor), reference_data=ref_csv)
+            else:
+                reference = inst.acquire({}).save(str(self.run_dir / "reference"), 0,
+                                                  stem="reference")
+                self.loop.setup(reference=reference,
+                                profile=(cfg.get("reference_profile") or None))
             self.loop.recommender = self._recommender(creds)
             self.state = "running"
             run_experiment(
-                inst, self.loop, int(cfg.get("n_frames") or 60),
+                inst, self.loop, self.n_frames if self.n_frames is not None else 10 ** 9,
                 apply=str(cfg.get("apply") or "never"),
                 interval_s=float(cfg.get("interval_s") or 2.0),
                 stop=self._stop.is_set, operator=self._operator,
@@ -211,6 +345,8 @@ class LiveRun:
         if frame.truth:
             self._truth[int(record["step"])] = {
                 k: v for k, v in frame.truth.items() if isinstance(v, (int, float))}
+            for old_step in [k for k in self._truth if k < int(record["step"]) - 1000]:
+                del self._truth[old_step]
 
     def _operator(self, current: Dict[str, Any], record: Dict[str, Any]):
         with self._oplock:
@@ -234,33 +370,23 @@ class LiveRun:
         return {"queued": params}
 
     # ---------------------------------------------------------------- view
-    def _events(self) -> List[Dict[str, Any]]:
-        if self.loop is None:
-            return []
-        try:
-            return self.loop.read_log()
-        except Exception:  # noqa: BLE001
-            return []
-
     def snapshot(self, tail: int = 400) -> Dict[str, Any]:
-        events = self._events()
-        frames = [e for e in events if e.get("event") == "frame"]
-        other = [e for e in events if e.get("event") != "frame"]
+        if self.loop is not None:
+            self._tail.read(self.loop.log_path)
+        frames, other = self._tail.frames, self._tail.events
         latest = frames[-1] if frames else None
-        recs = [e for e in events if e.get("event") == "recommendation"]
+        recs = [e for e in other if e.get("event") == "recommendation"]
         latest_rec = (latest or {}).get("recommendation") or (recs[-1] if recs else None)
-        status: Dict[str, Any] = {}
+        status: Dict[str, Any] = self._tail.status()
         if self.loop is not None and self.loop.recipe is not None:
-            try:
-                status = self.loop.status()
-            except Exception:  # noqa: BLE001
-                status = {}
+            status.update({"recipe": self.loop.recipe, "escalating": bool(self.loop.escalating)})
         return {
-            "state": self.state, "error": self.error,
+            "state": self.state, "error": self.error, "note": self.note,
             "run_dir": str(self.run_dir), "elapsed_s": round(time.time() - self.started_at, 1),
             "config": self.config, "instrument": _instrument_info(self.instrument),
             "status": status, "current_params": self.current_params,
-            "n_frames_total": int(self.config.get("n_frames") or 60),
+            "n_frames_total": self.n_frames,
+            "output_keys": self._output_keys(latest),
             "frames": [{
                 "step": f["step"], "features": f.get("features") or {},
                 "flags": f.get("flags") or [], "latency_s": f.get("latency_s"),
@@ -277,20 +403,42 @@ class LiveRun:
             "latest": self._curve(latest) if latest else self._reference_curve(),
         }
 
+    def _output_keys(self, latest: Optional[Dict[str, Any]], cap: int = 6) -> List[str]:
+        """What to trace: the outputs the user named, else the recipe's own
+        quantities (uncertainties and fit statistics left out)."""
+        if self.loop is not None and self.loop.outputs:
+            return list(self.loop.outputs)[:cap]
+        feats = (latest or {}).get("features") or {}
+        return [k for k in feats if not k.startswith("fit_")
+                and not k.endswith(("_err", "_error", "_stderr", "_std"))][:cap]
+
     def _reference_curve(self) -> Optional[Dict[str, Any]]:
         ref = self.run_dir / "reference" / "reference_000000.csv"
         return self._curve({"step": 0, "data": str(ref)}) if ref.exists() else None
 
     @staticmethod
     def _curve(frame: Dict[str, Any], max_points: int = 600) -> Optional[Dict[str, Any]]:
+        """The frame's data and, when the analysis left one, the fitted model on
+        the same x — the live analysis result, not just its input."""
         try:
             import numpy as np
             data = np.loadtxt(frame["data"], delimiter=",", skiprows=1)
             step = max(1, len(data) // max_points)
-            return {"step": frame["step"], "x": [round(float(v), 5) for v in data[::step, 0]],
-                    "y": [round(float(v), 5) for v in data[::step, 1]]}
+            out = {"step": frame["step"], "x": [round(float(v), 5) for v in data[::step, 0]],
+                   "y": [round(float(v), 5) for v in data[::step, 1]]}
         except Exception:  # noqa: BLE001
             return None
+        try:
+            fit = np.asarray(np.load(Path(str(frame.get("frame_dir"))) / "spectrum_0000" / "fit.npy"),
+                             dtype=float)
+            if fit.ndim == 2:
+                fit = fit[1] if (fit.shape[0] == 2 and fit.shape[1] != 2) else fit[:, -1]
+            if fit.size == len(data):
+                out["fit"] = [None if not np.isfinite(v) else round(float(v), 5)
+                              for v in fit.ravel()[::step]]
+        except Exception:  # noqa: BLE001 - a frame without a stored fit shows its data only
+            pass
+        return out
 
 
 # ──────────────────────────────────────────────────────────────
@@ -301,17 +449,22 @@ def start(session: Any, config: Dict[str, Any], allow_custom: bool = True) -> Di
     with _LOCK:
         run = _RUNS.get(session.id)
         if run is not None and run.state in ("arming", "running"):
-            raise LiveError(409, "A live run is already active in this session — stop it first.")
+            raise LiveError(409, "A live run is already active in this session. Stop it first.")
         run = LiveRun(session.id, session.session_dir, session.agent, dict(config or {}),
                       allow_custom=allow_custom)
         _RUNS[session.id] = run
     return run.snapshot()
 
 
+def _idle(session: Any) -> Dict[str, Any]:
+    return {"state": "idle", "simulators": list_simulators(),
+            "analyses": list_reference_analyses(session.session_dir)}
+
+
 def snapshot(session: Any) -> Dict[str, Any]:
     run = _RUNS.get(session.id)
     if run is None:
-        return {"state": "idle", "simulators": list_simulators()}
+        return _idle(session)
     return run.snapshot()
 
 
@@ -336,4 +489,4 @@ def clear(session: Any) -> Dict[str, Any]:
         if run is not None and run.state in ("arming", "running"):
             raise LiveError(409, "Stop the run before starting a new one.")
         _RUNS.pop(session.id, None)
-    return {"state": "idle", "simulators": list_simulators()}
+    return _idle(session)
