@@ -38,6 +38,8 @@ import io
 import json
 import logging
 import os
+
+import numpy as np
 import re
 import sys
 import time
@@ -231,6 +233,11 @@ FANOUT_BRANCH_TIME_BUDGET_S = 3600.0
 # opts in to running it inside a fan-out (allow_raw_branches). An explicit
 # branch_time_budget_s is never scaled.
 FANOUT_RAW_INSTRUMENT_BUDGET_FACTOR = 3.0
+# A DATACUBE SERIES branch (a directory of >= 2 hyperspectral cubes) runs the
+# specialist's series mode — anchor analysis, regime anchors, replays, refits,
+# trend and synthesis — which is a multiple of a single-cube run. Scaled the
+# same way (explicit branch_time_budget_s is never scaled).
+FANOUT_SERIES_BUDGET_FACTOR = 2.0
 # In AUTONOMOUS mode there is no human to confirm, so the verdict IS the gate:
 # proceed only on a confident 'complementary' read.
 AUTONOMOUS_CONFIDENCE_THRESHOLD = 0.6
@@ -1366,14 +1373,54 @@ def raw_instrument_branches(branches: List[dict]) -> List[dict]:
     return hits
 
 
+def datacube_series_branches(branches: List[dict]) -> List[dict]:
+    """Branches whose data_path is a DIRECTORY of >= 2 hyperspectral cubes
+    (3-D ``.npy``, or ``.h5``/``.hdf5``/``.nxs``), i.e. a series the
+    hyperspectral specialist runs in its series mode. Honors the branch's
+    ``pattern`` glob. Detection is cheap (memory-mapped shape reads) and must
+    never break a fan-out."""
+    import fnmatch
+    hits = []
+    for b in branches or []:
+        p = b.get("data_path") if isinstance(b, dict) else None
+        if not p:
+            continue
+        try:
+            d = Path(p)
+            if not d.is_dir():
+                continue
+            pattern = b.get("pattern") or "*"
+            n_cubes = 0
+            for f in sorted(d.iterdir()):
+                if not f.is_file() or f.name.startswith(".") or not fnmatch.fnmatch(f.name, pattern):
+                    continue
+                if f.suffix.lower() in (".h5", ".hdf5", ".nxs"):
+                    n_cubes += 1
+                elif f.suffix.lower() == ".npy":
+                    try:
+                        if np.load(f, mmap_mode="r").ndim == 3:
+                            n_cubes += 1
+                    except Exception:  # noqa: BLE001
+                        continue
+            if n_cubes >= 2:
+                hits.append({"label": b.get("label") or str(p), "data_path": str(p),
+                             "n_cubes": n_cubes})
+        except Exception:  # noqa: BLE001 - detection must never break a fan-out
+            continue
+    return hits
+
+
 def resolve_branch_budget(branch: dict, base_budget: float, explicit: bool = False) -> float:
     """Wall-clock budget for one branch: the base, scaled by
-    ``FANOUT_RAW_INSTRUMENT_BUDGET_FACTOR`` for a raw-instrument container
-    unless the caller set the budget explicitly (or budgets are disabled)."""
+    ``FANOUT_RAW_INSTRUMENT_BUDGET_FACTOR`` for a raw-instrument container or
+    ``FANOUT_SERIES_BUDGET_FACTOR`` for a datacube-series directory, unless
+    the caller set the budget explicitly (or budgets are disabled)."""
     if explicit or base_budget <= 0:
         return float(base_budget)
     if raw_instrument_branches([branch]):
         return float(base_budget) * FANOUT_RAW_INSTRUMENT_BUDGET_FACTOR
+    if datacube_series_branches([branch]):
+        return float(base_budget) * FANOUT_SERIES_BUDGET_FACTOR
     return float(base_budget)
 
 

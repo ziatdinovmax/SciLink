@@ -2586,6 +2586,7 @@ class AnalysisOrchestratorTools:
             r2_threshold: float = None,
             max_verification_iterations: int = None,
             max_series_refits: int = None,
+            series_workers: int = None,
             starting_annealing_level: int = None,
             n_candidates: int = None,
             executor_timeout: int = None,
@@ -3295,6 +3296,14 @@ class AnalysisOrchestratorTools:
                             f"   max_series_refits={max_series_refits} ignored: "
                             f"{self.AGENT_NAMES.get(agent_id, 'agent')} has no series refit stage."
                         )
+                if series_workers is not None:
+                    import inspect as _inspect
+                    if "series_workers" in _inspect.signature(agent.analyze).parameters:
+                        analyze_kwargs["series_workers"] = int(series_workers)
+                    else:
+                        self.logger.info(
+                            f"   series_workers={series_workers} ignored: "
+                            f"{self.AGENT_NAMES.get(agent_id, 'agent')} has no parallel series stage.")
                 if starting_annealing_level is not None:
                     # Annealing-schedule override for a RE-RUN: start the
                     # constraint-relaxation schedule higher (e.g. hot) so the
@@ -3826,6 +3835,16 @@ class AnalysisOrchestratorTools:
                         "30-60) for real-time/quick-look turnaround where a "
                         "slow fit should fail fast. Leave unset otherwise."
                     )
+                },
+                "series_workers": {
+                    "type": "integer",
+                    "description": (
+                        "Hyperspectral SERIES runs only. Number of locked "
+                        "replays to run concurrently (separate worker "
+                        "processes) after the regime anchors; replays are "
+                        "independent, so a long series finishes in about "
+                        "1/N of the serial time. Default 1 (serial); 3-4 is a "
+                        "sensible value on a workstation."),
                 },
                 "max_series_refits": {
                     "type": "integer",

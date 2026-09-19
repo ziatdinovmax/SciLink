@@ -529,6 +529,112 @@ def _render_band_flux_table(data, axis, axis_units: str, aux: dict | None = None
         return ""
 
 
+def _render_data_facts(data, axis, axis_units: str, max_peaks: int = 4) -> str:
+    """Text of :func:`_data_facts` (empty when the facts cannot be computed)."""
+    return _data_facts(data, axis, axis_units, max_peaks).get("text", "")
+
+
+class _NotMeasurableContradiction(Exception):
+    """A not_measurable declaration that contradicts the deterministic data
+    facts — handled as a mechanical correction, not a ladder failure."""
+
+
+def _data_facts(data, axis, axis_units: str, max_peaks: int = 4) -> dict:
+    """Deterministic facts about THIS cube for the code-generation prompt.
+
+    Live anchors repeatedly failed on gates the model set from priors rather
+    than from the data: fit windows centred on textbook peak positions while
+    the measured peaks sat elsewhere, seeds railing at window edges, and
+    not-measurable declarations built on a noise sigma of the wrong scale.
+    This block gives the model the measured positions, widths and the noise
+    of the field mean up front, so windows, seeds and the measurability test
+    start from evidence. Computed once per run; advisory, never raises.
+    """
+    try:
+        from scipy.signal import find_peaks, peak_widths
+        axis = np.asarray(axis, dtype=float)
+        e = axis.size
+        flat = np.asarray(data, dtype=float).reshape(-1, e)
+        n_pix = flat.shape[0]
+        mean = np.nanmean(flat, axis=0)
+        if not np.isfinite(mean).all() or e < 8:
+            return {}
+        # per-pixel noise: residual of each spectrum from its 5-channel running
+        # mean, on a subsample of pixels (robust median of the per-pixel std)
+        step = max(1, n_pix // 2000)
+        sub = flat[::step]
+        k = np.ones(5) / 5.0
+        resid = sub - np.apply_along_axis(lambda y: np.convolve(y, k, mode="same"), 1, sub)
+        sigma_pix = float(np.nanmedian(np.nanstd(resid[:, 2:-2], axis=1)))
+        sigma_mean = sigma_pix / np.sqrt(max(n_pix, 1))
+        # Smooth the field mean only as much as its own noise requires: the
+        # mean of thousands of spectra is already clean, and a fixed 5-channel
+        # box on a coarse axis (1-2 eV/channel) smears a doublet into one peak.
+        raw_rng = float(np.nanmax(mean) - np.nanmin(mean))
+        noise_frac = sigma_mean / max(raw_rng, 1e-12)
+        kw = 1 if noise_frac < 0.01 else 3 if noise_frac < 0.03 else 5
+        smooth = mean if kw == 1 else np.convolve(mean, np.ones(kw) / kw, mode="same")
+        rng = float(np.nanmax(smooth) - np.nanmin(smooth))
+        baseline = float(np.nanpercentile(smooth, 10))
+        dx = float(abs(axis[-1] - axis[0])) / max(e - 1, 1)
+        min_prom = max(5.0 * sigma_mean, 0.02 * rng)
+        # Prominence within a LOCAL window (a quarter of the axis), so a slow
+        # ripple of the field mean is not scored against the global minimum,
+        # and a "peak" wider than half the axis is not a spectral feature.
+        peaks, props = find_peaks(smooth, prominence=min_prom, wlen=max(9, e // 4))
+        if peaks.size:
+            w_all = peak_widths(smooth, peaks, rel_height=0.5)[0] * dx
+            keep = w_all < 0.5 * abs(axis[-1] - axis[0])
+            peaks = peaks[keep]
+            props = {k: v[keep] for k, v in props.items()}
+        lines = ["### DATA FACTS (deterministic — computed from THIS dataset)",
+                 f"- axis: {axis[0]:.6g} to {axis[-1]:.6g} {axis_units}, {e} channels ({dx:.4g} {axis_units}/channel); {n_pix} spectra",
+                 f"- field-mean level: baseline (10th percentile) {baseline:.4g}, max {float(np.nanmax(smooth)):.4g} at {axis[int(np.nanargmax(smooth))]:.6g} {axis_units}",
+                 f"- noise: sigma_pixel ≈ {sigma_pix:.4g} per channel; sigma of the field mean ≈ {sigma_mean:.3g} (sigma_pixel/sqrt(N))"]
+        def _fwhm(i: int) -> float:
+            # Walk outward from the peak to the half-height crossing, stopping
+            # at a saddle (a neighbouring peak) — an upper bound there, never
+            # a width that spans two features.
+            half = baseline + 0.5 * (smooth[i] - baseline)
+            lo, hi = i, i
+            while lo > 0 and smooth[lo] > half and smooth[lo - 1] <= smooth[lo]:
+                lo -= 1
+            while hi < e - 1 and smooth[hi] > half and smooth[hi + 1] <= smooth[hi]:
+                hi += 1
+            return max(hi - lo, 1) * dx
+
+        if peaks.size:
+            order = np.argsort(props["prominences"])[::-1][:max_peaks]
+            widths = [_fwhm(int(peaks[j])) for j in order]
+            lines.append("- field-mean peaks (by prominence): "
+                         + "; ".join(
+                             f"{axis[peaks[j]]:.6g} {axis_units} (height {smooth[peaks[j]]:.4g}, "
+                             f"prominence {props['prominences'][j]:.4g} = "
+                             f"{props['prominences'][j] / max(sigma_mean, 1e-12):.0f} sigma of the mean, "
+                             f"width ≲ {widths[i]:.3g} {axis_units} (FWHM upper bound))"
+                             for i, j in enumerate(order)))
+            lines.append("- verdict: the strongest feature is measurable in aggregate "
+                         f"({props['prominences'][order[0]] / max(sigma_mean, 1e-12):.0f} sigma); "
+                         "per-pixel measurability still depends on sigma_pixel at the feature.")
+        else:
+            lines.append(f"- field-mean peaks: none exceeds {min_prom:.3g} prominence "
+                         f"(5 sigma of the mean / 2% of range) — the field mean looks featureless.")
+        lines.append(
+            "Centre fit windows, seeds and bounds on the MEASURED positions and widths "
+            "above — not on literature values — and make each window wide enough to "
+            "contain its peak with margin. After any background subtraction, confirm the "
+            "peak amplitudes at these positions survive before fitting. A not_measurable "
+            "declaration that contradicts these numbers is rejected.")
+        strongest = (float(props["prominences"][order[0]] / max(sigma_mean, 1e-12))
+                     if peaks.size else 0.0)
+        return {"text": "\n".join(lines),
+                "measurable": bool(peaks.size) and strongest >= 5.0,
+                "strongest_sigma": strongest,
+                "peaks": [float(axis[peaks[j]]) for j in order] if peaks.size else []}
+    except Exception:  # noqa: BLE001 - advisory block, never break the run
+        return {}
+
+
 def _render_attempt_history(entries: list) -> str:
     """Compact prior-attempt block for the combined result review.
 
@@ -643,6 +749,7 @@ def build_code_generation_prompt(
     reconstruction_available: bool = False,
     auxiliary_operands: dict | None = None,
     fit_mask_pixels: tuple | None = None,
+    data_facts: str | None = None,
 ) -> str:
     skill_section = ""
     if skill_implementation:
@@ -740,6 +847,8 @@ guard with `if auxiliary and "<name>" in auxiliary:` before use; `auxiliary`
 may be `None` or empty.
 """
 
+    data_facts_section = f"{data_facts}\n\n" if data_facts else ""
+
     reconstruction_section = ""
     if reconstruction_available:
         reconstruction_section = f"""
@@ -815,7 +924,7 @@ noise/spike/negative handling you judge necessary for a stable per-pixel fit —
 the goal is fittable spectra — but do NOT erase the feature you are measuring.
 If performing derivative-based operations (like `find_peaks` or `curve_fit`) on noisy data, apply appropriate smoothing to ensure convergence.
 
-### MEASURABILITY GATE — the honest null
+{data_facts_section}### MEASURABILITY GATE — the honest null
 BEFORE mapping any per-pixel feature, TEST that it is measurable. Do the
 statistics correctly:
 - Compare the feature's prominence in an AVERAGED spectrum against the noise
@@ -925,6 +1034,76 @@ def _map_valid_coverage(result_map) -> tuple[float, int]:
     _real = _finite & (np.abs(result_map) > 0)
     n_valid = int(_real.sum())
     return 100.0 * n_valid / max(result_map.size, 1), n_valid
+
+
+def _replay_map_gate(result_map, fit_mask, reference: dict | None,
+                     required: bool) -> tuple[bool, str]:
+    """Deterministic acceptance of a map produced by a LOCKED-SCRIPT replay.
+
+    A verbatim replay re-runs a method the reviewer already approved on the
+    anchor; re-judging every map with the LLM only adds cost and judge
+    variance (observed live: the map approved on the anchor rejected on
+    replays, punching holes in the series schema). So replays are gated on
+    evidence alone: valid coverage (within the fit mask when scoped), a
+    non-collapsed value distribution, and — for a required output with the
+    anchor's stats as ``reference`` — a median inside the locked method's
+    plausible range (the anchor's [min, max] widened by one span on each
+    side, at least 0.5 % of the magnitude so a near-constant anchor map does
+    not reject trivial drift). Coverage is judged against the anchor's own
+    coverage (``reference["coverage"]``) when known. A map outside that range is the
+    method breaking down on this dataset (e.g. the peak left the fit
+    window), which the series driver answers with a fresh-code refit.
+    """
+    m = np.asarray(result_map, dtype=float)
+    if fit_mask is not None:
+        try:
+            m = m[np.asarray(fit_mask, dtype=bool)]
+        except Exception:  # noqa: BLE001 - shape mismatch: judge the full frame
+            pass
+    m = m.ravel()
+    finite = np.isfinite(m)
+    cov = float(finite.mean()) if m.size else 0.0
+    # Coverage floor: half of what the SAME method achieved on the anchor when
+    # that is known (a dilated fit mask over-covers its emitter, so the
+    # converged fraction is legitimately well below 1 — observed live at 43 %
+    # on a mask-scoped follower, which a fixed 50 % floor wrongly rejected);
+    # otherwise a lenient absolute floor.
+    # Without a reference there is NO coverage floor: a small emitter fitted
+    # full-frame legitimately covers ~1 % of the frame (observed live on a
+    # legacy replay), and only the anchor's own coverage can say what this
+    # method should reach. All-NaN maps are excluded before the gate.
+    ref_cov = (reference or {}).get("coverage") if isinstance(reference, dict) else None
+    if isinstance(ref_cov, (int, float)) and 0 < ref_cov <= 1:
+        min_cov = 0.25 * float(ref_cov)
+        if cov < min_cov:
+            return False, (f"valid coverage {cov:.0%} < {min_cov:.0%} (a quarter of the "
+                           f"anchor's {float(ref_cov):.0%}) — the locked method did not "
+                           "converge here")
+    vals = m[finite]
+    # A constant map is a collapse only if the SAME method varied on the
+    # anchor: a synthetic emitter with one exact centre, or a channel-
+    # quantized position, is legitimately constant (observed live on a
+    # mask-scoped follower the LLM review used to accept).
+    if vals.size > 8 and float(np.ptp(vals)) == 0.0 and isinstance(reference, dict):
+        try:
+            ref_spread = float(reference.get("max")) - float(reference.get("min"))
+        except (TypeError, ValueError):
+            ref_spread = None
+        if ref_spread is not None and ref_spread > 0:
+            return False, ("map is constant across the frame while the anchor's varied "
+                           f"over [{float(reference['min']):.4g}, {float(reference['max']):.4g}] "
+                           "(fit collapsed to a bound)")
+    if required and isinstance(reference, dict) and all(
+            isinstance(reference.get(k), (int, float)) for k in ("min", "max")):
+        lo, hi = float(reference["min"]), float(reference["max"])
+        mean = float(reference.get("mean", (lo + hi) / 2.0))
+        span = max(hi - lo, 0.005 * abs(mean), 1e-9)
+        med = float(np.median(vals))
+        if not (lo - span <= med <= hi + span):
+            return False, (f"median {med:.4g} outside the locked method's plausible "
+                           f"range [{lo - span:.4g}, {hi + span:.4g}] (anchor "
+                           f"[{lo:.4g}, {hi:.4g}]) — method breakdown on this dataset")
+    return True, ""
 
 
 def _wrap_console_text(text: str, width: int = 70) -> list:
@@ -2040,14 +2219,16 @@ class DecompositionController:
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"):
             return state
-        if state.get("reuse_records"):
-            # Locked-script replay: bypass the whole decomposition composite —
-            # including its skip-decision LLM call, which would otherwise
-            # overwrite the pre-seeded skip_decomposition flag. The replayed
-            # per-pixel scripts consume the raw cube; seed the minimal
-            # contract that downstream prompts read.
+        if state.get("reuse_records") or state.get("locked_targets"):
+            # Locked-script replay (and the series' locked-targets mode, where
+            # the targets are fixed but the code is regenerated): bypass the
+            # whole decomposition composite — including its skip-decision LLM
+            # call, which would otherwise overwrite the pre-seeded
+            # skip_decomposition flag. The per-pixel scripts consume the raw
+            # cube; seed the minimal contract that downstream prompts read.
             self.logger.info(
-                "🔒 Locked-script replay → decomposition bypassed entirely.")
+                "🔒 Locked %s → decomposition bypassed entirely."
+                % ("script replay" if state.get("reuse_records") else "targets"))
             state["skip_decomposition"] = True
             if "preprocessing_mask" not in state:
                 state["preprocessing_mask"] = np.ones(
@@ -2259,6 +2440,49 @@ class SelectRefinementTargetController:
                 self.logger,
                 f"🔒 Locked-script replay plan: {len(targets)} prior "
                 f"approved target(s), no planning LLM call",
+                [(f"Target {i}", t["description"]) for i, t in
+                 enumerate(targets, 1)], level=logging.INFO)
+            return state
+        # Locked TARGETS, fresh code (series regime anchor / adaptive refit):
+        # the analysis targets and their required output NAMES are fixed by
+        # the series' schema source so every dataset reports the same
+        # quantities under the same names, but the script is regenerated
+        # through the full codegen ladder — the locked script did not fit
+        # this dataset (or this regime), so a new method is wanted. The
+        # required-outputs check downstream enforces the names.
+        if state.get("locked_targets"):
+            targets = []
+            for t in state["locked_targets"]:
+                if not isinstance(t, dict):
+                    continue
+                desc = str(t.get("target") or "locked analysis target")
+                extra = [str(x) for x in (t.get("extra_outputs") or []) if x]
+                if extra:
+                    # The schema source's additional maps: asked for by name
+                    # (not required — a different method may not have them)
+                    # so the series' feature columns stay aligned.
+                    desc += (
+                        "\n\nSERIES SCHEMA: the other datasets of this series "
+                        "also report these maps; return them under EXACTLY "
+                        "these names whenever your method can compute them: "
+                        + ", ".join(extra) + ".")
+                targets.append({
+                    "type": "custom_code",
+                    "description": desc,
+                    "required_outputs": list(t.get("required_outputs") or []),
+                })
+            state["refinement_decision"] = {
+                "refinement_needed": True,
+                "reasoning": ("Locked targets: regenerating code for the "
+                              "series' fixed analysis targets and output "
+                              "names on this dataset."),
+                "targets": targets,
+                "requires_custom_code": True,
+            }
+            _log_structured_block(
+                self.logger,
+                f"🔒 Locked-targets plan: {len(targets)} fixed target(s) "
+                f"and output name(s), fresh code, no planning LLM call",
                 [(f"Target {i}", t["description"]) for i, t in
                  enumerate(targets, 1)], level=logging.INFO)
             return state
@@ -3042,6 +3266,13 @@ class RunDynamicAnalysisController:
         flux_table = _render_band_flux_table(
             optimal_data, state["energy_axis"], axis_units, auxiliary_operands
         )
+        # Deterministic data facts for the CODE-GENERATION prompt (the flux
+        # table used to reach only the reviews; the model that writes the
+        # gates never saw the numbers the judge holds it to).
+        facts = _data_facts(optimal_data, state["energy_axis"], axis_units)
+        data_facts = facts.get("text", "")
+        if data_facts and flux_table:
+            data_facts += "\n\n" + flux_table
 
         # --- MAIN LOOP: Process each target description separately ---
         for i, target in enumerate(custom_targets, 1):
@@ -3136,6 +3367,7 @@ class RunDynamicAnalysisController:
                                       int(target.get("mask_component_index")
                                           or 0))
                                      if fit_mask is not None else None),
+                    data_facts=data_facts,
                 )
 
                 # Registered tools from the _shared registry (this agent + active
@@ -3257,6 +3489,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 "all_valid_maps": all_valid_maps,
                 "all_valid_meta": all_valid_meta,
                 "flux_table": flux_table,
+                "facts": facts,
             }
             engine = CodegenQCEngine(host=self, spec=self._QC_ENGINE_SPEC)
             out = engine.run_item(ctx) or {}
@@ -3784,9 +4017,33 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         )
                     if not isinstance(result_dict, dict):
                         raise ValueError("Function return must be a dict.")
+                    # A not_measurable declaration that CONTRADICTS the
+                    # deterministic data facts (a >= 5-sigma feature in the
+                    # field mean) is a wrong gate, not a finding: repaired in
+                    # place like an execution error — no ladder budget, no
+                    # judge call — so the model re-issues the fit at once.
+                    _f = ctx.session.get("facts") or {}
+                    if (isinstance(result_dict.get("not_measurable"), dict)
+                            and not result_dict.get("maps") and _f.get("measurable")):
+                        raise _NotMeasurableContradiction(
+                            f"not_measurable declared, but the DATA FACTS show the "
+                            f"strongest field-mean feature at {_f.get('strongest_sigma', 0):.0f} "
+                            f"sigma of the mean (peaks at {_f.get('peaks')}) — the target IS "
+                            "measurable in aggregate. Your measurability test used a "
+                            "wrong-scale sigma or looked in the wrong window. Do not "
+                            "declare not_measurable: fit the feature, centring windows "
+                            "and seeds on the measured positions above.")
                     break  # executed cleanly — proceed to QC
                 except TimeoutError:
                     raise  # ladder currency, never mechanically retried
+                except _NotMeasurableContradiction as _nmc:
+                    _mech_tb = f"GATE ERROR: {_nmc}"
+                    if _exec_try >= self.MAX_EXEC_ATTEMPTS - 1:
+                        raise ValueError(str(_nmc))  # corrections exhausted → ladder
+                    self.logger.warning(
+                        f"    ⚙️ not_measurable contradicts the data facts "
+                        f"({(ctx.session.get('facts') or {}).get('strongest_sigma', 0):.0f} sigma) "
+                        f"— re-issuing the fit in place.")
                 except Exception:
                     _mech_tb = traceback.format_exc()
                     if _exec_try >= self.MAX_EXEC_ATTEMPTS - 1:
@@ -3886,13 +4143,17 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         f"    🧷 Fit-examples panel: {len(_fit_examples)} "
                         f"pixel(s) rendered.")
 
+            nan_only_maps: list = []
+            shape_mismatch_maps: dict = {}
             for feature_name, result_map in maps_dict.items():
                 # Shape/NaN Check
                 if result_map.shape != (h, w):
                     self.logger.warning(f"    Skipping {feature_name}: Shape mismatch.")
+                    shape_mismatch_maps[feature_name] = tuple(getattr(result_map, "shape", ()))
                     continue
                 if np.all(np.isnan(result_map)):
                     self.logger.warning(f"    Skipping {feature_name}: Map contains only NaNs.")
+                    nan_only_maps.append(feature_name)
                     continue
 
                 # 1. Determine Units (Fixes UnboundLocalError)
@@ -3927,6 +4188,16 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                             f"    ♻️ {feature_name}: numerically identical "
                             f"to a previously passed version — review "
                             f"verdict reused.")
+                    elif getattr(ctx, "locked_script", None):
+                        # Locked-script replay: deterministic gate, no LLM
+                        # review (see _replay_map_gate).
+                        _ref = (state.get("replay_reference") or {}).get(feature_name)
+                        is_valid, critique = _replay_map_gate(
+                            result_map, fit_mask, _ref,
+                            feature_name in required_outputs)
+                        self.logger.info(
+                            f"    🔒 Deterministic replay gate on {feature_name}: "
+                            f"{'pass' if is_valid else 'REJECT — ' + critique}")
                     elif feature_name in required_outputs:
                         # Combined review (visual + physical + tool
                         # evidence) in ONE voted pass for the user-asked-
@@ -4018,10 +4289,14 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                                 "min": float(np.nanmin(result_map)),
                                 "max": float(np.nanmax(result_map)),
                                 "mean": float(np.nanmean(result_map))
-                            }
+                            },
+                            # converged fraction of the frame — the replay
+                            # gate's coverage reference for this method
+                            "coverage": float(_map_valid_coverage(result_map)[0] / 100.0),
                         })
                     else:
-                        _review_kind = ("Combined review"
+                        _review_kind = ("Replay gate" if getattr(ctx, "locked_script", None)
+                                        else "Combined review"
                                         if feature_name in required_outputs
                                         else "Visual QC")
                         _log_qc_rejection(self.logger, feature_name,
@@ -4081,6 +4356,29 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     detail_parts.append(
                         f"QC critiques on required outputs: {relevant_critiques}"
                     )
+                _shape_req = {n: shape_mismatch_maps[n] for n in missing_required
+                              if n in shape_mismatch_maps}
+                if _shape_req:
+                    # Observed live: a spatially BINNED script returned coarse
+                    # maps, silently skipped for shape — the retry got nothing.
+                    detail_parts.append(
+                        f"returned with the wrong shape {_shape_req} — every map must be "
+                        f"({h}, {w}), the frame's spatial shape. A binned / coarse "
+                        "estimate must be upsampled back to the frame (e.g. np.kron or "
+                        "np.repeat along both axes, then crop) before returning; state "
+                        "the effective resolution in the description.")
+                _nan_req = [n for n in missing_required if n in nan_only_maps]
+                if _nan_req:
+                    # Observed live: a script whose try/except returned NaN
+                    # maps failed three attempts with no diagnosis — the
+                    # retry feedback said nothing because no map reached QC.
+                    detail_parts.append(
+                        f"{_nan_req} came back ENTIRELY NaN ({len(nan_only_maps)} of "
+                        f"{len(maps_dict)} maps all-NaN): nothing was fitted. Either a "
+                        "try/except swallowed the real error and returned NaN, or a "
+                        "gate excluded every pixel. Remove blanket exception handling "
+                        "so the error surfaces, and print how many pixels pass each "
+                        "gate before fitting.")
                 detail = "; ".join(detail_parts) or "no further detail"
                 raise ValueError(
                     f"Required outputs failed: {missing_required}. {detail}"

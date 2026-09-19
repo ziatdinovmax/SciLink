@@ -122,6 +122,106 @@ technique is, how to plan a use of it, how to write the code, how to
 read the output, and how to verify it. New skills should use this
 ordering; legacy `analysis` is accepted by the loader for backcompat.
 
+## Series analysis is one shape across the three analysis agents
+
+Curve, image and hyperspectral all run a series as **anchor + locked recipe**:
+the first unit is analysed in full, the verified recipe is locked, every later
+unit reuses it verbatim, failures are re-analysed within `max_series_refits`,
+feature outliers are flagged (never re-analysed — the anomaly may be the
+physics), then trend codegen and a series synthesis run over the per-unit
+feature table. The per-unit rows are written to `series_analysis_results.json`
+in one shape, so `feature_table.write_feature_table` and every downstream
+consumer read all three the same way.
+
+The hyperspectral instantiation differs in mechanics, not shape: the single-
+cube pipeline is bound to one output directory (decomposition, dynamic-analysis
+records, report), so the series driver (`_analyze_series`) runs **one child
+agent per dataset** in `dataset_NNNN/` instead of re-pointing controllers, and
+"locked recipe" *is* the existing locked-script replay (#172) pointed at the
+regime anchor's `dynamic_analysis_records.json`. The scout stage mirrors the
+curve agent: every cube's mean spectrum feeds the shared SVD change detection
+(`series_reduction.reduce_curves`) and an overlay, and one planning call
+declares regimes, each with its own anchor and locked script. The parent owns
+the once-per-series decisions (skill choice, script banking, T=2 staging);
+replay children skip them.
+
+**Feature names are aligned by construction, then completed.** The first
+dataset to lock a recipe is the series' *schema source*. Every later
+fresh-code run — another regime's anchor, an adaptive refit — runs in
+*locked-targets* mode (`analyze(locked_targets=...)`): the schema source's
+targets and required output names are fixed, planning and decomposition are
+skipped, and the code is regenerated through the full ladder, so the QC's
+required-outputs check enforces the names. What still drifts (a units suffix,
+a diagnostic-map prefix) is aliased onto the locked columns by
+`complete_locked_schema`; whatever cannot be matched is reported as
+`locked_schema_gap`, never silently NaN. Outliers are scored on the locked
+primary outputs only — a refit's diagnostics belong to a different method —
+and per regime when the planned regimes interleave along the axis.
+
+**Replays are gated on evidence, not re-judged.** Live stress runs showed
+the per-map LLM reviewer rejecting, on replays, the very map it approved on
+the anchor (judge variance), which punched holes in the series schema and
+cost minutes per replay. A locked-script replay therefore runs NO LLM map
+review: `_replay_map_gate` accepts a map on valid coverage (within the fit
+mask when scoped), a non-collapsed distribution and, for required outputs,
+a median inside the anchor's plausible range (its [min, max] widened by one
+span; the anchor's per-map stats travel as `replay_reference`). A rejection
+means the method broke on that dataset, which the driver answers with a
+locked-targets refit. Replay children also skip the synthesis critic/editor
+pair (`_light_synthesis`); the series synthesis interprets the series. A run
+that committed features from a salvaged attempt with no verified required
+output is `unverified`: flagged, excluded from the outlier statistics,
+refit-eligible after failures. The scout always includes the two datasets
+bracketing a sharp change point.
+
+**The regime plan is human-gated like any other plan.** In co-pilot /
+autopilot (`enable_human_feedback`) the driver shows the plan (regimes,
+anchors, control values, change-detection summary) and asks; Enter accepts,
+any text goes back to the planner as analyst feedback with the previous plan,
+up to three rounds (`_regime_plan_gate`). Autonomous runs and locked replays
+of a prior run skip it; EOF on the prompt accepts.
+
+**Anchor codegen starts from data facts, not priors.** Live anchors kept
+failing on gates set from literature: fit windows centred on textbook peak
+positions while the measured peaks sat elsewhere, seeds railing at window
+edges, not-measurable declarations built on a wrong-scale sigma. So the
+code-generation prompt now carries a deterministic `DATA FACTS` block
+(`_render_data_facts`: field-mean peaks with positions, prominence in sigma
+of the mean and width bounds, the noise of the mean, the axis) plus the same
+band-flux table the judge holds the script to — the model that writes the
+gates sees the numbers the reviewer will use. Prompt-side, one principle:
+centre windows and seeds on the measured positions and confirm the peaks
+survive background subtraction. Two rules give that structural teeth: a
+`not_measurable` declaration that contradicts the facts (a >= 5-sigma
+field-mean feature) is repaired IN PLACE like an execution error — no judge
+call, no ladder budget — and a required map that comes back entirely NaN
+or with the wrong shape (a binned estimate not upsampled to the frame) is
+diagnosed in the retry critique instead of "no further detail".
+
+**Through the meta agent, a series is ONE delegation.** The meta's routing
+guidance and `delegate_to_analysis` say so for spectra, images and cubes
+alike: pass the shared directory (or file list) and the control variable;
+the child's `run_task` runs `run_analysis` on the directory, so the series
+mode engages and the delegation result carries the series claims and its
+one `features.csv` (one row per dataset). Harmonized fan-out
+(`delegate_to_analyses(harmonize=True)`) predates the series mode and is
+kept only for sibling datasets that cannot be staged as one directory. A
+fan-out branch that IS a datacube-series directory gets
+`FANOUT_SERIES_BUDGET_FACTOR` × the default wall-clock budget (the raw-
+instrument rule's shape), because the series mode is a multiple of one run.
+Under AUTOPILOT delegation the regime-plan gate reaches the user through the
+normal feedback channel, like the specialists' other plan gates.
+
+**Replays fan out.** `series_workers` (or `SCILINK_HS_SERIES_WORKERS`) runs
+the locked replays on a spawned-process pool, each submitted the moment its
+regime locks so replays overlap with the anchors still running in the
+parent — replays are independent, and processes rather than threads keep
+matplotlib and the sandbox executor out of each other's way
+(`SCILINK_HS_SERIES_POOL=thread` exists for the offline tests). Each replay logs to its own
+`dataset_NNNN/replay.log`; the parent's sandbox approval travels with the
+spec. Anchors and refits stay serial: they are the LLM-heavy, human-gated
+part.
+
 ## Data preparation is a stage, not an agent
 
 Some instruments hand over a container that sits *upstream* of what the
