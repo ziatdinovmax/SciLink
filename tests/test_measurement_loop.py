@@ -658,3 +658,200 @@ class TestStreamReference:
         loop = MeasurementLoop(str(tmp_path / "loop"), agent_factory=SeriesAgent)
         with pytest.raises(RuntimeError, match="no frame of the reference series"):
             loop.setup(reference=["a.csv", "b.csv"])
+
+
+# ──────────────────────────────────────────────────────────────
+# a re-anchor planned from the recent frames, not one snapshot
+# ──────────────────────────────────────────────────────────────
+
+class TestReanchorWindow:
+    def _frames(self, tmp_path, n):
+        d = tmp_path / "incoming"
+        d.mkdir(exist_ok=True)
+        paths = []
+        for i in range(n):
+            p = d / f"frame_{i:03d}.csv"
+            p.write_text("x,y\n0,1\n")
+            paths.append(str(p))
+        return paths
+
+    def test_the_window_is_the_recent_frames_ending_in_the_breaching_one(self, tmp_path):
+        loop = loop_at(tmp_path, escalation_runner=FakeEscalation, reanchor_frames=4)
+        loop.setup(anchor=str(make_anchor(tmp_path)))
+        paths = self._frames(tmp_path, 7)
+        FakeAgent.replies = {Path(paths[4]).name: RuntimeError("detector glitch")}
+        for p in paths:
+            loop.step(p)
+        loop.escalate(paths[-1])
+        spec = FakeEscalation.last.spec
+        # four frames, newest last, the dead frame 4 left out
+        assert spec["data_path"] == [paths[2], paths[3], paths[5], paths[6]]
+        assert spec["analyze_kwargs"]["stream_reference"] is True
+        started = next(e for e in loop.read_log() if e["event"] == "escalation_started")
+        assert started["window"] == 4 and started["data"] == paths[-1]
+
+    def test_one_frame_when_asked_or_when_that_is_all_there_is(self, tmp_path):
+        loop = loop_at(tmp_path, escalation_runner=FakeEscalation, reanchor_frames=1)
+        loop.setup(anchor=str(make_anchor(tmp_path)))
+        paths = self._frames(tmp_path, 3)
+        for p in paths:
+            loop.step(p)
+        loop.escalate(paths[-1])
+        assert FakeEscalation.last.spec["data_path"] == paths[-1]
+        gone = loop_at(tmp_path / "b", escalation_runner=FakeEscalation, reanchor_frames=5)
+        gone.setup(anchor=str(make_anchor(tmp_path / "b")))
+        gone.step("not_on_disk_1.csv"); gone.step("not_on_disk_2.csv")
+        gone.escalate("not_on_disk_2.csv")                     # earlier frames no longer exist
+        assert FakeEscalation.last.spec["data_path"] == "not_on_disk_2.csv"
+
+    def test_explicit_frames_and_a_restart(self, tmp_path):
+        loop = loop_at(tmp_path, escalation_runner=FakeEscalation, reanchor_frames=3)
+        loop.setup(anchor=str(make_anchor(tmp_path)))
+        paths = self._frames(tmp_path, 5)
+        for p in paths[:4]:
+            loop.step(p)
+        again = MeasurementLoop.resume(str(tmp_path / "loop"), agent_factory=FakeAgent,
+                                       escalation_runner=FakeEscalation)
+        assert again.reanchor_frames == 3 and again._recent_frames == paths[:4]
+        again.escalate(paths[4], frames=paths[:2])
+        assert FakeEscalation.last.spec["data_path"] == [paths[0], paths[1], paths[4]]
+
+    def test_the_window_is_recorded_when_the_recipe_is_adopted(self, tmp_path):
+        loop = loop_at(tmp_path, escalation_runner=FakeEscalation)
+        loop.setup(anchor=str(make_anchor(tmp_path)))
+        loop.step("a.csv")
+        loop.escalate("a.csv")
+        FakeEscalation.last.result = {"status": "success", "seconds": 60, "llm_calls": 6,
+                                      "output_directory": str(new_anchor(tmp_path)),
+                                      "window": {"n": 5, "fitted": 5, "anchored_on": 4, "regimes": 2}}
+        loop.step("b.csv")
+        event = next(e for e in loop.read_log() if e["event"] == "reanchor")
+        assert event["window"]["n"] == 5 and event["window"]["regimes"] == 2
+
+
+class TestReanchorWorker:
+    """scilink.live._reanchor with a stand-in for the curve agent."""
+
+    def _agent(self, monkeypatch, tmp_path, bank_hit):
+        import scilink.agents.exp_agents.curve_fitting_agent as mod
+        calls = []
+        series = TestStreamReference()._series_run(tmp_path)
+
+        class Agent:
+            model = None
+
+            def __init__(self, output_dir, **kw):
+                self.output_dir = output_dir
+
+            def analyze(self, data, **kw):
+                calls.append({"data": data, **kw})
+                if kw.get("bank_only"):
+                    return ({"status": "success", "output_directory": str(make_anchor(tmp_path)),
+                             "cold_start": {"id": "abc"}} if bank_hit
+                            else {"status": "no_bank_recipe"})
+                return {"status": "success", "output_directory": str(series),
+                        "stage_timings": {"llm_calls": 5}}
+        monkeypatch.setattr(mod, "CurveFittingAgent", Agent)
+        return calls
+
+    def _run(self, tmp_path, data):
+        from scilink.live._reanchor import reanchor
+        out = tmp_path / "esc"
+        reanchor({"out_dir": str(out), "data_path": data, "agent_kwargs": {},
+                  "analyze_kwargs": {"profile": "extract", "stream_reference": True}})
+        return json.loads((out / "result.json").read_text())
+
+    def test_the_bank_is_asked_about_the_newest_frame_first(self, tmp_path, monkeypatch):
+        calls = self._agent(monkeypatch, tmp_path, bank_hit=True)
+        res = self._run(tmp_path, ["f0.csv", "f1.csv", "f2.csv"])
+        assert [(c["data"], c.get("bank_only")) for c in calls] == [("f2.csv", True)]
+        assert res["status"] == "success" and res["cold_start"] and res["window"] is None
+
+    def test_no_banked_recipe_means_a_series_over_the_window(self, tmp_path, monkeypatch):
+        calls = self._agent(monkeypatch, tmp_path, bank_hit=False)
+        files = ["f0.csv", "f1.csv", "f2.csv", "f3.csv"]
+        res = self._run(tmp_path, files)
+        assert calls[1]["data"] == files and "bank_only" not in calls[1]
+        assert calls[1]["profile"] == {"base": "extract", "trend": False, "synthesis": "none",
+                                       "adaptive_refit": False}
+        assert res["window"] == {"n": 4, "fitted": 4, "anchored_on": 3, "regimes": 2,
+                                 "model": "two peaks"}
+        anchor = Path(res["output_directory"])
+        assert anchor.name == "anchor" and (
+            anchor / "scripts" / "fitting_script.py").read_text().startswith("# script for frame 3")
+
+    def test_a_single_frame_is_analysed_as_before(self, tmp_path, monkeypatch):
+        calls = self._agent(monkeypatch, tmp_path, bank_hit=False)
+        self._run(tmp_path, "only.csv")
+        assert len(calls) == 1 and calls[0]["data"] == "only.csv" and "bank_only" not in calls[0]
+
+
+class TestDriftRebase:
+    """After a window-planned re-anchor the anchor FRAME is stale by
+    construction. Observed live (XRD through a phase transition): the new recipe
+    fitted every frame at R² 0.99 and the loop rebuilt it at once, because pure
+    phase B no longer looked like the mid-transition anchor frame."""
+
+    def _curve(self, tmp_path, name, centers):
+        import numpy as np
+        x = np.linspace(0, 20, 600)
+        y = 0.2 + sum(5.0 * np.exp(-0.5 * ((x - c) / 0.25) ** 2) for c in centers)
+        y = y + np.random.default_rng(len(name)).normal(0, 0.01, x.size)
+        p = tmp_path / name
+        np.savetxt(p, np.column_stack([x, y]), delimiter=",", header="x,y", comments="")
+        return str(p)
+
+    def _adopted(self, tmp_path, window):
+        loop = loop_at(tmp_path, escalation_runner=FakeEscalation, breach_patience=3,
+                       noise_gate_tolerance=None)
+        loop.setup(anchor=str(make_anchor(tmp_path)))
+        loop.step("a.csv")
+        loop.escalate("a.csv")
+        FakeEscalation.last.result = {"status": "success", "seconds": 60, "llm_calls": 6,
+                                      "output_directory": str(new_anchor(tmp_path)),
+                                      "window": window}
+        return loop
+
+    def _reply(self, path, r2=0.99):
+        FakeAgent.replies[Path(path).name] = good(6.9, r2=r2, drift="suspected")
+
+    def test_a_stable_stream_that_fits_moves_the_reference(self, tmp_path):
+        loop = self._adopted(tmp_path, {"n": 5, "regimes": 2})
+        frames = [self._curve(tmp_path, f"b{i}.csv", [5, 9, 14]) for i in range(3)]
+        other = self._curve(tmp_path, "changed.csv", [3, 5, 7, 9, 11, 14, 17])
+        for f in frames + [other]:
+            self._reply(f)
+        first, second, third = (loop.step(f) for f in frames)
+        assert first["flags"] == ["drift_suspected"]              # one frame is not yet a pattern
+        assert second["flags"] == [] and third["flags"] == []
+        assert third["gate"]["fingerprint_similarity_rebased"] > 0.92
+        [event] = [e for e in loop.read_log() if e["event"] == "drift_rebased"]
+        assert event["recipe_id"] == loop.recipe["id"]
+        assert loop.step(other)["flags"] == ["drift_suspected"]   # a real change still shows
+        again = MeasurementLoop.resume(str(tmp_path / "loop"), agent_factory=FakeAgent)
+        assert again._drift_reference == loop._drift_reference
+
+    def test_only_a_window_planned_recipe_earns_it(self, tmp_path):
+        loop = self._adopted(tmp_path, None)                      # rebuilt from one snapshot
+        frames = [self._curve(tmp_path, f"b{i}.csv", [5, 9, 14]) for i in range(3)]
+        for f in frames:
+            self._reply(f)
+        assert [loop.step(f)["flags"] for f in frames] == [["drift_suspected"]] * 3
+
+    def test_a_poor_fit_or_a_moving_stream_cancels_it(self, tmp_path):
+        loop = self._adopted(tmp_path, {"n": 5})
+        bad = self._curve(tmp_path, "bad.csv", [5, 9, 14])
+        self._reply(bad, r2=0.5)
+        ok = [self._curve(tmp_path, f"b{i}.csv", [5, 9, 14]) for i in range(2)]
+        for f in ok:
+            self._reply(f)
+        assert set(loop.step(bad)["flags"]) == {"gate_poor", "drift_suspected"}
+        assert [loop.step(f)["flags"] for f in ok] == [["drift_suspected"]] * 2
+        assert not [e for e in loop.read_log() if e["event"] == "drift_rebased"]
+
+        moving = self._adopted(tmp_path / "m", {"n": 5})
+        a = self._curve(tmp_path, "m0.csv", [5])
+        b = self._curve(tmp_path, "m1.csv", [2, 4, 6, 8, 10, 12, 14, 16, 18])
+        self._reply(a); self._reply(b)
+        assert moving.step(a)["flags"] == ["drift_suspected"]
+        assert moving.step(b)["flags"] == ["drift_suspected"]    # frames disagree: still changing

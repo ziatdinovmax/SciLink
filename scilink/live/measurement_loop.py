@@ -218,6 +218,13 @@ class MeasurementLoop:
             With a ``recommender`` attached and no explicit ``gate_keys`` the
             range gate is OFF: it assumes fixed acquisition conditions, and a
             recommender's job is to change them.
+        reanchor_frames: How many of the most recent frames a re-anchor is
+            planned from. With several, the plan sees the change happening — what
+            fades, what grows — instead of one snapshot of it. Observed live
+            (XRD through a phase transition): a recipe rebuilt from one
+            mid-transition frame was stale when adopted and a second rebuild
+            followed at once. The recipe is locked on the newest frame; the bank
+            is still asked about that frame first. 1 = the breaching frame only.
         auto_escalate: Start a background re-anchor by itself the moment
             ``needs_escalation`` is raised (on the frame that raised it). Off
             by default — a re-anchor calls a model, and whether the loop may
@@ -266,6 +273,7 @@ class MeasurementLoop:
                  noise_gate_tolerance: Optional[float] = 1.25,
                  check_portability: bool = True,
                  auto_escalate: bool = False,
+                 reanchor_frames: int = 5,
                  escalation_profile: str = "extract",
                  escalation_runner: Optional[Callable[[Dict[str, Any]], Any]] = None,
                  recommender: Any = None,
@@ -292,6 +300,13 @@ class MeasurementLoop:
         self._n_learned = 0
         self._out_of_range_streak: List[Dict[str, float]] = []
         self.auto_escalate = bool(auto_escalate)
+        self.reanchor_frames = max(1, int(reanchor_frames or 1))
+        self._recent_frames: List[str] = []
+        # The drift signal compares each frame with ONE reference frame. After a
+        # window-planned re-anchor that frame is stale by construction (see
+        # ``_rebase_drift``); the loop then holds the reference itself.
+        self._drift_reference: Optional[Dict[str, Any]] = None
+        self._rebase: Optional[List[Dict[str, Any]]] = None
         self.escalation_profile = escalation_profile
         self._escalation_runner = escalation_runner
         self._escalation: Any = None
@@ -596,7 +611,7 @@ class MeasurementLoop:
             if not error and result.get("error"):
                 error = json.dumps(result.get("error"), default=str)[:300]
         else:
-            gate_extra = self._judge(validity, str(frame_dir))
+            gate_extra = self._judge(validity, str(frame_dir), str(data_path))
             if gate_extra.pop("poor"):
                 flags.append(FLAG_GATE_POOR)
             if gate_extra.pop("drift"):
@@ -652,6 +667,8 @@ class MeasurementLoop:
             record["error"] = error
         if self.objective_key:
             record["objective"] = features.get(self.objective_key)
+        if FLAG_FIT_FAILED not in flags:       # a dead frame teaches a plan nothing
+            self._recent_frames = (self._recent_frames + [str(data_path)])[-25:]
         record["recommendation"] = self._recommend(params, features, flags, idx)
         if self._escalation is not None:
             record["escalation"] = "running"
@@ -667,10 +684,14 @@ class MeasurementLoop:
 
     # -------------------------------------------------------------- escalation
     def escalate(self, data_path: str, *, profile: Optional[str] = None,
-                 background: bool = True) -> Dict[str, Any]:
+                 background: bool = True, frames: Optional[List[str]] = None) -> Dict[str, Any]:
         """Re-anchor on ``data_path`` (normally the frame that breached). The
         slow clock: this may call a model, which is why ``step()`` never calls
         it unless ``auto_escalate`` was asked for.
+
+        The plan is made from a window of recent frames ending in ``data_path``
+        — ``frames`` when given, else the last ``reanchor_frames`` the loop has
+        seen — and the recipe is locked on ``data_path`` itself.
 
         In the background (default) the re-anchor runs in a spawned process
         and ``step()`` keeps answering with the old recipe, flagged; the new
@@ -699,8 +720,15 @@ class MeasurementLoop:
                                                          script_hash(effective)})
         except Exception:  # noqa: BLE001 - exclusion is a safeguard, not a requirement
             pass
+        window = [str(f) for f in (frames if frames is not None
+                                   else self._recent_frames[-self.reanchor_frames:])]
+        window = [f for f in window if f != str(data_path) and Path(f).is_file()]
+        window = window + [str(data_path)]
+        if frames is None:
+            window = window[-self.reanchor_frames:]
         spec = {
-            "out_dir": str(out_dir), "data_path": str(data_path),
+            "out_dir": str(out_dir),
+            "data_path": window if len(window) > 1 else str(data_path),
             # In memory only — a spec is never written to disk (it may carry
             # a credential).
             "agent_kwargs": {"api_key": self.api_key, "model_name": self.model_name,
@@ -713,6 +741,7 @@ class MeasurementLoop:
             "system_info": self.system_info,
         }
         self._escalation_meta = {"index": self._n_escalations, "data": str(data_path),
+                                 "window": len(window),
                                  "profile": analyze_kwargs["profile"],
                                  "from_recipe": self.recipe["id"],
                                  "started_step": self._step, "t0": time.perf_counter()}
@@ -755,7 +784,8 @@ class MeasurementLoop:
         base = {"step": self._step, "index": meta.get("index"),
                 "from_recipe": meta.get("from_recipe"),
                 "frames_answered_meanwhile": self._step - int(meta.get("started_step") or 0),
-                "seconds": result.get("seconds"), "llm_calls": result.get("llm_calls") or 0}
+                "seconds": result.get("seconds"), "llm_calls": result.get("llm_calls") or 0,
+                **({"window": result["window"]} if result.get("window") else {})}
         script, anchor_dir = (None, None)
         if result.get("status") == "success" and result.get("output_directory"):
             script, anchor_dir = self._anchor_script(result["output_directory"])
@@ -779,6 +809,8 @@ class MeasurementLoop:
         source = "bank" if result.get("cold_start") else f"reanchor:{meta.get('profile')}"
         self.recipe = self._recipe_record(script, source)
         self._calibrate()
+        self._drift_reference = None
+        self._rebase = [] if result.get("window") else None
         self._reference_features = (result.get("pin_features")
                                     or self._features_from_anchor(anchor_dir))
         self._ranges = {k: [v, v] for k, v in self._reference_features.items()}
@@ -834,7 +866,54 @@ class MeasurementLoop:
         if self._calibration:
             self.logger.info(f"   gates calibrated on the reference: {self._calibration}")
 
-    def _judge(self, validity: Dict[str, Any], frame_dir: str) -> Dict[str, Any]:
+    @staticmethod
+    def _fingerprint(data_path: str) -> Optional[Dict[str, Any]]:
+        try:
+            from ..skills._shared import _script_bank
+            from .instruments import read_curve
+            x, y, _, _ = read_curve(data_path)
+            return _script_bank.curve_fingerprint(x, y)
+        except Exception:  # noqa: BLE001 - no fingerprint, no opinion
+            return None
+
+    def _rebase_drift(self, poor: bool, drift: bool, data_path: str,
+                      floor: float) -> Optional[bool]:
+        """After a window-planned re-anchor: is the drift reference just stale?
+
+        The recipe was planned across a change and locked on the window's last
+        frame; by the time it is adopted the stream has moved further along the
+        same change. Observed live (XRD through a phase transition): the new
+        recipe fitted every frame at R² 0.99 and the loop still rebuilt it at
+        once, because pure phase B no longer looked like the mid-transition
+        anchor frame. So: if the first frames under the new recipe all pass the
+        fit gate and look like EACH OTHER, the stream is stable and the
+        reference moves to them. A poor fit, or a frame that matches the anchor
+        after all, cancels it and the ordinary rules apply. Returns the frame's
+        drift verdict when it took the decision, else None."""
+        if self._rebase is None:
+            return None
+        if poor or not drift:
+            self._rebase = None
+            return None
+        fp = self._fingerprint(data_path)
+        if fp is None:
+            self._rebase = None
+            return None
+        from ..skills._shared import _script_bank
+        if any(_script_bank._curve_similarity(fp, other) < floor for other in self._rebase):
+            self._rebase = None                  # still moving: not a stable new state
+            return None
+        self._rebase.append(fp)
+        if len(self._rebase) < max(1, self.breach_patience - 1):
+            return None                          # flagged for now; not yet a breach run
+        self._drift_reference, self._rebase = self._rebase[0], None
+        self._append({"event": "drift_rebased", "step": self._step,
+                      "recipe_id": self.recipe["id"],
+                      "why": "first frames under the new recipe fit and agree with each other"})
+        return False
+
+    def _judge(self, validity: Dict[str, Any], frame_dir: str,
+               data_path: Optional[str] = None) -> Dict[str, Any]:
         """The frame's fit and drift verdicts, with the agent's constant bars
         relaxed to what the reference run achieved under its own noise. Returns
         ``poor`` / ``drift`` plus whatever it measured, for the record."""
@@ -851,10 +930,22 @@ class MeasurementLoop:
                 if excess <= self.noise_gate_tolerance * cal["residual_excess"]:
                     poor, out["accepted_in_noise_units"] = False, True
         sim = validity.get("fingerprint_similarity")
+        floor = float(cal.get("drift_floor") if cal.get("drift_floor") is not None else 0.92)
+        if self._drift_reference is not None and data_path:
+            fp = self._fingerprint(data_path)     # the loop holds the reference (see _rebase_drift)
+            if fp is not None:
+                from ..skills._shared import _script_bank
+                sim = round(float(_script_bank._curve_similarity(fp, self._drift_reference)), 3)
+                out["fingerprint_similarity_rebased"] = sim
+                drift = sim < floor
         if cal and drift and cal.get("drift_floor") is not None and sim is not None:
             out["drift_floor"] = cal["drift_floor"]
             if float(sim) >= cal["drift_floor"]:
                 drift = False
+        if data_path:
+            decided = self._rebase_drift(poor, drift, data_path, floor)
+            if decided is not None:
+                drift = decided
         return {"poor": poor, "drift": drift, **out}
 
     _UNCERTAINTY_SUFFIXES = ("_err", "_error", "_stderr", "_std", "_unc", "_uncertainty", "_sigma_err")
@@ -1022,6 +1113,8 @@ class MeasurementLoop:
             "system_info": self.system_info,
             "gate_calibration": self._calibration,
             "noise_gate_tolerance": self.noise_gate_tolerance,
+            "reanchor_frames": self.reanchor_frames, "recent_frames": self._recent_frames,
+            "drift_reference": self._drift_reference, "drift_rebase": self._rebase,
         }
         tmp = self.output_dir / (LOOP_STATE_NAME + ".tmp")
         tmp.write_text(json.dumps(state, indent=2, default=str), encoding="utf-8")
@@ -1036,6 +1129,8 @@ class MeasurementLoop:
                   "range_widen", "range_warmup", "range_adopt_after", "gate_keys",
                   "system_info"):
             kwargs.setdefault(k, state.get(k))
+        if "reanchor_frames" in state:
+            kwargs.setdefault("reanchor_frames", state["reanchor_frames"])
         if "noise_gate_tolerance" in state:      # absent in older states: keep the default
             kwargs.setdefault("noise_gate_tolerance", state["noise_gate_tolerance"])
         loop = cls(output_dir, **kwargs)
@@ -1048,5 +1143,8 @@ class MeasurementLoop:
         loop._reference_features = state.get("reference_features") or {}
         loop._n_learned = int(state.get("n_learned") or 0)
         loop._calibration = state.get("gate_calibration") or {}
+        loop._recent_frames = [str(f) for f in (state.get("recent_frames") or [])]
+        loop._drift_reference = state.get("drift_reference")
+        loop._rebase = state.get("drift_rebase")
         loop._append({"event": "resume", "step": loop._step, "recipe": loop.recipe})
         return loop

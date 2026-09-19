@@ -77,8 +77,13 @@ function describeEvent(e: LiveEvent): string {
     }
     case "escalation_started":
       return "Rebuilding the recipe in the background.";
-    case "reanchor":
-      return `New recipe adopted after ${g("seconds")} s. ${g("frames_answered_meanwhile")} frames were answered meanwhile.`;
+    case "reanchor": {
+      const win = e.window as { n?: number } | undefined;
+      return `New recipe adopted after ${g("seconds")} s${win?.n ? `, planned from the last ${win.n} frames` : ""}. ` +
+        `${g("frames_answered_meanwhile")} frames were answered meanwhile.`;
+    }
+    case "drift_rebased":
+      return "The stream settled under the new recipe. Change detection now compares with these frames.";
     case "escalation_failed":
       return `Rebuild failed. ${String(g("error") ?? "").slice(0, 160)}`;
     case "recommendation":

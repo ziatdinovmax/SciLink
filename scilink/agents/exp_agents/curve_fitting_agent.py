@@ -348,6 +348,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # it has not seen. Adds one planning principle (see
         # ``_qc_profile.STREAM_REFERENCE_PLANNING``); changes nothing else.
         stream_reference: bool = False,
+        # Answer from the script bank or not at all: when no banked recipe
+        # fits, return ``{"status": "no_bank_recipe"}`` instead of continuing
+        # into a fresh plan. Numerics only, no model call. A live loop's
+        # multi-frame re-anchor asks this of the newest frame first, so a regime
+        # seen before is still served by the bank in seconds.
+        bank_only: bool = False,
         # Script hashes the bank-first audition must not consider. A live
         # loop's escalation passes the recipe that just breached: auditioning
         # it again is circular.
@@ -538,7 +544,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # codegen are skipped. Unlike realtime a miss costs nothing: the run
         # continues at the same depth instead of demoting to thorough.
         bank_first = False
-        if (qc_profile.name in ("quick", "extract")
+        # A stream's window of frames is not auditioned: the audition reads
+        # the FIRST spectrum, and in a re-anchor window that one predates the
+        # change. The caller asks the bank about the newest frame (bank_only).
+        _stream_window = bool(stream_reference and isinstance(data, (list, tuple))
+                              and len(data) > 1)
+        if (qc_profile.name in ("quick", "extract") and not _stream_window
                 and not (prior_analysis_paths or reuse_locked_script)):
             from scilink.skills._shared import _script_bank as _sb
             bank_first = _sb.bank_enabled()
@@ -852,6 +863,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 realtime = False
                 from ._qc_profile import THOROUGH
                 qc_profile = THOROUGH
+        if bank_only and cold_start_info is None:
+            self.logger.info("   🏦 bank_only: no banked recipe fits this data.")
+            return {"status": "no_bank_recipe", "output_directory": str(self.output_dir)}
         if realtime:
             effective_max_verification = 0
             n_candidates, candidate_escalation = 1, False

@@ -304,6 +304,7 @@ class LiveRun:
                 objective_key=(cfg.get("objective_key") or None) if outputs else None,
                 auto_escalate=bool(cfg.get("auto_escalate", True)),
                 breach_patience=int(cfg.get("breach_patience") or 3),
+                reanchor_frames=int(cfg.get("reanchor_frames") or 5),
                 closed_loop=(cfg.get("apply") == "valid"),
                 frame_deadline_s=float(cfg.get("frame_deadline_s") or 10.0), **creds)
             if self.from_analysis:

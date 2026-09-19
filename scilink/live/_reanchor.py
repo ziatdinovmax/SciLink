@@ -1,4 +1,12 @@
-"""The re-anchor worker: one analysis of one frame, in its own interpreter.
+"""The re-anchor worker: a new recipe for a stream whose old one stopped
+fitting, built in its own interpreter.
+
+One frame, or a WINDOW of the most recent frames. A window is planned as a
+series — the plan sees the change happening (what fades, what grows) instead of
+one snapshot of it, so the recipe it writes still fits when the change has
+completed — and the recipe is locked on the newest frame. Before that the bank
+is asked about the newest frame alone (no model call): a regime seen before is
+served in seconds, as with a single frame.
 
 ``python -m scilink.live._reanchor`` reads a JSON spec from stdin and writes
 ``result.json`` into the spec's ``out_dir``. See
@@ -36,13 +44,36 @@ def reanchor(spec: Dict[str, Any]) -> None:
         from ..agents.exp_agents.curve_fitting_agent import CurveFittingAgent
         agent = CurveFittingAgent(output_dir=str(out_dir / "run"),
                                   enable_human_feedback=False, **spec["agent_kwargs"])
-        res = agent.analyze(spec["data_path"], **spec["analyze_kwargs"]) or {}
+        data, kwargs = spec["data_path"], dict(spec["analyze_kwargs"])
+        window = [str(p) for p in data] if isinstance(data, (list, tuple)) else [str(data)]
+        pin_data, window_info = window[-1], None
+        if len(window) == 1:
+            res = agent.analyze(window[0], **kwargs) or {}
+        else:
+            res = agent.analyze(window[-1], **{**kwargs, "bank_only": True}) or {}
+            if res.get("status") != "success":
+                from .measurement_loop import MeasurementLoop
+                agent = CurveFittingAgent(output_dir=str(out_dir / "run_window"),
+                                          enable_human_feedback=False, **spec["agent_kwargs"])
+                res = agent.analyze(window, **{
+                    **kwargs,
+                    "profile": {"base": kwargs.get("profile") or "thorough", "trend": False,
+                                "synthesis": "none", "adaptive_refit": False},
+                    "series_metadata": {"variable": "frame", "values": list(range(len(window)))},
+                }) or {}
+                if res.get("status") == "success":
+                    anchor, window_info = MeasurementLoop._single_frame_anchor(
+                        Path(res.get("output_directory") or str(out_dir / "run_window")),
+                        out_dir / "anchor", window)
+                    res = {**res, "output_directory": anchor}
+                    pin_data = window_info.pop("data")
         payload = {
             "status": res.get("status"),
             "output_directory": res.get("output_directory") or str(out_dir / "run"),
             "cold_start": res.get("cold_start"),
             "llm_calls": (res.get("stage_timings") or {}).get("llm_calls"),
             "error": res.get("error"),
+            "window": window_info,
         }
         if res.get("status") == "success" and spec.get("pin_outputs"):
             # The new recipe must report the same pinned names as the old one.
@@ -56,7 +87,7 @@ def reanchor(spec: Dict[str, Any]) -> None:
                 script, anchor_dir = MeasurementLoop._anchor_script(payload["output_directory"])
                 pinned = pin_outputs(
                     script=script, outputs=spec["pin_outputs"], model=agent.model,
-                    replay=agent_replay(factory, str(anchor_dir), spec["data_path"],
+                    replay=agent_replay(factory, str(anchor_dir), pin_data,
                                         spec.get("system_info"), str(out_dir / "pinning")))
                 payload["pin_edits"] = pinned["edits"]
                 payload["pin_features"] = pinned["features"]
