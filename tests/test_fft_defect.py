@@ -191,3 +191,61 @@ class TestContract:
         from scilink.skills._shared._registry import get_tools_for
         names = [s.name for s in get_tools_for("image_analysis")]
         assert "fft_defect_map" in names
+
+
+class TestSignAwareDeficitGate:
+    """deficit_null_percentile / deficit_k_min: a separate, lower gate for the
+    deficit (vacancy) side, defaulting to a no-op. Missing units are shallower
+    than adsorbates, so a symmetric gate under-counts them (issue #650)."""
+
+    def _counts(self, res):
+        d = res.get("defects", [])
+        exc = sum(1 for c in d if c["sign"] == "excess")
+        dfc = sum(1 for c in d if c["sign"] == "deficit")
+        return exc, dfc
+
+    def test_default_is_symmetric_noop(self):
+        # both gates None -> deficit threshold equals the excess threshold
+        img, _ = make_defective_lattice((512, 512), a_px=14.0, kind="hex",
+                                        n_vacancies=6, n_interstitials=6, seed=3)
+        res = fft_defect_map(img)
+        assert res["threshold_deficit"] == pytest.approx(res["threshold"])
+
+    def test_deficit_knob_recovers_more_vacancies_without_touching_excess(self):
+        # SHALLOW deficits (dim sites at 70% contrast — the bounded-depth case
+        # the knob exists for; a full atom removal already clears the
+        # symmetric gate) next to tall interstitials: the symmetric gate
+        # misses some of the shallow deficits, a lower deficit gate recovers
+        # them, and the excess count is unchanged. Asserting strict recovery
+        # is what makes this test fail if the knob ever becomes a no-op.
+        img, _ = make_defective_lattice((512, 512), a_px=14.0, kind="hex",
+                                        n_vacancies=0, n_dopants=10,
+                                        dopant_contrast=0.7, n_interstitials=6,
+                                        noise=0.06, seed=5)
+        base = fft_defect_map(img)
+        lowered = fft_defect_map(
+            img, params={"deficit_k_min": 3.0, "deficit_null_percentile": 99.0})
+        e0, d0 = self._counts(base)
+        e1, d1 = self._counts(lowered)
+        assert lowered["threshold_deficit"] < base["threshold_deficit"]
+        assert lowered["threshold"] == pytest.approx(base["threshold"])
+        assert d0 < 10             # the symmetric gate misses shallow deficits
+        assert d1 > d0             # the lower deficit gate recovers some
+        assert d1 == 10            # ... all of them here, with no false positive
+        assert e1 == e0            # excess side untouched
+
+
+class TestPerSignCounts:
+    """n_excess / n_deficit are per-sign tallies of the gated defects, so a
+    caller reports both signs by reading a field, not re-deriving them."""
+
+    def test_per_sign_counts_partition_n_defects(self):
+        img, _ = make_defective_lattice((512, 512), a_px=14.0, kind="hex",
+                                        n_vacancies=8, n_interstitials=6, seed=7)
+        res = fft_defect_map(img)
+        assert "n_excess" in res and "n_deficit" in res
+        assert res["n_excess"] + res["n_deficit"] == res["n_defects"]
+        assert res["n_excess"] == sum(1 for d in res["defects"]
+                                      if d["sign"] == "excess")
+        assert res["n_deficit"] == sum(1 for d in res["defects"]
+                                       if d["sign"] == "deficit")

@@ -126,6 +126,7 @@ def fft_defect_map(image_array, pixel_size_nm=None, params=None):
     """
     p = dict(n_reflections=12, min_peak_snr=8.0, mask_frac=0.15, dc_frac=0.5,
              smooth_frac=0.30, null_percentile=99.9, k_min=4.0,
+             deficit_null_percentile=None, deficit_k_min=None,
              amp_valid_frac=0.35, dip_frac=0.85, border_periods=2.0,
              min_area_frac=0.04, merge_frac=0.75, max_defects=200,
              edge_pad=True)
@@ -226,9 +227,23 @@ def fft_defect_map(image_array, pixel_size_nm=None, params=None):
     null_sigma = 1.4826 * float(np.median(np.abs(nv - np.median(nv)))) + 1e-12
     thr = max(float(np.percentile(np.abs(nv), p["null_percentile"])),
               p["k_min"] * null_sigma)
+    # Excess (adsorbate / extra unit) and deficit (missing unit / vacancy) are
+    # NOT symmetric in amplitude: an adsorbate piles up above the surface with
+    # no ceiling, but a vacancy can at most drop from the lattice top to the
+    # pore/substrate floor — its residual is bounded by the local lattice
+    # modulation. A single symmetric magnitude gate is therefore calibrated for
+    # excess and too strict for deficit, so vacancies are systematically
+    # under-counted. deficit_null_percentile / deficit_k_min set a SEPARATE
+    # (typically lower) gate for the deficit side; both default to None, which
+    # reuses the symmetric excess values so behavior is unchanged unless set.
+    d_pct = (p["null_percentile"] if p["deficit_null_percentile"] is None
+             else p["deficit_null_percentile"])
+    d_k = p["k_min"] if p["deficit_k_min"] is None else p["deficit_k_min"]
+    thr_deficit = max(float(np.percentile(np.abs(nv), d_pct)), d_k * null_sigma)
 
     # --- 5. candidate extraction ---
-    hot = (np.abs(resid_s) > thr) & valid
+    # sign-aware gate: excess must clear thr, deficit must clear thr_deficit
+    hot = (((resid_s > thr) | (-resid_s > thr_deficit))) & valid
     # a real (period-smoothed) defect is an extended blob; correlated-noise
     # specks that graze the threshold are smaller than a fraction of a cell
     min_area = max(4, int(round(p["min_area_frac"] * period ** 2)))
@@ -322,12 +337,18 @@ def fft_defect_map(image_array, pixel_size_nm=None, params=None):
                 "(fourier_reflection_map) instead of counting sites.")
     out.update(
         n_defects=len(merged),
+        # per-sign tallies over the gated+merged defects, so a caller reports
+        # both signs by reading a field rather than re-deriving (and possibly
+        # over-filtering) the counts from the residual itself.
+        n_excess=sum(1 for c in merged if c["sign"] == "excess"),
+        n_deficit=sum(1 for c in merged if c["sign"] == "deficit"),
         defects=merged,
         defects_per_1000_sites=round(1000.0 * len(merged) / max(n_sites, 1.0), 2),
         n_sites_estimate=int(n_sites),
         anomaly_area_fraction=round(anomaly_frac, 4),
         null_sigma=float(null_sigma),
         threshold=float(thr),
+        threshold_deficit=float(thr_deficit),
         residual_sigma_map=resid_s / null_sigma,
         lattice_amplitude_map=amp_s,
         valid_mask=valid,
@@ -470,6 +491,18 @@ TOOL_SPEC = ToolSpec(
             "threshold = max(percentile of the phase-randomized null, k_min * "
             "null sigma); RAISE either to keep only the strongest candidates, "
             "LOWER (e.g. k_min=3) if planted/known defects are missed. "
+            "* deficit_null_percentile / deficit_k_min (both None) — a SEPARATE "
+            "gate for the deficit (missing-unit / vacancy) side; None reuses the "
+            "symmetric excess values (no change). Deficits are physically "
+            "bounded (a vacancy can only drop to the pore/substrate floor) while "
+            "adsorbates pile up with no ceiling, so the symmetric gate is too "
+            "strict for deficits and under-counts vacancies: LOWER these (e.g. "
+            "deficit_k_min=3) when missing units are visibly present but "
+            "undercounted, e.g. AFM-height honeycombs. Only the deficit "
+            "gate moves — excess thresholding is unchanged (a newly admitted "
+            "deficit blob that touches or outranks a nearby excess blob can "
+            "still absorb it in the merge step), and the extra deficit area "
+            "counts toward anomaly_area_fraction. "
             "Scales (fractions of the measured pattern period, so they "
             "transfer across magnification): * smooth_frac (0.30): residual "
             "integration scale; raise toward 0.5 for blob-like defects spread "
@@ -497,11 +530,13 @@ TOOL_SPEC = ToolSpec(
         "'note' then reports the best candidate snr vs the gate so you can "
         "decide whether to lower min_peak_snr or conclude the image is not "
         "periodic), 'reflections' (ALL candidates: period_px, snr, "
-        "significant), 'pattern_period_px' (and _nm), 'n_defects', 'defects' "
-        "(list of {y, x, sign='deficit'|'excess', strength_sigma, area_px, "
-        "coherence_dip} — deficit + coherence_dip is the vacancy / missing-"
-        "unit signature; excess without dip suggests an adatom/dopant on an "
-        "intact lattice), 'defects_per_1000_sites', 'anomaly_area_fraction', "
+        "significant), 'pattern_period_px' (and _nm), 'n_defects', 'n_excess' "
+        "and 'n_deficit' (per-sign tallies of the gated defects — report BOTH "
+        "of these directly; do not re-derive or aggregate the counts yourself), "
+        "'defects' (list of {y, x, sign='deficit'|'excess', strength_sigma, "
+        "area_px, coherence_dip} — deficit + coherence_dip is the vacancy / "
+        "missing-unit signature; excess without dip suggests an adatom/dopant "
+        "on an intact lattice), 'defects_per_1000_sites', 'anomaly_area_fraction', "
         "'valid_fraction', 'clark_evans_index' and 'largest_cluster_fraction' "
         "(candidate spatial statistics), 'residual_sigma_map' / "
         "'lattice_amplitude_map' / 'valid_mask' (arrays for overlay plots), "
