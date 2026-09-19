@@ -186,6 +186,24 @@ class MeasurementLoop:
             fit gate is good and no drift is suspected before the new level is
             adopted: the data says the value is real, so the range moves to it
             (logged as ``range_adopted``) instead of flagging forever.
+        noise_gate_tolerance: The fit and drift gates are calibrated on the
+            reference run, in units of its own noise (see ``live/gates.py``): a
+            frame below the agent's R² bar is still accepted when its residual
+            scatter is within this factor of the reference's, and the drift bar
+            drops to what the reference's fingerprint does under its own noise.
+            Calibration only ever relaxes the constant bars. ``None`` keeps the
+            constant bars (R² 0.95, similarity 0.92) — right only for clean data.
+            The default rests on limited evidence: one locked recipe replayed
+            over 225 real low-loss EELS spectra (untouched frames stayed within
+            1.1× the reference; at 1.25 an injected feature 60 % / 30 % / 15 % of
+            the peak height was caught 100 % / 47 % / 2 % of the time, at 1.5
+            only 80 % / 29 % / 2 %) plus the four simulators (≤ 1.1×). LOWER it
+            to catch weaker changes, RAISE it if clean frames are flagged
+            ``gate_poor``; re-derive it when other real data are available.
+        check_portability: At ``setup()``, replay the recipe on the reference
+            with its signal scaled ×3 and ×0.35 (two zero-LLM replays) and record
+            whether the fit quality survives — a recipe with a bound or window
+            read off the reference does not travel to stronger or weaker frames.
         gate_keys: Features the range gate watches. Default: the pinned
             ``outputs`` when declared — the quantities the user named, not the
             recipe's nuisance parameters (observed live: an ill-determined
@@ -241,6 +259,8 @@ class MeasurementLoop:
                  range_warmup: int = 5,
                  range_adopt_after: int = 3,
                  gate_keys: Optional[List[str]] = None,
+                 noise_gate_tolerance: Optional[float] = 1.25,
+                 check_portability: bool = True,
                  auto_escalate: bool = False,
                  escalation_profile: str = "extract",
                  escalation_runner: Optional[Callable[[Dict[str, Any]], Any]] = None,
@@ -262,6 +282,9 @@ class MeasurementLoop:
         self.range_warmup = max(0, int(range_warmup))
         self.range_adopt_after = max(1, int(range_adopt_after))
         self.gate_keys = list(gate_keys) if gate_keys else None
+        self.noise_gate_tolerance = noise_gate_tolerance
+        self.check_portability = check_portability
+        self._calibration: Dict[str, Any] = {}
         self._n_learned = 0
         self._out_of_range_streak: List[Dict[str, float]] = []
         self.auto_escalate = bool(auto_escalate)
@@ -360,6 +383,7 @@ class MeasurementLoop:
             self._validate_edits(script, list(script_edits))
             self._edits = list(script_edits)
         self.recipe = self._recipe_record(script, source)
+        self._calibrate()
 
         if ref_result is not None:
             self._reference_features = _numeric_features(ref_result)
@@ -380,12 +404,15 @@ class MeasurementLoop:
                 f"produces. Available: {sorted(self._reference_features)}")
         self._ranges = {k: [v, v] for k, v in self._reference_features.items()}
         self._n_learned, self._out_of_range_streak = 0, []
+        portability = self._check_portability(reference or reference_data)
 
         record = {
             "event": "setup", "recipe": self.recipe,
             "anchor_dir": str(self.anchor_dir), "source": source,
             "seconds": round(time.perf_counter() - t0, 3),
             "reference_features": self._reference_features,
+            "gate_calibration": self._calibration,
+            **({"portability": portability} if portability else {}),
             "targets": self.targets, "objective_key": self.objective_key,
             "frame_deadline_s": self.frame_deadline_s,
         }
@@ -489,14 +516,16 @@ class MeasurementLoop:
 
         features = _numeric_features(result) if result.get("status") == "success" else {}
         validity = result.get("reuse_validity") or {}
+        gate_extra: Dict[str, Any] = {}
         if error or result.get("status") != "success" or not features:
             flags.append(FLAG_FIT_FAILED)
             if not error and result.get("error"):
                 error = json.dumps(result.get("error"), default=str)[:300]
         else:
-            if validity.get("verdict") not in (None, "good"):
+            gate_extra = self._judge(validity, str(frame_dir))
+            if gate_extra.pop("poor"):
                 flags.append(FLAG_GATE_POOR)
-            if validity.get("drift") == "suspected":
+            if gate_extra.pop("drift"):
                 flags.append(FLAG_DRIFT)
         llm_calls = (result.get("stage_timings") or {}).get("llm_calls")
         if llm_calls:
@@ -533,9 +562,9 @@ class MeasurementLoop:
         record: Dict[str, Any] = {
             "event": "frame", "step": idx, "data": str(data_path),
             "params": params or {}, "features": features,
-            "gate": {k: validity.get(k) for k in
-                     ("verdict", "r_squared", "threshold", "drift",
-                      "fingerprint_similarity") if k in validity},
+            "gate": {**{k: validity.get(k) for k in
+                        ("verdict", "r_squared", "threshold", "drift",
+                         "fingerprint_similarity") if k in validity}, **gate_extra},
             "flags": flags, "needs_escalation": needs_escalation,
             "consecutive_breaches": self._consecutive_breaches,
             "latency_s": round(latency, 3), "llm_calls": llm_calls or 0,
@@ -674,6 +703,7 @@ class MeasurementLoop:
         self.anchor_dir, self._edits = anchor_dir, list(result.get("pin_edits") or [])
         source = "bank" if result.get("cold_start") else f"reanchor:{meta.get('profile')}"
         self.recipe = self._recipe_record(script, source)
+        self._calibrate()
         self._reference_features = (result.get("pin_features")
                                     or self._features_from_anchor(anchor_dir))
         self._ranges = {k: [v, v] for k, v in self._reference_features.items()}
@@ -684,7 +714,7 @@ class MeasurementLoop:
                 f"the new recipe does not produce objective_key {self.objective_key!r}; "
                 f"available: {sorted(self._reference_features)}")
         record = {"event": "reanchor", **base, "recipe": self.recipe, "source": source,
-                  "anchor_dir": str(anchor_dir),
+                  "anchor_dir": str(anchor_dir), "gate_calibration": self._calibration,
                   "objective_key_present": (self.objective_key in self._reference_features
                                             if self.objective_key else None)}
         self._append(record)
@@ -692,6 +722,63 @@ class MeasurementLoop:
         self.logger.info(f"🔁 Re-anchored: recipe {self.recipe['id']} from {source} "
                          f"({record['seconds']}s, {record['llm_calls']} LLM call(s)).")
         return record
+
+    def _check_portability(self, reference_data: Optional[str]) -> Dict[str, Any]:
+        """Replay the recipe on the reference with its signal scaled up and
+        down (zero-LLM). Advisory: the verdict is recorded and logged."""
+        if not self.check_portability or not reference_data or self.anchor_dir is None:
+            return {}
+        try:
+            from .portability import agent_replay_r2, check_portability, describe
+            work = self.output_dir / "portability"
+            report = check_portability(
+                agent_replay_r2(self._agent_factory, str(self.anchor_dir), self.system_info,
+                                str(work), edits=self._edits),
+                str(reference_data), self._reference_features.get("fit_r_squared"), str(work))
+        except Exception as e:  # noqa: BLE001 - a check, never a dependency
+            self.logger.warning(f"portability check skipped: {e}")
+            return {}
+        if report:
+            report["summary"] = describe(report)
+            (self.logger.info if report["portable"] else self.logger.warning)(
+                f"   portability: {report['summary']}")
+        return report
+
+    def _calibrate(self) -> None:
+        """Ask the current anchor run what its noise does to the gates."""
+        self._calibration = {}
+        if self.noise_gate_tolerance is None or self.anchor_dir is None:
+            return
+        try:
+            from .gates import calibrate
+            self._calibration = calibrate(str(self.anchor_dir))
+        except Exception as e:  # noqa: BLE001 - calibration is an improvement, never a dependency
+            self.logger.warning(f"gate calibration skipped: {e}")
+        if self._calibration:
+            self.logger.info(f"   gates calibrated on the reference: {self._calibration}")
+
+    def _judge(self, validity: Dict[str, Any], frame_dir: str) -> Dict[str, Any]:
+        """The frame's fit and drift verdicts, with the agent's constant bars
+        relaxed to what the reference run achieved under its own noise. Returns
+        ``poor`` / ``drift`` plus whatever it measured, for the record."""
+        poor = validity.get("verdict") not in (None, "good")
+        drift = validity.get("drift") == "suspected"
+        out: Dict[str, Any] = {}
+        cal = self._calibration
+        if cal and poor and cal.get("residual_excess"):
+            from .gates import residual_excess
+            excess = residual_excess(frame_dir)
+            if excess is not None:
+                out["residual_excess"] = round(excess, 3)
+                out["reference_excess"] = cal["residual_excess"]
+                if excess <= self.noise_gate_tolerance * cal["residual_excess"]:
+                    poor, out["accepted_in_noise_units"] = False, True
+        sim = validity.get("fingerprint_similarity")
+        if cal and drift and cal.get("drift_floor") is not None and sim is not None:
+            out["drift_floor"] = cal["drift_floor"]
+            if float(sim) >= cal["drift_floor"]:
+                drift = False
+        return {"poor": poor, "drift": drift, **out}
 
     _UNCERTAINTY_SUFFIXES = ("_err", "_error", "_stderr", "_std", "_unc", "_uncertainty", "_sigma_err")
 
@@ -856,6 +943,8 @@ class MeasurementLoop:
             "frame_deadline_s": self.frame_deadline_s,
             "breach_patience": self.breach_patience, "range_widen": self.range_widen,
             "system_info": self.system_info,
+            "gate_calibration": self._calibration,
+            "noise_gate_tolerance": self.noise_gate_tolerance,
         }
         tmp = self.output_dir / (LOOP_STATE_NAME + ".tmp")
         tmp.write_text(json.dumps(state, indent=2, default=str), encoding="utf-8")
@@ -870,6 +959,8 @@ class MeasurementLoop:
                   "range_widen", "range_warmup", "range_adopt_after", "gate_keys",
                   "system_info"):
             kwargs.setdefault(k, state.get(k))
+        if "noise_gate_tolerance" in state:      # absent in older states: keep the default
+            kwargs.setdefault("noise_gate_tolerance", state["noise_gate_tolerance"])
         loop = cls(output_dir, **kwargs)
         loop.anchor_dir = Path(state["anchor_dir"]) if state.get("anchor_dir") else None
         loop.recipe = state.get("recipe")
@@ -879,5 +970,6 @@ class MeasurementLoop:
         loop._ranges = {k: list(v) for k, v in (state.get("ranges") or {}).items()}
         loop._reference_features = state.get("reference_features") or {}
         loop._n_learned = int(state.get("n_learned") or 0)
+        loop._calibration = state.get("gate_calibration") or {}
         loop._append({"event": "resume", "step": loop._step, "recipe": loop.recipe})
         return loop
