@@ -117,9 +117,15 @@ export function LiveChart({
     const sy = (v: number) => M.top + (1 - (v - y0) / (y1 - y0)) * ih;
     const path = (p: ChartPoint[]) =>
       p.map((q, i) => `${i ? "L" : "M"}${sx(q.x).toFixed(1)},${sy(q.y as number).toFixed(1)}`).join("");
+    // A line joins points in the order they came. That is right for a curve
+    // sampled along x and wrong for anything else (a sweep that doubles back,
+    // unordered samples), where it draws strokes across the plot: those are
+    // shown as points instead.
+    const dx = xs.slice(1).map((v, i) => v - xs[i]);
+    const ordered = dx.every((d) => d >= 0) || dx.every((d) => d <= 0);
     let xt = niceTicks(x0, x1, Math.max(2, Math.floor(iw / 90)));
     if (xInteger) xt = xt.filter((v) => Number.isInteger(v));
-    return { pts, refPts, ovPts, sx, sy, path, x0, x1, iw, ih, xt, yt: niceTicks(y0, y1, compact ? 3 : 4) };
+    return { pts, refPts, ovPts, sx, sy, path, x0, x1, iw, ih, xt, ordered, yt: niceTicks(y0, y1, compact ? 3 : 4) };
   }, [series, reference, overlay, width, H, M, compact, xInteger]);
 
   const onMove = (e: React.PointerEvent<SVGRectElement>) => {
@@ -186,9 +192,22 @@ export function LiveChart({
             </g>
           ))}
           {geo.refPts.length > 1 && <path className="reference" d={geo.path(geo.refPts)} />}
-          <path className={geo.ovPts.length > 1 ? "series thin" : "series"} d={geo.path(geo.pts)} />
-          {geo.ovPts.length > 1 && <path className="overlay" d={geo.path(geo.ovPts)} />}
-          {!dense && geo.pts.length <= 60 && geo.pts.map((p) => (
+          {geo.ordered ? (
+            <>
+              <path className={geo.ovPts.length > 1 ? "series thin" : "series"} d={geo.path(geo.pts)} />
+              {geo.ovPts.length > 1 && <path className="overlay" d={geo.path(geo.ovPts)} />}
+            </>
+          ) : (
+            <>
+              {geo.pts.map((p, i) => (
+                <circle key={`s${i}`} className="scatter" cx={geo.sx(p.x)} cy={geo.sy(p.y as number)} r={1.8} />
+              ))}
+              {geo.ovPts.map((p, i) => (
+                <circle key={`o${i}`} className="scatter overlay-pt" cx={geo.sx(p.x)} cy={geo.sy(p.y as number)} r={1.4} />
+              ))}
+            </>
+          )}
+          {geo.ordered && !dense && geo.pts.length <= 60 && geo.pts.map((p) => (
             <circle key={p.x} className="dot" cx={geo.sx(p.x)} cy={geo.sy(p.y as number)} r={2.5} />
           ))}
           {flagged.map((f) => {

@@ -777,6 +777,8 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .live-chart .series { fill: none; stroke: var(--viz-series); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 .live-chart .series.thin { stroke-width: 1.25; opacity: 0.85; }
 .live-chart .overlay { fill: none; stroke: var(--viz-series-2); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.live-chart .scatter { fill: var(--viz-series); }
+.live-chart .scatter.overlay-pt { fill: var(--viz-series-2); }
 .live-chart .dot { fill: var(--viz-series); stroke: var(--bg-card); stroke-width: 1; }
 .live-chart .reference { fill: none; stroke: var(--viz-reference); stroke-width: 1.5; stroke-dasharray: 5 4; }
 .live-chart .flag { fill: var(--viz-warning); stroke: var(--bg-card); stroke-width: 2; paint-order: stroke; }
