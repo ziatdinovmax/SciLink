@@ -343,6 +343,97 @@ export interface CreateSessionBody {
 
 const BASE = "/api/v1";
 
+// ── Live tab ────────────────────────────────────────────────────
+export interface LiveParamSpec {
+  kind: string;
+  low?: number;
+  high?: number;
+  units?: string;
+  description?: string;
+  choices?: (string | number)[];
+}
+export interface LiveInstrumentInfo {
+  name: string;
+  technique?: string;
+  sample?: string;
+  x_axis?: string;
+  y_axis?: string;
+  about: string;
+  schema: Record<string, LiveParamSpec>;
+  defaults: Record<string, number | string>;
+  outputs: Record<string, string>;
+  targets: string[];
+  events: { frame: number; what: string }[];
+}
+export interface LiveFrame {
+  step: number;
+  features: Record<string, number | null>;
+  truth?: Record<string, number>;
+  flags: string[];
+  latency_s: number | null;
+  recipe_id: string | null;
+  params: Record<string, number | string>;
+  gate: Record<string, number | string | boolean | null>;
+  needs_escalation?: boolean;
+  escalation?: string | null;
+}
+export interface LiveRecommendation {
+  kind: string;
+  params: Record<string, number | string> | null;
+  protocol?: string | null;
+  rationale: string;
+  source?: string;
+  based_on_step?: number;
+  valid: boolean;
+  problems?: string[];
+  requires_approval?: boolean;
+  rejected_params?: Record<string, number | string>;
+}
+export interface LiveEvent {
+  event: string;
+  step?: number;
+  [key: string]: unknown;
+}
+export interface LiveSnapshot {
+  state: "idle" | "arming" | "running" | "stopped" | "done" | "error";
+  error?: string | null;
+  simulators?: LiveInstrumentInfo[];
+  run_dir?: string;
+  elapsed_s?: number;
+  config?: Record<string, unknown>;
+  instrument?: LiveInstrumentInfo;
+  status?: {
+    frames?: number;
+    clean_frames?: number;
+    flag_counts?: Record<string, number>;
+    llm_calls_in_frames?: number;
+    latency_s?: { median: number; max: number };
+    escalating?: boolean;
+    reanchors?: number;
+    recipe?: { id?: string; source?: string } | null;
+  };
+  current_params?: Record<string, number | string>;
+  n_frames_total?: number;
+  frames?: LiveFrame[];
+  events?: LiveEvent[];
+  recommendation?: LiveRecommendation | null;
+  latest?: { step: number; x: number[]; y: number[] } | null;
+}
+export interface LiveConfig {
+  instrument: string;
+  n_frames: number;
+  interval_s: number;
+  apply: "never" | "approved" | "valid";
+  recommender: "none" | "gp" | "llm";
+  objective_key?: string;
+  direction?: "maximize" | "minimize";
+  objective?: string;
+  every?: number;
+  auto_escalate: boolean;
+  reference_profile?: string;
+  seed?: number;
+}
+
 /** Thrown on a 401 so the app can drop to the sign-in screen (a cookie
  * session ends when the server restarts). */
 export class UnauthorizedError extends Error {}
@@ -535,6 +626,16 @@ export const api = {
       `/sessions/${id}/mcp/${encodeURIComponent(server)}`,
       { method: "DELETE" },
     ),
+
+  live: (id: string) => req<LiveSnapshot>(`/sessions/${id}/live`),
+  liveStart: (id: string, config: LiveConfig) =>
+    req<LiveSnapshot>(`/sessions/${id}/live/start`, json(config)),
+  liveStop: (id: string) =>
+    req<{ state: string }>(`/sessions/${id}/live/stop`, { method: "POST" }),
+  liveParams: (id: string, params: Record<string, number | string>) =>
+    req<{ queued: Record<string, number | string> }>(`/sessions/${id}/live/params`, json({ params })),
+  liveClear: (id: string) =>
+    req<LiveSnapshot>(`/sessions/${id}/live/clear`, { method: "POST" }),
 
   provenance: (id: string) =>
     req<{ events: ProvenanceEvent[] }>(`/sessions/${id}/provenance`),
