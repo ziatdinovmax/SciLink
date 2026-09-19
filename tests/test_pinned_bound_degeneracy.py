@@ -121,3 +121,29 @@ def test_single_regime_plan_does_not_block_locked_script_reuse():
     assert blocked({"series_analysis_plan": {"regimes": [{"spectrum_indices": [0, 1, 2]}]}, "regime_configs": {0: {}, 1: {}, 2: {}}}) is False
     assert blocked({"series_analysis_plan": {"regimes": [{"spectrum_indices": [0, 1]}, {"spectrum_indices": [2]}]}}) is True
     assert blocked({}) is False
+
+
+class TestPositivityFloorIsNotAPin:
+    """Observed live (2026-09-19): `baseline.k = 0.0844` with bounds
+    [1e-06, wide] was reported "pinned at its lower bound 1e-06" because the
+    tolerance was 1% of the SPAN. Each false alarm costs a model call to relax
+    a bound that was never binding."""
+
+    def _pins(self, value, lo, hi):
+        from scilink.skills._shared.curve_fitting_tools import validate_bound_pinning
+        return validate_bound_pinning({"baseline": {"k": value}},
+                                      {"baseline": {"k": [lo, hi]}})
+
+    def test_a_value_far_above_a_tiny_floor_is_not_pinned(self):
+        assert self._pins(0.0843632, 1e-06, 50.0) == []
+        assert self._pins(0.0844295, 1e-09, 50.0) == []
+
+    def test_a_value_sitting_on_the_floor_still_is(self):
+        [pin] = self._pins(1.0000001e-06, 1e-06, 50.0)
+        assert pin["side"] == "lower"
+
+    def test_window_edges_and_ceilings_are_still_caught(self):
+        assert self._pins(5.0001, 5.0, 7.0)[0]["side"] == "lower"      # position at its window edge
+        assert self._pins(4.31257, 0.1, 4.31257)[0]["side"] == "upper"  # a baked ceiling
+        assert self._pins(9.95, 0.0, 10.0)[0]["side"] == "upper"
+        assert self._pins(6.0, 5.0, 7.0) == []
