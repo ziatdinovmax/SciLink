@@ -252,10 +252,15 @@ def bump_bank_adapt_success(host, res, *, domain: str, ctx=None) -> None:
                 domain, bea["id"],
                 session=Path(str(getattr(host, "output_dir", "") or "")).name or None,
                 fingerprint=getattr(ctx, "bank_query_fingerprint", None),
-                # The ADAPTED script passed, not the banked one: evidence
-                # that the record is a good starting point, not that it runs
-                # unchanged.
-                adapted=True)
+                # An adaptation with edits means the ADAPTED script passed,
+                # not the banked one: evidence that the record is a good
+                # starting point, not that it runs unchanged. An adaptation
+                # with ZERO edits is the banked script itself, accepted under
+                # LLM verification — verbatim evidence earned under review,
+                # which is also the only way a script born under a
+                # reduced-depth profile can become eligible for unreviewed
+                # reuse.
+                adapted=bool(bea.get("n_edits")))
             host.logger.info(
                 f"   🏦 📈 Bank record {bea['id']}: cross-session success "
                 "recorded (edit-adapted script survived QC).")
@@ -352,6 +357,9 @@ class QCItemContext:
 
         # Set by the engine when the run's time budget ran out mid-loop.
         self.budget_expired: bool = False
+        # Set by the engine when a reduced-depth profile's iteration cap was
+        # reached with the verifier still rejecting.
+        self.capped: bool = False
 
         self.all_attempts: list = []
         self.verification_history: list = []
@@ -516,6 +524,22 @@ class CodegenQCEngine:
 
             if host.qc_check_accept(ctx, verification):
                 ctx.approved = True
+                return
+
+            # Reduced-depth profiles (purpose-scoped verification): the last
+            # allowed verification has just rejected. Refining and refitting
+            # once more would produce an attempt nobody may verify within the
+            # cap — observed live, that attempt then cost a final verify AND a
+            # judge (four LLM calls, ~170 s) only for the best fit to be
+            # accepted on the deterministic gate anyway. Stop here; the host
+            # returns the best attempt, flagged (ctx.capped).
+            if (verification_iter == max_iters - 1
+                    and (ctx.state or {}).get("_verification_mode") == "purpose"):
+                logger.info(
+                    "   Iteration cap reached with the verifier still rejecting "
+                    "— returning the best attempt so far, flagged (reduced-depth "
+                    "profile: no further refit, final verify or judge).")
+                ctx.capped = True
                 return
 
             # Apply the verifier's recommended fixes.

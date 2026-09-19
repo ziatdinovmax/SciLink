@@ -391,3 +391,29 @@ class TestSweepCLI:
         assert rid in capsys.readouterr().out
         assert cli._cmd_bank_restore(SimpleNamespace(ref=f"curve_fitting/{rid}")) == 0
         assert [r["id"] for r in sb.list_records("curve_fitting")] == [rid]
+
+
+class TestReviewedVerbatimReuseCountsAsVerbatim:
+    """An edit-adaptation that needed no edits is the banked script itself,
+    accepted under LLM verification — the reviewed route by which a script
+    (including one born under a reduced-depth profile) earns verbatim
+    evidence."""
+
+    def _bump(self, n_edits, monkeypatch):
+        from scilink.agents.exp_agents._qc_engine import bump_bank_adapt_success
+        seen = {}
+        monkeypatch.setattr(sb, "record_success",
+                            lambda d, rid, session=None, **kw: seen.update(kw))
+        host = SimpleNamespace(logger=SimpleNamespace(info=lambda *a, **k: None),
+                               output_dir="/tmp/sess")
+        bump_bank_adapt_success(
+            host, {"success": True,
+                   "bank_edit_adapt": {"id": "abc", "n_edits": n_edits}},
+            domain="curve_fitting")
+        return seen
+
+    def test_zero_edits_is_verbatim(self, monkeypatch):
+        assert self._bump(0, monkeypatch)["adapted"] is False
+
+    def test_any_edit_is_an_adaptation(self, monkeypatch):
+        assert self._bump(3, monkeypatch)["adapted"] is True

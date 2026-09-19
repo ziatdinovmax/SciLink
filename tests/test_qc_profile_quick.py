@@ -302,3 +302,88 @@ def test_profile_is_stamped_where_results_are_published():
     stamp_profile({}, untouched)
     stamp_profile(None, None)
     assert untouched == [{"name": "a"}]
+
+
+class TestBankFirstUnderQuick:
+    """Step 3c: with a verbatim audition winner the record IS the plan, so the
+    pipeline has no planning / skill-selection / literature stage at all."""
+
+    def _recipe(self, profile):
+        return _names(create_unified_curve_fitting_pipeline(
+            model=None, logger=logging.getLogger("t"), generation_config=None,
+            safety_settings=None, parse_fn=None, store_fn=None, plot_fn=None,
+            executor=None, output_dir="out", load_skills_fn=lambda *a, **k: None,
+            profile=profile, bank_recipe=True))
+
+    def test_quick_recipe_keeps_synthesis_only(self):
+        assert self._recipe("quick") == [
+            "AnalyzeDataController", "UnifiedSeriesProcessingController",
+            "UnifiedCurveSynthesisController", "StoreAnalysisResultsController",
+            "GenerateCurveFittingReportController", "UnifiedCurveReportController"]
+
+    def test_extract_recipe_has_no_llm_stage_at_all(self):
+        assert self._recipe("extract") == [
+            "AnalyzeDataController", "UnifiedSeriesProcessingController",
+            "StoreAnalysisResultsController",
+            "GenerateCurveFittingReportController", "UnifiedCurveReportController"]
+
+    def test_bank_recipe_flag_is_inert_without_it(self):
+        assert "CurveFittingPlanningController" in _names(_pipeline("quick"))
+
+
+class TestReducedDepthScriptsMustEarnVerbatimReuse:
+    @pytest.fixture(autouse=True)
+    def _bank(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCILINK_HOME", str(tmp_path))
+        monkeypatch.setenv("SCILINK_SCRIPT_BANK", "1")
+
+    def _agent(self, tmp_path, runs):
+        from types import SimpleNamespace
+        from scilink.agents.exp_agents.curve_fitting_agent import CurveFittingAgent
+        import scilink.agents.exp_agents._locked_exec as le
+        a = CurveFittingAgent.__new__(CurveFittingAgent)
+        a.output_dir = tmp_path / "run"
+        a.executor = None
+        a.logger = logging.getLogger("t")
+        return a
+
+    def _xy(self, shift=0.0, seed=0):
+        import numpy as np
+        x = np.linspace(0, 100, 2000)
+        y = (5 * np.exp(-(x - 20 - shift) ** 2 / 4) + 3 * np.exp(-(x - 60) ** 2 / 9)
+             + np.random.RandomState(seed).normal(0, 0.05, x.size))
+        return np.vstack([x, y])
+
+    def _audition(self, tmp_path, monkeypatch, born, extra_verbatim=0):
+        import numpy as np
+        from scilink.skills._shared import _script_bank as sb
+        import scilink.agents.exp_agents._locked_exec as le
+        data = self._xy()
+        rid = sb.add_record("curve_fitting", {
+            "working_script": "print('FIT_RESULTS_JSON: {}')",
+            "data_fingerprint": sb.curve_fingerprint(data[0], data[1]),
+            "provenance": {"session": "s1", "profile": born}})["id"]
+        for i in range(extra_verbatim):
+            d = self._xy(shift=0.3 * (i + 1), seed=i + 1)
+            sb.record_success("curve_fitting", rid, session=f"v{i}",
+                              fingerprint=sb.curve_fingerprint(d[0], d[1]))
+        ran = []
+        monkeypatch.setattr(le, "stage_and_run", lambda ex, script, d, work: (
+            ran.append(script) or {"status": "success", "visualization_path": "p.png",
+                                   "stdout": 'FIT_RESULTS_JSON: {"fit_quality": {"r_squared": 0.99}}'}))
+        a = self._agent(tmp_path, ran)
+        a._parse_audition_r2 = lambda stdout: 0.99
+        new = self._xy(shift=0.2, seed=9)
+        return a._bank_cold_start_audition(new, {}, 0.95), ran
+
+    def test_thorough_born_script_is_eligible_at_once(self, tmp_path, monkeypatch):
+        win, ran = self._audition(tmp_path, monkeypatch, born="thorough")
+        assert win is not None and len(ran) == 1
+
+    def test_quick_born_script_is_not_run_unreviewed_on_its_first_reuse(self, tmp_path, monkeypatch):
+        win, ran = self._audition(tmp_path, monkeypatch, born="extract")
+        assert win is None and ran == []
+
+    def test_quick_born_script_earns_it_on_a_second_dataset(self, tmp_path, monkeypatch):
+        win, ran = self._audition(tmp_path, monkeypatch, born="extract", extra_verbatim=1)
+        assert win is not None and len(ran) == 1

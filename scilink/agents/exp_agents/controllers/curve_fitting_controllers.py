@@ -5027,7 +5027,8 @@ Return JSON with:
             # series). The fingerprint distance to the anchor frame sees the
             # data change; both signals are reported, escalation stays the
             # caller's move.
-            if ctx.state.get("_qc_profile") == "realtime":
+            if (ctx.state.get("_qc_profile") == "realtime"
+                    or ctx.state.get("_cold_start_reuse")):
                 self._attach_drift_signal(ctx, reuse_result["reuse_validity"])
             return reuse_result
         self.logger.warning(
@@ -5552,6 +5553,33 @@ Return JSON with:
                     "quality_warning",
                     f"Time budget spent before the fit cleared the quality gate "
                     f"({self._gate_metric_str(ctx.state, ctx.best_result, ctx.best_score)}).")
+            self._stamp_hot_deviation(ctx.best_result)
+            return ctx.best_result
+
+        # --- Reduced-depth profile: iteration cap reached, verifier rejecting ---
+        # The best attempt is returned WITHOUT a judge call, but only when it
+        # clears the deterministic accept gate — otherwise the normal
+        # fallback (judge, best-available handling) still decides. Flagged,
+        # never reported as approved, and the verifier's last issues travel
+        # with it.
+        if (getattr(ctx, "capped", False) and ctx.best_result
+                and self._accept_gate().is_accept(ctx.best_score)):
+            quality_history = self._build_quality_history(
+                ctx.best_score, self.r2_threshold, ctx.all_attempts,
+                ctx.verification_history, None,
+                ctx.best_result.get("script_errors"),
+            )
+            quality_history["approved"] = False
+            quality_history["verifier_rejected"] = True
+            quality_history["stopped_by"] = "iteration_cap"
+            ctx.best_result["quality_history"] = quality_history
+            ctx.best_result.setdefault(
+                "quality_warning",
+                f"Reduced-depth profile: the verifier still had objections when "
+                f"the iteration cap was reached; the best attempt "
+                f"({self._gate_metric_str(ctx.state, ctx.best_result, ctx.best_score)}) "
+                f"clears the quality gate and is returned as-is. Re-run "
+                f"thoroughly before relying on more than the requested quantities.")
             self._stamp_hot_deviation(ctx.best_result)
             return ctx.best_result
 

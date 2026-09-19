@@ -66,6 +66,7 @@ def create_unified_curve_fitting_pipeline(
     load_skills_fn: Callable | None = None,
     profile: Any = None,
     explicit_verification_budget: bool = False,
+    bank_recipe: bool = False,
 ) -> List:
     """
     Factory function to create the unified curve fitting pipeline.
@@ -184,6 +185,45 @@ def create_unified_curve_fitting_pipeline(
             f"(zero-LLM happy path)"
         )
         return realtime_pipeline
+
+    # BANK RECIPE (quick / extract with a verbatim audition winner): the
+    # agent seeded the locked config from the bank record, so skill
+    # selection, planning, plan validation and literature have nothing left
+    # to decide — the series controller's reuse path runs the banked script
+    # under the arithmetic gate, and synthesis follows the profile.
+    if bank_recipe:
+        recipe_pipeline = [
+            AnalyzeDataController(logger, plot_fn),
+            UnifiedSeriesProcessingController(
+                model=model, logger=logger, generation_config=generation_config,
+                safety_settings=safety_settings, parse_fn=parse_fn,
+                executor=executor,
+                script_instructions=FITTING_SCRIPT_INSTRUCTIONS,
+                correction_instructions=FITTING_SCRIPT_CORRECTION_INSTRUCTIONS,
+                quality_instructions=FIT_QUALITY_ASSESSMENT_INSTRUCTIONS,
+                output_dir=output_dir, plot_fn=plot_fn,
+                r2_threshold=r2_threshold, max_model_retries=max_model_retries,
+                enable_human_feedback=enable_human_feedback,
+                outlier_sigma=outlier_sigma,
+                max_verification_iterations=max_verification_iterations,
+                conformance_instructions=None,
+                parallel_workers=parallel_workers, replanner=None,
+            ),
+        ]
+        if qc_profile.synthesis != "none":
+            recipe_pipeline.append(UnifiedCurveSynthesisController(
+                model=model, logger=logger, generation_config=generation_config,
+                safety_settings=safety_settings, parse_fn=parse_fn,
+                single_spectrum_instructions=FITTING_INTERPRETATION_INSTRUCTIONS,
+                output_dir=output_dir))
+        recipe_pipeline += [
+            StoreAnalysisResultsController(logger, store_fn),
+            GenerateCurveFittingReportController(logger, output_dir, r2_threshold=r2_threshold),
+            UnifiedCurveReportController(logger, output_dir),
+        ]
+        logger.info(f"Bank-recipe curve pipeline created: {len(recipe_pipeline)} steps "
+                    f"(profile: {qc_profile.name}; banked script, no planning)")
+        return recipe_pipeline
 
     pipeline = []
 

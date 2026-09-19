@@ -4136,6 +4136,22 @@ Return JSON with:
             ctx.best_result["quality_history"] = quality_history
             self._stamp_hot_deviation(ctx.best_result)
             return ctx.best_result
+        # --- Reduced-depth profile: iteration cap reached (curve twin) ---
+        # Best attempt, flagged, no judge — only when it clears the accept gate.
+        if (getattr(ctx, "capped", False) and ctx.best_result
+                and ctx.accept_gate.is_accept(ctx.best_score)):
+            quality_history = self._build_quality_history(
+                ctx.best_score, ctx.quality_threshold, ctx.all_attempts,
+                ctx.verification_history, ctx.judge_result,
+                ctx.best_result.get("script_errors"),
+            )
+            quality_history["approved"] = False
+            quality_history["verifier_rejected"] = True
+            quality_history["stopped_by"] = "iteration_cap"
+            ctx.best_result["quality_history"] = quality_history
+            self._stamp_hot_deviation(ctx.best_result)
+            return ctx.best_result
+
         # --- Explicit fast-path bypass (#271) ---
         # The initial score is provisional (0.0) when no verification ran,
         # so the accept gate below cannot pass it; return the accepted

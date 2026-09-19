@@ -337,6 +337,11 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # (requires prior_analysis_paths + reuse_locked_script). Accepts a
         # preset name or a QCProfile instance.
         profile: Optional[Any] = None,
+        # The quantities the consumer of this result needs (e.g. ["G-band
+        # position", "D/G ratio"]). Scopes the LLM verifier to them under any
+        # profile — see _qc_profile.verification_addendum. None = judge the
+        # whole analysis (today's behavior).
+        targets: Optional[List[str]] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -512,6 +517,16 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "can be cold-started."
                 )
             realtime_cold_start = True
+        # Bank first under the fit-for-purpose presets (quick / extract): with
+        # no explicit prior run, a banked script that clears the arithmetic
+        # gate on this data IS the recipe — planning, skill selection and
+        # codegen are skipped. Unlike realtime a miss costs nothing: the run
+        # continues at the same depth instead of demoting to thorough.
+        bank_first = False
+        if (qc_profile.name in ("quick", "extract")
+                and not (prior_analysis_paths or reuse_locked_script)):
+            from scilink.skills._shared import _script_bank as _sb
+            bank_first = _sb.bank_enabled()
 
         # Surgical script edits — validated HERE, before any pipeline work:
         # the edits must apply cleanly to the prior run's saved script or the
@@ -790,7 +805,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # this frame — numerics only, zero LLM. No winner → demote to a
         # thorough anchor run (which later frames can go realtime against).
         cold_start_info = None
-        if realtime_cold_start:
+        if realtime_cold_start or bank_first:
             from .controllers.curve_fitting_controllers import _degenerate_data_check
             _degenerate = _degenerate_data_check(processed_first_spectrum)
             if _degenerate:
@@ -806,8 +821,13 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 cold_start_info = self._bank_cold_start_audition(
                     processed_first_spectrum, handled_system_info,
                     effective_r2_threshold,
+                    active_skills=([skill] if isinstance(skill, str) else list(skill or [])),
                 )
-            if cold_start_info is None and not _degenerate:
+            if cold_start_info is None and bank_first:
+                self.logger.info(
+                    f"   🏦 No banked recipe fits this data — continuing at the "
+                    f"'{qc_profile.name}' profile (fresh plan + code).")
+            elif cold_start_info is None and not _degenerate:
                 self.logger.warning(
                     "⚡→🐢 REALTIME cold start: no banked recipe fits this "
                     "data — running a THOROUGH anchor instead; subsequent "
@@ -863,6 +883,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "_qc_profile": qc_profile.name,
             "_synthesis_level": qc_profile.synthesis,
             "_verification_mode": qc_profile.verification,
+            "analysis_targets": [str(x) for x in (targets or []) if str(x).strip()],
             # Wall-clock budget for per-unit re-analysis of flagged spectra
             # in a series (None = unlimited). Worst fits go first; skipped
             # units keep their locked-model result and are listed under
@@ -956,7 +977,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # summary, or — cold start — the winning bank record (its fingerprint
         # is the data the script originally solved, so the drift check reads
         # "how far is this frame from the script's proven territory").
-        if realtime and cold_start_info is not None:
+        if (realtime or bank_first) and cold_start_info is not None:
             rec = cold_start_info["record"]
             outcome = rec.get("outcome") or {}
             state["locked_fitting_config"] = {
@@ -1018,6 +1039,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # beats the preset's.
             profile=qc_profile,
             explicit_verification_budget=max_verification_iterations is not None,
+            bank_recipe=bool(bank_first and cold_start_info is not None),
         )
         
         # Execute pipeline
@@ -1559,7 +1581,8 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     VERBATIM_MIN_SCORE = 0.55
 
     def _bank_cold_start_audition(
-        self, curve_data, system_info, gate_threshold: float
+        self, curve_data, system_info, gate_threshold: float,
+        active_skills: Optional[List[str]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Execute top bank candidates against the first frame; first past
         the arithmetic gate becomes the locked recipe.
@@ -1589,7 +1612,24 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "curve_fitting", fingerprint,
                 _script_bank.measurement_context(system_info or {}),
                 k=self.VERBATIM_AUDITION_K, min_score=self.VERBATIM_MIN_SCORE,
+                active_skills=active_skills,
             )
+            # A script written under a reduced-depth profile was accepted on
+            # a lighter review, so it must earn unreviewed reuse: it becomes
+            # audition-eligible only after solving a second dataset unchanged.
+            # Thorough-born scripts are eligible from their first success.
+            def _eligible(rec):
+                born = ((rec.get("provenance") or {}).get("profile") or "thorough")
+                return (born == "thorough"
+                        or _script_bank.independent_successes(
+                            rec, verbatim_only=True) >= 2)
+            _n = len(candidates)
+            candidates = [c for c in candidates if _eligible(c["record"])]
+            if _n and not candidates:
+                self.logger.info(
+                    "   🏦 Cold start: the matching banked script(s) were produced "
+                    "under a reduced-depth profile and have not yet proven "
+                    "themselves on a second dataset — not run unreviewed.")
             if not candidates:
                 self.logger.info(
                     f"   🏦 Cold start: no banked recipe scores ≥ "
@@ -1695,6 +1735,11 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # not 500 — the graduation signal must stay honest).
         if state.get("_qc_profile") == "realtime":
             return []
+        # Same reasoning for a bank-first quick / extract run: the audition
+        # already recorded this success (with the new data as evidence);
+        # re-banking the identical script would count the run twice.
+        if state.get("_cold_start_reuse"):
+            return []
         from scilink.skills._shared import _script_bank
         if not _script_bank.bank_enabled():
             return []
@@ -1758,6 +1803,10 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                         "parameters_extracted": locked.get("parameters_to_extract"),
                     },
                     "provenance": {"session": self.output_dir.name,
+                                   # Depth the script was produced under: a
+                                   # reduced-depth script has to EARN verbatim
+                                   # reuse (see _bank_cold_start_audition).
+                                   "profile": state.get("_qc_profile") or "thorough",
                                    "item": r.get("name"),
                                    "data_file": os.path.basename(str(state.get("data_path") or ""))
                                    or None},
@@ -1893,6 +1942,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         _profile = state.get("_qc_profile")
         if _profile not in (None, "thorough", "realtime"):
             results["profile"] = _profile
+            if state.get("_cold_start_reuse"):
+                # Bank-first: which banked script served this run, unreviewed.
+                cs = state["_cold_start_reuse"]
+                results["cold_start"] = {k: cs.get(k) for k in
+                                         ("id", "score", "audition_r2",
+                                          "n_auditioned")}
             for r in series_results:
                 if isinstance(r, dict):
                     r.setdefault("quality_history", {})[

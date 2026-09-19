@@ -199,3 +199,46 @@ class TestProfileCarriesTheBudget:
         p = resolve_profile({"base": "quick", "time_budget_s": 120})
         assert p.time_budget_s == 120 and p.name == "quick"
         assert RunBudget(p.time_budget_s).seconds == 120
+
+
+class _RejectingHost(_Host):
+    """A verifier that never approves."""
+    max_verification_iterations = 2
+
+    def qc_check_accept(self, ctx, verification):
+        return False
+
+    def qc_refine(self, ctx, verification):
+        self.calls.append("refine")
+        return {}
+
+    def qc_refit(self, ctx, verification, refine_from, just_escalated_to_hot):
+        self.calls.append("refit")
+        return {"success": True, "fit_quality": {"r_squared": 0.97}, "script": "s2"}
+
+    def qc_after_refit(self, ctx, refit_result, verification):
+        ctx.current_result = refit_result
+
+
+class TestCappedLoopUnderAReducedProfile:
+    """Observed live (an `extract` Raman fit): after verification 2/2 rejected,
+    the loop refined and refitted a third time, which then cost a final verify
+    and a judge — four LLM calls, ~170 s — only for the best fit to be accepted
+    on the deterministic gate anyway."""
+
+    def test_the_last_rejection_does_not_start_another_refit(self):
+        host = _RejectingHost()
+        ctx = _ctx({"_verification_mode": "purpose"})
+        CodegenQCEngine(host, SPEC).run_item(ctx)
+        # two verifies, ONE refine (after the first), no final verify
+        assert host.calls.count("verify") == 2
+        assert host.calls.count("refine") == 1 and host.calls.count("refit") == 1
+        assert "final_verify" not in host.calls
+        assert ctx.capped is True
+
+    def test_strict_verification_keeps_todays_loop(self):
+        host = _RejectingHost()
+        ctx = _ctx({"_verification_mode": "strict"})
+        CodegenQCEngine(host, SPEC).run_item(ctx)
+        assert host.calls.count("refine") == 2 and host.calls.count("refit") == 2
+        assert "final_verify" in host.calls and ctx.capped is False
