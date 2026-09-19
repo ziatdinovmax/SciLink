@@ -727,6 +727,29 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
                 "details": f"Expected str, List[str], or np.ndarray, got {type(data).__name__}"
             }
     
+    def _reject_directory_input(self, data_path):
+        """A folder is not a data file. The orchestrator expands a directory
+        into a file list before it calls an agent; a direct caller that passes
+        one used to cost several LLM calls (the file-normalization stage asks
+        the model for a script that then fails to ``open()`` a directory)
+        before failing anyway. Refuse up front, with the fix in the message.
+        """
+        import os
+        if isinstance(data_path, str) and os.path.isdir(data_path):
+            return {
+                "status": "error",
+                "error": {
+                    "error": "Directory passed as data",
+                    "details": (
+                        f"{data_path} is a directory. Pass the files as a list "
+                        "(e.g. sorted(glob.glob(os.path.join(folder, '*.csv')))) "
+                        "to analyse them as a series; through the orchestrator, "
+                        "run_analysis expands a folder itself."),
+                },
+                "output_directory": str(self.output_dir),
+            }
+        return None
+
     def recommend_measurements(
         self,
         analysis_result: Dict[str, Any] | None = None,

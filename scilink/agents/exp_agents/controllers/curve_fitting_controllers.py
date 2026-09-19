@@ -2166,7 +2166,8 @@ class CurveFittingPlanningController:
         instructions: str,
         output_dir: str,
         enable_human_feedback: bool = False,
-        max_iterations: int = 5
+        max_iterations: int = 5,
+        validate_plan: bool = True,
     ):
         self.model = model
         self.logger = logger
@@ -2177,6 +2178,9 @@ class CurveFittingPlanningController:
         self.output_dir = Path(output_dir)
         self.enable_human_feedback = enable_human_feedback
         self.max_iterations = max_iterations
+        # QCProfile.plan_validation. Off (quick / extract) skips only the
+        # skill-free sanity pass; see _validate_plan.
+        self.validate_plan = validate_plan
 
     def _display_plan(self, state: dict) -> None:
         is_single = state.get("is_single_spectrum", True)
@@ -2398,6 +2402,12 @@ class CurveFittingPlanningController:
         only when skill rules are present (the validation prompt applies the
         "MANDATORY Domain Skill Rules" clause conditionally).
         """
+        # A fit-for-purpose profile skips this LLM call — but never when a
+        # technique skill is loaded: enforcing its MANDATORY rules is the one
+        # job of this pass that the execution stage does not repeat.
+        if not getattr(self, "validate_plan", True) and not _active_skill_names(state):
+            self.logger.info("  Plan validation skipped (profile; no skill rules to enforce).")
+            return state
         from ..instruct import CURVE_FITTING_PLAN_VALIDATION_PROMPT
 
         regime_section = self._build_regime_section(
@@ -4595,6 +4605,9 @@ Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2
             except Exception:
                 pass
         prompt_parts.append("\n\n" + VERIFIER_TOOL_SCRUTINY_PRINCIPLE)
+        from .._qc_profile import verification_addendum
+        if verification_addendum(state):
+            prompt_parts.append(verification_addendum(state))
 
         try:
             response = self.model.generate_content(
@@ -5518,6 +5531,30 @@ Return JSON with:
                     self._log_verification_issues(final_verification)
 
     def qc_post_verification(self, ctx: QCItemContext) -> Optional[dict]:
+        # --- Run time budget spent mid-loop (QCProfile.time_budget_s) ---
+        # The best fit so far is returned as it stands: no final verify, no
+        # judge, no human prompt — the budget is gone. It is NOT approved;
+        # `unverified` is what the series flagging and a later thorough sweep
+        # key on. The deterministic gate still speaks: a best fit below the
+        # accept threshold carries a quality warning.
+        if getattr(ctx, "budget_expired", False) and ctx.best_result:
+            quality_history = self._build_quality_history(
+                ctx.best_score, self.r2_threshold, ctx.all_attempts,
+                ctx.verification_history, None,
+                ctx.best_result.get("script_errors"),
+            )
+            quality_history["approved"] = False
+            quality_history["unverified"] = True
+            quality_history["stopped_by"] = "time_budget"
+            ctx.best_result["quality_history"] = quality_history
+            if not self._accept_gate().is_accept(ctx.best_score):
+                ctx.best_result.setdefault(
+                    "quality_warning",
+                    f"Time budget spent before the fit cleared the quality gate "
+                    f"({self._gate_metric_str(ctx.state, ctx.best_result, ctx.best_score)}).")
+            self._stamp_hot_deviation(ctx.best_result)
+            return ctx.best_result
+
         # --- Verifier-approved fits bypass the R² threshold check ---
         if ctx.approved:
             self.logger.info(f"✅ Verifier approved fit ({self._gate_metric_str(ctx.state, ctx.best_result, ctx.best_score)})")
@@ -6443,9 +6480,16 @@ Return JSON with:
             return fq.get("r_squared")
 
         self._score_fn = _score
+
+        def _unverified(r):
+            # Returned as-is when the run's time budget ran out mid-loop: no
+            # verifier ever passed it, so it neither anchors the series
+            # statistics nor gets scored against them.
+            return bool((r.get("quality_history") or {}).get("unverified"))
+
         r2_values = []
         for r in series_results:
-            if r["success"]:
+            if r["success"] and not _unverified(r):
                 r2 = _score(r)
                 if r2 is not None:
                     r2_values.append(r2)
@@ -6478,6 +6522,18 @@ Return JSON with:
                 continue
 
             r2 = self._score_fn(r)
+            if _unverified(r):
+                flagged.append({
+                    "index": r["index"], "name": r["name"], "reason": "unverified",
+                    "r_squared": float(r2) if r2 is not None else None,
+                    "series_mean": median_r2, "series_std": robust_scale,
+                    "deviation_sigma": None,
+                    "recommendation": ("The time budget ran out before this fit was "
+                                       "verified. The numbers are the best attempt so "
+                                       "far — re-run it under the thorough profile "
+                                       "before relying on them."),
+                })
+                continue
             # A pinned-at-bound fit is flagged regardless of its R² (#592):
             # the gate metric can stay high while the extracted value is
             # wrong, which is exactly how the degeneracy hid before.
@@ -6991,6 +7047,8 @@ Return JSON with:
                 
                 state["flagged_spectra_path"] = str(flagged_report_path)
         
+        from .._qc_profile import stamp_profile
+        stamp_profile(state, series_results)
         state["series_results"] = series_results
         state["flagged_spectra"] = flagged_spectra
 
@@ -8417,6 +8475,9 @@ same trend.
         prompt_parts.append(FITTING_INTERPRETATION_STAGE3)
         if is_id_mode:
             prompt_parts.append(ID_MODE_OUTPUT_ADDENDUM)
+        from .._qc_profile import synthesis_addendum
+        if synthesis_addendum(state):
+            prompt_parts.append(synthesis_addendum(state))
 
         try:
             response = self.model.generate_content(
@@ -8590,6 +8651,9 @@ same trend.
         prompt_parts.append(self.SERIES_STAGE3)
         if is_id_mode:
             prompt_parts.append(ID_MODE_OUTPUT_ADDENDUM)
+        from .._qc_profile import synthesis_addendum
+        if synthesis_addendum(state):
+            prompt_parts.append(synthesis_addendum(state))
 
         try:
             response = self.model.generate_content(contents=prompt_parts, generation_config=self.generation_config, safety_settings=self.safety_settings)

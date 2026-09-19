@@ -1119,6 +1119,7 @@ class ImagePlanningController:
         enable_human_feedback: bool = False,
         max_iterations: int = 5,
         num_plan_candidates: int = 1,
+        validate_plan: bool = True,
     ):
         self.model = model
         self.logger = logger
@@ -1130,6 +1131,8 @@ class ImagePlanningController:
         self.enable_human_feedback = enable_human_feedback
         self.max_iterations = max_iterations
         self.num_plan_candidates = num_plan_candidates
+        # QCProfile.plan_validation (the curve planner's twin).
+        self.validate_plan = validate_plan
 
     def _get_instructions(self, state: dict) -> str:
         """Return planning instructions, using state override if present."""
@@ -1683,6 +1686,11 @@ class ImagePlanningController:
 
     def _validate_plan(self, state: dict) -> dict:
         """Validate the selected plan against the actual images."""
+        # A fit-for-purpose profile skips this multimodal LLM call, except
+        # when a domain skill is loaded (its guidance is what gets checked).
+        if not getattr(self, "validate_plan", True) and not _active_skill_names(state):
+            self.logger.info("  Plan validation skipped (profile; no skill guidance to check).")
+            return state
         from ..instruct import IMAGE_ANALYSIS_PLAN_VALIDATION_PROMPT
 
         is_single = state.get("is_single_image", True)
@@ -3094,6 +3102,9 @@ Return JSON:
             except Exception:
                 pass
         prompt_parts.append("\n\n" + VERIFIER_TOOL_SCRUTINY_PRINCIPLE)
+        from .._qc_profile import verification_addendum
+        if verification_addendum(state):
+            prompt_parts.append(verification_addendum(state))
 
         state["_last_verify_error"] = None
         try:
@@ -4110,6 +4121,21 @@ Return JSON with:
 
     def qc_post_verification(self, ctx: QCItemContext) -> Optional[dict]:
         self._stamp_stalled(ctx)
+        # --- Run time budget spent mid-loop (the curve host's twin) ---
+        # Best result so far, as it stands: not approved, flagged unverified;
+        # no final verify, judge or human prompt once the budget is gone.
+        if getattr(ctx, "budget_expired", False) and ctx.best_result:
+            quality_history = self._build_quality_history(
+                ctx.best_score, ctx.quality_threshold, ctx.all_attempts,
+                ctx.verification_history, ctx.judge_result,
+                ctx.best_result.get("script_errors"),
+            )
+            quality_history["approved"] = False
+            quality_history["unverified"] = True
+            quality_history["stopped_by"] = "time_budget"
+            ctx.best_result["quality_history"] = quality_history
+            self._stamp_hot_deviation(ctx.best_result)
+            return ctx.best_result
         # --- Explicit fast-path bypass (#271) ---
         # The initial score is provisional (0.0) when no verification ran,
         # so the accept gate below cannot pass it; return the accepted
@@ -5864,6 +5890,8 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
 
                 state["flagged_images_path"] = str(flagged_report_path)
 
+        from .._qc_profile import stamp_profile
+        stamp_profile(state, series_results)
         state["series_results"] = series_results
         state["flagged_images"] = flagged_images
 
@@ -7249,6 +7277,9 @@ Return JSON with:
         _append_skill_context(prompt_parts, state, "interpretation")
         _append_prior_knowledge_context(prompt_parts, state)
         _append_subagent_context(prompt_parts, state)
+        from .._qc_profile import synthesis_addendum
+        if synthesis_addendum(state):
+            prompt_parts.append(synthesis_addendum(state))
 
         try:
             response = self.model.generate_content(
@@ -7428,6 +7459,9 @@ Return JSON with:
         _append_skill_context(prompt_parts, state, "interpretation")
         _append_prior_knowledge_context(prompt_parts, state)
         _append_subagent_context(prompt_parts, state)
+        from .._qc_profile import synthesis_addendum
+        if synthesis_addendum(state):
+            prompt_parts.append(synthesis_addendum(state))
 
         try:
             response = self.model.generate_content(

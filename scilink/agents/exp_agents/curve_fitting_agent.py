@@ -583,6 +583,10 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "output_directory": str(self.output_dir)
             }
         
+        _dir_error = self._reject_directory_input(data_path)
+        if _dir_error:
+            return _dir_error
+
         # Normalize to internal variables
         spectrum_path = data_path
         spectrum_paths = data_paths
@@ -822,6 +826,23 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "fingerprint drift check."
             )
 
+        if qc_profile.name not in ("thorough", "realtime"):
+            if not qc_profile.best_of_n_eligible:
+                n_candidates, candidate_escalation = 1, False
+            if max_verification_iterations is None:
+                effective_max_verification = qc_profile.max_verification_iterations
+            _off = [label for label, on in (
+                ("plan validation", qc_profile.plan_validation),
+                ("plan conformance", qc_profile.check_plan_conformance),
+                ("literature", qc_profile.literature),
+                ("adaptive refit", qc_profile.adaptive_refit),
+                ("trend", qc_profile.trend),
+                ("synthesis", qc_profile.synthesis != "none")) if not on]
+            self.logger.info(
+                f"⚡ {qc_profile.name.upper()} profile: up to "
+                f"{effective_max_verification} verification pass(es); skipped: "
+                f"{', '.join(_off) or 'nothing'}. Deterministic gates are unchanged.")
+
         # Build initial state
         state = {
             # Input data
@@ -840,6 +861,8 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # Operating profile name ("thorough" | "realtime") — controllers
             # gate realtime-only behavior (drift check, bank suppression) on it.
             "_qc_profile": qc_profile.name,
+            "_synthesis_level": qc_profile.synthesis,
+            "_verification_mode": qc_profile.verification,
             # Wall-clock budget for per-unit re-analysis of flagged spectra
             # in a series (None = unlimited). Worst fits go first; skipped
             # units keep their locked-model result and are listed under
@@ -990,18 +1013,27 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             max_verification_iterations=effective_max_verification,
             parallel_workers=self.parallel_workers,
             load_skills_fn=self._load_skills_to_state,
-            profile=qc_profile.name,
+            # The whole profile, not its name: a caller may have overridden
+            # fields on a preset. An explicit per-call iteration budget still
+            # beats the preset's.
+            profile=qc_profile,
+            explicit_verification_budget=max_verification_iterations is not None,
         )
         
         # Execute pipeline
-        from ._stage_timing import StageTimer
+        from ._stage_timing import RunBudget, StageTimer
         stage_timer = StageTimer()
+        # Soft run budget (QCProfile.time_budget_s): the deadline rides in the
+        # state so the QC engine can honour it mid-loop.
+        run_budget = RunBudget(qc_profile.time_budget_s)
+        run_budget.stamp(state)
         for i, controller in enumerate(pipeline, 1):
             step_name = controller.__class__.__name__
             self.logger.info(f"\n📍 STEP {i}: {step_name}\n")
             
             try:
-                state = stage_timer.run(controller, state)
+                state = stage_timer.run_within_budget(
+                    controller, state, run_budget, logger=self.logger)
                 
                 if state.get("error_dict"):
                     self.logger.error(f"Pipeline failed at {step_name}: {state['error_dict']}")
@@ -1059,6 +1091,18 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     if isinstance(r, dict) and r.get("bank_assist")]
         if _assists:
             final_results["bank_assist"] = _assists
+
+        # What the time budget did, if there was one.
+        if run_budget.seconds:
+            _unverified = [r.get("name") for r in state.get("series_results", []) or []
+                           if isinstance(r, dict)
+                           and (r.get("quality_history") or {}).get("unverified")]
+            final_results["time_budget"] = {
+                "seconds": run_budget.seconds,
+                "expired": run_budget.expired,
+                "skipped_stages": state.get("_budget_skipped") or [],
+                "unverified_items": _unverified,
+            }
 
         # Where the time went, per pipeline stage (wall-clock + LLM calls).
         final_results["stage_timings"] = stage_timer.summary()
@@ -1839,6 +1883,37 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     f"{rv.get('fingerprint_similarity', 'n/a')}). "
                     f"Interpretation is deferred to the post-experiment sweep."
                 )
+
+        # Fit-for-purpose provenance: a result produced under a reduced-depth
+        # profile says so, on the result and on every item, so a later sweep
+        # can pick those items for a thorough pass ("cheap now, rigorous
+        # later"). Without a synthesis stage (extract) the result is its
+        # numbers; say that in one deterministic line rather than leave the
+        # narrative field empty.
+        _profile = state.get("_qc_profile")
+        if _profile not in (None, "thorough", "realtime"):
+            results["profile"] = _profile
+            for r in series_results:
+                if isinstance(r, dict):
+                    r.setdefault("quality_history", {})[
+                        "produced_under_profile"] = _profile
+        # The narrative field is never left empty: when synthesis did not run
+        # BY DESIGN — the profile asked for none, or the time budget was spent
+        # before it — one deterministic line says so.
+        _budget_cut = any("Synthesis" in s for s in state.get("_budget_skipped") or [])
+        if ((_profile not in (None, "thorough", "realtime") or _budget_cut)
+                and not synthesis.get("detailed_analysis") and series_results):
+            ok = [r for r in series_results if isinstance(r, dict) and r.get("success")]
+            r2s = [(r.get("fit_quality") or {}).get("r_squared") for r in ok]
+            r2s = [v for v in r2s if isinstance(v, (int, float))]
+            synthesis = dict(synthesis)
+            synthesis["detailed_analysis"] = (
+                f"{len(ok)}/{len(series_results)} item(s) fitted"
+                + (f", R² {min(r2s):.4f}–{max(r2s):.4f}" if r2s else "") + ". "
+                + ("The time budget was spent before the narrative synthesis"
+                   if _budget_cut else
+                   f"No narrative synthesis was requested (profile '{_profile}')")
+                + " — the result is the fitted parameters.")
 
         # In identification mode, surface the ranked candidate list if the
         # synthesis produced one. Additive/optional field — callers that don't

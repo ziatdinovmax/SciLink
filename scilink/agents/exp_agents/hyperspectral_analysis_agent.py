@@ -397,13 +397,33 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "used by the hyperspectral agent yet — ignoring. Pass "
                 "reuse_locked_script=True for a locked replay.")
 
-        from ._qc_profile import resolve_profile
-        if resolve_profile(profile).name == "realtime":
+        # Operating profile. The fit-for-purpose presets (quick / extract)
+        # are honoured: a smaller codegen retry budget, a lighter (or no)
+        # synthesis, and for a series no refits / no trend script. 'realtime'
+        # is not wired for cubes (per-frame cost is numerics-dominated) and
+        # falls back to thorough.
+        from ._qc_profile import THOROUGH, resolve_profile
+        qc_profile = resolve_profile(profile)
+        if qc_profile.name == "realtime":
             self.logger.warning(
                 "profile='realtime' is not wired for hyperspectral analysis "
                 "yet (per-frame cost is numerics-dominated); running under "
                 "the thorough profile."
             )
+            qc_profile = THOROUGH
+        # Per-call, never sticky: the agent instance may be reused.
+        self._qc_profile = qc_profile
+        if qc_profile.name != "thorough":
+            if max_verification_iterations is None:
+                effective_max_verification = qc_profile.max_verification_iterations
+            if max_series_refits is None and not qc_profile.adaptive_refit:
+                max_series_refits = 0
+            self.logger.info(
+                f"⚡ {qc_profile.name.upper()} profile: codegen retry budget "
+                f"{effective_max_verification}, synthesis={qc_profile.synthesis}"
+                + ("" if qc_profile.adaptive_refit else ", no series refits")
+                + ("" if qc_profile.trend else ", no trend script")
+                + ". Deterministic gates are unchanged.")
 
         # Parse input
         data_path, data_paths, data_array, error = self._parse_data_input(data)
@@ -585,6 +605,11 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             response["dynamic_analysis_records"] = result_json["dynamic_analysis_records"]
         if result_json.get("stage_timings"):
             response["stage_timings"] = result_json["stage_timings"]
+        if result_json.get("time_budget"):
+            response["time_budget"] = result_json["time_budget"]
+        if getattr(self, "_qc_profile", None) is not None \
+                and self._qc_profile.name != "thorough":
+            response["profile"] = self._qc_profile.name
         if reuse_records:
             _new_recs = result_json.get("dynamic_analysis_records") or []
             _supplied = {r.get("script") for r in reuse_records}
@@ -693,15 +718,33 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
     _LIGHT_SYNTHESIS_SKIP = ("RunSelfReflectionController", "ApplyReflectionUpdatesController")
 
-    def _synthesis_controllers(self) -> list:
-        """The synthesis pipeline — without the critic/editor pair for a
-        series replay child (``_light_synthesis``): the series-level
-        synthesis interprets the series; a replay's own narrative only needs
-        the draft interpretation and the report."""
-        if getattr(self, "_light_synthesis", False):
-            return [c for c in self.synthesis_pipeline
-                    if c.__class__.__name__ not in self._LIGHT_SYNTHESIS_SKIP]
-        return list(self.synthesis_pipeline)
+    # synthesis="none": no holistic re-interpretation either — the iteration's
+    # own interpretation is carried forward, so report + store still run.
+    _NO_SYNTHESIS_SKIP = _LIGHT_SYNTHESIS_SKIP + (
+        "BuildHolisticSynthesisPromptController", "RunFinalInterpretationController")
+
+    def _synthesis_level(self) -> str:
+        """``full`` | ``light`` | ``none`` for this run: the active profile's
+        level, with a series replay child never above ``light``."""
+        level = getattr(getattr(self, "_qc_profile", None), "synthesis", "full")
+        if level == "full" and getattr(self, "_light_synthesis", False):
+            level = "light"
+        return level
+
+    def _synthesis_controllers(self, level: str | None = None) -> list:
+        """The synthesis pipeline at the run's synthesis level (or an explicit
+        ``level`` — a run whose time budget is already spent synthesizes at
+        ``none`` whatever its profile asked for).
+
+        ``light`` drops the critic/editor pair — a series replay child
+        (``_light_synthesis``) or a ``quick`` run: the draft interpretation
+        and the report are enough. ``none`` (``extract``) also drops the
+        holistic interpretation; see ``_NO_SYNTHESIS_SKIP``."""
+        level = level or self._synthesis_level()
+        skip = {"light": self._LIGHT_SYNTHESIS_SKIP,
+                "none": self._NO_SYNTHESIS_SKIP}.get(level, ())
+        return [c for c in self.synthesis_pipeline
+                if c.__class__.__name__ not in skip]
 
     def _write_results_file(self, response: dict) -> str | None:
         """Persist a compact ``analysis_results.json`` with a FLAT
@@ -954,6 +997,12 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             max_verification_iterations=max_verification_iterations,
             reference_scripts=reference_scripts,
         )
+        # Depth travels to every per-dataset child (as plain data — replay
+        # specs cross a process boundary): a quick series is quick throughout.
+        _prof = getattr(self, "_qc_profile", None)
+        if _prof is not None and _prof.name != "thorough":
+            from dataclasses import asdict
+            common["profile"] = asdict(_prof)
 
         def _join_hints(*parts):
             parts = [p for p in parts if p]
@@ -1217,7 +1266,14 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         # ---- Trend codegen over the series JSON ------------------------------
         n_ok = sum(1 for r in rows if r["success"])
-        if n_ok >= 2:
+        _prof = getattr(self, "_qc_profile", None)
+        _trend_on = getattr(_prof, "trend", True)
+        _series_synth_on = getattr(_prof, "synthesis", "full") != "none"
+        if not _trend_on:
+            state["trend_analysis_results"] = {
+                "success": True, "skipped": True,
+                "reason": f"profile '{_prof.name}' — no trend script"}
+        elif n_ok >= 2:
             try:
                 trend = _series.HyperspectralSeriesTrendController(
                     self.model, self.logger, self.generation_config,
@@ -1235,7 +1291,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         # ---- Series synthesis + report ---------------------------------------
         synth = {}
-        if n_ok:
+        if n_ok and _series_synth_on:
             with series_timer.stage("series:Synthesis"):
                 synth = _series.synthesize_series(
                     self.model, self.generation_config, self.safety_settings,
@@ -2170,8 +2226,14 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 **auxiliary_state,
             }
 
-            from ._stage_timing import StageTimer
+            from ._stage_timing import RunBudget, StageTimer
             stage_timer = StageTimer()
+            # Soft run budget (QCProfile.time_budget_s). The deadline rides in
+            # the state, where the shared QC engine reads it; no iteration
+            # stage is deferrable (each feeds the next).
+            run_budget = RunBudget(getattr(getattr(self, "_qc_profile", None),
+                                           "time_budget_s", None))
+            run_budget.stamp(iteration_state)
             for controller in self.iteration_pipeline:
                 iteration_state = stage_timer.run(controller, iteration_state)
                 if iteration_state.get("error_dict"):
@@ -2190,6 +2252,12 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
             # Run synthesis
             self.logger.info(f"\n=== Synthesizing {len(all_completed_results)} analyses ===\n")
+            _synth_level = self._synthesis_level()
+            if run_budget.expired and _synth_level != "none":
+                self.logger.warning(
+                    f"⏱️  Time budget ({int(run_budget.seconds)}s) spent — skipping the "
+                    "holistic synthesis; the iteration's interpretation stands.")
+                _synth_level = "none"
             
             synthesis_state = {
                 "all_iteration_results": all_completed_results,
@@ -2200,7 +2268,11 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "reference_scripts": _load_reference_scripts(reference_scripts),
                 "prior_knowledge": prior_knowledge or [],
                 "literature_context": literature_context,
-                "result_json": None,
+                # synthesis="none" (or a spent time budget): the iteration's
+                # interpretation IS the result; otherwise the holistic
+                # interpretation fills this.
+                "result_json": (iteration_state.get("result_json")
+                                if _synth_level == "none" else None),
                 # Carry the iteration pipeline's failure forward so the caller
                 # sees the ORIGINAL error (e.g. the decomposition exception),
                 # not the derivative "No iteration results found for
@@ -2211,7 +2283,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 **auxiliary_state
             }
 
-            for controller in self._synthesis_controllers():
+            for controller in self._synthesis_controllers(_synth_level):
                 synthesis_state = stage_timer.run(
                     controller, synthesis_state,
                     name=f"synthesis:{controller.__class__.__name__}")
@@ -2229,6 +2301,9 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             if _rj is not None:
                 # Where the time went, per pipeline stage (wall-clock + LLM).
                 _rj["stage_timings"] = stage_timer.summary()
+                if run_budget.seconds:
+                    _rj["time_budget"] = {"seconds": run_budget.seconds,
+                                          "expired": run_budget.expired}
             _notes = iteration_state.get("degradation_notes", [])
             if _rj is not None and _notes:
                 _rj["degradation_notes"] = _notes

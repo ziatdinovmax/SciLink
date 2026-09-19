@@ -64,7 +64,8 @@ def create_unified_curve_fitting_pipeline(
     max_verification_iterations: int = 7,
     parallel_workers: int | None = None,
     load_skills_fn: Callable | None = None,
-    profile: str | None = None,
+    profile: Any = None,
+    explicit_verification_budget: bool = False,
 ) -> List:
     """
     Factory function to create the unified curve fitting pipeline.
@@ -142,7 +143,14 @@ def create_unified_curve_fitting_pipeline(
     # arithmetic gate (verification is bypassed via
     # max_verification_iterations=0). Zero LLM calls on the happy path; the
     # fallback (prior script cannot execute) costs a single generation.
-    if profile == "realtime":
+    from .._qc_profile import resolve_profile
+    qc_profile = resolve_profile(profile)
+    # The caller's explicit iteration budget wins over the preset's; without
+    # one, a non-default profile brings its own.
+    if qc_profile.name != "thorough" and not explicit_verification_budget:
+        max_verification_iterations = qc_profile.max_verification_iterations
+
+    if qc_profile.name == "realtime":
         realtime_pipeline = [
             AnalyzeDataController(logger, plot_fn),
             UnifiedSeriesProcessingController(
@@ -216,18 +224,20 @@ def create_unified_curve_fitting_pipeline(
         instructions=CURVE_ANALYSIS_INSTRUCTIONS,
         output_dir=output_dir,
         enable_human_feedback=enable_human_feedback,
-        max_iterations=5
+        max_iterations=5,
+        validate_plan=qc_profile.plan_validation,
     )
     pipeline.append(planning_controller)
 
     # Step 3: Literature search (runs once, uses first spectrum context)
-    pipeline.append(
-        LiteratureSearchController(
-            logger=logger,
-            literature_agent=literature_agent,
-            output_dir=output_dir
+    if qc_profile.literature:
+        pipeline.append(
+            LiteratureSearchController(
+                logger=logger,
+                literature_agent=literature_agent,
+                output_dir=output_dir
+            )
         )
-    )
 
     # Step 4: Unified series processing with quality control
     pipeline.append(
@@ -248,7 +258,8 @@ def create_unified_curve_fitting_pipeline(
             enable_human_feedback=enable_human_feedback,
             outlier_sigma=outlier_sigma,
             max_verification_iterations=max_verification_iterations,
-            conformance_instructions=PLAN_CONFORMANCE_CHECK_INSTRUCTIONS,
+            conformance_instructions=(PLAN_CONFORMANCE_CHECK_INSTRUCTIONS
+                                      if qc_profile.check_plan_conformance else None),
             parallel_workers=parallel_workers,
             # Lets each best-of-N fan-out candidate (>=1) plan its own
             # independent fitting approach instead of sharing the locked plan.
@@ -257,7 +268,8 @@ def create_unified_curve_fitting_pipeline(
     )
 
     # Step 5: Adaptive refit of flagged spectra (post-processing recovery)
-    pipeline.append(
+    if qc_profile.adaptive_refit:
+      pipeline.append(
         AdaptiveRefitController(
             model=model,
             logger=logger,
@@ -279,7 +291,8 @@ def create_unified_curve_fitting_pipeline(
     )
 
     # Step 6: Conditional trend analysis (only for n>=2)
-    pipeline.append(
+    if qc_profile.trend:
+      pipeline.append(
         ConditionalTrendAnalysisController(
             model=model,
             logger=logger,
@@ -292,8 +305,10 @@ def create_unified_curve_fitting_pipeline(
         )
     )
 
-    # Step 7: Synthesis (adapts to single vs series)
-    pipeline.append(
+    # Step 7: Synthesis (adapts to single vs series). A single LLM call for
+    # curves, so "light" == "full"; "none" leaves the result as its numbers.
+    if qc_profile.synthesis != "none":
+      pipeline.append(
         UnifiedCurveSynthesisController(
             model=model,
             logger=logger,
@@ -320,7 +335,8 @@ def create_unified_curve_fitting_pipeline(
         UnifiedCurveReportController(logger, output_dir)
     )
 
-    logger.info(f"Unified curve fitting pipeline created: {len(pipeline)} steps")
+    logger.info(f"Unified curve fitting pipeline created: {len(pipeline)} steps"
+                + (f" (profile: {qc_profile.name})" if qc_profile.name != "thorough" else ""))
     logger.info(f"  Quality settings: R² threshold={r2_threshold}, max_retries={max_model_retries}, outlier_sigma={outlier_sigma}")
     logger.info(f"  Verification iterations: {max_verification_iterations}")
     

@@ -2581,6 +2581,7 @@ class AnalysisOrchestratorTools:
             reuse_locked_script: bool = False,
             script_edits: List[dict] = None,
             profile: str = None,
+            time_budget_s: float = None,
             literature_file: str = None,
             reference_scripts: List[str] = None,
             r2_threshold: float = None,
@@ -3251,13 +3252,18 @@ class AnalysisOrchestratorTools:
                                 "script, currently supported for curve "
                                 "fitting and image analysis. Re-run "
                                 "without script_edits.")})
-                if profile:
+                if profile or time_budget_s:
                     # Operating profile (#346): forward only to agents whose
                     # analyze() accepts it (all three do; introspection keeps
-                    # this robust for custom agents).
+                    # this robust for custom agents). A time budget is a
+                    # field of the profile, so it travels as an override on
+                    # whichever preset was chosen (thorough when none was).
                     import inspect as _inspect
                     if "profile" in _inspect.signature(agent.analyze).parameters:
-                        analyze_kwargs["profile"] = profile
+                        analyze_kwargs["profile"] = (
+                            {"base": profile or "thorough",
+                             "time_budget_s": float(time_budget_s)}
+                            if time_budget_s else profile)
                 if literature_file:
                     analyze_kwargs["literature_file"] = literature_file
                 if r2_threshold is not None:
@@ -3777,10 +3783,23 @@ class AnalysisOrchestratorTools:
                 },
                 "profile": {
                     "type": "string",
-                    "enum": ["thorough", "realtime"],
+                    "enum": ["thorough", "quick", "extract", "realtime"],
                     "description": (
-                        "Operating profile. Omit (or 'thorough') for the normal "
-                        "full-quality analysis. 'realtime' is the per-frame "
+                        "Analysis depth — choose it by who consumes the result, "
+                        "not by how interesting the data looks. Omit (or "
+                        "'thorough') for a result that will be interpreted or "
+                        "reported: the full verification loop, refits, trend and "
+                        "synthesis. 'quick' is a fast look for a person: a "
+                        "couple of verification passes, no literature, refits or "
+                        "trend script, and a short interpretation. 'extract' is "
+                        "numbers for a machine — an optimizer objective, a "
+                        "feature table, a screening pass: 'quick' with no "
+                        "narrative at all. Both keep every deterministic quality "
+                        "gate, mark the result with `profile` so it can be "
+                        "re-run thoroughly later, and work for curves, images "
+                        "and datacubes. Use them when the user asks for a quick "
+                        "/ rough / first look or the numbers feed another step. "
+                        "'realtime' is the per-frame "
                         "in-situ mode for curve data: it executes the locked "
                         "script from `prior_analysis_paths` with ZERO LLM calls "
                         "— requires `prior_analysis_paths` + "
@@ -3794,6 +3813,20 @@ class AnalysisOrchestratorTools:
                         "re-analysis of such frames. Use for high-cadence "
                         "measurement streams; interpretation is deferred to a "
                         "post-experiment sweep."
+                    )
+                },
+                "time_budget_s": {
+                    "type": "number",
+                    "description": (
+                        "Soft wall-clock budget for this analysis, in seconds. "
+                        "Use it when the caller has a deadline (an instrument "
+                        "waiting, a user who asked for an answer within a "
+                        "time). Once it is spent, optional stages are skipped "
+                        "and the quality loop returns its best result so far "
+                        "marked `unverified` — a result always comes back, and "
+                        "`time_budget` in it says what was cut. Soft: a call or "
+                        "script already running is not interrupted. Combines "
+                        "with any `profile`."
                     )
                 },
                 "literature_file": {

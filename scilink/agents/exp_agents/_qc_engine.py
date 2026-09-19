@@ -350,6 +350,9 @@ class QCItemContext:
         # Anchor = first item overall OR first in a regime; gets full QC
         self.is_anchor = item_idx == 0 or is_regime_anchor
 
+        # Set by the engine when the run's time budget ran out mid-loop.
+        self.budget_expired: bool = False
+
         self.all_attempts: list = []
         self.verification_history: list = []
         self.best_result: Optional[dict] = None
@@ -460,10 +463,23 @@ class CodegenQCEngine:
         import time as _time
         _budget = getattr(host, "qc_time_budget_s", None)
         _loop_t0 = _time.monotonic()
+        # The RUN's deadline (QCProfile.time_budget_s, stamped into the state
+        # by the agent) is separate from the host's own loop budget above and
+        # stricter about what it spends once it is gone: no final verify, no
+        # judge — the best result so far is returned as-is, and the host
+        # marks it unverified (ctx.budget_expired).
+        _run_deadline = (ctx.state or {}).get("_run_deadline")
 
         max_iters = host.max_verification_iterations
         for verification_iter in range(max_iters):
             ctx.iteration = verification_iter
+            if _run_deadline is not None and _time.monotonic() >= _run_deadline:
+                logger.warning(
+                    f"   ⏱️  Run time budget spent after {verification_iter} "
+                    "verification iteration(s) — returning the best result "
+                    "so far, unverified (no further LLM calls).")
+                ctx.budget_expired = True
+                return
             if _budget and _time.monotonic() - _loop_t0 > _budget:
                 logger.warning(
                     f"   Verification loop wall-clock budget exceeded "

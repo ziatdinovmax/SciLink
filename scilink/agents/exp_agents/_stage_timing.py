@@ -39,6 +39,78 @@ def _counters() -> Dict[str, float]:
         return {}
 
 
+RUN_DEADLINE_KEY = "_run_deadline"
+
+# Stages a run can do without once its time is up. Everything that produces
+# the result (data loading, planning, the QC-loop processing stage) or
+# persists it (store, report) is absent on purpose: a budget may shorten a
+# run, never leave it without a result on disk.
+_DEFERRABLE = ("LiteratureSearch", "AdaptiveRefit", "Trend", "Synthesis",
+               "SelfReflection", "ReflectionUpdates", "FinalInterpretation",
+               "Tier2", "tier2:")
+_NEVER_DEFERRED = ("Store", "Report", "Processing", "DynamicAnalysis")
+
+
+def is_deferrable(stage_name: str) -> bool:
+    """Whether a stage may be skipped after the run's deadline.
+
+    Hyperspectral synthesis stages arrive prefixed (``synthesis:<Controller>``);
+    its report / store stages stay essential, and so does the iteration
+    pipeline's own interpretation (unprefixed), which the result is built on.
+    """
+    if any(k in stage_name for k in _NEVER_DEFERRED) and not stage_name.startswith("tier2:"):
+        return False
+    if stage_name.startswith("tier2:") or stage_name.startswith("synthesis:"):
+        return not any(k in stage_name for k in ("Store", "Report"))
+    if "FinalInterpretation" in stage_name:
+        return False
+    return any(k in stage_name for k in _DEFERRABLE)
+
+
+class RunBudget:
+    """A soft wall-clock budget for one analysis run.
+
+    Soft: nothing in flight is interrupted — an LLM call or a script that has
+    started will finish — so a run overshoots by at most one call plus one
+    execution. What the budget controls is what STARTS after the deadline:
+    optional pipeline stages are skipped, and the QC loop stops refining and
+    returns its best result so far, flagged ``unverified``.
+
+    The deadline travels in the run state (``state["_run_deadline"]``, a
+    ``time.monotonic()`` value) so the QC engine, which only sees the state,
+    can honour it without a new parameter on every hook.
+    """
+
+    def __init__(self, seconds: Optional[float], *, _deadline: Optional[float] = None):
+        self.seconds = float(seconds) if seconds else None
+        if _deadline is not None:
+            self.deadline: Optional[float] = _deadline
+        else:
+            self.deadline = (time.monotonic() + self.seconds) if self.seconds else None
+
+    @property
+    def remaining(self) -> Optional[float]:
+        if self.deadline is None:
+            return None
+        return max(0.0, self.deadline - time.monotonic())
+
+    @property
+    def expired(self) -> bool:
+        return self.deadline is not None and time.monotonic() >= self.deadline
+
+    def stamp(self, state: dict) -> None:
+        if self.deadline is not None:
+            state[RUN_DEADLINE_KEY] = self.deadline
+            state["_run_budget_s"] = self.seconds
+
+    @classmethod
+    def from_state(cls, state: Optional[dict]) -> "RunBudget":
+        deadline = (state or {}).get(RUN_DEADLINE_KEY)
+        if deadline is None:
+            return cls(None)
+        return cls((state or {}).get("_run_budget_s") or 1.0, _deadline=float(deadline))
+
+
 class StageTimer:
     """Collects one record per executed pipeline stage."""
 
@@ -95,6 +167,27 @@ class StageTimer:
         """``controller.execute(state)`` under a stage named after its class."""
         with self.stage(name or controller.__class__.__name__, **extra):
             return controller.execute(state)
+
+    def run_within_budget(self, controller: Any, state: dict,
+                          budget: Optional["RunBudget"], *,
+                          name: Optional[str] = None, logger: Any = None,
+                          **extra: Any) -> dict:
+        """:meth:`run`, unless the run's deadline has passed and the stage is
+        one a run can do without (:func:`is_deferrable`) — then the stage is
+        recorded as ``skipped_budget`` and the state is returned untouched."""
+        stage_name = name or controller.__class__.__name__
+        if budget is not None and budget.expired and is_deferrable(stage_name):
+            self.records.append({
+                "stage": stage_name, "seconds": 0, "llm_calls": 0,
+                "llm_seconds": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                "status": "skipped_budget", **extra})
+            state.setdefault("_budget_skipped", []).append(stage_name)
+            if logger is not None:
+                logger.warning(
+                    f"⏱️  Time budget ({int(budget.seconds or 0)}s) spent — "
+                    f"skipping {stage_name}.")
+            return state
+        return self.run(controller, state, name=stage_name, **extra)
 
     def summary(self) -> Dict[str, Any]:
         """The persisted shape: per-stage records, per-name totals, run totals.
