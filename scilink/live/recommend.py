@@ -166,6 +166,11 @@ def finalize(raw: Any, schema: Optional[InstrumentSchema], *, source: str,
     kind = "protocol" if raw.get("protocol") and not raw.get("params") else "params"
     problems: List[str] = list(raw.get("problems") or [])
     params = raw.get("params")
+    # "Change nothing" is an answer, not a failure: no parameters, a reason, and
+    # no problem reported by the recommender itself. (Observed live: an AFM
+    # recommender that judged precision already met was logged as refused.)
+    if kind == "params" and not params and not problems and str(raw.get("rationale") or "").strip():
+        kind, params = "hold", {}
     if kind == "params":
         problems += (schema.validate(params) if schema is not None
                      else ([] if isinstance(params, dict) and params
@@ -179,8 +184,10 @@ def finalize(raw: Any, schema: Optional[InstrumentSchema], *, source: str,
         "source": source, "based_on_step": based_on_step,
         "valid": valid, "problems": problems,
         # A protocol is never auto-applied; parameters only in a closed loop.
-        "requires_approval": (kind == "protocol") or not closed_loop or not valid,
+        # Holding the current settings asks nothing of anyone.
+        "requires_approval": kind != "hold" and ((kind == "protocol") or not closed_loop or not valid),
         **({"rejected_params": params} if (not valid and params) else {}),
+        **({"acquisition_skill": raw["acquisition_skill"]} if raw.get("acquisition_skill") else {}),
     }
 
 
@@ -343,7 +350,7 @@ LLM_RECOMMENDER_PROMPT = """You are choosing the next measurement for a running 
 
 ## The experiment
 {context}
-
+{guidance}
 ## Acquisition parameters you may set (the instrument controller's interface)
 {schema}
 
@@ -352,12 +359,18 @@ LLM_RECOMMENDER_PROMPT = """You are choosing the next measurement for a running 
 (A flag after a frame is the analysis loop's own quality signal for it, e.g. the
 fit was below its acceptance gate or the data looked unlike the reference.)
 
+## What you recommended earlier in this run
+{decisions}
+Do not reverse an earlier decision unless the frames since then give a reason
+the earlier ones did not.
+
 Reason from the numbers above. Respond with ONE JSON object and nothing else:
 {output_contract}"""
 
 _PARAMS_CONTRACT = ('{"params": {"<parameter name>": <value>, ...}, "rationale": "<one or two sentences>"}\n'
                     "Use only the parameter names listed, with values inside their ranges. "
-                    "Set only what should change.")
+                    "Set only what should change; when nothing should, return an empty "
+                    '"params" object and say why.')
 _PROTOCOL_CONTRACT = ('{"protocol": "<the revised acquisition protocol, as text or code>", '
                       '"rationale": "<one or two sentences>"}\n'
                       "The protocol is handed to a person for review; it is not executed automatically.")
@@ -380,7 +393,7 @@ class LLMRecommender(Recommender):
     def __init__(self, model: Any, schema: InstrumentSchema, objective: str, *,
                  output: str = "params", every: int = 5, max_history: int = 25,
                  feature_keys: Optional[List[str]] = None,
-                 context: Any = None,
+                 context: Any = None, skill: Optional[str] = "auto",
                  generation_config: Any = None) -> None:
         super().__init__()
         #: What is being measured and what is being done to the sample — a dict
@@ -388,6 +401,17 @@ class LLMRecommender(Recommender):
         #: with its own ``system_info``: without it a model cannot tell a sample
         #: that is evolving on purpose from an artefact of its own settings.
         self.context = context
+        #: Acquisition skill (``skills/acquisition/<name>``): technique knowledge
+        #: about steering — what each knob buys and costs, damage limits, how to
+        #: read the stream. ``"auto"`` picks the one matching the experiment on
+        #: the first ``suggest()`` (one extra model call, on the slow clock);
+        #: a name is authoritative; ``None`` turns it off.
+        self.skill = skill
+        self._guidance: Optional[str] = None
+        #: The recommender's own earlier answers, shown back to it. Observed
+        #: live (in-situ Raman): without them it shortened the integration,
+        #: restored it, and shortened it again — each call reasonable alone.
+        self.decisions: List[Dict[str, Any]] = []
         if output not in ("params", "protocol"):
             raise ValueError("output must be 'params' or 'protocol'")
         self.model, self.schema, self.objective = model, schema, objective
@@ -416,27 +440,54 @@ class LLMRecommender(Recommender):
             return "\n".join(f"- {k}: {v}" for k, v in c.items())
         return str(c)
 
+    def _resolve_guidance(self) -> str:
+        """Once per recommender: select (if ``auto``) and render the skill."""
+        if self._guidance is None:
+            from .acquisition_skills import render_guidance, select_acquisition_skill
+            if self.skill == "auto":
+                self.skill = select_acquisition_skill(self.model, self.context, self.schema)
+            self._guidance = render_guidance(self.skill) if self.skill else ""
+        return self._guidance
+
+    def _decisions_text(self, keep: int = 6) -> str:
+        if not self.decisions:
+            return "(nothing yet — this is your first recommendation)"
+        return "\n".join(
+            f"after step {d['after_step']}: "
+            + (json.dumps(d["params"]) if d.get("params") else "no change")
+            + f" — {d['rationale']}" for d in self.decisions[-keep:])
+
     def build_prompt(self) -> str:
+        guidance = self._guidance or ""
+        if guidance:
+            guidance = (f"\n## How to steer this kind of measurement (the `{self.skill}` "
+                        f"acquisition skill)\n{guidance}\n")
         return LLM_RECOMMENDER_PROMPT.format(
-            objective=self.objective, context=self._context_text(),
+            objective=self.objective, context=self._context_text(), guidance=guidance,
             schema=self.schema.describe(),
-            history=self._history_table(),
+            history=self._history_table(), decisions=self._decisions_text(),
             output_contract=_PARAMS_CONTRACT if self.output == "params" else _PROTOCOL_CONTRACT)
 
     def suggest(self) -> Dict[str, Any]:
         from ..skills._shared._graduation import parse_json_response
         kwargs = ({"generation_config": self.generation_config}
                   if self.generation_config is not None else {})
+        self._resolve_guidance()
         raw = self.model.generate_content(self.build_prompt(), **kwargs)
         text = raw.text if hasattr(raw, "text") else str(raw)
+        used = {"acquisition_skill": self.skill} if self._guidance else {}
         try:
             parsed = parse_json_response(text)
         except ValueError:
             return {"params": None, "problems": ["the model did not return JSON"],
-                    "rationale": text[:200]}
+                    "rationale": text[:200], **used}
         if not isinstance(parsed, dict):
-            return {"params": None, "problems": ["the model did not return a JSON object"]}
-        return parsed
+            return {"params": None, "problems": ["the model did not return a JSON object"], **used}
+        self.decisions.append({
+            "after_step": self.history[-1]["step"] if self.history else 0,
+            "params": parsed.get("params") if isinstance(parsed.get("params"), dict) else None,
+            "rationale": str(parsed.get("rationale") or parsed.get("protocol") or "")[:240]})
+        return {**parsed, **used}
 
 
 # ──────────────────────────────────────────────────────────────

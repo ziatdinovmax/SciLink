@@ -137,8 +137,9 @@ def _build_skill_description(agent_registry: dict = None,
     # Prefer the frontmatter `description` field when present; fall back
     # to the first line of the overview section.
     for domain, names in list_all_skills().items():
-        if domain == "data_preparation":
-            continue   # preparation skills belong to prepare_data, not run_analysis
+        if domain in ("data_preparation", "acquisition"):
+            continue   # preparation skills belong to prepare_data, acquisition
+            #            skills to the live loop's recommender — not run_analysis
         skill_descs = []
         for name in names:
             try:

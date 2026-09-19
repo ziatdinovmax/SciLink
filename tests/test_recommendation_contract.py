@@ -198,6 +198,22 @@ class TestGPRecommender:
             GPRecommender(SCHEMA, "signal")
 
 
+def test_change_nothing_is_an_answer_not_a_failure():
+    # Observed live: an AFM recommender that judged precision already met
+    # returned no parameters and was logged as refused.
+    for raw in ({"params": None, "rationale": "precision already meets the goal"},
+                {"params": {}, "rationale": "hold"}):
+        rec = finalize(raw, SCHEMA, source="llm", based_on_step=4)
+        assert rec["kind"] == "hold" and rec["valid"] and rec["params"] is None
+        assert rec["requires_approval"] is False
+    # ...but silence is not: no parameters AND no reason is still a failure,
+    assert finalize({"params": None}, SCHEMA, source="llm", based_on_step=4)["valid"] is False
+    # and so is a recommender that reported its own problem.
+    broken = finalize({"params": None, "problems": ["the model did not return JSON"],
+                       "rationale": "garbled"}, SCHEMA, source="llm", based_on_step=4)
+    assert broken["valid"] is False and broken["kind"] == "params"
+
+
 # ──────────────────────────────────────────────────────────────
 # the slow clock: an LLM recommender
 # ──────────────────────────────────────────────────────────────
@@ -225,6 +241,19 @@ class TestLLMRecommender:
         assert 'step 3: {"dwell_ms": 100} -> {"snr": 4.0}' in prompt
         r.observe({"dwell_ms": 100}, {"snr": 3.0}, step=4, flags=["gate_poor"])
         assert '{"snr": 3.0}  [flags: gate_poor]' in r.build_prompt()
+
+    def test_it_is_shown_its_own_earlier_decisions(self):
+        # Observed live (in-situ Raman): shorten, restore, shorten again.
+        m = ScriptedModel(['{"params": {"dwell_ms": 50}, "rationale": "precision met; go faster"}',
+                           '{"params": {}, "rationale": "still fine"}', '{"params": {"dwell_ms": 60}}'])
+        r = LLMRecommender(m, SCHEMA, "goal", skill=None)
+        r.observe({"dwell_ms": 100}, {"snr": 9.0}, step=8)
+        r.suggest()
+        assert "first recommendation" in m.prompts[0]
+        r.observe({"dwell_ms": 50}, {"snr": 6.0}, step=16)
+        r.suggest(); r.suggest()
+        assert 'after step 8: {"dwell_ms": 50} — precision met; go faster' in m.prompts[1]
+        assert "after step 16: no change — still fine" in m.prompts[2]
 
     def test_json_in_a_fence_and_non_json(self):
         m = ScriptedModel(['```json\\n{"params": {"averages": 16}}\\n```'.replace("\\\\n", "\\n"),

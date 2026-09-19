@@ -781,6 +781,28 @@ This resolves the preemption risk: an autonomous orchestrator guess no
 longer suppresses the agent's richer, data-level (and possibly multi-skill)
 selection, while a genuine user request still binds.
 
+### Live loops reuse the technique skills; steering knowledge is its own domain
+
+A live measurement loop (`scilink/live/`) has no analysis skills of its own.
+Its slow clock — the reference analysis and every re-anchor — is an ordinary
+`CurveFittingAgent.analyze()`, so the same technique skill (`curve_fitting/raman`,
+`xrd_profile`, ...) is auto-selected there as in a chat run; the per-frame fast
+path replays a locked script and reads no skill. **Do not add a live-flavoured
+copy of an analysis skill**: a technique missing from `curve_fitting/` is
+missing for chat runs too, and that is where it gets added.
+
+What *is* specific to a running experiment is how to steer it, and that lives in
+the knowledge-only `skills/acquisition/<technique>/` domain with its own section
+vocabulary — `overview · tradeoffs · limits · quality · strategy` (declared in
+`loader._DOMAIN_VOCABULARIES`, like optimization's). It is read by the loop's
+slow-clock consumers — today `LLMRecommender`, which selects one skill through
+the shared selector (exclusive: one technique per measurement) on its first
+call and records it on every recommendation as `acquisition_skill`. Two
+boundaries: acquisition skills are **per technique, not per instrument** (a
+vendor's API, limits and file format belong to the `Instrument` subclass and its
+`schema`), and they stay out of the `run_analysis` skill menu, like
+`data_preparation`.
+
 ### Comparison with Anthropic Skills
 
 |  | Anthropic | SciLink |
