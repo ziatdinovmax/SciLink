@@ -3297,6 +3297,7 @@ class AnalysisOrchestratorTools:
                             f"{self.AGENT_NAMES.get(agent_id, 'agent')} has no series refit stage."
                         )
                 if series_workers is not None:
+                    import inspect as _inspect
                     if "series_workers" in _inspect.signature(agent.analyze).parameters:
                         analyze_kwargs["series_workers"] = int(series_workers)
                     else:

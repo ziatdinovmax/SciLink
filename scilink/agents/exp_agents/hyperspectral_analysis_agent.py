@@ -1263,11 +1263,13 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             return plan
         from ...hitl import request_human_feedback
         for _round in range(self._REGIME_GATE_MAX_ROUNDS):
-            print(_series.render_regime_plan(plan, series_metadata, scout, n))
+            rendered = _series.render_regime_plan(plan, series_metadata, scout, n)
+            print(rendered)
             try:
                 answer = request_human_feedback(
                     "\nYour feedback on the regime plan (or Enter to accept): ",
                     kind="review_plan",
+                    context=rendered,      # non-terminal channels can show the plan
                     origin={"stage": "series_regime_plan", "round": _round + 1},
                 ).strip()
             except (EOFError, KeyboardInterrupt):

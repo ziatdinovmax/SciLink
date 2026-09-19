@@ -530,6 +530,16 @@ def _render_band_flux_table(data, axis, axis_units: str, aux: dict | None = None
 
 
 def _render_data_facts(data, axis, axis_units: str, max_peaks: int = 4) -> str:
+    """Text of :func:`_data_facts` (empty when the facts cannot be computed)."""
+    return _data_facts(data, axis, axis_units, max_peaks).get("text", "")
+
+
+class _NotMeasurableContradiction(Exception):
+    """A not_measurable declaration that contradicts the deterministic data
+    facts — handled as a mechanical correction, not a ladder failure."""
+
+
+def _data_facts(data, axis, axis_units: str, max_peaks: int = 4) -> dict:
     """Deterministic facts about THIS cube for the code-generation prompt.
 
     Live anchors repeatedly failed on gates the model set from priors rather
@@ -548,7 +558,7 @@ def _render_data_facts(data, axis, axis_units: str, max_peaks: int = 4) -> str:
         n_pix = flat.shape[0]
         mean = np.nanmean(flat, axis=0)
         if not np.isfinite(mean).all() or e < 8:
-            return ""
+            return {}
         # per-pixel noise: residual of each spectrum from its 5-channel running
         # mean, on a subsample of pixels (robust median of the per-pixel std)
         step = max(1, n_pix // 2000)
@@ -615,9 +625,14 @@ def _render_data_facts(data, axis, axis_units: str, max_peaks: int = 4) -> str:
             "contain its peak with margin. After any background subtraction, confirm the "
             "peak amplitudes at these positions survive before fitting. A not_measurable "
             "declaration that contradicts these numbers is rejected.")
-        return "\n".join(lines)
+        strongest = (float(props["prominences"][order[0]] / max(sigma_mean, 1e-12))
+                     if peaks.size else 0.0)
+        return {"text": "\n".join(lines),
+                "measurable": bool(peaks.size) and strongest >= 5.0,
+                "strongest_sigma": strongest,
+                "peaks": [float(axis[peaks[j]]) for j in order] if peaks.size else []}
     except Exception:  # noqa: BLE001 - advisory block, never break the run
-        return ""
+        return {}
 
 
 def _render_attempt_history(entries: list) -> str:
@@ -3228,7 +3243,8 @@ class RunDynamicAnalysisController:
         # Deterministic data facts for the CODE-GENERATION prompt (the flux
         # table used to reach only the reviews; the model that writes the
         # gates never saw the numbers the judge holds it to).
-        data_facts = _render_data_facts(optimal_data, state["energy_axis"], axis_units)
+        facts = _data_facts(optimal_data, state["energy_axis"], axis_units)
+        data_facts = facts.get("text", "")
         if data_facts and flux_table:
             data_facts += "\n\n" + flux_table
 
@@ -3447,6 +3463,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 "all_valid_maps": all_valid_maps,
                 "all_valid_meta": all_valid_meta,
                 "flux_table": flux_table,
+                "facts": facts,
             }
             engine = CodegenQCEngine(host=self, spec=self._QC_ENGINE_SPEC)
             out = engine.run_item(ctx) or {}
@@ -3974,9 +3991,33 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         )
                     if not isinstance(result_dict, dict):
                         raise ValueError("Function return must be a dict.")
+                    # A not_measurable declaration that CONTRADICTS the
+                    # deterministic data facts (a >= 5-sigma feature in the
+                    # field mean) is a wrong gate, not a finding: repaired in
+                    # place like an execution error — no ladder budget, no
+                    # judge call — so the model re-issues the fit at once.
+                    _f = ctx.session.get("facts") or {}
+                    if (isinstance(result_dict.get("not_measurable"), dict)
+                            and not result_dict.get("maps") and _f.get("measurable")):
+                        raise _NotMeasurableContradiction(
+                            f"not_measurable declared, but the DATA FACTS show the "
+                            f"strongest field-mean feature at {_f.get('strongest_sigma', 0):.0f} "
+                            f"sigma of the mean (peaks at {_f.get('peaks')}) — the target IS "
+                            "measurable in aggregate. Your measurability test used a "
+                            "wrong-scale sigma or looked in the wrong window. Do not "
+                            "declare not_measurable: fit the feature, centring windows "
+                            "and seeds on the measured positions above.")
                     break  # executed cleanly — proceed to QC
                 except TimeoutError:
                     raise  # ladder currency, never mechanically retried
+                except _NotMeasurableContradiction as _nmc:
+                    _mech_tb = f"GATE ERROR: {_nmc}"
+                    if _exec_try >= self.MAX_EXEC_ATTEMPTS - 1:
+                        raise ValueError(str(_nmc))  # corrections exhausted → ladder
+                    self.logger.warning(
+                        f"    ⚙️ not_measurable contradicts the data facts "
+                        f"({(ctx.session.get('facts') or {}).get('strongest_sigma', 0):.0f} sigma) "
+                        f"— re-issuing the fit in place.")
                 except Exception:
                     _mech_tb = traceback.format_exc()
                     if _exec_try >= self.MAX_EXEC_ATTEMPTS - 1:
@@ -4076,6 +4117,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         f"    🧷 Fit-examples panel: {len(_fit_examples)} "
                         f"pixel(s) rendered.")
 
+            nan_only_maps: list = []
             for feature_name, result_map in maps_dict.items():
                 # Shape/NaN Check
                 if result_map.shape != (h, w):
@@ -4083,6 +4125,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     continue
                 if np.all(np.isnan(result_map)):
                     self.logger.warning(f"    Skipping {feature_name}: Map contains only NaNs.")
+                    nan_only_maps.append(feature_name)
                     continue
 
                 # 1. Determine Units (Fixes UnboundLocalError)
@@ -4282,6 +4325,18 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     detail_parts.append(
                         f"QC critiques on required outputs: {relevant_critiques}"
                     )
+                _nan_req = [n for n in missing_required if n in nan_only_maps]
+                if _nan_req:
+                    # Observed live: a script whose try/except returned NaN
+                    # maps failed three attempts with no diagnosis — the
+                    # retry feedback said nothing because no map reached QC.
+                    detail_parts.append(
+                        f"{_nan_req} came back ENTIRELY NaN ({len(nan_only_maps)} of "
+                        f"{len(maps_dict)} maps all-NaN): nothing was fitted. Either a "
+                        "try/except swallowed the real error and returned NaN, or a "
+                        "gate excluded every pixel. Remove blanket exception handling "
+                        "so the error surfaces, and print how many pixels pass each "
+                        "gate before fitting.")
                 detail = "; ".join(detail_parts) or "no further detail"
                 raise ValueError(
                     f"Required outputs failed: {missing_required}. {detail}"

@@ -129,10 +129,13 @@ rather than fabricate a result).
   experimental-design input depending on the user's goal.
 - Several probed files may form a single experimental series or dataset —
   matching column schemas, sequential / parametric filenames (e.g.
-  `spec_5K`, `spec_10K`, ...), or a shared sidecar-JSON pattern. Recognize
-  this from the probes and the user's goal, and delegate the whole set as
-  ONE batched task (pass the file list or their shared directory) so the
-  specialist's batch tools engage — never one delegation per file.
+  `spec_5K`, `spec_10K`, ...), a run of same-shaped datacubes, or a shared
+  sidecar-JSON pattern. Recognize this from the probes and the user's goal,
+  and delegate the whole set as ONE batched task (pass the file list or
+  their shared directory, and name the control variable) so the specialist's
+  series mode engages — spectra, images and hyperspectral cubes alike —
+  never one delegation per file, and never a fan-out over a same-technique
+  series (fan-out is for DIFFERENT measurements of one system).
 - `inspect_uploads` is for routing only — do not use its output to interpret
   or analyze the data yourself; hand that to the specialist. To see what an
   uploaded SCRIPT or text file actually does before routing it, `read_file`

@@ -191,7 +191,26 @@ of the mean and width bounds, the noise of the mean, the axis) plus the same
 band-flux table the judge holds the script to — the model that writes the
 gates sees the numbers the reviewer will use. Prompt-side, one principle:
 centre windows and seeds on the measured positions and confirm the peaks
-survive background subtraction.
+survive background subtraction. Two rules give that structural teeth: a
+`not_measurable` declaration that contradicts the facts (a >= 5-sigma
+field-mean feature) is repaired IN PLACE like an execution error — no judge
+call, no ladder budget — and a required map that comes back entirely NaN
+is diagnosed in the retry critique (a swallowed exception or an all-
+excluding gate) instead of "no further detail".
+
+**Through the meta agent, a series is ONE delegation.** The meta's routing
+guidance and `delegate_to_analysis` say so for spectra, images and cubes
+alike: pass the shared directory (or file list) and the control variable;
+the child's `run_task` runs `run_analysis` on the directory, so the series
+mode engages and the delegation result carries the series claims and its
+one `features.csv` (one row per dataset). Harmonized fan-out
+(`delegate_to_analyses(harmonize=True)`) predates the series mode and is
+kept only for sibling datasets that cannot be staged as one directory. A
+fan-out branch that IS a datacube-series directory gets
+`FANOUT_SERIES_BUDGET_FACTOR` × the default wall-clock budget (the raw-
+instrument rule's shape), because the series mode is a multiple of one run.
+Under AUTOPILOT delegation the regime-plan gate reaches the user through the
+normal feedback channel, like the specialists' other plan gates.
 
 **Replays fan out.** `series_workers` (or `SCILINK_HS_SERIES_WORKERS`) runs
 the locked replays on a spawned-process pool, each submitted the moment its

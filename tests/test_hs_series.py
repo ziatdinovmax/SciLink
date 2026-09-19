@@ -991,3 +991,140 @@ def test_data_facts_block_reports_measured_peaks_and_noise():
     assert prompt.index("DATA FACTS") < prompt.index("MEASURABILITY GATE")
     assert "DATA FACTS" not in build_code_generation_prompt(target_desc="t", h=1, w=1, e=8, axis_units="eV",
                                                             axis_start=0, axis_end=1, processing_note="raw")
+
+
+def test_fanout_budget_scales_for_a_datacube_series_directory(tmp_path):
+    """A fan-out branch pointing at a directory of >= 2 cubes runs the series
+    mode, so it gets the series budget factor (explicit budgets never scale)."""
+    from scilink.agents.meta_agent.fanout import (
+        resolve_branch_budget, datacube_series_branches, FANOUT_SERIES_BUDGET_FACTOR)
+    d = tmp_path / "cubes"; d.mkdir()
+    for i in range(3):
+        np.save(d / f"c{i}.npy", np.zeros((4, 4, 8), np.float32))
+    np.save(d / "image.npy", np.zeros((8, 8), np.float32))
+    (d / "notes.json").write_text("{}")
+    series = {"data_path": str(d), "task": "t", "label": "cubes"}
+    assert datacube_series_branches([series])[0]["n_cubes"] == 3
+    assert resolve_branch_budget(series, 3600.0) == 3600.0 * FANOUT_SERIES_BUDGET_FACTOR
+    assert resolve_branch_budget(series, 7200.0, explicit=True) == 7200.0
+    # a pattern selecting one cube is not a series; a single file is not a series
+    assert datacube_series_branches([{**series, "pattern": "c0.npy"}]) == []
+    assert datacube_series_branches([{"data_path": str(d / "c0.npy"), "task": "t"}]) == []
+    assert resolve_branch_budget({"data_path": str(d / "c0.npy"), "task": "t"}, 3600.0) == 3600.0
+
+
+def test_run_analysis_forwards_series_workers_alone(tmp_path, monkeypatch):
+    """Regression: the series_workers forwarding block must not depend on an
+    earlier block having imported `inspect` (seen live via the meta agent:
+    UnboundLocalError when only series_workers was passed)."""
+    from scilink.agents.exp_agents.analysis_orchestrator import AnalysisOrchestratorAgent, AnalysisMode
+    d = tmp_path / "cubes"; d.mkdir()
+    for i, T in enumerate((300, 350, 400)):
+        np.save(d / f"c_T{T}.npy", np.full((3, 3, 8), float(i), np.float32))
+    o = AnalysisOrchestratorAgent(base_dir=str(tmp_path / "s"), api_key="sk-dummy",
+                                  analysis_mode=AnalysisMode.AUTONOMOUS)
+    seen = {}
+
+    class _Stub:
+        def analyze(self, data, system_info=None, series_workers=None, max_series_refits=None, **kw):
+            seen.update({"data": data, "series_workers": series_workers, "series": (system_info or {}).get("series")})
+            return {"status": "success", "detailed_analysis": "ok", "scientific_claims": [],
+                    "summary": {"total_datasets": len(data)}}
+    monkeypatch.setattr(o, "create_agent_for_analysis", lambda *a, **k: _Stub())
+    o.current_metadata = {"technique": "EELS", "energy_range": {"start": 450, "end": 570, "units": "eV"}}
+    out = json.loads(o.tools.execute_tool(
+        "run_analysis", data_path=str(d), agent_id=2, series_workers=3,
+        series_metadata=json.dumps({"variable": "temperature", "unit": "K",
+                                    "values": {"c_T300.npy": 300, "c_T350.npy": 350, "c_T400.npy": 400}})))
+    assert out.get("status") == "success", out
+    assert seen["series_workers"] == 3 and len(seen["data"]) == 3
+    assert seen["series"]["values"] == [300, 350, 400]           # sorted, list-aligned
+
+
+def _peaked_cube(n=6, m=5, e=64):
+    E = np.linspace(450, 570, e)
+    spec = np.exp(-0.5 * ((E - 462.0) / 2.0) ** 2) + 0.05
+    return (spec[None, None, :] + np.random.default_rng(1).normal(0, 0.01, (n, m, e))).astype(np.float32), E
+
+
+def test_data_facts_structured_verdict():
+    from scilink.agents.exp_agents.controllers.hyperspectral_controllers import _data_facts
+    cube, E = _peaked_cube()
+    f = _data_facts(cube, E, "eV")
+    assert f["measurable"] is True and f["strongest_sigma"] > 5 and abs(f["peaks"][0] - 462.0) < 2.5
+    flat = (0.1 + np.random.default_rng(2).normal(0, 0.03, (6, 5, 64))).astype(np.float32)
+    assert _data_facts(flat, E, "eV")["measurable"] is False
+    assert _data_facts(np.zeros((2, 2, 4)), E[:4], "eV") == {}          # too few channels → no facts
+
+
+def test_not_measurable_contradicting_facts_is_repaired_in_place(tmp_path):
+    """A declaration of not_measurable on a cube whose data facts show a
+    strong feature is corrected as a mechanical error (second codegen call
+    within the SAME attempt, no judge call), and the fit then proceeds."""
+    from scilink.agents.exp_agents.controllers.hyperspectral_controllers import RunDynamicAnalysisController
+    import logging
+    calls = []
+    NM_CODE = ("def analyze_feature(data, energy_axis):\n"
+               "    return {'maps': {}, 'not_measurable': {'feature': 'peak', 'evidence': 'snr 0.1', 'description': 'flat'}}\n")
+    GOOD = ("def analyze_feature(data, energy_axis):\n"
+            "    import numpy as np\n"
+            "    return {'maps': {'Mean_Map': np.asarray(data).mean(axis=2)}, 'units': 'a.u.', 'description': 'd'}\n")
+
+    class _Model:
+        def generate_content(self, contents, **kw):
+            text = contents if isinstance(contents, str) else "\n".join(c for c in contents if isinstance(c, str))
+            calls.append(text)
+            if "GATE ERROR" in text:
+                return json.dumps({"code": GOOD})
+            return json.dumps({"code": NM_CODE})
+    cube, E = _peaked_cube()
+    ctrl = RunDynamicAnalysisController(model=_Model(), logger=logging.getLogger("t"),
+                                        generation_config=None, safety_settings=None,
+                                        parse_fn=lambda r: (json.loads(r), None), executor_timeout=60)
+    ctrl._review_required_output = lambda *a, **k: (True, "")
+    ctrl._check_result_visually = lambda *a, **k: (True, "")
+    ctrl._judge_not_measurable = lambda *a, **k: (_ for _ in ()).throw(AssertionError("judge must not be called"))
+    state = ctrl.execute({
+        "refinement_decision": {"refinement_needed": True, "requires_custom_code": True,
+                                "targets": [{"type": "custom_code", "description": "map the peak",
+                                             "required_outputs": ["Mean_Map"]}]},
+        "hspy_data": cube, "original_hspy_data": cube, "energy_axis": E,
+        "system_info": {"axis_spec": {"axis_2": {"name": "E", "units": "eV", "start": 450, "end": 570}}},
+        "settings": {"output_dir": str(tmp_path)}, "iteration_title": "T", "analysis_images": [],
+        "error_dict": None, "max_verification_iterations": 0})
+    rec = state["dynamic_analysis_records"][0]
+    assert rec["task_success"] is True
+    assert len(calls) == 2 and "GATE ERROR" in calls[1] and "sigma of the mean" in calls[1]
+    assert [m["name"] for m in state["custom_analysis_metadata_list"]] == ["Mean_Map"]
+    assert '"exec_corrections": 1' in json.dumps(rec)          # one in-place repair, attempt 1
+
+
+def test_all_nan_required_map_gets_a_diagnosis(tmp_path):
+    """Required maps returned entirely NaN: the retry critique must say so
+    (previously 'no further detail')."""
+    from scilink.agents.exp_agents.controllers.hyperspectral_controllers import RunDynamicAnalysisController
+    import logging
+    NAN_CODE = ("def analyze_feature(data, energy_axis):\n"
+                "    import numpy as np\n"
+                "    h, w = data.shape[:2]\n"
+                "    return {'maps': {'Mean_Map': np.full((h, w), np.nan)}, 'units': 'a.u.', 'description': 'd'}\n")
+    prompts = []
+
+    class _Model:
+        def generate_content(self, contents, **kw):
+            prompts.append(contents if isinstance(contents, str) else "\n".join(c for c in contents if isinstance(c, str)))
+            return json.dumps({"code": NAN_CODE})
+    cube, E = _peaked_cube()
+    ctrl = RunDynamicAnalysisController(model=_Model(), logger=logging.getLogger("t"),
+                                        generation_config=None, safety_settings=None,
+                                        parse_fn=lambda r: (json.loads(r), None), executor_timeout=60)
+    state = ctrl.execute({
+        "refinement_decision": {"refinement_needed": True, "requires_custom_code": True,
+                                "targets": [{"type": "custom_code", "description": "map the peak",
+                                             "required_outputs": ["Mean_Map"]}]},
+        "hspy_data": cube, "original_hspy_data": cube, "energy_axis": E,
+        "system_info": {"axis_spec": {"axis_2": {"name": "E", "units": "eV", "start": 450, "end": 570}}},
+        "settings": {"output_dir": str(tmp_path)}, "iteration_title": "T", "analysis_images": [],
+        "error_dict": None, "max_verification_iterations": 1})
+    assert state["dynamic_analysis_records"][0]["task_success"] is False
+    assert any("ENTIRELY NaN" in p and "try/except" in p for p in prompts[1:])

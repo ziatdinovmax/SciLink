@@ -555,7 +555,18 @@ class MetaOrchestratorTools:
                 "candidate count in `task` (e.g. 'run as best-of-3: 3 "
                 "independent candidate analyses'); the specialist maps that to "
                 "`run_analysis`'s `n_candidates`. Curve fitting, image, and "
-                "hyperspectral all support this."
+                "hyperspectral all support this. A SERIES — same-technique "
+                "files along a control variable (spectra, images, OR "
+                "hyperspectral cubes: one per temperature, dose, time step, "
+                "sample) — is ONE delegation: pass their shared directory (or "
+                "the file list) and state the control variable and its "
+                "values, or that per-file sidecar JSONs carry them. The "
+                "specialist's series mode locks a verified recipe on the "
+                "first dataset, replays it on the rest, plans regimes when "
+                "the spectra change character, keeps one feature schema, "
+                "flags outliers, re-analyses failures, and synthesizes the "
+                "trend. Never one delegation per file, and do not fan a "
+                "same-technique series out with delegate_to_analyses."
             ),
             parameters={
                 "task": {
@@ -858,8 +869,13 @@ class MetaOrchestratorTools:
                     "type": "boolean",
                     "description": (
                         "Opt-in (default false): harmonized pipeline replay "
-                        "for SAME-TECHNIQUE sibling datasets (e.g. one "
-                        "hyperspectral cube per experimental condition). The "
+                        "for SAME-TECHNIQUE sibling datasets that CANNOT be "
+                        "handed over as one series directory. PREFER ONE "
+                        "delegate_to_analysis on the series directory: the "
+                        "specialist's series mode does this and more (regime "
+                        "planning, aligned feature schema, outlier flags, "
+                        "budgeted refits, trend synthesis, parallel replays). "
+                        "In harmonized fan-out the "
                         "FIRST branch runs as the pipeline DONOR; every other "
                         "branch then REPLAYS the donor's approved analysis "
                         "script verbatim, so extracted magnitudes are "
