@@ -10,6 +10,10 @@ are pinned to those names. Every later frame is then answered by the recipe
 alone — about a second, no model call — and flagged when the recipe stops
 fitting, at which point a new one is built in the background.
 
+To try it on data you have already recorded, swap the simulator for
+``ReplayInstrument("path/to/folder", system_info={...}, outputs={...})``: every
+two-column file in the folder is served as one frame, in file order.
+
 To move to a real instrument, replace ``get_simulator(...)`` with your own
 ``Instrument`` subclass (the sketch at the bottom). Nothing else changes; the
 same class also works in the web UI's Live tab as ``package.module:ClassName``.

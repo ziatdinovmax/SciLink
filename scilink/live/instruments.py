@@ -99,6 +99,122 @@ class Instrument:
         return merged
 
 
+class EndOfData(Exception):
+    """The data source has nothing more to give (a replay ran out of files)."""
+
+
+_CURVE_SUFFIXES = (".csv", ".txt", ".xy", ".dat", ".tsv", ".npy")
+
+
+def read_curve(path: str):
+    """``(x, y, x_label, y_label)`` from a recorded 1D measurement: a two-column
+    text file (comma / tab / whitespace separated, optional header line) or a
+    ``.npy`` of shape (N, 2), (2, N) or (N,) — the last with the index as x."""
+    p = Path(path)
+    x_label, y_label = "x", "y"
+    if p.suffix.lower() == ".npy":
+        a = np.asarray(np.load(p), dtype=float)
+    else:
+        lines = [ln for ln in p.read_text(errors="replace").splitlines()
+                 if ln.strip() and not ln.lstrip().startswith(("#", "%", ";"))]
+        if not lines:
+            raise ValueError(f"{p.name}: no data")
+        delim = "," if "," in lines[-1] else ("\t" if "\t" in lines[-1] else None)
+
+        def _row(ln):
+            return [float(v) for v in ln.replace(";", " ").split(delim)[:2]]
+        try:
+            _row(lines[0])
+        except ValueError:                      # a header line: keep its names
+            names = [n.strip() for n in lines[0].split(delim)]
+            if len(names) >= 2:
+                x_label, y_label = names[0] or "x", names[1] or "y"
+            lines = lines[1:]
+        a = np.asarray([_row(ln) for ln in lines], dtype=float)
+    if a.ndim == 1:
+        a = np.column_stack([np.arange(a.size, dtype=float), a])
+    elif a.ndim == 2 and a.shape[0] == 2 and a.shape[1] != 2:
+        a = a.T
+    if a.ndim != 2 or a.shape[1] < 2 or a.shape[0] < 3:
+        raise ValueError(f"{p.name}: expected two columns (x, y), got shape {a.shape}")
+    return a[:, 0], a[:, 1], x_label, y_label
+
+
+def _natural_key(path: Path):
+    import re
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", path.name)]
+
+
+class ReplayInstrument(Instrument):
+    """Recorded measurements served one per ``acquire()``, in file order — real
+    data through the live loop, before there is a live instrument.
+
+        inst = ReplayInstrument("runs/2026-03-anneal/", system_info={
+            "technique": "Raman spectroscopy", "sample": "carbon film, annealed in situ",
+            "x_axis": "Raman shift (cm^-1)", "y_axis": "intensity (counts)"},
+            outputs={"g_position": "position of the G band"})
+
+    ``source`` is a directory (every two-column ``.csv/.txt/.xy/.dat/.tsv/.npy``
+    in it, sorted naturally so ``scan_2`` precedes ``scan_10``) or an explicit
+    list of files. A same-stem ``.json`` sidecar, when present, supplies the
+    frame's recorded ``params`` and ``meta``. There is no ``schema``: recorded
+    data cannot be steered, so recommendations made on a replay are advice about
+    a run that already happened. ``acquire()`` raises :class:`EndOfData` after
+    the last file, which ends :func:`run_experiment` cleanly.
+    """
+
+    def __init__(self, source: Any, *, system_info: Optional[Dict[str, Any]] = None,
+                 outputs: Optional[Dict[str, str]] = None, targets: Optional[List[str]] = None,
+                 name: str = "replay") -> None:
+        if isinstance(source, (str, Path)):
+            root = Path(source).expanduser()
+            if not root.is_dir():
+                raise ValueError(f"replay source {str(root)!r} is not a directory")
+            files = [p for p in root.iterdir()
+                     if p.is_file() and p.suffix.lower() in _CURVE_SUFFIXES]
+        else:
+            files = [Path(p).expanduser() for p in source]
+        self.files: List[Path] = sorted(files, key=_natural_key)
+        if not self.files:
+            raise ValueError(f"replay source has no measurement files ({', '.join(_CURVE_SUFFIXES)})")
+        self.name = name
+        self.system_info = dict(system_info or {})
+        self.outputs = dict(outputs or {})
+        self.targets = list(targets or [])
+        self.events = [{"frame": 1, "what": f"{len(self.files)} recorded measurements, "
+                                            f"{self.files[0].name} … {self.files[-1].name}"}]
+        self._next = 0
+
+    def __len__(self) -> int:
+        return len(self.files)
+
+    @property
+    def remaining(self) -> int:
+        return len(self.files) - self._next
+
+    def acquire(self, params: Dict[str, Any]) -> Frame:
+        if self._next >= len(self.files):
+            raise EndOfData(f"all {len(self.files)} recorded measurements have been replayed")
+        path = self.files[self._next]
+        self._next += 1
+        x, y, x_label, y_label = read_curve(str(path))
+        recorded: Dict[str, Any] = {}
+        sidecar = path.with_suffix(".json")
+        if sidecar.exists():
+            try:
+                recorded = json.loads(sidecar.read_text())
+            except (OSError, ValueError):
+                recorded = {}
+        if not isinstance(recorded, dict):
+            recorded = {}
+        rec_params = recorded.get("params") if isinstance(recorded.get("params"), dict) else {}
+        meta = recorded.get("meta") if isinstance(recorded.get("meta"), dict) else {
+            k: v for k, v in recorded.items() if k not in ("params", "truth")}
+        return Frame(x=x, y=y, params={**rec_params, **(params or {})},
+                     meta={**meta, "source_file": path.name, "index": self._next},
+                     x_label=x_label, y_label=y_label)
+
+
 def run_experiment(instrument: Instrument, loop: Any, n_frames: int, *,
                    apply: str = "approved", params: Optional[Dict[str, Any]] = None,
                    interval_s: float = 0.0,
@@ -134,7 +250,10 @@ def run_experiment(instrument: Instrument, loop: Any, n_frames: int, *,
     for i in range(1, n_frames + 1):
         if stop is not None and stop():
             break
-        frame = instrument.acquire(dict(current))
+        try:
+            frame = instrument.acquire(dict(current))
+        except EndOfData:
+            break
         path = frame.save(str(incoming), i)
         record = loop.step(path, params=dict(current))
         if frame.truth:

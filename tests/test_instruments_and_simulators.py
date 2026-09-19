@@ -178,3 +178,73 @@ class TestRunExperiment:
     def test_simulator_truth_rides_along_for_checking(self, tmp_path):
         records = run_experiment(get_simulator("afm_force_curve"), _armed_loop(tmp_path), 2)
         assert records[0]["truth"]["material"] == "matrix"
+
+
+# ──────────────────────────────────────────────────────────────
+# ReplayInstrument: recorded data through the same seam
+# ──────────────────────────────────────────────────────────────
+
+class TestReplayInstrument:
+    def _write(self, d, name, text):
+        d.mkdir(parents=True, exist_ok=True)
+        (d / name).write_text(text)
+
+    def test_files_are_served_in_natural_order_then_end(self, tmp_path):
+        from scilink.live import EndOfData, ReplayInstrument
+        d = tmp_path / "run"
+        for i in (10, 2, 1):
+            self._write(d, f"scan_{i}.csv", "shift,counts\n" + "\n".join(f"{k},{k * i}" for k in range(5)))
+        self._write(d, "notes.md", "not a measurement")
+        inst = ReplayInstrument(str(d), system_info={"technique": "Raman"})
+        assert len(inst) == 3 and inst.schema is None
+        names = [inst.acquire({}).meta["source_file"] for _ in range(3)]
+        assert names == ["scan_1.csv", "scan_2.csv", "scan_10.csv"]
+        with pytest.raises(EndOfData):
+            inst.acquire({})
+
+    def test_formats_headers_and_sidecars(self, tmp_path):
+        from scilink.live import ReplayInstrument
+        from scilink.live.instruments import read_curve
+        d = tmp_path / "run"
+        self._write(d, "a.csv", "two_theta,intensity\n10,1\n11,5\n12,1\n")
+        self._write(d, "a.json", json.dumps({"params": {"exposure_s": 2.0}, "meta": {"T_K": 300}}))
+        self._write(d, "b.txt", "# comment\n10 1\n11 6\n12 1\n")
+        self._write(d, "c.xy", "10\t1\n11\t7\n12\t1\n")
+        np.save(d / "d.npy", np.array([[10, 11, 12], [1, 8, 1]], dtype=float))   # (2, N)
+        np.save(d / "e.npy", np.array([1.0, 9.0, 1.0, 0.5]))                     # y only
+        inst = ReplayInstrument(str(d))
+        frames = [inst.acquire({}) for _ in range(5)]
+        assert [float(np.max(f.y)) for f in frames] == [5, 6, 7, 8, 9]
+        assert frames[0].x_label == "two_theta" and frames[0].params == {"exposure_s": 2.0}
+        assert frames[0].meta["T_K"] == 300
+        assert list(frames[4].x) == [0, 1, 2, 3]
+        with pytest.raises(ValueError):
+            self._write(d, "bad.csv", "1\n2\n3\n")
+            read_curve(str(d / "bad.csv"))
+
+    def test_an_empty_or_missing_source_is_refused(self, tmp_path):
+        from scilink.live import ReplayInstrument
+        with pytest.raises(ValueError):
+            ReplayInstrument(str(tmp_path / "nope"))
+        (tmp_path / "empty").mkdir()
+        with pytest.raises(ValueError):
+            ReplayInstrument(str(tmp_path / "empty"))
+
+    def test_run_experiment_stops_cleanly_when_the_recording_ends(self, tmp_path):
+        from scilink.live import ReplayInstrument
+        d = tmp_path / "run"
+        for i in range(3):
+            self._write(d, f"s{i}.csv", "x,y\n0,1\n1,2\n2,1\n")
+        inst = ReplayInstrument(str(d))
+
+        class Loop:
+            output_dir = str(tmp_path / "loop")
+
+            def __init__(self):
+                self.n = 0
+
+            def step(self, path, params=None):
+                self.n += 1
+                return {"step": self.n, "flags": [], "params": params}
+        records = run_experiment(inst, Loop(), 50, apply="never")
+        assert [r["step"] for r in records] == [1, 2, 3]

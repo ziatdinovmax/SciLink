@@ -173,6 +173,46 @@ def test_a_failed_run_reports_the_error(session):
     assert "objective" in snap["error"]
 
 
+# ── replaying a folder of recorded measurements ──────────────────
+
+def _recording(tmp_path, n=5):
+    d = tmp_path / "recorded"
+    d.mkdir()
+    for i in range(1, n + 1):
+        (d / f"scan_{i}.csv").write_text("shift,counts\n" + "\n".join(
+            f"{x},{100 + 50 * (x == 5) + i}" for x in range(10)))
+    return d
+
+
+def test_a_recorded_folder_streams_through_the_loop(session, tmp_path):
+    d = _recording(tmp_path)
+    live_api.start(session, {"instrument": "replay", "replay_dir": str(d), "n_frames": 60,
+                             "interval_s": 0.0, "pin_outputs": False, "auto_escalate": False,
+                             "system_info": {"technique": "Raman spectroscopy", "sample": " "},
+                             "recommender": "llm", "objective": "anything"})
+    snap = _wait(session, lambda s: s["state"] in ("done", "error"))
+    assert snap["state"] == "done", snap.get("error")
+    # the first file is the reference; the other four are the stream
+    assert [f["step"] for f in snap["frames"]] == [1, 2, 3, 4] and snap["n_frames_total"] == 4
+    assert snap["instrument"]["technique"] == "Raman spectroscopy"
+    assert snap["instrument"]["schema"] == {} and snap["recommendation"] is None   # nothing to steer
+    assert snap["frames"][0]["truth"] == {}
+
+
+def test_replay_needs_a_folder_a_technique_and_a_local_server(session, tmp_path):
+    d = _recording(tmp_path)
+    for cfg, status in (({"replay_dir": str(d)}, 400),                                   # no technique
+                        ({"system_info": {"technique": "XRD"}}, 400),                    # no folder
+                        ({"replay_dir": str(tmp_path / "nope"), "system_info": {"technique": "XRD"}}, 400)):
+        with pytest.raises(LiveError) as e:
+            live_api.start(session, {"instrument": "replay", **cfg})
+        assert e.value.status == status
+    with pytest.raises(LiveError) as e:
+        live_api.start(session, {"instrument": "replay", "replay_dir": str(d),
+                                 "system_info": {"technique": "XRD"}}, allow_custom=False)
+    assert e.value.status == 403
+
+
 # ── routes ───────────────────────────────────────────────────────
 
 def test_routes(tmp_path):

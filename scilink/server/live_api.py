@@ -54,8 +54,31 @@ def list_simulators() -> List[Dict[str, Any]]:
     return [_instrument_info(cls()) for cls in SIMULATORS.values()]
 
 
-def _make_instrument(spec: str, seed: int, allow_custom: bool = True) -> Any:
-    """A simulator by name, or the user's own ``package.module:Class``.
+def _replay_instrument(config: Dict[str, Any]) -> Any:
+    """Recorded measurements from a folder on this machine, as an instrument."""
+    from scilink.live.instruments import ReplayInstrument
+    folder = str(config.get("replay_dir") or "").strip()
+    if not folder:
+        raise LiveError(400, "Replay needs the folder that holds the recorded measurements.")
+    info = {k: str(v).strip() for k, v in (config.get("system_info") or {}).items()
+            if str(v or "").strip()}
+    if not info.get("technique"):
+        raise LiveError(400, "Replay needs at least the measurement technique — the analysis "
+                             "is only as good as what it is told about the data.")
+    outputs = {str(k).strip(): str(v).strip() for k, v in (config.get("outputs") or {}).items()
+               if str(k).strip() and str(v or "").strip()}
+    try:
+        return ReplayInstrument(folder, system_info=info, outputs=outputs,
+                                targets=[str(t).strip() for t in (config.get("targets") or [])
+                                         if str(t).strip()])
+    except ValueError as e:
+        raise LiveError(400, str(e))
+
+
+def _make_instrument(spec: str, seed: int, allow_custom: bool = True,
+                     config: Optional[Dict[str, Any]] = None) -> Any:
+    """A simulator by name, recorded data (``replay``), or the user's own
+    ``package.module:Class``.
 
     Importing a module runs its top-level code, so a custom instrument is a
     local-machine feature (``allow_custom``); and the class is checked to BE an
@@ -64,6 +87,11 @@ def _make_instrument(spec: str, seed: int, allow_custom: bool = True) -> Any:
     from scilink.live.simulators import SIMULATORS
     if spec in SIMULATORS:
         return SIMULATORS[spec](seed=seed)
+    if spec == "replay":
+        if not allow_custom:
+            raise LiveError(403, "Replaying a folder is only available when SciLink runs on "
+                                 "your own machine.")
+        return _replay_instrument(config or {})
     if ":" not in spec:
         raise LiveError(400, f"Unknown instrument {spec!r}. Use one of {sorted(SIMULATORS)} "
                              "or your own as 'package.module:ClassName'.")
@@ -94,7 +122,10 @@ class LiveRun:
         self.error: Optional[str] = None
         self.started_at = time.time()
         self.instrument = _make_instrument(str(config.get("instrument") or ""),
-                                           int(config.get("seed") or 0), allow_custom)
+                                           int(config.get("seed") or 0), allow_custom, config)
+        if hasattr(self.instrument, "remaining"):       # a recording is finite; one file is the reference
+            config["n_frames"] = max(1, min(int(config.get("n_frames") or 10 ** 6),
+                                            len(self.instrument) - 1))
         root = Path(session_dir) / "live"
         root.mkdir(parents=True, exist_ok=True)
         n = len([p for p in root.glob("run_*") if p.is_dir()]) + 1
