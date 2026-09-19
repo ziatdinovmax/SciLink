@@ -306,7 +306,11 @@ class LiveRun:
                 breach_patience=int(cfg.get("breach_patience") or 3),
                 reanchor_frames=int(cfg.get("reanchor_frames") or 5),
                 closed_loop=(cfg.get("apply") == "valid"),
-                frame_deadline_s=float(cfg.get("frame_deadline_s") or 10.0), **creds)
+                # How long a frame may take before it is flagged slow. It belongs to
+                # the instrument's cadence, so the page sets it; absent = 10 s (the
+                # simulators' pace), an explicit null = no deadline.
+                frame_deadline_s=((float(cfg["frame_deadline_s"]) if cfg["frame_deadline_s"] else None)
+                                  if "frame_deadline_s" in cfg else 10.0), **creds)
             if self.from_analysis:
                 anchor = (self._session_dir / str(cfg.get("reference_analysis") or "")).resolve()
                 if not (anchor.is_dir() and anchor.is_relative_to(self._session_dir)

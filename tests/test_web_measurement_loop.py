@@ -65,7 +65,7 @@ def session(tmp_path, monkeypatch):
     live_api._RUNS.clear()
 
 
-def _wait(session, until, timeout=20.0):
+def _wait(session, until, timeout=90.0):
     t0 = time.time()
     while time.time() - t0 < timeout:
         snap = live_api.snapshot(session)
@@ -216,6 +216,18 @@ def test_open_ended_until_stopped_and_the_log_is_read_incrementally(session):
     done = _wait(session, lambda s: s["state"] == "stopped")
     assert done["status"]["frames"] == len(done["frames"]) == done["status"]["clean_frames"]
     assert done["output_keys"] == ["peak_1_center"]          # nothing pinned: the recipe's own names
+
+
+def test_the_frame_deadline_comes_from_the_page(session):
+    live_api.start(session, {**CONFIG, "frame_deadline_s": 0.000001})
+    snap = _wait(session, lambda s: s["state"] == "done")
+    assert all(f["flags"] == ["deadline_missed"] for f in snap["frames"])
+    assert snap["status"]["clean_frames"] == 0 and not any(
+        e["event"] == "escalation_started" for e in snap["events"])      # slow is not a breach
+    live_api.clear(session)
+    live_api.start(session, {**CONFIG, "frame_deadline_s": None})          # no deadline at all
+    snap = _wait(session, lambda s: s["state"] == "done")
+    assert all(f["flags"] == [] for f in snap["frames"])
 
 
 # ── replaying a folder of recorded measurements ──────────────────

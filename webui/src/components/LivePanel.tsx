@@ -34,7 +34,7 @@ const FLAG_HELP: Record<string, string> = {
   gate_poor: "The fit describes this frame clearly worse than it described the reference.",
   drift_suspected: "The data looks different from what the recipe was built on, even if the fit is good.",
   out_of_reference_range: "A tracked value left the range seen so far. If it stays there it is accepted as real.",
-  deadline_missed: "The analysis took longer than the frame deadline. The values are still valid and nothing is rebuilt because of it.",
+  deadline_missed: "The analysis took longer than the frame deadline set under Options. The values are still valid and nothing is rebuilt because of it.",
   llm_used: "A model was called while answering this frame. This should never happen.",
 };
 
@@ -135,6 +135,7 @@ export function LivePanel({
   const [autoEscalate, setAutoEscalate] = useState(true);
   const [profile, setProfile] = useState("thorough");
   const [refFrames, setRefFrames] = useState("1");
+  const [deadline, setDeadline] = useState("10");
   const [replayDir, setReplayDir] = useState("");
   const [technique, setTechnique] = useState("");
   const [sample, setSample] = useState("");
@@ -197,6 +198,7 @@ export function LivePanel({
       reference_source: reference === FIRST_FRAME ? "first_frame" : "analysis",
       reference_analysis: reference === FIRST_FRAME ? undefined : reference,
       reference_frames: Math.max(1, Math.min(25, parseInt(refFrames, 10) || 1)),
+      frame_deadline_s: parseFloat(deadline) > 0 ? parseFloat(deadline) : null,
       ...(instrument === REPLAY ? {
         replay_dir: replayDir.trim(),
         system_info: { technique, sample, x_axis: xAxis, y_axis: yAxis },
@@ -381,6 +383,16 @@ export function LivePanel({
                 </span>
                 <input type="number" min={1} placeholder="until stopped" value={nFrames}
                   onChange={(e) => setNFrames(e.target.value)} />
+              </label>
+              <label><span>Frame deadline (s)
+                  <Info>
+                    How long the analysis of one frame may take before the frame is flagged slow. Set it
+                    to the time between frames at your instrument. A slow frame keeps its values and nothing
+                    is rebuilt because of it. Leave empty for no deadline.
+                  </Info>
+                </span>
+                <input type="number" min={0} step={0.5} placeholder="none" value={deadline}
+                  onChange={(e) => setDeadline(e.target.value)} />
               </label>
               <label><span>Pause between frames (s)</span>
                 <input type="number" min={0} step={0.5} value={interval} onChange={(e) => setIntervalS(e.target.value)} />

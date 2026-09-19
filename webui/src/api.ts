@@ -442,6 +442,8 @@ export interface LiveConfig {
   reference_source?: "first_frame" | "analysis";
   /** First-frame reference: how many frames to plan the recipe from (1 to 25). */
   reference_frames?: number;
+  /** Seconds a frame may take before it is flagged slow. null = no deadline. */
+  frame_deadline_s?: number | null;
   reference_analysis?: string;
   interval_s: number;
   apply: "never" | "approved" | "valid";
