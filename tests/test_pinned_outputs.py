@@ -160,6 +160,46 @@ class TestPinOutputs:
             pin_outputs(script=SCRIPT, outputs=self.OUT, model=m, replay=_runner(SCRIPT))
         assert len(m.prompts) == 3
 
+    # ── the value review: a second, independent reading of the numbers ──
+    GOOD = 'results["parameters"]["outputs"] = {"peak1_height": area / width}'
+    WRONG = 'results["parameters"]["outputs"] = {"peak1_height": area / width / 3.0}'
+
+    def test_a_wrong_value_that_passes_the_gate_is_caught_and_fed_back(self):
+        # Observed live (in-situ Raman): the recipe reported the right D/G ratio
+        # while the added lines re-derived it wrongly, and every check passed.
+        objection = json.dumps({"ok": False, "problems": [
+            "peak1_height: 2.667 contradicts area / width = 8.0 reported by the script"]})
+        m = Scripted([_reply(self.WRONG), objection, _reply(self.GOOD), '{"ok": true, "problems": []}'])
+        out = pin_outputs(script=SCRIPT, outputs=self.OUT, model=m, replay=_runner(SCRIPT))
+        assert out["attempts"] == 2 and out["llm_calls"] == 4
+        assert out["features"]["peak1_height"] == 8.0 and out["review"] == {"ok": True, "problems": []}
+        review, retry = m.prompts[1], m.prompts[2]
+        assert '"peak1_height": 2.666667' in review and '"peak_1_amplitude": 4.0' in review
+        assert "value review: peak1_height: 2.667 contradicts" in retry
+
+    def test_a_standing_objection_is_recorded_not_fatal(self):
+        objection = json.dumps({"ok": False, "problems": ["peak1_height: disagrees"]})
+        m = Scripted([_reply(self.GOOD), objection] * 3)
+        out = pin_outputs(script=SCRIPT, outputs=self.OUT, model=m, replay=_runner(SCRIPT))
+        assert out["attempts"] == 3 and out["features"]["peak1_height"] == 8.0
+        assert out["review"] == {"ok": False, "problems": ["peak1_height: disagrees"]}
+
+    def test_a_reviewer_that_cannot_be_read_has_no_opinion(self):
+        m = Scripted([_reply(self.GOOD), "I think it looks fine."])
+        out = pin_outputs(script=SCRIPT, outputs=self.OUT, model=m, replay=_runner(SCRIPT))
+        assert out["attempts"] == 1 and out["review"]["ok"] is True
+
+    def test_review_can_be_switched_off(self):
+        m = Scripted([_reply(self.WRONG)])
+        out = pin_outputs(script=SCRIPT, outputs=self.OUT, model=m, replay=_runner(SCRIPT),
+                          review=False)
+        assert len(m.prompts) == 1 and out["llm_calls"] == 1
+
+    def test_the_prompt_prefers_what_the_script_already_reports(self):
+        m = Scripted([_reply(self.GOOD)])
+        pin_outputs(script=SCRIPT, outputs=self.OUT, model=m, replay=_runner(SCRIPT), review=False)
+        assert "already reports a quantity that meets a definition, report THAT value" in m.prompts[0]
+
     def test_names_must_be_identifiers(self):
         with pytest.raises(ValueError, match="identifiers"):
             pin_outputs(script=SCRIPT, outputs={"peak height": "x"}, model=None,

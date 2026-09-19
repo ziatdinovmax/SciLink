@@ -91,7 +91,9 @@ def reanchor(spec: Dict[str, Any]) -> None:
                                         spec.get("system_info"), str(out_dir / "pinning")))
                 payload["pin_edits"] = pinned["edits"]
                 payload["pin_features"] = pinned["features"]
-                payload["llm_calls"] = (payload.get("llm_calls") or 0) + pinned["attempts"]
+                payload["pin_review"] = pinned.get("review")
+                payload["llm_calls"] = (payload.get("llm_calls") or 0) + (
+                    pinned.get("llm_calls") or pinned["attempts"])
             except Exception as e:  # noqa: BLE001 - reported to the parent
                 payload["pin_error"] = f"{type(e).__name__}: {e}"
     except BaseException as e:  # noqa: BLE001 - reported, never raised

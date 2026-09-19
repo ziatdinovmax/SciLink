@@ -61,11 +61,64 @@ Write ONLY the Python lines that compute these outputs from quantities the scrip
 Rules:
 - Your lines are inserted immediately BEFORE the `FIT_RESULTS_JSON` print, at that line's indentation. Use the variable names that exist at that point in the script.
 - Every listed name must appear, as a plain finite float. If the script has an uncertainty for an output, also add "<name>_err".
-- Follow each definition literally — e.g. a HEIGHT is the peak's maximum above the baseline, which for an area-normalised profile is not its amplitude parameter; evaluate the fitted component if you need to.
+- When the script already reports a quantity that meets a definition, report THAT value; derive something new only when nothing it reports does, and then follow the definition literally (a HEIGHT is the peak's maximum above the baseline, which for an area-normalised profile is not its amplitude parameter).
 - Do not refit, do not re-read the data, do not modify existing entries, do not print anything.
 {feedback}
 Respond with ONE JSON object and nothing else:
 {{"code": "<the python lines>", "rationale": "<one sentence per output: which fitted quantity it comes from>"}}"""
+
+
+# The deterministic gate can say the named outputs exist and nothing else moved;
+# it cannot say a value MEANS what its definition says. Observed live (in-situ
+# Raman): the recipe already reported the D and G heights and their ratio (1.18,
+# tracking the truth all run) while the added lines re-derived the ratio with the
+# baseline subtracted twice — 1.74 on the reference, negative by the end — and
+# every check passed. So a second, independent call reads the numbers.
+REVIEW_PROMPT = """A curve-fitting script was extended to report NAMED OUTPUTS. Check the values it now reports for them on the reference data.
+
+## Definitions
+{outputs}
+
+## What the script itself reports on this data (its own fitted and derived quantities)
+{features}
+
+## The values now reported for the named outputs
+{pinned}
+
+## The lines that compute them
+```python
+{code}
+```
+
+A named output is wrong when it contradicts its definition, or contradicts a quantity the script already reports that measures the same thing (or a simple function of reported quantities, such as a ratio or a difference). Work the arithmetic from the numbers above; do not judge style.
+
+Respond with ONE JSON object and nothing else:
+{{"ok": true | false, "problems": ["<output name>: <what it contradicts, with the numbers>", ...]}}"""
+
+
+def review_pinned(model: Any, outputs: Dict[str, str], before: Dict[str, float],
+                  after: Dict[str, float], code: str,
+                  generation_config: Any = None) -> List[str]:
+    """Problems an independent reading finds with the pinned VALUES; empty when
+    none. A reviewer that cannot be parsed has no opinion (never blocks)."""
+    from ..skills._shared._graduation import parse_json_response
+    prefix = OUTPUTS_KEY + "_"
+    prompt = REVIEW_PROMPT.format(
+        outputs="\n".join(f"- `{n}`: {d}" for n, d in outputs.items()),
+        features=json.dumps({k: round(v, 6) for k, v in sorted(before.items())
+                             if not k.startswith(prefix)}, indent=1),
+        pinned=json.dumps({k[len(prefix):]: round(v, 6) for k, v in sorted(after.items())
+                           if k.startswith(prefix)}, indent=1),
+        code=code)
+    kwargs = {"generation_config": generation_config} if generation_config is not None else {}
+    try:
+        raw = model.generate_content(prompt, **kwargs)
+        parsed = parse_json_response(raw.text if hasattr(raw, "text") else str(raw))
+    except Exception:  # noqa: BLE001
+        return []
+    if not isinstance(parsed, dict) or parsed.get("ok") is not False:
+        return []
+    return [str(p)[:300] for p in (parsed.get("problems") or ["the reviewer rejected the values"])][:6]
 
 
 def _print_lines(script: str) -> List[str]:
@@ -159,9 +212,17 @@ def propose_code(model: Any, script: str, outputs: Dict[str, str],
 def pin_outputs(*, script: str, outputs: Dict[str, str], model: Any,
                 replay: Callable[[Optional[List[Dict[str, Any]]]], Dict[str, float]],
                 max_attempts: int = 3, generation_config: Any = None,
-                logger: Optional[logging.Logger] = None) -> Dict[str, Any]:
+                logger: Optional[logging.Logger] = None, review: bool = True) -> Dict[str, Any]:
     """Extend ``script`` to report ``outputs``; return the accepted
-    ``{"edits", "features", "rationale", "attempts"}``.
+    ``{"edits", "features", "rationale", "attempts", "llm_calls", "review"}``.
+
+    Two gates per attempt: the deterministic one (names present and finite,
+    nothing else changed) and, with ``review``, an independent reading of the
+    VALUES against the definitions and the script's own reported quantities.
+    A reviewer objection is fed back like any other rejection. If the last
+    attempt passes the deterministic gate and only the reviewer still objects,
+    it is accepted and the objection travels in ``review`` — an argument between
+    two model calls must not stop an experiment, but it must be visible.
 
     ``replay(edits)`` runs the locked recipe on the REFERENCE data with the
     given ``script_edits`` (``None`` = unedited) and returns its flat numeric
@@ -177,24 +238,39 @@ def pin_outputs(*, script: str, outputs: Dict[str, str], model: Any,
     if bad:
         raise ValueError(f"output names must be identifiers: {bad}")
     before = replay(None)
-    feedback, last = None, "no attempt made"
+    feedback, last, llm_calls = None, "no attempt made", 0
+
+    def accepted(edits, after, proposal, attempt, objections):
+        return {"edits": edits, "features": lift_outputs(after),
+                "rationale": str(proposal.get("rationale") or "")[:600],
+                "attempts": attempt, "llm_calls": llm_calls,
+                "review": {"ok": not objections, "problems": objections}}
+
     for attempt in range(1, max_attempts + 1):
+        objections: List[str] = []
         try:
+            llm_calls += 1
             proposal = propose_code(model, script, outputs, before, feedback,
                                     generation_config=generation_config)
             edits = splice_edits(script, proposal["code"])
             after = replay(edits)
             problems = check_pinned(before, after, names)
+            if not problems and review:
+                llm_calls += 1
+                objections = review_pinned(model, outputs, before, after, proposal["code"],
+                                           generation_config=generation_config)
         except Exception as e:  # noqa: BLE001 - fed back to the model
             problems = [f"{type(e).__name__}: {e}"]
             after, proposal, edits = {}, {}, []
-        if not problems:
+        if not problems and not objections:
             log.info(f"📌 Outputs pinned on attempt {attempt}: "
                      + ", ".join(f"{n}={after[OUTPUTS_KEY + '_' + n]:.5g}" for n in names))
-            return {"edits": edits, "features": lift_outputs(after),
-                    "rationale": str(proposal.get("rationale") or "")[:600],
-                    "attempts": attempt}
-        last = "; ".join(problems)[:600]
+            return accepted(edits, after, proposal, attempt, [])
+        if not problems and attempt == max_attempts:
+            log.warning("📌 Outputs pinned, but the value review still objects: "
+                        + "; ".join(objections))
+            return accepted(edits, after, proposal, attempt, objections)
+        last = "; ".join(problems or [f"value review: {o}" for o in objections])[:900]
         feedback = last
         log.warning(f"📌 Pinning attempt {attempt}/{max_attempts} rejected: {last}")
     raise RuntimeError(f"could not pin outputs {names} after {max_attempts} attempt(s): {last}")

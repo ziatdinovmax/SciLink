@@ -257,10 +257,18 @@ class TestLLMRecommender:
 
     def test_json_in_a_fence_and_non_json(self):
         m = ScriptedModel(['```json\\n{"params": {"averages": 16}}\\n```'.replace("\\\\n", "\\n"),
-                           "I would increase the dwell time."])
+                           "I would increase the dwell time.", "Still prose."])
         r = LLMRecommender(m, SCHEMA, "goal")
         assert r.suggest()["params"] == {"averages": 16}
-        assert "did not return JSON" in r.suggest()["problems"][0]
+        assert "did not return JSON" in r.suggest()["problems"][0]        # after one retry
+        assert len(m.prompts) == 3
+
+    def test_a_reply_cut_off_mid_object_is_asked_again(self):
+        # Observed live: '{"params": {}' was logged as a refused recommendation.
+        m = ScriptedModel(['{"params": {}', '{"params": {}, "rationale": "precision is met"}'])
+        out = LLMRecommender(m, SCHEMA, "goal", skill=None).suggest()
+        assert out == {"params": {}, "rationale": "precision is met"}
+        assert finalize(out, SCHEMA, source="llm", based_on_step=1)["kind"] == "hold"
 
     def test_protocol_output(self):
         m = ScriptedModel(['{"protocol": "1. halve the dose\\n2. re-acquire", "rationale": "damage"}'])

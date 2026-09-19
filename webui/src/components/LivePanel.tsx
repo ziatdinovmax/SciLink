@@ -28,6 +28,16 @@ const FLAG_WORDS: Record<string, string> = {
   llm_used: "model called",
 };
 
+/** What each flag means for the person watching, in one sentence. */
+const FLAG_HELP: Record<string, string> = {
+  fit_failed: "The recipe could not run on this frame. No values are reported for it.",
+  gate_poor: "The fit describes this frame clearly worse than it described the reference.",
+  drift_suspected: "The data looks different from what the recipe was built on, even if the fit is good.",
+  out_of_reference_range: "A tracked value left the range seen so far. If it stays there it is accepted as real.",
+  deadline_missed: "The analysis took longer than the frame deadline. The values are still valid and nothing is rebuilt because of it.",
+  llm_used: "A model was called while answering this frame. This should never happen.",
+};
+
 /** A small "i" button. The explanation opens on click and closes on blur, so
  * the page stays quiet for people who do not need it. */
 function Info({ children }: { children: ReactNode }) {
@@ -471,7 +481,9 @@ export function LivePanel({
         <Info>
           <ul>
             <li>{st.clean_frames ?? 0} of {count} frames clean</li>
-            {flagCounts.map(([k, n]) => <li key={k}>{n} flagged: {FLAG_WORDS[k] ?? k}</li>)}
+            {flagCounts.map(([k, n]) => (
+              <li key={k}>{n} flagged, {FLAG_WORDS[k] ?? k}. {FLAG_HELP[k] ?? ""}</li>
+            ))}
             <li>{st.llm_calls_in_frames ?? 0} model calls while answering frames</li>
             <li>{st.reanchors ?? 0} recipe rebuilds</li>
             <li>Slowest frame {(st.latency_s?.max ?? 0).toFixed(1)} s</li>
@@ -513,6 +525,9 @@ export function LivePanel({
               <Info>
                 One chart per tracked quantity against frame number. Triangles mark flagged frames and a
                 dotted line marks a new recipe. Several quantities get several charts, never a shared axis.
+                <ul>{Object.entries(FLAG_WORDS).filter(([k]) => k !== "llm_used").map(([k, w]) => (
+                  <li key={k}><b>{w}</b>. {FLAG_HELP[k]}</li>
+                ))}</ul>
               </Info>
               {hasTruth && (
                 <span className="live-legend inline">

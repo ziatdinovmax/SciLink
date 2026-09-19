@@ -473,12 +473,21 @@ class LLMRecommender(Recommender):
         kwargs = ({"generation_config": self.generation_config}
                   if self.generation_config is not None else {})
         self._resolve_guidance()
-        raw = self.model.generate_content(self.build_prompt(), **kwargs)
-        text = raw.text if hasattr(raw, "text") else str(raw)
         used = {"acquisition_skill": self.skill} if self._guidance else {}
-        try:
-            parsed = parse_json_response(text)
-        except ValueError:
+        # One retry on a reply that is not JSON. Observed live: an answer cut
+        # off mid-object ('{"params": {}') was logged as a refused
+        # recommendation. This is the slow clock, so a second call costs the
+        # stream nothing.
+        parsed, text = None, ""
+        for _ in range(2):
+            raw = self.model.generate_content(self.build_prompt(), **kwargs)
+            text = raw.text if hasattr(raw, "text") else str(raw)
+            try:
+                parsed = parse_json_response(text)
+                break
+            except ValueError:
+                parsed = None
+        if parsed is None:
             return {"params": None, "problems": ["the model did not return JSON"],
                     "rationale": text[:200], **used}
         if not isinstance(parsed, dict):

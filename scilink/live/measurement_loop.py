@@ -468,7 +468,9 @@ class MeasurementLoop:
         if pinned is not None:
             record["pinned_outputs"] = {"definitions": self.outputs,
                                         "rationale": pinned["rationale"],
-                                        "attempts": pinned["attempts"]}
+                                        "attempts": pinned["attempts"],
+                                        "llm_calls": pinned.get("llm_calls"),
+                                        "review": pinned.get("review")}
         if ref_result is not None:
             st = ref_result.get("stage_timings") or {}
             record["llm_calls"] = st.get("llm_calls")
