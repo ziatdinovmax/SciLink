@@ -241,7 +241,8 @@ class LiveRun:
         self.n_frames: Optional[int] = int(n) if n not in (None, "", 0, "0") else None
         self.from_analysis = str(config.get("reference_source") or "first_frame") == "analysis"
         if hasattr(self.instrument, "remaining"):
-            left = len(self.instrument) - (0 if self.from_analysis else 1)   # one file may be the reference
+            n_ref = max(1, min(int(config.get("reference_frames") or 1), 25))
+            left = len(self.instrument) - (0 if self.from_analysis else n_ref)   # some files are the reference
             self.n_frames = max(1, min(self.n_frames or left, left))
         self._tail = _LogTail()
         self._session_dir = Path(session_dir).resolve()
@@ -319,9 +320,20 @@ class LiveRun:
                         "under the recipe's own names.")
                 self.loop.setup(anchor=str(anchor), reference_data=ref_csv)
             else:
-                reference = inst.acquire({}).save(str(self.run_dir / "reference"), 0,
-                                                  stem="reference")
-                self.loop.setup(reference=reference,
+                # The first frame, or the first few: several frames let the plan
+                # see what moves before the recipe is locked on the last of them.
+                n_ref = max(1, min(int(cfg.get("reference_frames") or 1), 25))
+                refs = []
+                for i in range(n_ref):
+                    if self._stop.is_set():
+                        break
+                    refs.append(inst.acquire({}).save(str(self.run_dir / "reference"), i,
+                                                      stem="reference"))
+                    if i < n_ref - 1 and float(cfg.get("interval_s") or 0) > 0:
+                        time.sleep(float(cfg.get("interval_s")))
+                if not refs:
+                    raise LiveError(400, "Stopped before a reference was acquired.")
+                self.loop.setup(reference=refs if len(refs) > 1 else refs[0],
                                 profile=(cfg.get("reference_profile") or None))
             self.loop.recommender = self._recommender(creds)
             self.state = "running"
@@ -413,8 +425,8 @@ class LiveRun:
                 and not k.endswith(("_err", "_error", "_stderr", "_std"))][:cap]
 
     def _reference_curve(self) -> Optional[Dict[str, Any]]:
-        ref = self.run_dir / "reference" / "reference_000000.csv"
-        return self._curve({"step": 0, "data": str(ref)}) if ref.exists() else None
+        refs = sorted((self.run_dir / "reference").glob("reference_*.csv"))
+        return self._curve({"step": 0, "data": str(refs[-1])}) if refs else None
 
     @staticmethod
     def _curve(frame: Dict[str, Any], max_points: int = 600) -> Optional[Dict[str, Any]]:

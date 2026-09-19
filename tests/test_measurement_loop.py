@@ -572,3 +572,89 @@ class TestStrictReplay:
 
     def test_default_keeps_the_forgiving_fallback(self):
         assert self._try_reuse(strict=False) is None      # None = re-derive (today)
+
+
+# ──────────────────────────────────────────────────────────────
+# the reference of a stream: told it will be replayed, and planned from
+# several frames when there are several
+# ──────────────────────────────────────────────────────────────
+
+class TestStreamReference:
+    def test_the_reference_analysis_is_told_it_will_be_replayed(self, tmp_path):
+        anchor = make_anchor(tmp_path)
+
+        class RefAgent(FakeAgent):
+            def analyze(self, data, **kw):
+                FakeAgent.calls.append({"data": data, **kw})
+                return {**good(6.0), "output_directory": str(anchor)}
+        MeasurementLoop(str(tmp_path / "loop"), agent_factory=RefAgent).setup(reference="ref.csv")
+        assert FakeAgent.calls[0]["stream_reference"] is True
+        from scilink.agents.exp_agents._qc_profile import planning_addendum
+        text = planning_addendum({"stream_reference": True, "analysis_targets": ["peak position"]})
+        assert "## Scope" in text and "## Replay" in text and "replayed unchanged" in text
+        assert planning_addendum({"stream_reference": False}) is None
+
+    def _series_run(self, root, n=4, regimes=2):
+        d = root / "series_run"
+        d.mkdir()
+        results = []
+        for i in range(n):
+            (d / f"spectrum_{i:04d}").mkdir()
+            (d / f"spectrum_{i:04d}" / "marker.txt").write_text(str(i))
+            results.append({"index": i, "name": f"f{i}", "success": i != n - 1 or True,
+                            "model_type": "two peaks" if i >= n - 2 else "one peak",
+                            "script": f"# script for frame {i}\n" + SCRIPT,
+                            "parameters": {"peak_1": {"center": 6.0 + i}},
+                            "fit_quality": {"r_squared": 0.99}})
+        (d / "series_fit_results.json").write_text(json.dumps({
+            "total_spectra": n, "is_single_spectrum": False,
+            "locked_config": {"physical_model": "one peak"},
+            "series_analysis_plan": {"regimes": [{}] * regimes}, "results": results}))
+        return d
+
+    def test_several_frames_are_a_series_and_the_recipe_locks_on_the_last(self, tmp_path):
+        series = self._series_run(tmp_path)
+
+        class SeriesAgent(FakeAgent):
+            def analyze(self, data, **kw):
+                FakeAgent.calls.append({"data": data, **kw})
+                if isinstance(data, list):
+                    return {"status": "success", "output_directory": str(series),
+                            "stage_timings": {"llm_calls": 9}}
+                return {**good(9.0), "output_directory": self.output_dir}
+        loop = MeasurementLoop(str(tmp_path / "loop"), agent_factory=SeriesAgent,
+                               check_portability=False)
+        files = [f"f{i}.csv" for i in range(4)]
+        rec = loop.setup(reference=files)
+        call = FakeAgent.calls[0]
+        assert call["data"] == files and call["series_metadata"]["values"] == [0, 1, 2, 3]
+        assert call["profile"] == {"base": "thorough", "trend": False, "synthesis": "none",
+                                   "adaptive_refit": False}
+        assert rec["source"] == "reference:thorough:4 frames" and rec["llm_calls"] == 9
+        assert rec["reference_frames"] == {"n": 4, "fitted": 4, "anchored_on": 3, "regimes": 2,
+                                           "model": "two peaks", "llm_calls": 9}
+        anchor = loop.anchor_dir
+        assert anchor.name == "reference_anchor"
+        assert (anchor / "scripts" / "fitting_script.py").read_text().startswith("# script for frame 3")
+        assert (anchor / "spectrum_0000" / "marker.txt").read_text() == "3"
+        single = json.loads((anchor / "series_fit_results.json").read_text())
+        assert single["locked_config"]["physical_model"] == "two peaks"      # the last regime's
+        assert single["is_single_spectrum"] and len(single["results"]) == 1
+        assert rec["reference_features"]["peak_1_center"] == 9.0
+        # and the stream replays against that single-frame anchor
+        loop.step("next.csv")
+        assert FakeAgent.calls[-1]["prior_analysis_paths"] == [str(anchor)]
+
+    def test_a_series_with_no_fitted_frame_does_not_arm(self, tmp_path):
+        series = self._series_run(tmp_path)
+        data = json.loads((series / "series_fit_results.json").read_text())
+        for r in data["results"]:
+            r["success"] = False
+        (series / "series_fit_results.json").write_text(json.dumps(data))
+
+        class SeriesAgent(FakeAgent):
+            def analyze(self, data, **kw):
+                return {"status": "success", "output_directory": str(series)}
+        loop = MeasurementLoop(str(tmp_path / "loop"), agent_factory=SeriesAgent)
+        with pytest.raises(RuntimeError, match="no frame of the reference series"):
+            loop.setup(reference=["a.csv", "b.csv"])

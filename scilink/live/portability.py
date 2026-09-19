@@ -14,6 +14,13 @@ transform for a recipe whose constants are expressions of the data — noise
 scales with the signal — so a material drop means a number read off the
 reference is baked in. It costs two replays and no model call, and its verdict
 goes into the setup record.
+
+A third replay shifts the x axis by a few percent of its span. That one is
+INFORMATION, not a verdict: a recipe that finds its features follows them
+anywhere, while one that fixes positions does not, and fixing positions is
+sometimes exactly right (XPS binding energies, the D and G bands, a known
+reflection). What the operator learns is how far a feature may move before this
+recipe stops fitting and the loop has to rebuild it.
 """
 
 from __future__ import annotations
@@ -25,11 +32,14 @@ import numpy as np
 
 SCALES = (3.0, 0.35)
 R2_TOLERANCE = 0.03
+#: x-axis shift of the position replay, as a fraction of the measured span.
+SHIFT_FRACTION = 0.03
 
 
 def check_portability(replay_r2: Callable[[str, str], Optional[float]], reference_data: str,
                       reference_r2: Optional[float], work_dir: str,
-                      scales=SCALES, tolerance: float = R2_TOLERANCE) -> Dict[str, Any]:
+                      scales=SCALES, tolerance: float = R2_TOLERANCE,
+                      shift_fraction: Optional[float] = SHIFT_FRACTION) -> Dict[str, Any]:
     """``replay_r2(data_path, tag)`` returns the locked recipe's R² on a file
     (None when it failed to run). Returns ``{"portable": bool, "trials": [...]}``;
     an empty dict when the reference cannot be read or has no R² to compare with."""
@@ -51,8 +61,34 @@ def check_portability(replay_r2: Callable[[str, str], Optional[float]], referenc
         ok = r2 is not None and r2 >= reference_r2 - tolerance
         trials.append({"signal_scale": scale, "r_squared": None if r2 is None else round(r2, 4),
                        "ok": bool(ok)})
-    return {"portable": all(t["ok"] for t in trials), "reference_r_squared": round(reference_r2, 4),
-            "trials": trials}
+    report = {"portable": all(t["ok"] for t in trials),
+              "reference_r_squared": round(reference_r2, 4), "trials": trials}
+    # Positions: the same curve, its x axis moved. Reported, never judged.
+    span = float(np.nanmax(x) - np.nanmin(x))
+    if shift_fraction and span > 0:
+        shift = shift_fraction * span
+        path = d / "reference_shifted.csv"
+        np.savetxt(path, np.column_stack([x + shift, y]), delimiter=",",
+                   header=f"{x_label},{y_label}", comments="")
+        r2 = replay_r2(str(path), "shifted")
+        report["positions"] = {
+            "shift": round(shift, 6), "shift_fraction": shift_fraction,
+            "r_squared": None if r2 is None else round(r2, 4),
+            "follows_features": bool(r2 is not None and r2 >= reference_r2 - tolerance)}
+    return report
+
+
+def describe_positions(report: Dict[str, Any]) -> str:
+    """One sentence on how the recipe treats feature positions ('' if untested)."""
+    pos = report.get("positions")
+    if not pos:
+        return ""
+    if pos["follows_features"]:
+        return "It finds its features where they are, so it follows them if they move."
+    how = "it did not run" if pos["r_squared"] is None else f"R² fell to {pos['r_squared']}"
+    return (f"It fixes feature positions. With the axis moved by {pos['shift']:g} "
+            f"({pos['shift_fraction']:.0%} of the span) {how}, so a larger move than that "
+            "means a rebuild. That is expected when positions are known in advance.")
 
 
 def describe(report: Dict[str, Any]) -> str:

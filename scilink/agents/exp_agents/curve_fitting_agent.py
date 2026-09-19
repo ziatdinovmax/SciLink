@@ -343,6 +343,11 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # path, where a model call is never acceptable. Default False keeps
         # today's forgiving behaviour (LLM correction, then re-derivation).
         strict_replay: bool = False,
+        # This analysis is the reference for a stream: its script will be
+        # replayed unchanged, with no model in the loop, on later measurements
+        # it has not seen. Adds one planning principle (see
+        # ``_qc_profile.STREAM_REFERENCE_PLANNING``); changes nothing else.
+        stream_reference: bool = False,
         # Script hashes the bank-first audition must not consider. A live
         # loop's escalation passes the recipe that just breached: auditioning
         # it again is circular.
@@ -895,6 +900,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "_synthesis_level": qc_profile.synthesis,
             "_verification_mode": qc_profile.verification,
             "_strict_replay": bool(strict_replay),
+            "stream_reference": bool(stream_reference),
             "analysis_targets": [str(x) for x in (targets or []) if str(x).strip()],
             # Wall-clock budget for per-unit re-analysis of flagged spectra
             # in a series (None = unlimited). Worst fits go first; skipped

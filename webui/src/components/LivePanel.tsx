@@ -66,9 +66,14 @@ function describeEvent(e: LiveEvent): string {
   const g = (k: string) => e[k] as string | number | undefined;
   switch (e.event) {
     case "setup": {
-      const port = e.portability as { portable?: boolean; summary?: string } | undefined;
-      const how = g("source") === "anchor" ? "Armed from a past analysis." : "Armed from the reference.";
-      return port && port.portable === false ? `${how} ${port.summary}` : how;
+      const port = e.portability as
+        { portable?: boolean; summary?: string; positions_summary?: string } | undefined;
+      const refs = e.reference_frames as { n?: number; regimes?: number } | undefined;
+      const how = g("source") === "anchor" ? "Armed from a past analysis."
+        : refs?.n ? `Armed from the first ${refs.n} frames${(refs.regimes ?? 1) > 1 ? `, ${refs.regimes} regimes seen` : ""}.`
+        : "Armed from the reference.";
+      return [how, port && port.portable === false ? port.summary : "", port?.positions_summary ?? ""]
+        .filter(Boolean).join(" ");
     }
     case "escalation_started":
       return "Rebuilding the recipe in the background.";
@@ -114,6 +119,7 @@ export function LivePanel({
   const [every, setEvery] = useState(8);
   const [autoEscalate, setAutoEscalate] = useState(true);
   const [profile, setProfile] = useState("thorough");
+  const [refFrames, setRefFrames] = useState("1");
   const [replayDir, setReplayDir] = useState("");
   const [technique, setTechnique] = useState("");
   const [sample, setSample] = useState("");
@@ -175,6 +181,7 @@ export function LivePanel({
       apply, recommender: steerable ? recommender : "none",
       reference_source: reference === FIRST_FRAME ? "first_frame" : "analysis",
       reference_analysis: reference === FIRST_FRAME ? undefined : reference,
+      reference_frames: Math.max(1, Math.min(25, parseInt(refFrames, 10) || 1)),
       ...(instrument === REPLAY ? {
         replay_dir: replayDir.trim(),
         system_info: { technique, sample, x_axis: xAxis, y_axis: yAxis },
@@ -232,7 +239,7 @@ export function LivePanel({
                 </Info>
               </span>
               <select value={reference} onChange={(e) => setReference(e.target.value)}>
-                <option value={FIRST_FRAME}>First frame</option>
+                <option value={FIRST_FRAME}>{(parseInt(refFrames, 10) || 1) > 1 ? `First ${refFrames} frames` : "First frame"}</option>
                 {analyses.map((a) => (
                   <option key={a.path} value={a.path} title={a.model}>
                     {a.from_live_run ? "Earlier live run" : "Analysis"}: {a.name}
@@ -363,6 +370,18 @@ export function LivePanel({
               <label><span>Pause between frames (s)</span>
                 <input type="number" min={0} step={0.5} value={interval} onChange={(e) => setIntervalS(e.target.value)} />
               </label>
+              {reference === FIRST_FRAME && (
+                <label><span>Reference frames
+                    <Info>
+                      How many frames the recipe is planned from. With several, the plan sees what moves,
+                      appears or is only noise before the recipe is locked on the last of them. Each extra
+                      frame adds a few seconds.
+                    </Info>
+                  </span>
+                  <input type="number" min={1} max={25} value={refFrames}
+                    onChange={(e) => setRefFrames(e.target.value)} />
+                </label>
+              )}
               {reference === FIRST_FRAME && (
                 <label><span>Reference analysis
                     <Info>Thorough takes a few minutes and is verified. Quick and extract are faster and less checked.</Info>

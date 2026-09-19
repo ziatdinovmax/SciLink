@@ -440,6 +440,8 @@ export interface LiveConfig {
   /** null runs until stopped. */
   n_frames: number | null;
   reference_source?: "first_frame" | "analysis";
+  /** First-frame reference: how many frames to plan the recipe from (1 to 25). */
+  reference_frames?: number;
   reference_analysis?: string;
   interval_s: number;
   apply: "never" | "approved" | "valid";

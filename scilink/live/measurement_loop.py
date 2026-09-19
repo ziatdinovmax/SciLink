@@ -38,6 +38,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -201,9 +202,12 @@ class MeasurementLoop:
             to catch weaker changes, RAISE it if clean frames are flagged
             ``gate_poor``; re-derive it when other real data are available.
         check_portability: At ``setup()``, replay the recipe on the reference
-            with its signal scaled ×3 and ×0.35 (two zero-LLM replays) and record
-            whether the fit quality survives — a recipe with a bound or window
-            read off the reference does not travel to stronger or weaker frames.
+            with its signal scaled ×3 and ×0.35 and record whether the fit
+            quality survives — a recipe with a bound read off the reference does
+            not travel to stronger or weaker frames. A third replay moves the x
+            axis by 3 % of its span and reports, without judging, whether the
+            recipe follows its features or fixes their positions. Three zero-LLM
+            replays in all.
         gate_keys: Features the range gate watches. Default: the pinned
             ``outputs`` when declared — the quantities the user named, not the
             recipe's nuisance parameters (observed live: an ill-determined
@@ -320,7 +324,7 @@ class MeasurementLoop:
 
     _human_feedback = False
 
-    def setup(self, reference: Optional[str] = None, *,
+    def setup(self, reference: Optional[Any] = None, *,
               anchor: Optional[str] = None,
               reference_data: Optional[str] = None,
               profile: Optional[str] = None,
@@ -339,6 +343,12 @@ class MeasurementLoop:
           system arms in seconds) and that run becomes the anchor.
           ``enable_human_feedback`` keeps the analysis's plan / result gates
           for a caller attached to a person.
+          A LIST of files (the first frames of the stream, in order) is
+          analysed as a series instead: the plan is made with all of them in
+          view — what moves, what appears, what is noise — which a single
+          frame cannot show, and the recipe is locked on the LAST of them, the
+          state the stream continues from. Trend analysis and synthesis are
+          skipped; the series is a means here, not a result.
 
         ``script_edits`` (exact old/new snippet pairs) are applied to the
         anchor's script on every frame — tomorrow's loop from yesterday's
@@ -353,16 +363,30 @@ class MeasurementLoop:
                              "file to analyse now) or `anchor` (a prior run directory).")
         t0 = time.perf_counter()
         source, ref_result = "anchor", None
-        if reference:
+        refs = ([str(reference)] if isinstance(reference, (str, Path))
+                else [str(r) for r in (reference or [])])
+        series_info: Optional[Dict[str, Any]] = None
+        if refs:
             self._human_feedback = bool(enable_human_feedback)
             run_dir = self.output_dir / "reference"
             agent = self._agent_factory(str(run_dir))
-            kwargs: Dict[str, Any] = {"system_info": self.system_info}
+            # The plan is told the recipe will be replayed on frames it has not
+            # seen; the structural half of that rule is the portability check.
+            kwargs: Dict[str, Any] = {"system_info": self.system_info, "stream_reference": True}
             if profile:
                 kwargs["profile"] = profile
             if self.targets:
                 kwargs["targets"] = self.targets
-            ref_result = agent.analyze(reference, **kwargs)
+            if len(refs) > 1:
+                kwargs["series_metadata"] = {"variable": "frame", "values": list(range(len(refs)))}
+                # The series is a means here: its plan, made with every frame
+                # in view, is what is wanted. No trend, no synthesis, and no
+                # per-frame re-analysis — observed on real EELS frames, the R²
+                # bar flagged 7 of 8 noise-limited frames and each was
+                # re-analysed by a model for about two minutes.
+                kwargs["profile"] = {"base": profile or "thorough", "trend": False,
+                                     "synthesis": "none", "adaptive_refit": False}
+            ref_result = agent.analyze(refs if len(refs) > 1 else refs[0], **kwargs)
             self._human_feedback = False
             if (ref_result or {}).get("status") != "success":
                 raise RuntimeError(
@@ -371,6 +395,14 @@ class MeasurementLoop:
             anchor = (ref_result.get("output_directory") or str(run_dir))
             source = ("bank" if ref_result.get("cold_start")
                       else f"reference:{profile or 'thorough'}")
+            if len(refs) > 1:
+                anchor, series_info = self._single_frame_anchor(
+                    Path(anchor), self.output_dir / "reference_anchor", refs)
+                series_info["llm_calls"] = (ref_result.get("stage_timings") or {}).get("llm_calls")
+                reference, ref_result = series_info["data"], None
+                source += f":{len(refs)} frames"
+            else:
+                reference = refs[0]
 
         script, anchor_dir = self._anchor_script(anchor)
         if script is None:
@@ -413,6 +445,8 @@ class MeasurementLoop:
             "reference_features": self._reference_features,
             "gate_calibration": self._calibration,
             **({"portability": portability} if portability else {}),
+            **({"reference_frames": {k: v for k, v in series_info.items() if k != "data"}}
+               if series_info else {}),
             "targets": self.targets, "objective_key": self.objective_key,
             "frame_deadline_s": self.frame_deadline_s,
         }
@@ -423,6 +457,8 @@ class MeasurementLoop:
         if ref_result is not None:
             st = ref_result.get("stage_timings") or {}
             record["llm_calls"] = st.get("llm_calls")
+        elif series_info:
+            record["llm_calls"] = series_info.get("llm_calls")
         self._append(record)
         self._save_state()
         self.logger.info(
@@ -453,6 +489,44 @@ class MeasurementLoop:
             _load_prior_curve_fit_state)
         anchor_dir, _summary, script, _label = _load_prior_curve_fit_state(anchor)
         return (script, anchor_dir) if anchor_dir is not None and script else (None, None)
+
+    @staticmethod
+    def _single_frame_anchor(series_dir: Path, dest: Path, files: List[str]):
+        """A series run's LAST successful frame, laid out as a single-spectrum
+        anchor (its own script, results and arrays) — so replay, pinning, gate
+        calibration and the portability check all read it like any reference.
+        A series keeps one script per spectrum and, with regimes, more than one
+        model; the stream continues from the last frame, so that is the recipe
+        to lock. Returns ``(anchor_dir, info)``."""
+        data = json.loads((series_dir / "series_fit_results.json").read_text())
+        ok = [r for r in (data.get("results") or [])
+              if isinstance(r, dict) and r.get("success") and r.get("script")]
+        if not ok:
+            raise RuntimeError("setup(): no frame of the reference series was fitted successfully")
+        last = ok[-1]
+        idx = int(last.get("index", len(files) - 1))
+        (dest / "scripts").mkdir(parents=True, exist_ok=True)
+        (dest / "scripts" / "fitting_script.py").write_text(last["script"], encoding="utf-8")
+        config = dict(data.get("locked_config") or {})
+        if last.get("model_type"):
+            config["physical_model"] = last["model_type"]     # the last regime's, when there were several
+        regimes = ((data.get("series_analysis_plan") or {}).get("regimes") or [])
+        single = {**data, "total_spectra": 1, "successful": 1, "is_single_spectrum": True,
+                  "locked_config": config, "series_analysis_plan": None,
+                  "results": [{**last, "index": 0}],
+                  "derived_from": {"series_dir": str(series_dir), "index": idx}}
+        (dest / "series_fit_results.json").write_text(json.dumps(single, indent=1, default=str))
+        (dest / "analysis_results.json").write_text(json.dumps({
+            "status": "success", "model_type": last.get("model_type"),
+            "fitting_parameters": last.get("parameters") or {},
+            "fit_quality": last.get("fit_quality") or {}}, indent=1, default=str))
+        arrays = series_dir / f"spectrum_{idx:04d}"
+        if arrays.is_dir():
+            shutil.copytree(arrays, dest / "spectrum_0000", dirs_exist_ok=True)
+        info = {"n": len(files), "fitted": len(ok), "anchored_on": idx,
+                "regimes": len(regimes) or 1, "model": str(last.get("model_type") or "")[:200],
+                "data": files[min(idx, len(files) - 1)]}
+        return str(dest), info
 
     @staticmethod
     def _features_from_anchor(anchor_dir: Path) -> Dict[str, float]:
@@ -611,7 +685,8 @@ class MeasurementLoop:
         self._n_escalations += 1
         out_dir = self.output_dir / "escalations" / f"escalation_{self._n_escalations:03d}"
         analyze_kwargs: Dict[str, Any] = {"system_info": self.system_info,
-                                          "profile": profile or self.escalation_profile}
+                                          "profile": profile or self.escalation_profile,
+                                          "stream_reference": True}
         if self.targets:
             analyze_kwargs["targets"] = self.targets
         # Never audition the recipe that just breached: that is circular.
@@ -729,7 +804,8 @@ class MeasurementLoop:
         if not self.check_portability or not reference_data or self.anchor_dir is None:
             return {}
         try:
-            from .portability import agent_replay_r2, check_portability, describe
+            from .portability import (agent_replay_r2, check_portability, describe,
+                                      describe_positions)
             work = self.output_dir / "portability"
             report = check_portability(
                 agent_replay_r2(self._agent_factory, str(self.anchor_dir), self.system_info,
@@ -740,8 +816,9 @@ class MeasurementLoop:
             return {}
         if report:
             report["summary"] = describe(report)
+            report["positions_summary"] = describe_positions(report)
             (self.logger.info if report["portable"] else self.logger.warning)(
-                f"   portability: {report['summary']}")
+                f"   portability: {report['summary']} {report['positions_summary']}".rstrip())
         return report
 
     def _calibrate(self) -> None:

@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from scilink.live import MeasurementLoop
-from scilink.live.portability import check_portability, describe
+from scilink.live.portability import check_portability, describe, describe_positions
 
 
 def _reference(tmp_path):
@@ -31,6 +31,7 @@ def test_an_invariant_recipe_travels(tmp_path):
     rep = check_portability(replay, _reference(tmp_path), 0.97, str(tmp_path / "w"))
     assert rep["portable"] and [t["signal_scale"] for t in rep["trials"]] == [3.0, 0.35]
     assert seen[0] > 1200 and seen[1] < 150                       # the data really was scaled
+    assert rep["positions"]["follows_features"] and "follows them" in describe_positions(rep)
     assert "travels" in describe(rep) and "—" not in describe(rep)
 
 
@@ -72,6 +73,22 @@ def test_setup_records_the_verdict_and_never_calls_a_model(tmp_path):
     loop = MeasurementLoop(str(tmp_path / "loop"), agent_factory=Agent)
     rec = loop.setup(anchor=str(anchor), reference_data=_reference(tmp_path))
     assert rec["portability"]["portable"] is False and "may not travel" in rec["portability"]["summary"]
-    assert calls == [("reference_x3.csv", True), ("reference_x0.35.csv", True)]
+    assert calls == [("reference_x3.csv", True), ("reference_x0.35.csv", True),
+                     ("reference_shifted.csv", True)]
     quiet = MeasurementLoop(str(tmp_path / "loop2"), agent_factory=Agent, check_portability=False)
     assert "portability" not in quiet.setup(anchor=str(anchor), reference_data=_reference(tmp_path))
+
+
+def test_fixed_positions_are_reported_not_judged(tmp_path):
+    ref = _reference(tmp_path)
+    x0 = float(np.loadtxt(ref, delimiter=",", skiprows=1)[0, 0])
+
+    def replay(path, tag):                                        # a centre window that does not move
+        return 0.97 if np.loadtxt(path, delimiter=",", skiprows=1)[0, 0] == x0 else 0.41
+    rep = check_portability(replay, ref, 0.97, str(tmp_path / "w"))
+    assert rep["portable"] is True                                # the verdict is about signal only
+    assert rep["positions"] == {"shift": 0.3, "shift_fraction": 0.03, "r_squared": 0.41,
+                                "follows_features": False}
+    text = describe_positions(rep)
+    assert "fixes feature positions" in text and "0.3" in text and "—" not in text and ";" not in text
+    assert describe_positions({}) == ""

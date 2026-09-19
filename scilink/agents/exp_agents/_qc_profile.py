@@ -97,11 +97,31 @@ TARGET_PLANNING_TMPL = (
     "the plan which region you fit and why it is sufficient.")
 
 
+# A series anchor is planned with the whole series in view; the reference of a
+# live stream is planned from what exists so far, and the frames that will test
+# it do not exist yet. Observed on a real STEM-EELS line scan: a reference taken
+# on a weak pixel produced an amplitude ceiling of 600 and a centre window of
+# 0.40-0.52 eV, and every bright-crystal frame came back pinned at the ceiling.
+# The structural half of this rule is live/portability.py.
+STREAM_REFERENCE_PLANNING = (
+    "\n\n## Replay\nThis recipe will be replayed unchanged, with no model in the loop, "
+    "on later measurements of the same kind in which the features seen here may be "
+    "stronger, weaker, shifted, newly present or gone — choose a model, a fit region "
+    "and constraints that stay valid across that range rather than ones fitted to "
+    "this measurement alone.")
+
+
 def planning_addendum(state: Optional[dict]) -> Optional[str]:
-    """The scope clause for a planning prompt when targets were named."""
+    """What a planning prompt is told beyond the data: the scope clause when
+    targets were named, and the replay clause for a stream's reference."""
     targets = [str(x).strip() for x in ((state or {}).get("analysis_targets") or [])
                if str(x).strip()]
-    return TARGET_PLANNING_TMPL.format(targets=", ".join(targets)) if targets else None
+    parts = []
+    if targets:
+        parts.append(TARGET_PLANNING_TMPL.format(targets=", ".join(targets)))
+    if (state or {}).get("stream_reference"):
+        parts.append(STREAM_REFERENCE_PLANNING)
+    return "".join(parts) or None
 
 
 def stamp_profile(state: Optional[dict], series_results: Any) -> None:
