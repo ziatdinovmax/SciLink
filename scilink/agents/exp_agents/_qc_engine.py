@@ -215,6 +215,15 @@ def record_bank_assist(host, ctx, res, *, domain: str,
             block["seconds"] = round(float(seconds), 2)
         res["bank_assist"] = block
         from scilink.skills._shared import _script_bank
+        # The bank must learn bad news too: an adaptation that did not end up
+        # as the accepted script cost a call and delivered nothing.
+        if mode == "edit_adapt" and not block["survived"] and rec.get("id"):
+            _script_bank.record_failure(
+                domain, rec["id"],
+                "edit_adapt_" + ("replaced" if block["executed"]
+                                 else "not_executed" if block["applied"]
+                                 else "not_applied"),
+                session=Path(str(getattr(host, "output_dir", "") or "")).name or None)
         _script_bank.log_assist(
             {**block, "session": Path(
                 str((ctx.state or {}).get("output_dir")
@@ -224,7 +233,7 @@ def record_bank_assist(host, ctx, res, *, domain: str,
         return None
 
 
-def bump_bank_adapt_success(host, res, *, domain: str) -> None:
+def bump_bank_adapt_success(host, res, *, domain: str, ctx=None) -> None:
     """CLEAN acceptance of an edit-adapted script accumulates proven-N
     evidence on the SAME bank record. A verification-loop refit replaces
     the result and drops the provenance, so a rejected adaptation never
@@ -237,7 +246,16 @@ def bump_bank_adapt_success(host, res, *, domain: str) -> None:
         if (bea and bea.get("id") and res.get("success")
                 and not res.get("quality_warning")):
             from scilink.skills._shared import _script_bank
-            _script_bank.record_success(domain, bea["id"])
+            # Evidence = the NEW data's digest (independent of the data the
+            # record was banked on), plus the session.
+            _script_bank.record_success(
+                domain, bea["id"],
+                session=Path(str(getattr(host, "output_dir", "") or "")).name or None,
+                fingerprint=getattr(ctx, "bank_query_fingerprint", None),
+                # The ADAPTED script passed, not the banked one: evidence
+                # that the record is a good starting point, not that it runs
+                # unchanged.
+                adapted=True)
             host.logger.info(
                 f"   🏦 📈 Bank record {bea['id']}: cross-session success "
                 "recorded (edit-adapted script survived QC).")

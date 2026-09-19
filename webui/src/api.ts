@@ -175,6 +175,7 @@ export interface TelemetrySnapshot {
 /** Persistent memory (GET /memory and friends — scilink/server/memory_api.py). */
 export interface MemoryBankRow {
   id: string; label: string; n_successes: number; n_retrievals: number;
+  n_independent?: number | null; n_failures?: number | null;
   sessions: string[]; metric: unknown; created_at: string | null;
   proven: boolean; promoted_to_staging: string | null;
 }
@@ -196,7 +197,8 @@ export interface MemorySkill {
 export interface MemoryOverview {
   enabled: boolean; env_override: string | null; home: string;
   consolidate_min_n: number; proven_n: number;
-  pipeline: { bank_total: number; bank_proven: number; inbox_total: number; inbox_ready: number;
+  pipeline: { bank_total: number; bank_proven: number; bank_archived?: number;
+              inbox_total: number; inbox_ready: number;
               skills_total: number; skills_provisional: number };
   bank: { domain: string; n_proven: number; records: MemoryBankRow[]; variant_groups: MemoryVariantGroup[] }[];
   inbox: MemoryInboxGroup[];

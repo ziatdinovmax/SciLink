@@ -230,8 +230,13 @@ class TestRetrieval:
                 "outcome": {}, "provenance": {"session": "s1"}}
         fresh = sb.add_record("curve_fitting", {**base, "working_script": "# once"})
         vet = sb.add_record("curve_fitting", {**base, "working_script": "# veteran"})
-        for s in ("s2", "s3", "s4"):
+        # The bonus is earned on NEW data: re-banking the same script on the
+        # same file is a rerun, not independent evidence (see
+        # test_script_bank_hardening.py::TestIndependentEvidence).
+        for i, s in enumerate(("s2", "s3", "s4"), start=1):
+            xi, yi = self._raman(i)
             sb.add_record("curve_fitting", {**base, "working_script": "# veteran",
+                                            "data_fingerprint": sb.curve_fingerprint(xi, yi),
                                             "provenance": {"session": s}})
         top = sb.find_exemplar("curve_fitting", fp)[0]
         assert top["record"]["id"] == vet["id"]

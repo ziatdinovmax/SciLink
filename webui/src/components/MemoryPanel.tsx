@@ -270,9 +270,17 @@ function BankSection({
       <p className="caption">
         Each approved analysis banks its working script with a fingerprint of the data it solved;
         later runs retrieve the closest match as a starting point. Records that keep succeeding
-        across sessions (★, {ov.proven_n} or more) are evidence-backed skill candidates — nominate one
-        to send it into the review inbox below.
+        on new data (★, {ov.proven_n} or more independent datasets) are evidence-backed skill
+        candidates — nominate one to send it into the review inbox below.
       </p>
+      {ov.pipeline.bank_archived ? (
+        <p className="caption">
+          {ov.pipeline.bank_archived} unused script{ov.pipeline.bank_archived === 1 ? "" : "s"} archived
+          (never retrieved, never succeeded again, or superseded by a proven variant) — kept on disk;
+          list with <code>scilink memory bank-archived</code>, bring one back with{" "}
+          <code>bank-restore</code>.
+        </p>
+      ) : null}
       {ov.bank.length === 0 && (
         <p className="caption">No banked scripts yet — they accumulate as analyses succeed.</p>
       )}
@@ -333,7 +341,8 @@ function BankSection({
               <div key={r.id} className="mem-row">
                 <div className="mem-row-main">
                   <span className="caption">
-                    id={r.id} · {r.proven ? "★ proven" : `${r.n_successes}/${ov.proven_n} sessions`}
+                    id={r.id} · {r.proven ? "★ proven" : `${r.n_independent ?? r.n_successes}/${ov.proven_n} datasets`}
+                    {r.n_failures ? ` · ${r.n_failures} miss${r.n_failures === 1 ? "" : "es"}` : ""}
                     {r.promoted_to_staging ? ` · ✓ in review inbox (${r.promoted_to_staging})` : ""}
                     {" · "}retrieved {r.n_retrievals}×{metric}
                   </span>

@@ -3453,6 +3453,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         # Per-target stash for the minimal-edit adapt
                         # attempt (Phase B) — ctx is fresh per target.
                         ctx.bank_exemplar = match
+                        ctx.bank_query_fingerprint = _bank_cube_fp
                         _script_bank.mark_retrieved(
                             "hyperspectral", match["record"]["id"])
                         self.logger.info(
@@ -3513,7 +3514,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     bump_bank_adapt_success(
                         self, {"success": True,
                                "bank_edit_adapt": record["bank_edit_adapt"]},
-                        domain="hyperspectral")
+                        domain="hyperspectral", ctx=ctx)
 
         # --- FINAL AGGREGATION ---
         # Persist the per-target records (script, verdict, quality history,

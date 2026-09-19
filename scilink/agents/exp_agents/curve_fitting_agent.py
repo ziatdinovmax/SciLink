@@ -1565,11 +1565,17 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                         self.executor, rec["working_script"], curve_data, work)
                 except Exception as e:  # noqa: BLE001
                     self.logger.info(f"      ✗ execution error: {e}")
+                    _script_bank.record_failure(
+                        "curve_fitting", rec["id"], "audition_exec_error",
+                        session=self.output_dir.name)
                     continue
                 if (run["status"] != "success"
                         or run["visualization_path"] is None
                         or "FIT_RESULTS_JSON:" not in run["stdout"]):
                     self.logger.info("      ✗ script did not complete cleanly")
+                    _script_bank.record_failure(
+                        "curve_fitting", rec["id"], "audition_incomplete",
+                        session=self.output_dir.name)
                     continue
                 r2 = self._parse_audition_r2(run["stdout"])
                 if r2 is None or r2 < gate_threshold:
@@ -1581,10 +1587,14 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                         "fingerprint_score": cand.get("fingerprint_score"),
                         "iterations": 0, "approved": False,
                         "audition_r2": r2, "session": self.output_dir.name})
+                    _script_bank.record_failure(
+                        "curve_fitting", rec["id"], "audition_gate_failed",
+                        session=self.output_dir.name)
                     continue
                 _script_bank.mark_retrieved("curve_fitting", rec["id"])
                 _script_bank.record_success(
-                    "curve_fitting", rec["id"], session=self.output_dir.name)
+                    "curve_fitting", rec["id"], session=self.output_dir.name,
+                    fingerprint=fingerprint)
                 _script_bank.log_assist({
                     "domain": "curve_fitting", "mode": "verbatim",
                     "record_id": rec["id"], "score": cand["score"],

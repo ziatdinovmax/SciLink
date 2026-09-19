@@ -35,6 +35,9 @@ Script bank (script_bank — episodic memory of successful scripts) subcommands:
                through the same review-gated upgrade/consolidate path
   bank-stats   Does the bank shorten runs? Iterations / approval by assist
                mode and match score, from the bank's assist log
+  bank-sweep   Archive stale records (never used / never succeeds / superseded).
+               Runs unattended once a day on a bank write; --dry-run to preview
+  bank-archived / bank-restore   List archived records / bring one back
   bank-prune   Delete a bank record
 
 `upgrade`/`consolidate` call an LLM; configure with --model / --base-url / --api-key.
@@ -555,6 +558,62 @@ def _cmd_bank_stats(args) -> int:
     return 0
 
 
+_STALE_REASONS = {
+    "never_used": "never retrieved since it was banked",
+    "never_succeeds": "retrieved repeatedly, never succeeded on new data",
+    "superseded": "an unproven variant of a proven script",
+}
+
+
+def _cmd_bank_sweep(args) -> int:
+    """`scilink memory bank-sweep` — archive records nobody uses."""
+    from scilink.skills._shared import _script_bank
+    rows = _script_bank.sweep(args.domain, idle_days=args.days, dry_run=args.dry_run)
+    if not rows:
+        print("Nothing stale — the bank is tidy.")
+        return 0
+    verb = "Would archive" if args.dry_run else "Archived"
+    print(f"{verb} {len(rows)} record(s):")
+    for r in rows:
+        idle = f", idle {r['idle_days']:.0f} d" if r.get("idle_days") is not None else ""
+        by = f" (kept: {r['superseded_by']})" if r.get("superseded_by") else ""
+        print(f"    · {r['domain']}/{r['id']}  {_STALE_REASONS.get(r['reason'], r['reason'])}"
+              f"{idle}{by}")
+        print(f"      {r['label']}")
+    if args.dry_run:
+        print("\nNothing was moved. Run without --dry-run to archive them.")
+    else:
+        print("\nArchived records leave the listing and retrieval but stay on disk: "
+              "see them with `bank-archived`, bring one back with "
+              "`bank-restore <domain>/<id>`. Re-banking the same script restores "
+              "it automatically.")
+    return 0
+
+
+def _cmd_bank_archived(args) -> int:
+    from scilink.skills._shared import _script_bank
+    recs = _script_bank.list_archived(args.domain)
+    if not recs:
+        print("No archived bank records.")
+        return 0
+    for r in recs:
+        arch = r.get("archived") or {}
+        print(f"    · {r.get('domain')}/{r.get('id')}  archived {str(arch.get('at'))[:10]}  "
+              f"({_STALE_REASONS.get(arch.get('reason'), arch.get('reason') or 'manual')})")
+        print(f"      {_script_bank.record_label(r)[:100]}")
+    print(f"\n{len(recs)} archived record(s). Restore with `bank-restore <domain>/<id>`.")
+    return 0
+
+
+def _cmd_bank_restore(args) -> int:
+    from scilink.skills._shared import _script_bank
+    domain, rid = _split_ref(args.ref)
+    n = _script_bank.restore_records(domain, [rid])
+    print(f"♻️  Restored {n} bank record(s)." if n
+          else f"No archived record {domain}/{rid}.")
+    return 0 if n else 1
+
+
 def _cmd_bank_prune(args) -> int:
     from scilink.skills._shared import _script_bank
     domain, rid = _split_ref(args.ref)
@@ -696,6 +755,23 @@ def main():
     p_bst.add_argument("--domain", help="Restrict to one domain")
     p_bst.add_argument("--json", action="store_true", help="Machine-readable output")
     p_bst.set_defaults(func=_cmd_bank_stats)
+
+    p_bsw = sub.add_parser(
+        "bank-sweep",
+        help="Archive stale records (never used, never succeeds, superseded); reversible")
+    p_bsw.add_argument("--domain", help="Restrict to one domain")
+    p_bsw.add_argument("--days", type=int, default=None,
+                       help="Idle window in days (default 60, or $SCILINK_BANK_STALE_DAYS)")
+    p_bsw.add_argument("--dry-run", action="store_true", help="Report only; move nothing")
+    p_bsw.set_defaults(func=_cmd_bank_sweep)
+
+    p_bar = sub.add_parser("bank-archived", help="List archived bank records")
+    p_bar.add_argument("--domain", help="Restrict to one domain")
+    p_bar.set_defaults(func=_cmd_bank_archived)
+
+    p_brs = sub.add_parser("bank-restore", help="Bring an archived record back")
+    p_brs.add_argument("ref", help="<domain>/<id>")
+    p_brs.set_defaults(func=_cmd_bank_restore)
 
     p_br = sub.add_parser("bank-prune", help="Delete a bank record")
     p_br.add_argument("ref", help="Bank record ref '<domain>/<id>'")

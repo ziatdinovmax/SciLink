@@ -4927,7 +4927,7 @@ Return JSON with:
         import time as _time
         _t0 = _time.perf_counter()
         res = engine.run_item(ctx)
-        self._bump_bank_adapt_success(res)
+        self._bump_bank_adapt_success(res, ctx)
         from .._qc_engine import record_bank_assist
         record_bank_assist(self, ctx, res, domain="curve_fitting",
                            seconds=_time.perf_counter() - _t0)
@@ -5108,9 +5108,9 @@ Return JSON with:
                 spectrum_idx=ctx.item_idx, base_script=script),
         )
 
-    def _bump_bank_adapt_success(self, res) -> None:
+    def _bump_bank_adapt_success(self, res, ctx=None) -> None:
         from .._qc_engine import bump_bank_adapt_success
-        bump_bank_adapt_success(self, res, domain="curve_fitting")
+        bump_bank_adapt_success(self, res, domain="curve_fitting", ctx=ctx)
 
     def _offer_bank_exemplar(self, ctx: QCItemContext) -> None:
         """Adapt-mode script-bank retrieval (#346 step 2).
@@ -5135,10 +5135,14 @@ Return JSON with:
                 xy[0], xy[1],
                 x_units=_script_bank.guess_x_units(state.get("system_info")),
             )
+            # Curve skills are exclusive technique rules, so a record banked
+            # under a different technique skill is not a candidate.
             matches = _script_bank.find_exemplar(
                 "curve_fitting", fingerprint,
                 _script_bank.measurement_context(state.get("system_info") or {}),
+                active_skills=_active_skill_names(state),
             )
+            ctx.bank_query_fingerprint = fingerprint
             if matches:
                 match = matches[0]
                 state["_bank_exemplar"] = match
