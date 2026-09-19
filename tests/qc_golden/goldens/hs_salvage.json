@@ -89,6 +89,7 @@
   "meta": [
     {
       "confidence": "medium",
+      "coverage": 1.0,
       "description": "[APPROXIMATE — medium confidence: edge amplitude unverified; treat as approximate] edge jump and mean intensity. [Data Source: Raw Data (Very Low quality, SNR≈1.6)]",
       "name": "mean_map",
       "salvage_caveat": "edge amplitude unverified; treat as approximate",

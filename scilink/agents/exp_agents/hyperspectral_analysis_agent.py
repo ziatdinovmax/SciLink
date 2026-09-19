@@ -1037,7 +1037,9 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                                 # the anchor's per-map stats: the deterministic
                                 # replay gate's plausible-range reference
                                 "reference_maps": {
-                                    m["name"]: m["stats"] for m in row.get("feature_records") or []
+                                    m["name"]: {**m["stats"], **({"coverage": m["coverage"]}
+                                                                 if isinstance(m.get("coverage"), (int, float)) else {})}
+                                    for m in row.get("feature_records") or []
                                     if isinstance(m, dict) and isinstance(m.get("stats"), dict)},
                                 "source": ("prior_run" if extra.get("reuse_locked_script")
                                            else "anchor")}

@@ -1049,7 +1049,8 @@ def _replay_map_gate(result_map, fit_mask, reference: dict | None,
     anchor's stats as ``reference`` — a median inside the locked method's
     plausible range (the anchor's [min, max] widened by one span on each
     side, at least 0.5 % of the magnitude so a near-constant anchor map does
-    not reject trivial drift). A map outside that range is the
+    not reject trivial drift). Coverage is judged against the anchor's own
+    coverage (``reference["coverage"]``) when known. A map outside that range is the
     method breaking down on this dataset (e.g. the peak left the fit
     window), which the series driver answers with a fresh-code refit.
     """
@@ -1062,8 +1063,22 @@ def _replay_map_gate(result_map, fit_mask, reference: dict | None,
     m = m.ravel()
     finite = np.isfinite(m)
     cov = float(finite.mean()) if m.size else 0.0
-    if cov < 0.5:
-        return False, f"valid coverage {cov:.0%} < 50% (locked method did not converge here)"
+    # Coverage floor: half of what the SAME method achieved on the anchor when
+    # that is known (a dilated fit mask over-covers its emitter, so the
+    # converged fraction is legitimately well below 1 — observed live at 43 %
+    # on a mask-scoped follower, which a fixed 50 % floor wrongly rejected);
+    # otherwise a lenient absolute floor.
+    # Without a reference there is NO coverage floor: a small emitter fitted
+    # full-frame legitimately covers ~1 % of the frame (observed live on a
+    # legacy replay), and only the anchor's own coverage can say what this
+    # method should reach. All-NaN maps are excluded before the gate.
+    ref_cov = (reference or {}).get("coverage") if isinstance(reference, dict) else None
+    if isinstance(ref_cov, (int, float)) and 0 < ref_cov <= 1:
+        min_cov = 0.25 * float(ref_cov)
+        if cov < min_cov:
+            return False, (f"valid coverage {cov:.0%} < {min_cov:.0%} (a quarter of the "
+                           f"anchor's {float(ref_cov):.0%}) — the locked method did not "
+                           "converge here")
     vals = m[finite]
     if vals.size > 8 and float(np.ptp(vals)) == 0.0:
         return False, "map is constant across the frame (fit collapsed to a bound)"
@@ -4263,7 +4278,10 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                                 "min": float(np.nanmin(result_map)),
                                 "max": float(np.nanmax(result_map)),
                                 "mean": float(np.nanmean(result_map))
-                            }
+                            },
+                            # converged fraction of the frame — the replay
+                            # gate's coverage reference for this method
+                            "coverage": float(_map_valid_coverage(result_map)[0] / 100.0),
                         })
                     else:
                         _review_kind = ("Replay gate" if getattr(ctx, "locked_script", None)

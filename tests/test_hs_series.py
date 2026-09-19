@@ -772,13 +772,19 @@ def test_replay_map_gate_rules():
     good = np.random.RandomState(0).normal(459.0, 0.3, (8, 8))
     ref = {"min": 458.0, "max": 460.0, "mean": 459.0}
     assert _replay_map_gate(good, None, ref, True) == (True, "")
-    # low coverage
-    holes = good.copy(); holes[:6, :] = np.nan
-    ok, why = _replay_map_gate(holes, None, ref, True)
-    assert not ok and "coverage" in why
+    # coverage: no floor without a reference (a small emitter fitted
+    # full-frame legitimately covers ~1 % of the frame) …
+    holes = good.copy(); holes[:6, :] = np.nan          # 25 %
+    sparse = good.copy(); sparse[1:, :] = np.nan        # 12.5 %
+    assert _replay_map_gate(holes, None, ref, True)[0]
+    assert _replay_map_gate(sparse, None, ref, True)[0]
+    # … but below a quarter of the anchor's own coverage when that is known
+    ok, why = _replay_map_gate(sparse, None, {**ref, "coverage": 0.9}, True)
+    assert not ok and "quarter of the anchor's 90%" in why
+    assert _replay_map_gate(holes, None, {**ref, "coverage": 0.9}, True)[0]     # 25 % >= 22.5 %
     # coverage judged within the fit mask when scoped
     mask = np.zeros((8, 8), bool); mask[6:, :] = True
-    assert _replay_map_gate(holes, mask, ref, True)[0]
+    assert _replay_map_gate(holes, mask, {**ref, "coverage": 0.9}, True)[0]
     # collapsed map
     ok, why = _replay_map_gate(np.full((8, 8), 461.1), None, None, True)
     assert not ok and "constant" in why

@@ -23,6 +23,7 @@
   ],
   "meta": [
     {
+      "coverage": 1.0,
       "description": "per-pixel mean intensity. [Data Source: Raw Data (Very Low quality, SNR≈1.6)]",
       "name": "mean_map",
       "stats": {
