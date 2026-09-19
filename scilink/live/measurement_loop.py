@@ -186,9 +186,13 @@ class MeasurementLoop:
             fit gate is good and no drift is suspected before the new level is
             adopted: the data says the value is real, so the range moves to it
             (logged as ``range_adopted``) instead of flagging forever.
-        gate_keys: Features the range gate watches. Default: ``objective_key``
-            when set, else every feature that is not a fit uncertainty
-            (``*_err`` and the like never are — they scatter by construction).
+        gate_keys: Features the range gate watches. Default: the pinned
+            ``outputs`` when declared — the quantities the user named, not the
+            recipe's nuisance parameters (observed live: an ill-determined
+            pseudo-Voigt mixing fraction wandering over ten decades flagged
+            clean XRD frames); else ``objective_key`` when set; else every
+            feature that is not a fit uncertainty (``*_err`` and the like never
+            are — they scatter by construction).
             With a ``recommender`` attached and no explicit ``gate_keys`` the
             range gate is OFF: it assumes fixed acquisition conditions, and a
             recommender's job is to change them.
@@ -696,6 +700,8 @@ class MeasurementLoop:
             return key in self.gate_keys
         if self.recommender is not None:
             return False        # conditions are being changed on purpose
+        if self.outputs:
+            return key in self.outputs     # what the user asked for, by name
         if self.objective_key:
             return key == self.objective_key
         return not (key.startswith("fit_") or key.endswith(self._UNCERTAINTY_SUFFIXES))
@@ -727,6 +733,8 @@ class MeasurementLoop:
             return None
         from .recommend import finalize
         source = getattr(rec, "name", rec.__class__.__name__)
+        if getattr(rec, "context", True) is None and self.system_info:
+            rec.context = dict(self.system_info)   # a model must know what is being measured
         try:
             observed = bool(features) and params is not None
             if observed:

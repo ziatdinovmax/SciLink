@@ -250,6 +250,20 @@ class TestStep:
             "peak_1": {"center": 6.0, "fwhm": 9.0}}}}
         assert loop.step("wide.csv")["flags"] == []          # fwhm is not the objective
 
+    def test_declared_outputs_are_what_the_gate_watches(self, tmp_path):
+        # Observed live (beamline XRD): an ill-determined mixing fraction
+        # wandering over decades flagged clean frames; the user never asked for it.
+        loop = loop_at(tmp_path, range_warmup=0)
+        loop.setup(anchor=str(make_anchor(tmp_path, features={
+            "peak_1": {"center": 6.0, "eta": 1e-9}})))
+        loop.outputs = {"peak_1_center": "centre of the first peak"}
+
+        def frame(center, eta):
+            return {**good(center), "fitting_parameters": {"peak_1": {"center": center, "eta": eta}}}
+        FakeAgent.replies = {"eta.csv": frame(6.0, 0.9), "moved.csv": frame(9.5, 0.9)}
+        assert loop.step("eta.csv")["flags"] == []
+        assert loop.step("moved.csv")["flags"] == ["out_of_reference_range"]
+
     def test_a_persistent_new_level_on_good_fits_is_adopted(self, tmp_path):
         loop = self._armed(tmp_path, range_warmup=0, range_adopt_after=3)
         FakeAgent.replies = {f"hi{i}.csv": good(9.5) for i in range(4)}

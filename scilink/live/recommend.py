@@ -341,6 +341,9 @@ LLM_RECOMMENDER_PROMPT = """You are choosing the next measurement for a running 
 ## Goal
 {objective}
 
+## The experiment
+{context}
+
 ## Acquisition parameters you may set (the instrument controller's interface)
 {schema}
 
@@ -377,8 +380,14 @@ class LLMRecommender(Recommender):
     def __init__(self, model: Any, schema: InstrumentSchema, objective: str, *,
                  output: str = "params", every: int = 5, max_history: int = 25,
                  feature_keys: Optional[List[str]] = None,
+                 context: Any = None,
                  generation_config: Any = None) -> None:
         super().__init__()
+        #: What is being measured and what is being done to the sample — a dict
+        #: (the loop's ``system_info``) or text. Left None, the loop fills it
+        #: with its own ``system_info``: without it a model cannot tell a sample
+        #: that is evolving on purpose from an artefact of its own settings.
+        self.context = context
         if output not in ("params", "protocol"):
             raise ValueError("output must be 'params' or 'protocol'")
         self.model, self.schema, self.objective = model, schema, objective
@@ -399,9 +408,18 @@ class LLMRecommender(Recommender):
                          f"{json.dumps(feats)}{flagged}")
         return "\n".join(lines) or "(no clean frames yet)"
 
+    def _context_text(self) -> str:
+        c = self.context
+        if not c:
+            return "(not described)"
+        if isinstance(c, dict):
+            return "\n".join(f"- {k}: {v}" for k, v in c.items())
+        return str(c)
+
     def build_prompt(self) -> str:
         return LLM_RECOMMENDER_PROMPT.format(
-            objective=self.objective, schema=self.schema.describe(),
+            objective=self.objective, context=self._context_text(),
+            schema=self.schema.describe(),
             history=self._history_table(),
             output_contract=_PARAMS_CONTRACT if self.output == "params" else _PROTOCOL_CONTRACT)
 

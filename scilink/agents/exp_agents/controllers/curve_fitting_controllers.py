@@ -3938,7 +3938,10 @@ Your guidance: '''
                     consecutive_timeouts = (
                         consecutive_timeouts + 1
                         if _is_timeout_error(last_error) else 0)
-                    self.logger.warning(f"    ⚠️ Attempt {attempt} failed: {last_error[:100]}")
+                    # A traceback's head is boilerplate; its LAST line names the error.
+                    _lines = [ln.strip() for ln in str(last_error).splitlines() if ln.strip()]
+                    _headline = _lines[-1][:240] if _lines else "unknown error"
+                    self.logger.warning(f"    ⚠️ Attempt {attempt} failed: {_headline}")
             except Exception as e:
                 last_error = str(e)
                 consecutive_timeouts = 0

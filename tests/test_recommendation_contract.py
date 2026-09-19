@@ -264,6 +264,19 @@ class TestLoopWithRecommenders:
         assert rec["source"] == "llm" and rec["requires_approval"] is True
         assert [e["event"] for e in loop.read_log()].count("recommendation") == 1
 
+    def test_the_model_is_told_what_the_experiment_is(self, tmp_path):
+        # Observed live (in-situ Raman): with no context the model read an
+        # anneal's G-band shift as laser heating and cut the power.
+        m = ScriptedModel(['{"params": {"dwell_ms": 200}}'] * 2)
+        rec = LLMRecommender(m, SCHEMA, "goal", every=1)
+        loop = _loop(tmp_path, rec, system_info={"sample": "carbon film, annealed in situ"})
+        loop.step("f1.csv", {"dwell_ms": 100})
+        loop._slot.wait(5)
+        assert "- sample: carbon film, annealed in situ" in m.prompts[0]
+        own = LLMRecommender(m, SCHEMA, "goal", context="a beam-sensitive polymer")
+        _loop(tmp_path / "b", own, system_info={"sample": "x"}).step("f1.csv", {"dwell_ms": 100})
+        assert "a beam-sensitive polymer" in own.build_prompt()      # the caller's own wins
+
     def test_the_loop_refuses_what_the_model_got_wrong(self, tmp_path):
         m = ScriptedModel(['{"params": {"dwell_ms": 5000, "laser_power": 3}}'])
         loop = _loop(tmp_path, LLMRecommender(m, SCHEMA, "goal", every=1))
