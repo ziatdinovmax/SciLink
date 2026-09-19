@@ -50,14 +50,21 @@ PURPOSE_VERIFICATION_TMPL = (
 def verification_addendum(state: Optional[dict]) -> Optional[str]:
     """The fit-for-purpose clause when the run verifies under ``purpose``.
 
-    The purpose is the caller's objective when there is one, else the
-    quantities the locked plan set out to extract — so the verifier is always
-    told WHAT must be right, never just "be lenient".
+    The purpose is, in order: the caller's named ``targets`` (the quantities
+    the consumer of the result needs), the objective, else the quantities the
+    locked plan set out to extract — so the verifier is always told WHAT must
+    be right, never just "be lenient". Named targets scope the verification
+    under ANY profile: a caller who says which numbers it needs has said what
+    the result is for, and thoroughness is then spent on those numbers.
     """
     state = state or {}
-    if state.get("_verification_mode") != "purpose":
+    targets = [str(x).strip() for x in (state.get("analysis_targets") or [])
+               if str(x).strip()]
+    if state.get("_verification_mode") != "purpose" and not targets:
         return None
-    purpose = (state.get("analysis_objective") or "").strip()
+    purpose = ", ".join(targets)
+    if not purpose:
+        purpose = (state.get("analysis_objective") or "").strip()
     if not purpose:
         cfg = (state.get("locked_fitting_config")
                or state.get("locked_analysis_config") or {})

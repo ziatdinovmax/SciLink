@@ -209,6 +209,18 @@ Metadata Options:
         action='store_true',
         help='Restore from previous checkpoint in session directory'
     )
+
+    parser.add_argument(
+        '--profile',
+        choices=['thorough', 'quick', 'extract'],
+        default=None,
+        help=("Analysis depth for every analysis in this session. 'thorough' "
+              "(default): full verification, refits, trend and synthesis. "
+              "'quick': a fast look — a couple of verification passes, short "
+              "interpretation. 'extract': numbers only, no narrative (for an "
+              "optimizer or a feature table). Deterministic quality gates are "
+              "kept under all three.")
+    )
     
     # Deprecated arguments (hidden but functional)
     parser.add_argument(
@@ -295,6 +307,7 @@ Metadata Options:
         'api_key': api_key,
         'futurehouse_api_key': args.futurehouse_api_key,
         'analysis_mode': args.mode,
+        'analysis_profile': getattr(args, 'profile', None),
         'data_path': args.data_path,
         'metadata_path': args.metadata_path,
         'session_dir': args.session_dir,
@@ -498,6 +511,7 @@ Supported data types:
                 model_name=model_name,
                 base_url=base_url,
                 analysis_mode=analysis_mode,
+                analysis_profile=self.config.get('analysis_profile'),
                 restore_checkpoint=restore,
                 futurehouse_api_key=futurehouse_key
             )
@@ -531,6 +545,8 @@ Supported data types:
         print("="*60)
         print(f"Session Directory: {self.session_dir}")
         print(f"Analysis Mode: {analysis_mode.value}")
+        if self.config.get('analysis_profile'):
+            print(f"Analysis Depth: {self.config['analysis_profile']}")
         print(f"Human Feedback: {'Enabled' if self.agent._enable_human_feedback else 'Disabled'}")
         print(f"Novelty Assessment: {'Enabled' if futurehouse_key else 'Disabled'}")
         

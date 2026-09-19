@@ -2582,6 +2582,7 @@ class AnalysisOrchestratorTools:
             script_edits: List[dict] = None,
             profile: str = None,
             time_budget_s: float = None,
+            targets: List[str] = None,
             literature_file: str = None,
             reference_scripts: List[str] = None,
             r2_threshold: float = None,
@@ -3252,6 +3253,24 @@ class AnalysisOrchestratorTools:
                                 "script, currently supported for curve "
                                 "fitting and image analysis. Re-run "
                                 "without script_edits.")})
+                # Depth / scope fixed by whoever drives this orchestrator (a
+                # meta delegation, or --profile) win over this call's own
+                # arguments: the caller knows what the result is for. The one
+                # exception is 'realtime', which is a different mechanism (a
+                # locked replay), not a depth.
+                _caller_profile = getattr(self.orch, "default_profile", None)
+                if _caller_profile and profile != "realtime":
+                    if profile and profile != _caller_profile:
+                        print(f"  ℹ️  Depth is set by the caller: using "
+                              f"'{_caller_profile}' (not '{profile}').")
+                    profile = _caller_profile
+                time_budget_s = (getattr(self.orch, "default_time_budget_s", None)
+                                 or time_budget_s)
+                targets = getattr(self.orch, "default_targets", None) or targets
+                if targets:
+                    import inspect as _inspect
+                    if "targets" in _inspect.signature(agent.analyze).parameters:
+                        analyze_kwargs["targets"] = [str(x) for x in targets]
                 if profile or time_budget_s:
                     # Operating profile (#346): forward only to agents whose
                     # analyze() accepts it (all three do; introspection keeps
@@ -3329,6 +3348,10 @@ class AnalysisOrchestratorTools:
                 # unless explicitly requested; forwarded only to agents whose
                 # analyze() accepts it.
                 resolved_n = _resolve_n_candidates(agent, n_candidates)
+                if profile in ("quick", "extract"):
+                    # Fit-for-purpose profiles run one candidate; do not
+                    # forward (or announce) the agent's best-of-N default.
+                    resolved_n, n_candidates = None, None
                 if resolved_n is None:
                     if n_candidates is not None:
                         self.logger.info(
@@ -3813,6 +3836,20 @@ class AnalysisOrchestratorTools:
                         "re-analysis of such frames. Use for high-cadence "
                         "measurement streams; interpretation is deferred to a "
                         "post-experiment sweep."
+                    )
+                },
+                "targets": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "The quantities the consumer of this result actually "
+                        "needs, in plain words (e.g. ['G-band position', 'D/G "
+                        "intensity ratio']). The quality verifier then judges "
+                        "whether THOSE are trustworthy and stops asking for "
+                        "refinement of features they do not depend on. Use it "
+                        "when the user or a downstream step names what it "
+                        "wants; omit it to have the whole analysis judged. "
+                        "Curve and image analyses."
                     )
                 },
                 "time_budget_s": {

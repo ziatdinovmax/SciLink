@@ -136,6 +136,12 @@ rather than fabricate a result).
   series mode engages — spectra, images and hyperspectral cubes alike —
   never one delegation per file, and never a fan-out over a same-technique
   series (fan-out is for DIFFERENT measurements of one system).
+- How good an analysis has to be depends on what it is FOR, and only you know
+  that — the specialist never sees the conversation. Say so with
+  `delegate_to_analysis`'s typed `profile` / `targets` (never as prose in the
+  task): thorough for a result that will be interpreted or fused, `quick` for a
+  fast look, `extract` when the numbers feed another step, and `targets`
+  whenever the user or the next step names the quantities it needs.
 - `inspect_uploads` is for routing only — do not use its output to interpret
   or analyze the data yourself; hand that to the specialist. To see what an
   uploaded SCRIPT or text file actually does before routing it, `read_file`
@@ -1377,7 +1383,8 @@ class MetaOrchestratorAgent:
                   context_from: Optional[list] = None,
                   label: Optional[str] = None,
                   data_path: Optional[str] = None,
-                  metadata: Optional[str] = None) -> str:
+                  metadata: Optional[str] = None,
+                  depth: Optional[dict] = None) -> str:
         """Run a task on a child orchestrator, record it, return a JSON summary.
 
         The child runs under the meta's own autonomy mode (mapped by enum
@@ -1395,6 +1402,12 @@ class MetaOrchestratorAgent:
         with others can re-run the complementarity gate — without them an
         incremental fusion silently demotes to ungated (no computed
         reconciliation).
+
+        ``depth`` (analysis delegations) is the meta's TYPED decision about
+        how good the result has to be — ``{profile, targets, time_budget_s}``
+        — passed to the child's ``run_task`` as arguments, not folded into
+        ``context`` as prose: the child applies it to every ``run_analysis``
+        call whether or not its LLM repeats it. Recorded on the ledger entry.
         """
         if mode == "analysis":
             from ..exp_agents.analysis_orchestrator import AnalysisMode
@@ -1415,6 +1428,9 @@ class MetaOrchestratorAgent:
             })
 
         entry = self._open_delegation(mode, task, context, context_from, label)
+        depth = {k: v for k, v in (depth or {}).items() if v} if mode == "analysis" else {}
+        if depth:
+            entry["depth"] = depth
         if mode == "analysis" and data_path:
             entry["data_path"] = str(data_path)
             if metadata:
@@ -1445,6 +1461,7 @@ class MetaOrchestratorAgent:
             result = child.run_task(
                 task, context=context,
                 autonomy=autonomy_enum[self.meta_mode.name],
+                **depth,
             )
         except Exception as e:
             self.logger.exception(f"Delegation to {mode} failed: {e}")

@@ -280,6 +280,11 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Operating profile (#346): plumbed for parity with the curve agent;
         # the realtime toggles are wired for curve only in v1 — see below.
         profile: Optional[Any] = None,
+        # The quantities the consumer of this result needs (e.g. ["G-band
+        # position", "D/G ratio"]). Scopes the LLM verifier to them under any
+        # profile — see _qc_profile.verification_addendum. None = judge the
+        # whole analysis (today's behavior).
+        targets: Optional[List[str]] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -563,6 +568,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "_qc_profile": qc_profile.name,
             "_synthesis_level": qc_profile.synthesis,
             "_verification_mode": qc_profile.verification,
+            "analysis_targets": [str(x) for x in (targets or []) if str(x).strip()],
             # Input data
             "image_paths": image_paths,
             "image_stack": image_stack,

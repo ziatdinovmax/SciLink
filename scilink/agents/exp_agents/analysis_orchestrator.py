@@ -595,6 +595,7 @@ class AnalysisOrchestratorAgent:
         futurehouse_api_key: Optional[str] = None,
         image_analysis_depth: str = "basic",
         max_iterations: Optional[int] = None,
+        analysis_profile: Optional[str] = None,
         # Deprecated
         google_api_key: Optional[str] = None,
         local_model: Optional[str] = None,
@@ -649,6 +650,17 @@ class AnalysisOrchestratorAgent:
         # in-agent escalation, so the image agent defaults to Tier-1-only.
         # Users can override via the constructor kwarg.
         self.image_analysis_depth = image_analysis_depth
+
+        # Depth / scope set by whoever is driving this orchestrator — the
+        # `--profile` of a CLI session, or the meta agent for the duration of
+        # one delegation (run_task sets and restores them). run_analysis
+        # applies them DETERMINISTICALLY: the decision is the caller's (it
+        # knows what the result is for; the analysis agents never see that),
+        # and it must not depend on the orchestrator LLM choosing to repeat
+        # it as a tool argument.
+        self.default_profile: Optional[str] = analysis_profile
+        self.default_targets: Optional[List[str]] = None
+        self.default_time_budget_s: Optional[float] = None
 
         self.futurehouse_api_key = futurehouse_api_key
         if not self.futurehouse_api_key:
@@ -1444,7 +1456,10 @@ class AnalysisOrchestratorAgent:
 
     def run_task(self, task: str, context: Optional[Dict[str, Any]] = None,
                  autonomy: Optional[AnalysisMode] = None,
-                 max_iterations: Optional[int] = None) -> Dict[str, Any]:
+                 max_iterations: Optional[int] = None,
+                 profile: Optional[str] = None,
+                 targets: Optional[List[str]] = None,
+                 time_budget_s: Optional[float] = None) -> Dict[str, Any]:
         """Non-interactive entry point — used by the meta agent.
 
         Runs the task and returns a structured summary that's easy to
@@ -1471,7 +1486,18 @@ class AnalysisOrchestratorAgent:
         human (the meta agent, driven via CLI/UI) passes AUTOPILOT so the
         sub-agents' human-feedback prompts reach that human.
         The original mode is restored on exit, even if chat() raises.
+
+        ``profile`` / ``targets`` / ``time_budget_s`` are the caller's typed
+        decision about depth and scope (see ``run_analysis``): how good the
+        result has to be is known to whoever consumes it, not to the analysis
+        agents. They are applied to EVERY ``run_analysis`` call made during
+        this task — deterministically, not as prose the orchestrator LLM may
+        or may not repeat as a tool argument — and restored on exit. The
+        returned dict echoes them under ``depth``.
         """
+        if profile is not None:
+            from ._qc_profile import resolve_profile
+            resolve_profile(profile)     # a typo fails here, not mid-run
         # Build a self-contained prompt that includes the optional context.
         prompt = task
         if context:
@@ -1486,6 +1512,18 @@ class AnalysisOrchestratorAgent:
                 "Use this context together with your tools to complete the task."
             )
 
+        _depth = {k: v for k, v in (("profile", profile), ("targets", targets),
+                                    ("time_budget_s", time_budget_s)) if v}
+        if _depth:
+            # One line so the orchestrator plans accordingly (no novelty
+            # check or literature run around a quick extraction); the values
+            # themselves are enforced in run_analysis, not by this sentence.
+            prompt += (
+                "\n\nThe caller has fixed the analysis depth/scope for this "
+                f"task: {json.dumps(_depth)}. It is applied to every "
+                "run_analysis call automatically; keep the rest of your work "
+                "in proportion to it.")
+
         # Snapshot prior state so we report "what was produced *during* this
         # call" rather than "everything in the session."
         n_before = len(self.analysis_results)
@@ -1497,6 +1535,14 @@ class AnalysisOrchestratorAgent:
         run_mode = autonomy if autonomy is not None else AnalysisMode.AUTONOMOUS
         original_mode = self.analysis_mode
         original_max_iter = self.max_iterations
+        _orig_depth = (self.default_profile, self.default_targets,
+                       self.default_time_budget_s)
+        if profile is not None:
+            self.default_profile = profile
+        if targets:
+            self.default_targets = [str(x) for x in targets]
+        if time_budget_s:
+            self.default_time_budget_s = float(time_budget_s)
         from ...hitl import get_thread_feedback_log, set_thread_feedback_log
         from ...session_events import get_thread_event_log, set_thread_event_log
         _prev_fblog = get_thread_feedback_log()
@@ -1533,6 +1579,8 @@ class AnalysisOrchestratorAgent:
             # Always restore the original mode, even if chat() raised.
             self.set_analysis_mode(original_mode)
             self.max_iterations = original_max_iter
+            (self.default_profile, self.default_targets,
+             self.default_time_budget_s) = _orig_depth
             # chat() bound the feedback log to THIS session; restore the
             # caller's binding (a delegating meta keeps logging to its own).
             set_thread_feedback_log(_prev_fblog)
@@ -1651,6 +1699,8 @@ class AnalysisOrchestratorAgent:
             ],
             "warnings": warnings,
         }
+        if _depth:
+            result["depth"] = _depth
         if error_msg:
             result["error"] = error_msg
         return result
