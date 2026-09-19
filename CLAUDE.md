@@ -195,8 +195,8 @@ survive background subtraction. Two rules give that structural teeth: a
 `not_measurable` declaration that contradicts the facts (a >= 5-sigma
 field-mean feature) is repaired IN PLACE like an execution error — no judge
 call, no ladder budget — and a required map that comes back entirely NaN
-is diagnosed in the retry critique (a swallowed exception or an all-
-excluding gate) instead of "no further detail".
+or with the wrong shape (a binned estimate not upsampled to the frame) is
+diagnosed in the retry critique instead of "no further detail".
 
 **Through the meta agent, a series is ONE delegation.** The meta's routing
 guidance and `delegate_to_analysis` say so for spectra, images and cubes

@@ -4118,10 +4118,12 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         f"pixel(s) rendered.")
 
             nan_only_maps: list = []
+            shape_mismatch_maps: dict = {}
             for feature_name, result_map in maps_dict.items():
                 # Shape/NaN Check
                 if result_map.shape != (h, w):
                     self.logger.warning(f"    Skipping {feature_name}: Shape mismatch.")
+                    shape_mismatch_maps[feature_name] = tuple(getattr(result_map, "shape", ()))
                     continue
                 if np.all(np.isnan(result_map)):
                     self.logger.warning(f"    Skipping {feature_name}: Map contains only NaNs.")
@@ -4325,6 +4327,17 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     detail_parts.append(
                         f"QC critiques on required outputs: {relevant_critiques}"
                     )
+                _shape_req = {n: shape_mismatch_maps[n] for n in missing_required
+                              if n in shape_mismatch_maps}
+                if _shape_req:
+                    # Observed live: a spatially BINNED script returned coarse
+                    # maps, silently skipped for shape — the retry got nothing.
+                    detail_parts.append(
+                        f"returned with the wrong shape {_shape_req} — every map must be "
+                        f"({h}, {w}), the frame's spatial shape. A binned / coarse "
+                        "estimate must be upsampled back to the frame (e.g. np.kron or "
+                        "np.repeat along both axes, then crop) before returning; state "
+                        "the effective resolution in the description.")
                 _nan_req = [n for n in missing_required if n in nan_only_maps]
                 if _nan_req:
                     # Observed live: a script whose try/except returned NaN

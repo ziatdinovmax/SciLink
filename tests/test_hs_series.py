@@ -1128,3 +1128,34 @@ def test_all_nan_required_map_gets_a_diagnosis(tmp_path):
         "error_dict": None, "max_verification_iterations": 1})
     assert state["dynamic_analysis_records"][0]["task_success"] is False
     assert any("ENTIRELY NaN" in p and "try/except" in p for p in prompts[1:])
+
+
+def test_wrong_shape_required_map_gets_a_diagnosis(tmp_path):
+    """A binned script returning coarse maps: the retry critique must name the
+    shape and say to upsample back to the frame."""
+    from scilink.agents.exp_agents.controllers.hyperspectral_controllers import RunDynamicAnalysisController
+    import logging
+    COARSE = ("def analyze_feature(data, energy_axis):\n"
+              "    import numpy as np\n"
+              "    h, w = data.shape[:2]\n"
+              "    return {'maps': {'Mean_Map': np.ones((h // 2, w // 2))}, 'units': 'a.u.', 'description': 'd'}\n")
+    prompts = []
+
+    class _Model:
+        def generate_content(self, contents, **kw):
+            prompts.append(contents if isinstance(contents, str) else "\n".join(c for c in contents if isinstance(c, str)))
+            return json.dumps({"code": COARSE})
+    cube, E = _peaked_cube()
+    ctrl = RunDynamicAnalysisController(model=_Model(), logger=logging.getLogger("t"),
+                                        generation_config=None, safety_settings=None,
+                                        parse_fn=lambda r: (json.loads(r), None), executor_timeout=60)
+    state = ctrl.execute({
+        "refinement_decision": {"refinement_needed": True, "requires_custom_code": True,
+                                "targets": [{"type": "custom_code", "description": "map the peak",
+                                             "required_outputs": ["Mean_Map"]}]},
+        "hspy_data": cube, "original_hspy_data": cube, "energy_axis": E,
+        "system_info": {"axis_spec": {"axis_2": {"name": "E", "units": "eV", "start": 450, "end": 570}}},
+        "settings": {"output_dir": str(tmp_path)}, "iteration_title": "T", "analysis_images": [],
+        "error_dict": None, "max_verification_iterations": 1})
+    assert state["dynamic_analysis_records"][0]["task_success"] is False
+    assert any("wrong shape" in p and "(3, 2)" in p and "(6, 5)" in p and "upsampled" in p for p in prompts[1:])
