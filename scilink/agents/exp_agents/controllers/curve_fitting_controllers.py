@@ -3833,6 +3833,16 @@ Your guidance: '''
                             "    \u2139\ufe0f Justified plan deviations: %s",
                             "; ".join(conformance["justified_deviations"]),
                         )
+                elif base_script is not None and state.get("_strict_replay"):
+                    # Strict replay (a live loop's fast clock): the locked
+                    # script failed on this data, and repairing it means
+                    # calling a model — which a frame must never do. Stop;
+                    # the failure is the signal (the loop flags the frame and
+                    # escalates off the fast path).
+                    self.logger.warning(
+                        f"    🔒 Strict replay: the locked script failed on this "
+                        f"data ({str(last_error)[:120]}) — not repaired in-frame.")
+                    break
                 else:
                     if self._should_escalate_timeout_model(
                             base_script, attempt, self.MAX_ATTEMPTS,
@@ -5030,6 +5040,16 @@ Return JSON with:
             if (ctx.state.get("_qc_profile") == "realtime"
                     or ctx.state.get("_cold_start_reuse")):
                 self._attach_drift_signal(ctx, reuse_result["reuse_validity"])
+            return reuse_result
+        if ctx.state.get("_strict_replay"):
+            # No re-derivation on the fast clock: return the failure as the
+            # item's result (a non-None return ends the engine's reuse path).
+            reuse_result.setdefault(
+                "error", "the locked script could not execute on this data")
+            reuse_result["reuse_validity"] = {
+                "reused": True, "source": ctx.reuse_source, "verdict": "failed",
+                "message": "Strict replay: the locked script failed on this data; "
+                           "no in-frame repair or re-derivation."}
             return reuse_result
         self.logger.warning(
             f"   ⚠️  Prior fitting script could not execute on this data "

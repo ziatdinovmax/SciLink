@@ -15,6 +15,14 @@ clock and never runs inside ``step()``; a frame the recipe cannot handle is
 returned *flagged*, and ``needs_escalation`` tells the caller the recipe has
 stopped describing the data.
 
+Escalation is that slow clock at work. ``escalate(frame)`` re-anchors on the
+breaching frame in a spawned process while ``step()`` keeps answering (flagged)
+with the old recipe; the new recipe is adopted between frames. The re-anchor
+is one ordinary analysis at a fit-for-purpose depth, which already IS the
+cost ladder: the script bank is auditioned first (a regime seen before costs
+no model call), then a banked script is edit-adapted (one call), and only
+then is code written fresh.
+
 The loop recommends, it never actuates: ``step()`` returns numbers, flags and
 (when a recommender is attached) suggested next parameters. Bounds and safe
 limits belong to the caller.
@@ -53,6 +61,65 @@ _BREACH_FLAGS = (FLAG_FIT_FAILED, FLAG_GATE_POOR, FLAG_DRIFT)
 
 class LoopNotReady(RuntimeError):
     """``step()`` / ``amend()`` before ``setup()`` locked a recipe."""
+
+
+from ._reanchor import reanchor as _reanchor_worker  # noqa: E402
+
+
+class _ProcessEscalation:
+    """A re-anchor running in its own interpreter; ``poll()`` never blocks.
+
+    Launched as ``python -m scilink.live._reanchor`` with the spec on stdin —
+    NOT ``multiprocessing`` spawn. A spawned child re-imports the caller's
+    ``__main__``, so a driving script without an ``if __name__ == "__main__"``
+    guard re-runs itself inside the worker (observed live: the child re-ran the
+    whole scenario, including deleting the run directory). A ``-m`` subprocess
+    never sees the caller's main module, and stdin keeps the spec — which may
+    carry a credential — off the disk and off the command line.
+    """
+
+    def __init__(self, spec: Dict[str, Any]) -> None:
+        import subprocess
+        import sys
+        self.out_dir = Path(spec["out_dir"])
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self._log = open(self.out_dir / "worker.out", "w", encoding="utf-8")
+        self._proc = subprocess.Popen(
+            [sys.executable, "-m", "scilink.live._reanchor"],
+            stdin=subprocess.PIPE, stdout=self._log, stderr=subprocess.STDOUT)
+        self._proc.stdin.write(json.dumps(spec, default=str).encode("utf-8"))
+        self._proc.stdin.close()
+
+    def poll(self) -> Optional[Dict[str, Any]]:
+        result = self.out_dir / "result.json"
+        if result.exists():
+            try:
+                return json.loads(result.read_text())
+            except ValueError:
+                return None                  # mid-rename; next poll
+        code = self._proc.poll()
+        if code is not None:
+            return {"status": "error",
+                    "error": f"escalation worker exited (code {code}) without a result; "
+                             f"see {self.out_dir / 'worker.out'}"}
+        return None
+
+    def wait(self, timeout: Optional[float] = None) -> None:
+        self._proc.wait(timeout)
+
+
+class _InlineEscalation:
+    """The same re-anchor, run in this process (``background=False``)."""
+
+    def __init__(self, spec: Dict[str, Any]) -> None:
+        self.out_dir = Path(spec["out_dir"])
+        _reanchor_worker(spec)
+
+    def poll(self) -> Optional[Dict[str, Any]]:
+        try:
+            return json.loads((self.out_dir / "result.json").read_text())
+        except Exception as e:  # noqa: BLE001
+            return {"status": "error", "error": str(e)}
 
 
 def _now() -> str:
@@ -108,6 +175,12 @@ class MeasurementLoop:
         gate_keys: Features the range gate watches. Default: ``objective_key``
             when set, else every feature that is not a fit uncertainty
             (``*_err`` and the like never are — they scatter by construction).
+        auto_escalate: Start a background re-anchor by itself the moment
+            ``needs_escalation`` is raised (on the frame that raised it). Off
+            by default — a re-anchor calls a model, and whether the loop may
+            is the caller's decision.
+        escalation_profile: Depth of a re-anchor (default ``extract``: bank
+            first, then edit-adapt, then fresh code, two verification passes).
         recommender: Optional object with ``observe(params, features)`` and
             ``suggest() -> dict``; called after each clean frame. Failure-
             isolated — a recommender error never fails a frame.
@@ -127,6 +200,9 @@ class MeasurementLoop:
                  range_warmup: int = 5,
                  range_adopt_after: int = 3,
                  gate_keys: Optional[List[str]] = None,
+                 auto_escalate: bool = False,
+                 escalation_profile: str = "extract",
+                 escalation_runner: Optional[Callable[[Dict[str, Any]], Any]] = None,
                  recommender: Any = None,
                  agent_factory: Optional[Callable[[str], Any]] = None,
                  logger: Optional[logging.Logger] = None) -> None:
@@ -144,6 +220,12 @@ class MeasurementLoop:
         self.gate_keys = list(gate_keys) if gate_keys else None
         self._n_learned = 0
         self._out_of_range_streak: List[Dict[str, float]] = []
+        self.auto_escalate = bool(auto_escalate)
+        self.escalation_profile = escalation_profile
+        self._escalation_runner = escalation_runner
+        self._escalation: Any = None
+        self._escalation_meta: Dict[str, Any] = {}
+        self._n_escalations = 0
         self.recommender = recommender
         self._agent_factory = agent_factory or self._default_agent
         self.logger = logger or logging.getLogger("MeasurementLoop")
@@ -288,6 +370,8 @@ class MeasurementLoop:
         call on the happy path, never raises for a bad frame — it flags it."""
         if self.recipe is None or self.anchor_dir is None:
             raise LoopNotReady("call setup() before step()")
+        # Between frames is the only moment a finished re-anchor is adopted.
+        self._poll_escalation()
         self._step += 1
         idx = self._step
         t0 = time.perf_counter()
@@ -300,7 +384,13 @@ class MeasurementLoop:
             kwargs: Dict[str, Any] = dict(
                 system_info=self.system_info,
                 prior_analysis_paths=[str(self.anchor_dir)],
-                reuse_locked_script=True, profile="realtime")
+                reuse_locked_script=True, profile="realtime",
+                # The fast clock never calls a model: a recipe that cannot run
+                # on this frame fails the frame (flagged, escalated off-path)
+                # instead of being repaired or re-derived in-frame. Observed
+                # live: without this, a three-peak recipe meeting two-peak
+                # data cost three frames ~40 s and an LLM call each.
+                strict_replay=True)
             if self._edits:
                 kwargs["script_edits"] = list(self._edits)
             result = agent.analyze(data_path, **kwargs) or {}
@@ -372,8 +462,134 @@ class MeasurementLoop:
         if self.objective_key:
             record["objective"] = features.get(self.objective_key)
         record["recommendation"] = self._recommend(params, features, clean)
+        if self._escalation is not None:
+            record["escalation"] = "running"
         self._append(record)
         self._save_state()
+        if needs_escalation and self.auto_escalate and self._escalation is None:
+            try:
+                self.escalate(data_path)
+                record["escalation"] = "started"
+            except Exception as e:  # noqa: BLE001 - never fails the frame
+                self.logger.warning(f"auto-escalation could not start: {e}")
+        return record
+
+    # -------------------------------------------------------------- escalation
+    def escalate(self, data_path: str, *, profile: Optional[str] = None,
+                 background: bool = True) -> Dict[str, Any]:
+        """Re-anchor on ``data_path`` (normally the frame that breached). The
+        slow clock: this may call a model, which is why ``step()`` never calls
+        it unless ``auto_escalate`` was asked for.
+
+        In the background (default) the re-anchor runs in a spawned process
+        and ``step()`` keeps answering with the old recipe, flagged; the new
+        recipe is adopted at the start of the first ``step()`` after it
+        finishes. ``background=False`` runs it here and adopts it before
+        returning. One escalation at a time.
+        """
+        if self.recipe is None:
+            raise LoopNotReady("call setup() before escalate()")
+        if self._escalation is not None:
+            raise RuntimeError("an escalation is already running")
+        self._n_escalations += 1
+        out_dir = self.output_dir / "escalations" / f"escalation_{self._n_escalations:03d}"
+        analyze_kwargs: Dict[str, Any] = {"system_info": self.system_info,
+                                          "profile": profile or self.escalation_profile}
+        if self.targets:
+            analyze_kwargs["targets"] = self.targets
+        # Never audition the recipe that just breached: that is circular.
+        try:
+            from ..skills._shared._script_bank import script_hash
+            script, _ = self._anchor_script(str(self.anchor_dir))
+            if script:
+                effective = self._validate_edits(script, self._edits) if self._edits else script
+                analyze_kwargs["bank_exclude"] = sorted({script_hash(script),
+                                                         script_hash(effective)})
+        except Exception:  # noqa: BLE001 - exclusion is a safeguard, not a requirement
+            pass
+        spec = {
+            "out_dir": str(out_dir), "data_path": str(data_path),
+            # In memory only — a spec is never written to disk (it may carry
+            # a credential).
+            "agent_kwargs": {"api_key": self.api_key, "model_name": self.model_name,
+                             "base_url": self.base_url},
+            "analyze_kwargs": analyze_kwargs,
+            "sandbox_approved": self._sandbox_approved(),
+        }
+        self._escalation_meta = {"index": self._n_escalations, "data": str(data_path),
+                                 "profile": analyze_kwargs["profile"],
+                                 "from_recipe": self.recipe["id"],
+                                 "started_step": self._step, "t0": time.perf_counter()}
+        self._append({"event": "escalation_started", "step": self._step,
+                      **{k: v for k, v in self._escalation_meta.items() if k != "t0"}})
+        runner = self._escalation_runner or (
+            _ProcessEscalation if background else _InlineEscalation)
+        self._escalation = runner(spec)
+        if not background:
+            return self._poll_escalation() or {"event": "escalation_started"}
+        return {"event": "escalation_started", **{
+            k: v for k, v in self._escalation_meta.items() if k != "t0"}}
+
+    @staticmethod
+    def _sandbox_approved() -> bool:
+        import os
+        try:
+            from .. import executors
+            if getattr(executors, "_GLOBAL_SANDBOX_APPROVED", False):
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        return os.environ.get("UNSAFE_EXECUTION_OK", "").strip().lower() in ("1", "true", "yes")
+
+    @property
+    def escalating(self) -> bool:
+        return self._escalation is not None
+
+    def _poll_escalation(self) -> Optional[Dict[str, Any]]:
+        """Adopt a finished re-anchor (or record its failure). Never blocks."""
+        if self._escalation is None:
+            return None
+        try:
+            result = self._escalation.poll()
+        except Exception as e:  # noqa: BLE001
+            result = {"status": "error", "error": f"{type(e).__name__}: {e}"}
+        if result is None:
+            return None
+        meta, self._escalation = self._escalation_meta, None
+        base = {"step": self._step, "index": meta.get("index"),
+                "from_recipe": meta.get("from_recipe"),
+                "frames_answered_meanwhile": self._step - int(meta.get("started_step") or 0),
+                "seconds": result.get("seconds"), "llm_calls": result.get("llm_calls") or 0}
+        script, anchor_dir = (None, None)
+        if result.get("status") == "success" and result.get("output_directory"):
+            script, anchor_dir = self._anchor_script(result["output_directory"])
+        if script is None:
+            record = {"event": "escalation_failed", **base,
+                      "error": str(result.get("error") or "the re-anchor produced no reusable run")[:300]}
+            self._append(record)
+            self._save_state()
+            return record
+        # Adopt. Amendments were written against the OLD script and do not
+        # carry; the plausible ranges belong to the old regime and re-learn.
+        self.anchor_dir, self._edits = anchor_dir, []
+        source = "bank" if result.get("cold_start") else f"reanchor:{meta.get('profile')}"
+        self.recipe = self._recipe_record(script, source)
+        self._reference_features = self._features_from_anchor(anchor_dir)
+        self._ranges = {k: [v, v] for k, v in self._reference_features.items()}
+        self._n_learned, self._out_of_range_streak = 0, []
+        self._consecutive_breaches = 0
+        if self.objective_key and self.objective_key not in self._reference_features:
+            self.logger.warning(
+                f"the new recipe does not produce objective_key {self.objective_key!r}; "
+                f"available: {sorted(self._reference_features)}")
+        record = {"event": "reanchor", **base, "recipe": self.recipe, "source": source,
+                  "anchor_dir": str(anchor_dir),
+                  "objective_key_present": (self.objective_key in self._reference_features
+                                            if self.objective_key else None)}
+        self._append(record)
+        self._save_state()
+        self.logger.info(f"🔁 Re-anchored: recipe {self.recipe['id']} from {source} "
+                         f"({record['seconds']}s, {record['llm_calls']} LLM call(s)).")
         return record
 
     _UNCERTAINTY_SUFFIXES = ("_err", "_error", "_stderr", "_std", "_unc", "_uncertainty", "_sigma_err")
@@ -456,6 +672,8 @@ class MeasurementLoop:
             "llm_calls_in_frames": sum(int(r.get("llm_calls") or 0) for r in frames),
             "latency_s": {"median": lat[len(lat) // 2], "max": lat[-1]},
             "needs_escalation": bool(frames and frames[-1].get("needs_escalation")),
+            "escalating": self.escalating,
+            "reanchors": sum(1 for r in self.read_log() if r.get("event") == "reanchor"),
         }
 
     # ------------------------------------------------------------ persistence

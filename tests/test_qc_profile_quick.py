@@ -376,6 +376,43 @@ class TestReducedDepthScriptsMustEarnVerbatimReuse:
         new = self._xy(shift=0.2, seed=9)
         return a._bank_cold_start_audition(new, {}, 0.95), ran
 
+    def test_a_gate_pass_on_DIFFERENT_data_is_not_a_verbatim_win(self, tmp_path, monkeypatch):
+        """Observed live: a two-peak script with a flexible baseline absorbed a
+        new third peak (R² 0.996) and was locked verbatim while the drift check
+        said the data had changed (similarity 0.858 < 0.92)."""
+        import numpy as np
+        from scilink.skills._shared import _script_bank as sb
+        import scilink.agents.exp_agents._locked_exec as le
+        two = self._xy()
+        sb.add_record("curve_fitting", {
+            "working_script": "print('FIT_RESULTS_JSON: {}')",
+            "data_fingerprint": sb.curve_fingerprint(two[0], two[1]),
+            "provenance": {"session": "s1", "profile": "thorough"}})
+        ran = []
+        monkeypatch.setattr(le, "stage_and_run", lambda *a, **k: (
+            ran.append(1) or {"status": "success", "visualization_path": "p.png",
+                              "stdout": 'FIT_RESULTS_JSON: {}'}))
+        a = self._agent(tmp_path, ran)
+        a._parse_audition_r2 = lambda stdout: 0.996          # the gate WOULD pass
+        x = two[0]
+        three = np.vstack([x, two[1] + 6 * np.exp(-(x - 85) ** 2 / 6)])
+        fp = sb.curve_fingerprint(three[0], three[1])
+        [cand] = sb.find_exemplar("curve_fitting", fp, min_score=0.55)
+        assert cand["fingerprint_score"] < 0.92               # retrievable, but different data
+        assert a._bank_cold_start_audition(three, {}, 0.95) is None and ran == []
+
+    def test_the_recipe_that_just_breached_is_not_auditioned(self, tmp_path, monkeypatch):
+        from scilink.skills._shared import _script_bank as sb
+        win, ran = self._audition(tmp_path, monkeypatch, born="thorough")
+        assert win is not None
+        ran.clear()
+        a = self._agent(tmp_path, ran)
+        a._parse_audition_r2 = lambda stdout: 0.99
+        h = sb.script_hash("print('FIT_RESULTS_JSON: {}')")
+        assert a._bank_cold_start_audition(self._xy(shift=0.2, seed=9), {}, 0.95,
+                                           exclude_hashes=[h]) is None
+        assert ran == []
+
     def test_thorough_born_script_is_eligible_at_once(self, tmp_path, monkeypatch):
         win, ran = self._audition(tmp_path, monkeypatch, born="thorough")
         assert win is not None and len(ran) == 1

@@ -151,6 +151,7 @@ class TestStep:
         rec = loop.step("f1.csv", params={"T": 300})
         [call] = FakeAgent.calls
         assert call["profile"] == "realtime" and call["reuse_locked_script"] is True
+        assert call["strict_replay"] is True          # the fast clock never repairs in-frame
         assert call["prior_analysis_paths"] == [str(loop.anchor_dir)]
         assert "script_edits" not in call
         assert rec["step"] == 1 and rec["flags"] == [] and rec["llm_calls"] == 0
@@ -348,3 +349,192 @@ class TestAmendAndResume:
         with open(loop.log_path, "a") as fh:
             fh.write('{"event": "fra')
         assert len(loop.read_log()) == 2 and loop.status()["frames"] == 1
+
+
+# ──────────────────────────────────────────────────────────────
+# escalation
+# ──────────────────────────────────────────────────────────────
+
+class FakeEscalation:
+    """A re-anchor whose completion the test controls."""
+    last = None
+
+    def __init__(self, spec):
+        self.spec, self.result = spec, None
+        FakeEscalation.last = self
+
+    def poll(self):
+        return self.result
+
+
+def new_anchor(root, name="regime2", features=None):
+    d = root / name
+    (d / "scripts").mkdir(parents=True)
+    (d / "scripts" / "fitting_script.py").write_text("THREE_PEAKS = True\n")
+    (d / "series_fit_results.json").write_text(json.dumps({"results": []}))
+    (d / "analysis_results.json").write_text(json.dumps({
+        "status": "success", "fit_quality": {"r_squared": 0.99},
+        "fitting_parameters": features or {"peak_1": {"center": 6.9},
+                                           "peak_3": {"center": 16.5}}}))
+    return d
+
+
+class TestEscalation:
+    def _breaching(self, tmp_path, **kw):
+        loop = loop_at(tmp_path, breach_patience=2, escalation_runner=FakeEscalation,
+                       targets=["first peak"], **kw)
+        loop.setup(anchor=str(make_anchor(tmp_path)))
+        FakeAgent.replies = {"bad.csv": good(6.9, r2=0.4, drift="suspected")}
+        return loop
+
+    def test_step_keeps_answering_while_the_reanchor_runs(self, tmp_path):
+        loop = self._breaching(tmp_path)
+        loop.step("bad.csv")
+        assert loop.step("bad.csv")["needs_escalation"] is True
+        started = loop.escalate("bad.csv")
+        spec = FakeEscalation.last.spec
+        assert started["event"] == "escalation_started" and loop.escalating
+        assert spec["analyze_kwargs"]["profile"] == "extract"          # the cost ladder
+        assert spec["analyze_kwargs"]["targets"] == ["first peak"]
+        assert spec["data_path"] == "bad.csv"
+        old = loop.recipe["id"]
+        rec = loop.step("bad.csv")                                     # still the old recipe
+        assert rec["escalation"] == "running" and rec["recipe_id"] == old
+        assert rec["flags"] == ["gate_poor", "drift_suspected"]
+
+    def test_the_new_recipe_is_adopted_between_frames(self, tmp_path):
+        loop = self._breaching(tmp_path)
+        loop.step("bad.csv"); loop.step("bad.csv")
+        loop.amend([{"old_text": "THRESH = 0.5", "new_text": "THRESH = 0.4"}])
+        loop.escalate("bad.csv")
+        loop.step("bad.csv")
+        old = loop.recipe["id"]
+        anchor2 = new_anchor(tmp_path)
+        FakeEscalation.last.result = {"status": "success", "output_directory": str(anchor2),
+                                      "llm_calls": 4, "seconds": 61.0}
+        FakeAgent.replies = {"new.csv": good(6.9)}
+        rec = loop.step("new.csv")
+        assert rec["recipe_id"] != old and rec["flags"] == [] and "escalation" not in rec
+        assert FakeAgent.calls[-1]["prior_analysis_paths"] == [str(anchor2.resolve())]
+        assert "script_edits" not in FakeAgent.calls[-1]      # old amendments do not carry
+        [re] = [e for e in loop.read_log() if e["event"] == "reanchor"]
+        assert re["from_recipe"] == old and re["source"] == "reanchor:extract"
+        assert re["llm_calls"] == 4 and re["frames_answered_meanwhile"] == 1
+        assert loop._n_learned == 1 and loop._consecutive_breaches == 0   # ranges re-learn
+        assert loop.status()["reanchors"] == 1 and not loop.status()["escalating"]
+
+    def test_a_regime_the_bank_already_knows_costs_no_model_call(self, tmp_path):
+        loop = self._breaching(tmp_path)
+        loop.escalate("bad.csv")
+        FakeEscalation.last.result = {"status": "success", "llm_calls": 0, "seconds": 2.1,
+                                      "output_directory": str(new_anchor(tmp_path)),
+                                      "cold_start": {"id": "abc"}}
+        loop.step("x.csv")
+        [re] = [e for e in loop.read_log() if e["event"] == "reanchor"]
+        assert re["source"] == "bank" and re["llm_calls"] == 0
+
+    def test_a_failed_reanchor_keeps_the_old_recipe(self, tmp_path):
+        loop = self._breaching(tmp_path)
+        old = loop.recipe["id"]
+        loop.escalate("bad.csv")
+        FakeEscalation.last.result = {"status": "error", "error": "503 from the endpoint"}
+        rec = loop.step("bad.csv")
+        assert rec["recipe_id"] == old and not loop.escalating
+        [failed] = [e for e in loop.read_log() if e["event"] == "escalation_failed"]
+        assert "503" in failed["error"]
+        loop.escalate("bad.csv")                                # and it may be retried
+
+    def test_one_escalation_at_a_time(self, tmp_path):
+        loop = self._breaching(tmp_path)
+        loop.escalate("bad.csv")
+        with pytest.raises(RuntimeError, match="already running"):
+            loop.escalate("bad.csv")
+
+    def test_auto_escalate_starts_on_the_frame_that_raised_it(self, tmp_path):
+        loop = self._breaching(tmp_path, auto_escalate=True)
+        assert "escalation" not in loop.step("bad.csv")
+        rec = loop.step("bad.csv")
+        assert rec["needs_escalation"] and rec["escalation"] == "started"
+        assert FakeEscalation.last.spec["data_path"] == "bad.csv"
+        loop.step("bad.csv")                                    # no second one
+        assert [e["event"] for e in loop.read_log()].count("escalation_started") == 1
+
+    def test_never_escalates_by_itself_unless_asked(self, tmp_path):
+        loop = self._breaching(tmp_path)
+        for _ in range(4):
+            loop.step("bad.csv")
+        assert FakeEscalation.last is None or not loop.escalating
+
+    def test_the_spec_is_never_written_to_disk(self, tmp_path):
+        loop = self._breaching(tmp_path)
+        loop.api_key = "sk-SECRET"
+        loop.escalate("bad.csv")
+        assert FakeEscalation.last.spec["agent_kwargs"]["api_key"] == "sk-SECRET"
+        for f in (tmp_path / "loop").rglob("*"):
+            if f.is_file():
+                assert "sk-SECRET" not in f.read_text(errors="ignore")
+
+
+class TestReanchorSubprocess:
+    """The real worker plumbing, without a model: a frame that does not exist
+    fails fast, which is enough to prove the spec arrives over stdin, the
+    result comes back as a file, and nothing secret touches the disk."""
+
+    def test_spec_over_stdin_result_as_a_file(self, tmp_path):
+        import time as _t
+        out = tmp_path / "escalation_001"
+        esc = ml._ProcessEscalation({
+            "out_dir": str(out), "data_path": str(tmp_path / "no_such_frame.csv"),
+            "agent_kwargs": {"api_key": "sk-SECRET-123", "model_name": "gpt-4o",
+                             "base_url": None},
+            "analyze_kwargs": {"system_info": None, "profile": "extract"},
+            "sandbox_approved": False})
+        deadline = _t.time() + 120
+        result = None
+        while result is None and _t.time() < deadline:
+            result = esc.poll()
+            _t.sleep(0.5)
+        assert result is not None, "worker never reported"
+        assert result["status"] != "success" and "seconds" in result
+        assert (out / "result.json").exists()
+        for f in out.rglob("*"):
+            if f.is_file():
+                assert "sk-SECRET-123" not in f.read_text(errors="ignore"), f
+
+    def test_it_is_not_a_multiprocessing_child(self):
+        # A spawned multiprocessing child re-imports the caller's __main__ —
+        # observed live: an unguarded driving script re-ran itself inside the
+        # worker. The worker must be a `-m` subprocess.
+        import inspect
+        src = inspect.getsource(ml._ProcessEscalation)
+        assert '"-m", "scilink.live._reanchor"' in src
+        assert "get_context" not in src
+
+
+class TestStrictReplay:
+    """Observed live: back in a two-peak regime, the three-peak recipe could not
+    execute, and the realtime profile's forgiving fallback repaired / re-derived
+    it INSIDE step() — three frames at ~40 s and an LLM call each. Under strict
+    replay the failure is the result."""
+
+    def _try_reuse(self, strict):
+        from types import SimpleNamespace
+        from scilink.agents.exp_agents._qc_engine import QCItemContext
+        from scilink.agents.exp_agents.controllers.curve_fitting_controllers import (
+            UnifiedSeriesProcessingController as C)
+        host = SimpleNamespace(
+            logger=SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None),
+            _fit_single_spectrum=lambda **kw: {"success": False, "error": "needs 3 peaks",
+                                               "parameters": {}, "fit_quality": {}})
+        ctx = QCItemContext(state={"_strict_replay": strict}, data=None, data_path="f.csv",
+                            item_name="f", item_idx=0, reuse_script="s",
+                            reuse_source="anchor")
+        return C.qc_try_reuse(host, ctx)
+
+    def test_strict_returns_the_failure_instead_of_rederiving(self):
+        out = self._try_reuse(strict=True)
+        assert out is not None and out["success"] is False
+        assert out["reuse_validity"]["verdict"] == "failed"
+
+    def test_default_keeps_the_forgiving_fallback(self):
+        assert self._try_reuse(strict=False) is None      # None = re-derive (today)

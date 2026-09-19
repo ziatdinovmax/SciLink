@@ -337,6 +337,16 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # (requires prior_analysis_paths + reuse_locked_script). Accepts a
         # preset name or a QCProfile instance.
         profile: Optional[Any] = None,
+        # Strict replay (locked-script runs only): a locked script that fails
+        # on this data is NOT repaired or re-derived — both need a model —
+        # and the item comes back failed instead. For a live loop's per-frame
+        # path, where a model call is never acceptable. Default False keeps
+        # today's forgiving behaviour (LLM correction, then re-derivation).
+        strict_replay: bool = False,
+        # Script hashes the bank-first audition must not consider. A live
+        # loop's escalation passes the recipe that just breached: auditioning
+        # it again is circular.
+        bank_exclude: Optional[List[str]] = None,
         # The quantities the consumer of this result needs (e.g. ["G-band
         # position", "D/G ratio"]). Scopes the LLM verifier to them under any
         # profile — see _qc_profile.verification_addendum. None = judge the
@@ -822,6 +832,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     processed_first_spectrum, handled_system_info,
                     effective_r2_threshold,
                     active_skills=([skill] if isinstance(skill, str) else list(skill or [])),
+                    exclude_hashes=bank_exclude,
                 )
             if cold_start_info is None and bank_first:
                 self.logger.info(
@@ -883,6 +894,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "_qc_profile": qc_profile.name,
             "_synthesis_level": qc_profile.synthesis,
             "_verification_mode": qc_profile.verification,
+            "_strict_replay": bool(strict_replay),
             "analysis_targets": [str(x) for x in (targets or []) if str(x).strip()],
             # Wall-clock budget for per-unit re-analysis of flagged spectra
             # in a series (None = unlimited). Worst fits go first; skipped
@@ -1583,6 +1595,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     def _bank_cold_start_audition(
         self, curve_data, system_info, gate_threshold: float,
         active_skills: Optional[List[str]] = None,
+        exclude_hashes: Optional[List[str]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Execute top bank candidates against the first frame; first past
         the arithmetic gate becomes the locked recipe.
@@ -1623,6 +1636,29 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 return (born == "thorough"
                         or _script_bank.independent_successes(
                             rec, verbatim_only=True) >= 2)
+            # The arithmetic gate is not physics identity. Observed live: a
+            # two-peak script with a flexible baseline absorbed a NEW third
+            # peak (R² 0.996) and was locked verbatim — while the drift check
+            # on that very frame said the data had changed (fingerprint
+            # similarity 0.858). A verbatim recipe must therefore clear the
+            # SAME similarity bar the realtime path uses to call drift; below
+            # it the data is different enough that a script is a starting
+            # point (edit-adapt / exemplar), not an answer.
+            from .controllers.curve_fitting_controllers import (
+                UnifiedSeriesProcessingController as _USP)
+            _bar = _USP.DRIFT_SIMILARITY_THRESHOLD
+            _excluded = {str(h) for h in (exclude_hashes or [])}
+            _before = len(candidates)
+            candidates = [
+                c for c in candidates
+                if (c.get("fingerprint_score") or 0) >= _bar
+                and c["record"].get("script_hash") not in _excluded]
+            if _before and not candidates:
+                self.logger.info(
+                    f"   🏦 Cold start: the matching banked script(s) do not clear "
+                    f"the data-similarity bar ({_bar}) for unreviewed reuse"
+                    + (" or are the recipe that just breached" if _excluded else "")
+                    + " — they remain available as a starting point.")
             _n = len(candidates)
             candidates = [c for c in candidates if _eligible(c["record"])]
             if _n and not candidates:
