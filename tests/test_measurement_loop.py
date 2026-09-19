@@ -264,24 +264,44 @@ class TestStep:
         FakeAgent.replies = {"bad.csv": good(9.5, r2=0.4)}
         assert loop.step("bad.csv")["flags"] == ["gate_poor"]
 
-    def test_recommender_sees_clean_frames_only_and_cannot_fail_a_frame(self, tmp_path):
+    def test_recommender_sees_flagged_frames_too_and_cannot_fail_a_frame(self, tmp_path):
+        """Observed live: shown clean frames only, a GP exploring focus starved
+        (defocus reads as drift) and an LLM asked to fix low SNR was never
+        asked (every frame was below the fit gate)."""
         class Rec:
             seen = []
 
-            def observe(self, params, features):
-                Rec.seen.append((params, features["peak_1_center"]))
+            def observe(self, params, features, step=None, flags=None):
+                Rec.seen.append((params, flags))
 
             def suggest(self):
-                if len(Rec.seen) == 2:
+                if len(Rec.seen) == 3:
                     raise RuntimeError("singular kernel")
-                return {"T": 310 + len(Rec.seen)}
+                return {"params": {"T": 310 + len(Rec.seen)}}
         loop = self._armed(tmp_path, recommender=Rec())
-        FakeAgent.replies = {"bad.csv": good(6.0, r2=0.3)}
-        assert loop.step("a.csv", {"T": 300})["recommendation"] == {"T": 311}
-        assert loop.step("bad.csv", {"T": 305})["recommendation"] == {"T": 311}
+        FakeAgent.replies = {"noisy.csv": good(6.0, r2=0.3),
+                             "dead.csv": {"status": "error", "error": {"error": "empty"}}}
+        assert loop.step("a.csv", {"T": 300})["recommendation"]["params"] == {"T": 311}
+        assert loop.step("noisy.csv", {"T": 305})["recommendation"]["params"] == {"T": 312}
+        assert loop.step("dead.csv", {"T": 306})["recommendation"]["params"] == {"T": 312}
         rec = loop.step("b.csv", {"T": 311})
-        assert "singular kernel" in rec["recommendation"]["error"] and rec["flags"] == []
-        assert [p for p, _ in Rec.seen] == [{"T": 300}, {"T": 311}]
+        assert rec["flags"] == [] and rec["recommendation"]["valid"] is False
+        assert "singular kernel" in rec["recommendation"]["problems"][0]
+        # the noisy frame was observed WITH its flag; the dead one had nothing to observe
+        assert Rec.seen == [({"T": 300}, []), ({"T": 305}, ["gate_poor"]), ({"T": 311}, [])]
+
+    def test_the_range_gate_stands_down_when_conditions_are_being_changed(self, tmp_path):
+        class Hold:
+            def observe(self, *a, **k): pass
+            def suggest(self): return {"params": {"T": 1}}
+        loop = self._armed(tmp_path, recommender=Hold(), range_warmup=0)
+        FakeAgent.replies = {"far.csv": good(9.5)}
+        assert loop.step("far.csv", {"T": 1})["flags"] == []
+        watched = loop_at(tmp_path / "w", recommender=Hold(), range_warmup=0,
+                          gate_keys=["peak_1_center"])
+        watched.setup(anchor=str(loop.anchor_dir))
+        FakeAgent.replies = {"far.csv": good(9.5)}
+        assert watched.step("far.csv", {"T": 1})["flags"] == ["out_of_reference_range"]
 
 
 # ──────────────────────────────────────────────────────────────

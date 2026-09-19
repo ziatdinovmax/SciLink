@@ -175,15 +175,37 @@ class MeasurementLoop:
         gate_keys: Features the range gate watches. Default: ``objective_key``
             when set, else every feature that is not a fit uncertainty
             (``*_err`` and the like never are — they scatter by construction).
+            With a ``recommender`` attached and no explicit ``gate_keys`` the
+            range gate is OFF: it assumes fixed acquisition conditions, and a
+            recommender's job is to change them.
         auto_escalate: Start a background re-anchor by itself the moment
             ``needs_escalation`` is raised (on the frame that raised it). Off
             by default — a re-anchor calls a model, and whether the loop may
             is the caller's decision.
         escalation_profile: Depth of a re-anchor (default ``extract``: bank
             first, then edit-adapt, then fresh code, two verification passes).
-        recommender: Optional object with ``observe(params, features)`` and
-            ``suggest() -> dict``; called after each clean frame. Failure-
-            isolated — a recommender error never fails a frame.
+        recommender: What proposes the next measurement — see
+            :mod:`scilink.live.recommend`. BO is one option among several: a
+            rule table, a surrogate optimizer, or a language model writing the
+            next acquisition parameters as JSON (or a revised protocol). It
+            sees every frame that produced features, WITH its flags — a noisy
+            or drifting frame is often exactly what a recommendation is for
+            (observed live: hiding flagged frames starved a GP exploring focus,
+            where defocus reads as drift, and an LLM asked to fix low SNR,
+            where every frame is below the fit gate). It can never fail a
+            frame. A ``fast``-clock
+            recommender runs inside ``step()``; a ``slow`` one (an LLM) runs
+            off the fast path and ``step()`` returns its most recent finished
+            recommendation, stamped with the step it was based on.
+        schema: The instrument controller's acquisition parameters
+            (:class:`~scilink.live.recommend.InstrumentSchema`). The LOOP
+            validates every recommendation against it — an unknown name or an
+            out-of-bounds value is refused, never clamped. The caller owns the
+            instrument and its safe limits.
+        closed_loop: ``False`` (default, advisory): every recommendation is
+            marked ``requires_approval``. ``True``: valid parameter
+            recommendations are not. A protocol always requires approval, and
+            nothing is ever actuated by SciLink either way.
         agent_factory: ``f(output_dir) -> agent`` (tests; defaults to the
             curve-fitting agent).
     """
@@ -204,6 +226,8 @@ class MeasurementLoop:
                  escalation_profile: str = "extract",
                  escalation_runner: Optional[Callable[[Dict[str, Any]], Any]] = None,
                  recommender: Any = None,
+                 schema: Any = None,
+                 closed_loop: bool = False,
                  agent_factory: Optional[Callable[[str], Any]] = None,
                  logger: Optional[logging.Logger] = None) -> None:
         self.output_dir = Path(output_dir).resolve()
@@ -227,6 +251,12 @@ class MeasurementLoop:
         self._escalation_meta: Dict[str, Any] = {}
         self._n_escalations = 0
         self.recommender = recommender
+        self.schema = schema
+        self.closed_loop = bool(closed_loop)
+        self._n_observed = 0
+        self._last_recommendation: Optional[Dict[str, Any]] = None
+        from .recommend import SlowSlot
+        self._slot = SlowSlot(logger=logger)
         self._agent_factory = agent_factory or self._default_agent
         self.logger = logger or logging.getLogger("MeasurementLoop")
 
@@ -461,7 +491,7 @@ class MeasurementLoop:
             record["error"] = error
         if self.objective_key:
             record["objective"] = features.get(self.objective_key)
-        record["recommendation"] = self._recommend(params, features, clean)
+        record["recommendation"] = self._recommend(params, features, flags, idx)
         if self._escalation is not None:
             record["escalation"] = "running"
         self._append(record)
@@ -597,6 +627,8 @@ class MeasurementLoop:
     def _gated(self, key: str) -> bool:
         if self.gate_keys is not None:
             return key in self.gate_keys
+        if self.recommender is not None:
+            return False        # conditions are being changed on purpose
         if self.objective_key:
             return key == self.objective_key
         return not (key.startswith("fit_") or key.endswith(self._UNCERTAINTY_SUFFIXES))
@@ -620,16 +652,55 @@ class MeasurementLoop:
             lo, hi = self._ranges.get(k, [v, v])
             self._ranges[k] = [min(lo, v), max(hi, v)]
 
-    def _recommend(self, params, features, clean: bool):
-        if self.recommender is None:
+    def _recommend(self, params, features, flags: List[str], idx: int):
+        """The recommendation this frame's record carries. Never raises, never
+        waits: a slow recommender's call runs off the fast path."""
+        rec = self.recommender
+        if rec is None:
             return None
+        from .recommend import finalize
+        source = getattr(rec, "name", rec.__class__.__name__)
         try:
-            if clean and params is not None:
-                self.recommender.observe(params, features)
-            return self.recommender.suggest()
+            observed = bool(features) and params is not None
+            if observed:
+                try:
+                    rec.observe(params, features, step=idx, flags=list(flags))
+                except TypeError:              # a duck-typed observe(params, features)
+                    rec.observe(params, features)
+                self._n_observed += 1
+            if getattr(rec, "clock", "fast") != "slow":
+                return finalize(rec.suggest(), self.schema, source=source,
+                                based_on_step=idx, closed_loop=self.closed_loop)
+            # Slow clock: collect a finished call, maybe start the next one.
+            done = self._slot.take()
+            if done is not None:
+                self._last_recommendation = self._adopt_recommendation(
+                    finalize(done["raw"], self.schema, source=source,
+                             based_on_step=done["based_on_step"],
+                             closed_loop=self.closed_loop))
+            every = max(1, int(getattr(rec, "every", 1)))
+            if observed and self._n_observed % every == 0:
+                self._slot.start(rec, idx)
+            if self._last_recommendation is None:
+                return {"pending": True} if self._slot.busy else None
+            return {**self._last_recommendation, "pending": self._slot.busy}
         except Exception as e:  # noqa: BLE001 - a recommender never fails a frame
             self.logger.warning(f"recommender failed: {e}")
-            return {"error": f"{type(e).__name__}: {e}"}
+            return finalize({"params": None, "problems": [f"{type(e).__name__}: {e}"]},
+                            self.schema, source=source, based_on_step=idx,
+                            closed_loop=self.closed_loop)
+
+    def _adopt_recommendation(self, rec: Dict[str, Any]) -> Dict[str, Any]:
+        """Log a slow recommender's result; write a protocol out as a file —
+        an artifact for a person, never something SciLink runs."""
+        if rec.get("kind") == "protocol" and rec.get("protocol"):
+            d = self.output_dir / "protocols"
+            d.mkdir(parents=True, exist_ok=True)
+            path = d / f"protocol_step_{int(rec['based_on_step']):06d}.txt"
+            path.write_text(str(rec["protocol"]), encoding="utf-8")
+            rec = {**rec, "protocol_path": str(path)}
+        self._append({"event": "recommendation", "step": self._step, **rec})
+        return rec
 
     # ------------------------------------------------------------------ amend
     def amend(self, edits: List[Dict[str, Any]], note: Optional[str] = None) -> Dict[str, Any]:

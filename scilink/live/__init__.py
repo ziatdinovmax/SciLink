@@ -5,5 +5,9 @@ typed methods. See :mod:`scilink.live.measurement_loop`.
 """
 
 from .measurement_loop import LOOP_LOG_NAME, LoopNotReady, MeasurementLoop
+from .recommend import (GPRecommender, InstrumentSchema, LLMRecommender,
+                        ParameterSpec, Recommender, RuleTableRecommender)
 
-__all__ = ["MeasurementLoop", "LoopNotReady", "LOOP_LOG_NAME"]
+__all__ = ["MeasurementLoop", "LoopNotReady", "LOOP_LOG_NAME",
+           "InstrumentSchema", "ParameterSpec", "Recommender",
+           "RuleTableRecommender", "GPRecommender", "LLMRecommender"]

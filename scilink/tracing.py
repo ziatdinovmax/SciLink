@@ -66,7 +66,29 @@ def disable_tracing() -> None:
 
 _counters: Dict[str, float] = {
     "calls": 0, "seconds": 0.0, "prompt_tokens": 0, "completion_tokens": 0,
+    "off_path_calls": 0,
 }
+_off_path = threading.local()
+
+
+class off_path:
+    """Context manager: LLM calls made on this thread inside the block are
+    counted as ``off_path_calls`` and NOT in ``calls``.
+
+    For work that runs beside a timed pipeline rather than inside it — a live
+    loop's slow recommender thinking on its own thread while frames are being
+    analysed. Without it the process-wide ``calls`` counter would charge that
+    call to whichever pipeline stage happened to be running, and a frame that
+    called no model would be reported as having used one.
+    """
+
+    def __enter__(self):
+        _off_path.depth = getattr(_off_path, "depth", 0) + 1
+        return self
+
+    def __exit__(self, *exc):
+        _off_path.depth -= 1
+        return False
 
 
 def note_llm_call(latency_s: Optional[float] = None,
@@ -74,6 +96,10 @@ def note_llm_call(latency_s: Optional[float] = None,
                   completion_tokens: Optional[int] = None) -> None:
     """Count one completed LLM call. Never raises."""
     try:
+        if getattr(_off_path, "depth", 0):
+            with _lock:
+                _counters["off_path_calls"] += 1
+            return
         with _lock:
             _counters["calls"] += 1
             _counters["seconds"] += float(latency_s or 0.0)
