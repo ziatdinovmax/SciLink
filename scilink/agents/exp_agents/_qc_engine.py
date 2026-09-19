@@ -104,6 +104,11 @@ def try_bank_edit_adapt(host, ctx, *, domain: str, script_kind: str,
             data_context=data_context,
             output_contract=output_contract,
         )
+        # Attempt provenance for the assist log, from the moment the call is
+        # spent: an adaptation that never applies or never runs still cost
+        # an LLM call, and that waste has to be visible.
+        ctx.bank_adapt_attempt = {"n_edits": None, "applied": False,
+                                  "executed": False}
         raw = host.model.generate_content(
             prompt, generation_config=host.generation_config)
         raw = raw.text if hasattr(raw, "text") else str(raw)
@@ -130,7 +135,9 @@ def try_bank_edit_adapt(host, ctx, *, domain: str, script_kind: str,
             f"   🏦 ✏️  Bank edit-adapt: record {rec.get('id')} "
             f"(score {score}), {n_edits} edit(s) — "
             f"{str(parsed.get('rationale'))[:120]}")
+        ctx.bank_adapt_attempt.update(n_edits=n_edits, applied=True)
         result = run_fn(adapted_script)
+        ctx.bank_adapt_attempt["executed"] = bool(result.get("success"))
         if not result.get("success"):
             host.logger.info(
                 "   🏦 ↩️  Edit-adapted script did not execute cleanly — "
@@ -144,9 +151,76 @@ def try_bank_edit_adapt(host, ctx, *, domain: str, script_kind: str,
         }
         return result
     except Exception as e:  # noqa: BLE001 - never worse than today
+        _att = getattr(ctx, "bank_adapt_attempt", None)
+        if isinstance(_att, dict):
+            _att["fell_through"] = str(e)[:160]
         host.logger.info(
             f"   🏦 ↩️  Edit-adapt fell through ({e}) — falling back to "
             "exemplar-guided generation.")
+        return None
+
+
+def record_bank_assist(host, ctx, res, *, domain: str,
+                       seconds: Optional[float] = None,
+                       anchor_only: bool = True) -> Optional[dict]:
+    """Attach a ``bank_assist`` block to a finished QC-loop item and append
+    it to the bank's assist log.
+
+    One block per item that went through the codegen QC loop (``anchor_only``
+    = the curve / image rule that only anchors do; hyperspectral targets all
+    do) — including
+    ``mode="none"`` (nothing in the bank matched), which is the baseline the
+    assisted runs are compared against. Locked-script reuse is not a bank
+    event and is skipped. ``survived`` says whether an edit-adapted script is
+    still the accepted one: a verification-loop refit drops the
+    ``bank_edit_adapt`` provenance, and with it the claim that the bank
+    helped. Bookkeeping only — never raises, never changes ``res``'s verdict.
+    """
+    try:
+        if (not isinstance(res, dict) or res.get("reuse_validity")
+                or res.get("locked_replay")):
+            return None
+        # Curve / image run the verification loop on anchors only; a
+        # non-anchor item's zero iterations would corrupt the baseline.
+        if anchor_only and not getattr(ctx, "is_anchor", True):
+            return None
+        match = getattr(ctx, "bank_exemplar", None) or {}
+        attempt = getattr(ctx, "bank_adapt_attempt", None) or {}
+        rec = match.get("record") or {}
+        if attempt:
+            mode = "edit_adapt"
+        elif rec:
+            mode = "exemplar"
+        else:
+            mode = "none"
+        qh = res.get("quality_history") or {}
+        block = {
+            "domain": domain,
+            "mode": mode,
+            "record_id": rec.get("id"),
+            "score": match.get("score"),
+            "fingerprint_score": match.get("fingerprint_score"),
+            "iterations": len(qh.get("verification_iterations") or []),
+            "approved": bool(qh.get("approved")),
+            "item": getattr(ctx, "item_name", None),
+        }
+        if mode == "edit_adapt":
+            block["n_edits"] = attempt.get("n_edits")
+            block["applied"] = bool(attempt.get("applied"))
+            block["executed"] = bool(attempt.get("executed"))
+            block["survived"] = bool(res.get("bank_edit_adapt"))
+            if attempt.get("fell_through"):
+                block["fell_through"] = attempt["fell_through"]
+        if seconds is not None:
+            block["seconds"] = round(float(seconds), 2)
+        res["bank_assist"] = block
+        from scilink.skills._shared import _script_bank
+        _script_bank.log_assist(
+            {**block, "session": Path(
+                str((ctx.state or {}).get("output_dir")
+                    or getattr(host, "output_dir", "") or "")).name or None})
+        return block
+    except Exception:  # noqa: BLE001 - bookkeeping must never fail a run
         return None
 
 

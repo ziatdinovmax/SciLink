@@ -3492,10 +3492,19 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 "facts": facts,
             }
             engine = CodegenQCEngine(host=self, spec=self._QC_ENGINE_SPEC)
+            import time as _time
+            _t0 = _time.perf_counter()
             out = engine.run_item(ctx) or {}
             record = out.get("record")
             if record is not None:
                 state.setdefault("dynamic_analysis_records", []).append(record)
+                # Assist log: every target runs the full ladder here, so
+                # there is no anchor-only rule (locked replays are skipped
+                # inside the recorder).
+                from .._qc_engine import record_bank_assist
+                record_bank_assist(self, ctx, record, domain="hyperspectral",
+                                   seconds=_time.perf_counter() - _t0,
+                                   anchor_only=False)
                 # Clean acceptance of an edit-adapted script accumulates
                 # proven-N on the SAME bank record (provenance only exists
                 # on task_success records — see _build_target_record).

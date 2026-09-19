@@ -583,6 +583,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # counterpart of curve/image quality_history.
         if result_json.get("dynamic_analysis_records"):
             response["dynamic_analysis_records"] = result_json["dynamic_analysis_records"]
+        if result_json.get("stage_timings"):
+            response["stage_timings"] = result_json["stage_timings"]
         if reuse_records:
             _new_recs = result_json.get("dynamic_analysis_records") or []
             _supplied = {r.get("script") for r in reuse_records}
@@ -727,6 +729,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "status": response.get("status"),
                 "extracted_features": feats,
             }
+            if response.get("stage_timings"):
+                payload["stage_timings"] = response["stage_timings"]
             path = self.output_dir / "analysis_results.json"
             with open(path, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, indent=2, default=str)
@@ -922,11 +926,16 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "analysis_hints": hints, "prior_knowledge": prior_knowledge or [],
             **skill_state,
         }
-        series_plan = _series.plan_series_regimes(
-            self.model, self.generation_config, self.safety_settings,
-            self._parse_llm_response, plan_state, scout, self.logger)
-        series_plan = self._regime_plan_gate(series_plan, plan_state, scout,
-                                             series_metadata, n, reuse_locked_script)
+        # Series-level stages only; each dataset's own pipeline stages are
+        # timed in its child run (dataset_NNNN/analysis_results.json).
+        from ._stage_timing import StageTimer
+        series_timer = StageTimer()
+        with series_timer.stage("series:RegimePlanning"):
+            series_plan = _series.plan_series_regimes(
+                self.model, self.generation_config, self.safety_settings,
+                self._parse_llm_response, plan_state, scout, self.logger)
+            series_plan = self._regime_plan_gate(series_plan, plan_state, scout,
+                                                 series_metadata, n, reuse_locked_script)
         if series_plan:
             regimes = series_plan["regimes"]
         else:
@@ -1215,7 +1224,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     self.safety_settings, self._parse_llm_response,
                     executor=ScriptExecutor(timeout=self.executor_timeout),
                     output_dir=str(series_dir), max_corrections=3)
-                state = trend.execute(state)
+                state = series_timer.run(trend, state, name="series:Trend")
             except Exception as e:  # noqa: BLE001
                 self.logger.exception(f"Trend analysis failed: {e}")
                 state["trend_analysis_results"] = {"success": False, "error": str(e)}
@@ -1227,13 +1236,16 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # ---- Series synthesis + report ---------------------------------------
         synth = {}
         if n_ok:
-            synth = _series.synthesize_series(
-                self.model, self.generation_config, self.safety_settings,
-                self._parse_llm_response, state, self.logger)
+            with series_timer.stage("series:Synthesis"):
+                synth = _series.synthesize_series(
+                    self.model, self.generation_config, self.safety_settings,
+                    self._parse_llm_response, state, self.logger)
         state["synthesis_result"] = synth
         state["report_path"] = _series.generate_series_report(series_dir, state)
 
         response = self._compile_series_results(state, literature_file)
+        response["stage_timings"] = series_timer.summary()
+        series_timer.log_summary(self.logger)
         try:
             (series_dir / "analysis_results.json").write_text(
                 json.dumps(_series._serializable(response), indent=2), encoding="utf-8")
@@ -2158,8 +2170,10 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 **auxiliary_state,
             }
 
+            from ._stage_timing import StageTimer
+            stage_timer = StageTimer()
             for controller in self.iteration_pipeline:
-                iteration_state = controller.execute(iteration_state)
+                iteration_state = stage_timer.run(controller, iteration_state)
                 if iteration_state.get("error_dict"):
                     self.logger.error(f"Pipeline failed at {controller.__class__.__name__}")
                     break
@@ -2198,7 +2212,9 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             }
 
             for controller in self._synthesis_controllers():
-                synthesis_state = controller.execute(synthesis_state)
+                synthesis_state = stage_timer.run(
+                    controller, synthesis_state,
+                    name=f"synthesis:{controller.__class__.__name__}")
                 if synthesis_state.get("error_dict"):
                     self.logger.error(f"Synthesis failed at {controller.__class__.__name__}")
                     break
@@ -2209,6 +2225,10 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # 'success'. The notes live on iteration_state (set by the salvage
             # judge); attach them to result_json for analyze() to read.
             _rj = synthesis_state.get("result_json")
+            stage_timer.log_summary(self.logger)
+            if _rj is not None:
+                # Where the time went, per pipeline stage (wall-clock + LLM).
+                _rj["stage_timings"] = stage_timer.summary()
             _notes = iteration_state.get("degradation_notes", [])
             if _rj is not None and _notes:
                 _rj["degradation_notes"] = _notes

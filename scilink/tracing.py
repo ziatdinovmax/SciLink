@@ -54,6 +54,47 @@ def disable_tracing() -> None:
     _trace_path = None
 
 
+# ──────────────────────────────────────────────────────────────
+# Always-on call counters
+#
+# Distinct from the opt-in trace above: no prompt, response or file is
+# involved — only how many LLM calls completed in this process, how long they
+# took and how many tokens they moved. Stage timing
+# (``exp_agents/_stage_timing.py``) reads deltas of these to split a pipeline
+# stage's wall-clock into LLM time and everything else.
+# ──────────────────────────────────────────────────────────────
+
+_counters: Dict[str, float] = {
+    "calls": 0, "seconds": 0.0, "prompt_tokens": 0, "completion_tokens": 0,
+}
+
+
+def note_llm_call(latency_s: Optional[float] = None,
+                  prompt_tokens: Optional[int] = None,
+                  completion_tokens: Optional[int] = None) -> None:
+    """Count one completed LLM call. Never raises."""
+    try:
+        with _lock:
+            _counters["calls"] += 1
+            _counters["seconds"] += float(latency_s or 0.0)
+            _counters["prompt_tokens"] += int(prompt_tokens or 0)
+            _counters["completion_tokens"] += int(completion_tokens or 0)
+    except Exception:
+        pass
+
+
+def llm_counters() -> Dict[str, float]:
+    """Snapshot of the process-wide LLM-call counters.
+
+    Process-wide by design: a stage that fans work out to worker threads still
+    sees their calls. The cost is that two pipelines running concurrently in
+    one process (a meta fan-out) see each other's calls; calls made in a
+    spawned worker process are not seen at all.
+    """
+    with _lock:
+        return dict(_counters)
+
+
 def is_enabled() -> bool:
     """Whether a trace destination is active (set via enable_tracing or $SCILINK_TRACE_FILE)."""
     return _active_path() is not None

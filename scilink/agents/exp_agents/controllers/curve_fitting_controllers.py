@@ -4924,8 +4924,13 @@ Return JSON with:
             is_regime_anchor=is_regime_anchor,
             reuse_script=reuse_script, reuse_source=reuse_source,
         )
+        import time as _time
+        _t0 = _time.perf_counter()
         res = engine.run_item(ctx)
         self._bump_bank_adapt_success(res)
+        from .._qc_engine import record_bank_assist
+        record_bank_assist(self, ctx, res, domain="curve_fitting",
+                           seconds=_time.perf_counter() - _t0)
         return res
 
     # --- CodegenQCEngine hooks (bodies moved verbatim from the old driver) ---
@@ -5137,6 +5142,7 @@ Return JSON with:
             if matches:
                 match = matches[0]
                 state["_bank_exemplar"] = match
+                ctx.bank_exemplar = match  # per-item, for the assist log
                 _script_bank.mark_retrieved("curve_fitting", match["record"]["id"])
                 self.logger.info(
                     f"   🏦 Bank exemplar offered: id={match['record']['id']} "

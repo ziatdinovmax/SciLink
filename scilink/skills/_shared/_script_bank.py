@@ -669,6 +669,110 @@ def record_success(domain: str, rid: str, session: Optional[str] = None,
 
 
 # ──────────────────────────────────────────────────────────────
+# Assist log — did the bank actually help?
+#
+# Retrieval thresholds were hand-set from a single corpus. Whether a banked
+# script shortens a run is an empirical question, so every QC-loop item
+# appends one event here: which mode served it (none / exemplar / edit_adapt /
+# verbatim), the record and its score, how many verification iterations the
+# item then needed, and whether it was approved. ``mode == "none"`` events are
+# the baseline the assisted ones are compared against.
+#
+# One append-only JSONL file for the whole bank (single short writes, so
+# concurrent runs interleave whole lines). Bookkeeping only — never raises.
+# ──────────────────────────────────────────────────────────────
+
+ASSIST_LOG_NAME = "assist_log.jsonl"
+ASSIST_MODES = ("none", "exemplar", "edit_adapt", "verbatim")
+_SCORE_BUCKETS = ((0.0, 0.45), (0.45, 0.55), (0.55, 0.70), (0.70, 1.01))
+
+
+def assist_log_path(*, root: Optional[Path] = None) -> Path:
+    return (root or bank_dir()) / ASSIST_LOG_NAME
+
+
+def log_assist(event: Dict[str, Any], *, root: Optional[Path] = None) -> None:
+    """Append one assist event. No-op when the bank is disabled."""
+    try:
+        if not bank_enabled():
+            return
+        path = assist_log_path(root=root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rec = {"timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+               **event}
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, default=str) + "\n")
+    except Exception:
+        pass
+
+
+def read_assist_log(domain: Optional[str] = None, *,
+                    root: Optional[Path] = None) -> List[Dict[str, Any]]:
+    path = assist_log_path(root=root)
+    if not path.exists():
+        return []
+    events = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue  # a torn line from a killed run
+        if domain is None or ev.get("domain") == domain:
+            events.append(ev)
+    return events
+
+
+def _assist_rollup(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    n = len(events)
+    iters = [e["iterations"] for e in events
+             if isinstance(e.get("iterations"), (int, float))]
+    secs = [e["seconds"] for e in events
+            if isinstance(e.get("seconds"), (int, float))]
+    return {
+        "n": n,
+        "approved_rate": (round(sum(1 for e in events if e.get("approved")) / n, 3)
+                          if n else None),
+        "mean_iterations": round(float(np.mean(iters)), 2) if iters else None,
+        "mean_seconds": round(float(np.mean(secs)), 1) if secs else None,
+    }
+
+
+def assist_stats(domain: Optional[str] = None, *,
+                 root: Optional[Path] = None) -> Dict[str, Any]:
+    """Summarise the assist log per domain → mode, and per score bucket.
+
+    ``survived_rate`` (edit_adapt only) is the fraction of adaptations whose
+    script was still the accepted one at the end — the rest were replaced by
+    a verification-loop refit, i.e. the adaptation cost a call and bought
+    nothing.
+    """
+    out: Dict[str, Any] = {}
+    events = read_assist_log(domain, root=root)
+    for dom in sorted({e.get("domain") or "unknown" for e in events}):
+        evs = [e for e in events if (e.get("domain") or "unknown") == dom]
+        modes: Dict[str, Any] = {}
+        for mode in ASSIST_MODES:
+            sel = [e for e in evs if e.get("mode") == mode]
+            if not sel:
+                continue
+            roll = _assist_rollup(sel)
+            if mode == "edit_adapt":
+                roll["survived_rate"] = round(
+                    sum(1 for e in sel if e.get("survived")) / len(sel), 3)
+            modes[mode] = roll
+        buckets: Dict[str, Any] = {}
+        assisted = [e for e in evs if e.get("mode") not in (None, "none")
+                    and isinstance(e.get("score"), (int, float))]
+        for lo, hi in _SCORE_BUCKETS:
+            sel = [e for e in assisted if lo <= e["score"] < hi]
+            if sel:
+                buckets[f"{lo:.2f}-{min(hi, 1.0):.2f}"] = _assist_rollup(sel)
+        out[dom] = {"n_events": len(evs), "by_mode": modes,
+                    "by_score": buckets}
+    return out
+
+
+# ──────────────────────────────────────────────────────────────
 # Management surface + graduation signal
 #
 # The bank is episodic memory; skill graduation is semantic memory. The

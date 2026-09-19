@@ -200,6 +200,10 @@ def _record_trace(model: str, messages, response, latency_s: float) -> None:
     """Record one completed LLM call to the opt-in global tracer (no-op if disabled)."""
     try:
         from .. import tracing
+        _u = getattr(response, "usage", None)
+        tracing.note_llm_call(latency_s,
+                              getattr(_u, "prompt_tokens", None),
+                              getattr(_u, "completion_tokens", None))
         if not tracing.is_enabled():
             return
         text, finish = "", None

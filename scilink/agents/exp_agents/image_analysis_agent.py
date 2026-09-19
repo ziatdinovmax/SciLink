@@ -638,13 +638,16 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             num_plan_candidates=self.num_plan_candidates,
         )
 
-        # Execute pipeline
+        # Execute pipeline. The timer lives on the instance so the Tier 2
+        # pass (``_run_tier2``) reports into the same ``stage_timings``.
+        from ._stage_timing import StageTimer
+        self._stage_timer = StageTimer()
         for i, controller in enumerate(pipeline, 1):
             step_name = controller.__class__.__name__
             self.logger.info(f"\n📍 STEP {i}: {step_name}\n")
 
             try:
-                state = controller.execute(state)
+                state = self._stage_timer.run(controller, state)
 
                 if state.get("error_dict"):
                     self.logger.error(
@@ -714,9 +717,10 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         )
 
         if self.analysis_depth == "auto" and tier1_results["status"] == "success":
-            tier2_decision = self._evaluate_tier2_needed(
-                tier1_results, objective
-            )
+            with self._stage_timer.stage("Tier2Evaluation"):
+                tier2_decision = self._evaluate_tier2_needed(
+                    tier1_results, objective
+                )
             if tier2_decision and tier2_decision.get("tier2_needed"):
                 run_tier2 = True
                 if self.enable_human_feedback:
@@ -769,6 +773,17 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         fb_staged = self._maybe_stage_feedback_errors(tier1_state, final_results)
         if fb_staged:
             final_results.setdefault("staged_solutions", []).extend(fb_staged)
+
+        # Did the script bank help? One block per QC-loop item (also in
+        # the bank's assist log, where `scilink memory bank stats` reads it).
+        _assists = [r["bank_assist"] for r in tier1_state.get("series_results", []) or []
+                    if isinstance(r, dict) and r.get("bank_assist")]
+        if _assists:
+            final_results["bank_assist"] = _assists
+
+        # Where the time went, per pipeline stage (wall-clock + LLM calls).
+        final_results["stage_timings"] = self._stage_timer.summary()
+        self._stage_timer.log_summary(self.logger)
 
         # Save final merged results
         results_path = self.output_dir / "analysis_results.json"
@@ -1378,7 +1393,12 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             step_name = controller.__class__.__name__
             self.logger.info(f"\n📍 TIER 2 STEP {i}: {step_name}\n")
             try:
-                tier2_state = controller.execute(tier2_state)
+                _timer = getattr(self, "_stage_timer", None)
+                tier2_state = (
+                    _timer.run(controller, tier2_state,
+                               name=f"tier2:{step_name}")
+                    if _timer is not None
+                    else controller.execute(tier2_state))
                 if tier2_state.get("error_dict"):
                     self.logger.error(
                         f"Tier 2 failed at {step_name}: "

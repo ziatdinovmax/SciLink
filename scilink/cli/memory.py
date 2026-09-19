@@ -33,6 +33,8 @@ Script bank (script_bank — episodic memory of successful scripts) subcommands:
   bank-show    Print a bank record including its script
   bank-promote Send a proven record into distill staging — it then flows
                through the same review-gated upgrade/consolidate path
+  bank-stats   Does the bank shorten runs? Iterations / approval by assist
+               mode and match score, from the bank's assist log
   bank-prune   Delete a bank record
 
 `upgrade`/`consolidate` call an LLM; configure with --model / --base-url / --api-key.
@@ -514,6 +516,45 @@ def _cmd_bank_groups(args) -> int:
     return 0
 
 
+def _cmd_bank_stats(args) -> int:
+    """`scilink memory bank-stats` — does the bank shorten runs?"""
+    from scilink.skills._shared import _script_bank
+    stats = _script_bank.assist_stats(args.domain)
+    if args.json:
+        import json as _json
+        print(_json.dumps(stats, indent=2))
+        return 0
+    if not stats:
+        print("No assist events logged yet — they accumulate as analyses run "
+              f"with the bank enabled ({_script_bank.assist_log_path()}).")
+        return 0
+
+    def _row(label, r):
+        def _f(v, fmt):
+            return format(v, fmt) if v is not None else "—"
+        extra = (f"  survived={_f(r.get('survived_rate'), '.0%')}"
+                 if "survived_rate" in r else "")
+        print(f"    {label:<12} n={r['n']:<4} "
+              f"approved={_f(r['approved_rate'], '.0%'):<5} "
+              f"iterations={_f(r['mean_iterations'], '.2f'):<5} "
+              f"seconds={_f(r['mean_seconds'], '.0f')}{extra}")
+
+    for dom, d in stats.items():
+        print(f"{dom}: {d['n_events']} QC-loop item(s)")
+        print("  by mode  (none = no bank match: the baseline)")
+        for mode, r in d["by_mode"].items():
+            _row(mode, r)
+        if d["by_score"]:
+            print("  assisted items by match score")
+            for bucket, r in d["by_score"].items():
+                _row(bucket, r)
+    print("\nRead it as: an assist mode earns its keep when its mean "
+          "iterations / seconds sit below the `none` baseline at a comparable "
+          "approval rate; a score bucket that does not is below the useful "
+          "retrieval floor.")
+    return 0
+
+
 def _cmd_bank_prune(args) -> int:
     from scilink.skills._shared import _script_bank
     domain, rid = _split_ref(args.ref)
@@ -648,6 +689,13 @@ def main():
                       help="Fingerprint-similarity grouping threshold "
                            "(default 0.85)")
     p_bg.set_defaults(func=_cmd_bank_groups)
+
+    p_bst = sub.add_parser(
+        "bank-stats",
+        help="Summarise the bank's assist log: iterations / approval by mode and match score")
+    p_bst.add_argument("--domain", help="Restrict to one domain")
+    p_bst.add_argument("--json", action="store_true", help="Machine-readable output")
+    p_bst.set_defaults(func=_cmd_bank_stats)
 
     p_br = sub.add_parser("bank-prune", help="Delete a bank record")
     p_br.add_argument("ref", help="Bank record ref '<domain>/<id>'")

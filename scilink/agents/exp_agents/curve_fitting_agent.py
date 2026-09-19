@@ -994,12 +994,14 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         )
         
         # Execute pipeline
+        from ._stage_timing import StageTimer
+        stage_timer = StageTimer()
         for i, controller in enumerate(pipeline, 1):
             step_name = controller.__class__.__name__
             self.logger.info(f"\n📍 STEP {i}: {step_name}\n")
             
             try:
-                state = controller.execute(state)
+                state = stage_timer.run(controller, state)
                 
                 if state.get("error_dict"):
                     self.logger.error(f"Pipeline failed at {step_name}: {state['error_dict']}")
@@ -1050,6 +1052,17 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         fb_staged = self._maybe_stage_feedback_errors(state, final_results)
         if fb_staged:
             final_results.setdefault("staged_solutions", []).extend(fb_staged)
+
+        # Did the script bank help? One block per QC-loop item (also in
+        # the bank's assist log, where `scilink memory bank stats` reads it).
+        _assists = [r["bank_assist"] for r in state.get("series_results", []) or []
+                    if isinstance(r, dict) and r.get("bank_assist")]
+        if _assists:
+            final_results["bank_assist"] = _assists
+
+        # Where the time went, per pipeline stage (wall-clock + LLM calls).
+        final_results["stage_timings"] = stage_timer.summary()
+        stage_timer.log_summary(self.logger)
 
         # Save final results AFTER the memory hooks so the persisted JSON
         # carries staged_solutions / banked_scripts, matching the returned
@@ -1562,10 +1575,23 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 if r2 is None or r2 < gate_threshold:
                     self.logger.info(
                         f"      ✗ gate failed (R²={r2} < {gate_threshold})")
+                    _script_bank.log_assist({
+                        "domain": "curve_fitting", "mode": "verbatim",
+                        "record_id": rec["id"], "score": cand["score"],
+                        "fingerprint_score": cand.get("fingerprint_score"),
+                        "iterations": 0, "approved": False,
+                        "audition_r2": r2, "session": self.output_dir.name})
                     continue
                 _script_bank.mark_retrieved("curve_fitting", rec["id"])
                 _script_bank.record_success(
                     "curve_fitting", rec["id"], session=self.output_dir.name)
+                _script_bank.log_assist({
+                    "domain": "curve_fitting", "mode": "verbatim",
+                    "record_id": rec["id"], "score": cand["score"],
+                    "fingerprint_score": cand.get("fingerprint_score"),
+                    "iterations": 0, "approved": True,
+                    "audition_r2": round(float(r2), 4),
+                    "session": self.output_dir.name})
                 self.logger.info(
                     f"   🏦 ✅ Cold start locked: bank record {rec['id']} "
                     f"passes the gate on this frame (R²={r2:.4f})."
