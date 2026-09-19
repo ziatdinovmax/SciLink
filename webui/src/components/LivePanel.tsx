@@ -16,6 +16,17 @@ import { fmt, LiveChart } from "./LiveChart";
  * to its own log. */
 
 const CUSTOM = "__custom__";
+const REPLAY = "replay";
+
+/** "name: definition" per line → {name: definition}. */
+function parseOutputs(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of text.split("\n")) {
+    const i = line.indexOf(":");
+    if (i > 0 && line.slice(i + 1).trim()) out[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  }
+  return out;
+}
 const POLL_MS = 1500;
 
 const FLAG_WORDS: Record<string, string> = {
@@ -30,8 +41,11 @@ const FLAG_WORDS: Record<string, string> = {
 function describeEvent(e: LiveEvent): string {
   const g = (k: string) => e[k] as string | number | undefined;
   switch (e.event) {
-    case "setup":
-      return `armed from ${g("source") ?? "reference"}`;
+    case "setup": {
+      const port = e.portability as { portable?: boolean; summary?: string } | undefined;
+      return `armed from ${g("source") ?? "reference"}` +
+        (port && port.portable === false ? ` — ▲ ${port.summary}` : "");
+    }
     case "escalation_started":
       return "escalation started — a new recipe is being built in the background";
     case "reanchor":
@@ -77,6 +91,13 @@ export function LivePanel({
   const [every, setEvery] = useState(8);
   const [autoEscalate, setAutoEscalate] = useState(true);
   const [profile, setProfile] = useState("thorough");
+  const [replayDir, setReplayDir] = useState("");
+  const [technique, setTechnique] = useState("");
+  const [sample, setSample] = useState("");
+  const [xAxis, setXAxis] = useState("");
+  const [yAxis, setYAxis] = useState("");
+  const [outputsText, setOutputsText] = useState("");
+  const [targetsText, setTargetsText] = useState("");
 
   // running view
   const [traceKey, setTraceKey] = useState("");
@@ -128,7 +149,14 @@ export function LivePanel({
   const start = () =>
     act(() => api.liveStart(sessionId, {
       instrument: instrument === CUSTOM ? custom.trim() : instrument,
-      n_frames: nFrames, interval_s: interval, apply, recommender,
+      n_frames: nFrames, interval_s: interval, apply,
+      recommender: instrument === REPLAY ? "none" : recommender,
+      ...(instrument === REPLAY ? {
+        replay_dir: replayDir.trim(),
+        system_info: { technique, sample, x_axis: xAxis, y_axis: yAxis },
+        outputs: parseOutputs(outputsText),
+        targets: targetsText.split(",").map((t) => t.trim()).filter(Boolean),
+      } : {}),
       objective_key: recommender === "gp" ? objectiveKey : undefined,
       direction, objective: recommender === "llm" ? objective : undefined, every,
       auto_escalate: autoEscalate, reference_profile: profile,
@@ -154,6 +182,7 @@ export function LivePanel({
                 {simulators.map((s) => (
                   <option key={s.name} value={s.name}>{s.technique ?? s.name} (simulated)</option>
                 ))}
+                {localFiles && <option value={REPLAY}>Replay recorded data from a folder…</option>}
                 {localFiles && <option value={CUSTOM}>My own instrument…</option>}
               </select>
             </label>
@@ -169,6 +198,48 @@ export function LivePanel({
                   parameter schema and implements <code>acquire(params)</code>.
                 </span>
               </label>
+            )}
+            {instrument === REPLAY && (
+              <div className="live-about">
+                <p>
+                  Real measurements through the live loop, before there is a live instrument: every
+                  two-column file in the folder (.csv .txt .xy .dat .tsv .npy) is served as one frame, in
+                  file order. The first file is the reference. Recorded data cannot be steered, so there
+                  is no recommender.
+                </p>
+                <div className="live-form">
+                  <label><span>Folder on this machine</span>
+                    <input type="text" placeholder="/path/to/recorded/series" value={replayDir}
+                      onChange={(e) => setReplayDir(e.target.value)} />
+                  </label>
+                  <div className="live-row">
+                    <label><span>Technique</span>
+                      <input type="text" placeholder="e.g. Raman spectroscopy" value={technique}
+                        onChange={(e) => setTechnique(e.target.value)} />
+                    </label>
+                    <label><span>Sample and what is being done to it</span>
+                      <input type="text" placeholder="e.g. carbon film, annealed in situ" value={sample}
+                        onChange={(e) => setSample(e.target.value)} />
+                    </label>
+                    <label><span>x axis</span>
+                      <input type="text" placeholder="e.g. Raman shift (cm^-1)" value={xAxis}
+                        onChange={(e) => setXAxis(e.target.value)} />
+                    </label>
+                    <label><span>y axis</span>
+                      <input type="text" placeholder="e.g. intensity (counts)" value={yAxis}
+                        onChange={(e) => setYAxis(e.target.value)} />
+                    </label>
+                  </div>
+                  <label><span>Outputs to report for every frame — one per line, name: definition</span>
+                    <textarea rows={3} value={outputsText} onChange={(e) => setOutputsText(e.target.value)}
+                      placeholder={"g_position: position of the G band (the band near 1585 cm^-1)\nd_over_g: ratio of the D band height to the G band height"} />
+                  </label>
+                  <label><span>What matters, in plain words (comma separated)</span>
+                    <input type="text" placeholder="G band position, D/G ratio" value={targetsText}
+                      onChange={(e) => setTargetsText(e.target.value)} />
+                  </label>
+                </div>
+              </div>
             )}
             {chosen && (
               <div className="live-about">
@@ -215,7 +286,7 @@ export function LivePanel({
                 <span>Re-anchor automatically when the recipe stops fitting</span>
               </label>
             </div>
-            <div className="live-row">
+            {instrument !== REPLAY && <div className="live-row">
               <label><span>Next-measurement recommender</span>
                 <select value={recommender} onChange={(e) => setRecommender(e.target.value as LiveConfig["recommender"])}>
                   <option value="none">none — analysis only</option>
@@ -250,8 +321,8 @@ export function LivePanel({
                   </select>
                 </label>
               )}
-            </div>
-            {recommender === "llm" && (
+            </div>}
+            {instrument !== REPLAY && recommender === "llm" && (
               <label>
                 <span>Goal, in words</span>
                 <textarea
@@ -264,7 +335,8 @@ export function LivePanel({
               <button
                 className="primary" onClick={start}
                 disabled={busy || (instrument === CUSTOM && !custom.includes(":")) ||
-                  (recommender === "llm" && !objective.trim())}
+                  (instrument === REPLAY && !(replayDir.trim() && technique.trim())) ||
+                  (instrument !== REPLAY && recommender === "llm" && !objective.trim())}
               >
                 Start live run
               </button>
@@ -415,7 +487,10 @@ export function LivePanel({
                 <div className={`live-rec ${rec.valid ? "" : "invalid"}`}>
                   <div className="live-rec-head">
                     <b>Recommendation</b>
-                    <span className="caption">{rec.source} · from frame {rec.based_on_step}</span>
+                    <span className="caption">
+                      {rec.source} · from frame {rec.based_on_step}
+                      {rec.acquisition_skill ? ` · guided by the ${rec.acquisition_skill} acquisition skill` : ""}
+                    </span>
                   </div>
                   {rec.params && (
                     <div className="tool-chips">
@@ -424,6 +499,7 @@ export function LivePanel({
                       ))}
                     </div>
                   )}
+                  {rec.kind === "hold" && <p><b>Keep the current parameters.</b></p>}
                   {rec.protocol && <pre className="live-protocol">{rec.protocol}</pre>}
                   {!rec.valid && (
                     <p className="caption warn">Refused — not mappable onto the instrument: {(rec.problems ?? []).join("; ")}</p>

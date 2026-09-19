@@ -388,6 +388,7 @@ export interface LiveRecommendation {
   problems?: string[];
   requires_approval?: boolean;
   rejected_params?: Record<string, number | string>;
+  acquisition_skill?: string;
 }
 export interface LiveEvent {
   event: string;
@@ -432,6 +433,11 @@ export interface LiveConfig {
   auto_escalate: boolean;
   reference_profile?: string;
   seed?: number;
+  /** instrument === "replay": a folder of recorded measurements and what they are. */
+  replay_dir?: string;
+  system_info?: Record<string, string>;
+  outputs?: Record<string, string>;
+  targets?: string[];
 }
 
 /** Thrown on a 401 so the app can drop to the sign-in screen (a cookie
