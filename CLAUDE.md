@@ -174,6 +174,25 @@ output is `unverified`: flagged, excluded from the outlier statistics,
 refit-eligible after failures. The scout always includes the two datasets
 bracketing a sharp change point.
 
+**The regime plan is human-gated like any other plan.** In co-pilot /
+autopilot (`enable_human_feedback`) the driver shows the plan (regimes,
+anchors, control values, change-detection summary) and asks; Enter accepts,
+any text goes back to the planner as analyst feedback with the previous plan,
+up to three rounds (`_regime_plan_gate`). Autonomous runs and locked replays
+of a prior run skip it; EOF on the prompt accepts.
+
+**Anchor codegen starts from data facts, not priors.** Live anchors kept
+failing on gates set from literature: fit windows centred on textbook peak
+positions while the measured peaks sat elsewhere, seeds railing at window
+edges, not-measurable declarations built on a wrong-scale sigma. So the
+code-generation prompt now carries a deterministic `DATA FACTS` block
+(`_render_data_facts`: field-mean peaks with positions, prominence in sigma
+of the mean and width bounds, the noise of the mean, the axis) plus the same
+band-flux table the judge holds the script to — the model that writes the
+gates sees the numbers the reviewer will use. Prompt-side, one principle:
+centre windows and seeds on the measured positions and confirm the peaks
+survive background subtraction.
+
 **Replays fan out.** `series_workers` (or `SCILINK_HS_SERIES_WORKERS`) runs
 the locked replays on a spawned-process pool, each submitted the moment its
 regime locks so replays overlap with the anchors still running in the

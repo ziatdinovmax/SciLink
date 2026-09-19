@@ -884,3 +884,110 @@ def test_parallel_replays_run_on_worker_pool(tmp_path, monkeypatch):
     for i in (1, 3, 4, 5):
         assert (out / f"dataset_{i:04d}" / "replay.log").is_file()
     assert res["individual_results"][1]["reuse_validity"]["verdict"] == "good"
+
+
+# ---------------------------------------------------------------------------
+# Regime-plan human gate + anchor codegen data facts
+# ---------------------------------------------------------------------------
+
+def test_regime_plan_gate_accepts_on_enter_and_revises_on_feedback(tmp_path, monkeypatch):
+    """Co-pilot/autopilot: the plan is shown; Enter accepts; text is fed back
+    to the planner, which revises; the revised plan is shown again."""
+    import scilink.hitl as hitl
+    calls = _Calls()
+    _install_fake_pipeline(monkeypatch, calls)
+    plan = {"rationale": "edge shifts", "regimes": [
+        {"name": "low_T", "dataset_indices": [0, 1, 2, 3], "description": "L3 ~458"},
+        {"name": "high_T", "dataset_indices": [4, 5], "description": "shifted"}]}
+    agent, out = _agent(tmp_path, calls, monkeypatch, plan=plan)
+    agent.enable_human_feedback = True                      # co-pilot / autopilot
+
+    answers = iter(["treat the whole series as one regime", ""])
+    asked = []
+
+    def fake_ask(prompt, **kw):
+        asked.append(kw.get("origin"))
+        return next(answers)
+    monkeypatch.setattr(hitl, "request_human_feedback", fake_ask)
+
+    # the fake model returns a single-regime plan once it sees analyst feedback
+    orig_gen = agent.model.generate_content
+
+    def gen(contents, **kw):
+        text = "\n".join(c for c in contents if isinstance(c, str))
+        if "Analyst feedback on the previous plan" in text:
+            assert "treat the whole series as one regime" in text and "low_T" in text
+            return json.dumps({"observations": "ok", "series_analysis_plan": {
+                "rationale": "per analyst", "regimes": [{"name": "all", "dataset_indices": [0, 1, 2, 3, 4, 5]}]}})
+        return orig_gen(contents, **kw)
+    agent.model.generate_content = gen
+
+    res = agent.analyze(_cubes(tmp_path), system_info=dict(AXIS),
+                        series_metadata={"variable": "temperature", "values": [300, 350, 400, 450, 500, 550], "unit": "K"})
+    assert [a["stage"] for a in asked] == ["series_regime_plan", "series_regime_plan"]
+    assert [a["round"] for a in asked] == [1, 2]
+    assert res["summary"]["regimes"] == 1 and res["summary"]["regime_anchors"] == {"all": 0}
+    assert agent.state["human_feedback_log"] == [{"stage": "series_regime_plan",
+                                                  "feedback": "treat the whole series as one regime"}]
+    # anchors of the (single) regime and replays as usual
+    assert [c["role"] for c in calls.pipeline] == ["anchor"] + ["replay"] * 5
+
+
+def test_regime_plan_gate_skipped_when_feedback_off_or_eof(tmp_path, monkeypatch):
+    import scilink.hitl as hitl
+    calls = _Calls()
+    _install_fake_pipeline(monkeypatch, calls)
+    plan = {"regimes": [{"name": "a", "dataset_indices": [0, 1, 2]}, {"name": "b", "dataset_indices": [3, 4, 5]}]}
+    agent, out = _agent(tmp_path, calls, monkeypatch, plan=plan)
+    asked = []
+    monkeypatch.setattr(hitl, "request_human_feedback", lambda *a, **k: asked.append(1) or "")
+    res = agent.analyze(_cubes(tmp_path), system_info=dict(AXIS),
+                        series_metadata={"variable": "t", "values": list(range(6)), "unit": ""})
+    assert asked == [] and res["summary"]["regimes"] == 2          # autonomous: no gate
+    # EOF on the prompt keeps the current plan
+    agent2, out2 = _agent(tmp_path / "b", calls, monkeypatch, plan=plan)
+    agent2.enable_human_feedback = True
+    def boom(*a, **k):
+        raise EOFError
+    monkeypatch.setattr(hitl, "request_human_feedback", boom)
+    res2 = agent2.analyze(_cubes(tmp_path / "b"), system_info=dict(AXIS),
+                          series_metadata={"variable": "t", "values": list(range(6)), "unit": ""})
+    assert res2["summary"]["regimes"] == 2
+
+
+def test_render_regime_plan_lists_regimes_anchors_and_values():
+    plan = {"rationale": "r", "regimes": [{"name": "A", "dataset_indices": [0, 2], "description": "d"},
+                                          {"name": "B", "dataset_indices": [1]}],
+            "transition_points": [{"between_indices": [0, 1], "description": "jump"}]}
+    txt = hs.render_regime_plan(plan, {"variable": "T", "values": [300, 350, 400], "unit": "K"},
+                                {"reduction": {"change_point": 325.0, "change_sharpness": 0.9,
+                                               "axis_coherence": {"coherent": False}}}, 3)
+    assert "1. A" in txt and "0 (T=300 K), 2 (T=400 K)" in txt and "anchor: dataset 0" in txt
+    assert "2. B" in txt and "NOT coherent" in txt and "jump" in txt
+    assert "1 regime" in hs.render_regime_plan(None, {}, None, 4)
+
+
+def test_data_facts_block_reports_measured_peaks_and_noise():
+    from scilink.agents.exp_agents.controllers.hyperspectral_controllers import (
+        _render_data_facts, build_code_generation_prompt)
+    E = np.linspace(450, 570, 120)
+    rng = np.random.RandomState(0)
+    spec = np.exp(-0.5 * ((E - 462.1) / 1.2) ** 2) + 0.7 * np.exp(-0.5 * ((E - 468.0) / 1.4) ** 2) + 0.08
+    cube = spec[None, None, :] + rng.normal(0, 0.03, (12, 12, 120))
+    txt = _render_data_facts(cube, E, "eV")
+    assert "DATA FACTS" in txt and "144 spectra" in txt
+    assert "462." in txt and "468" in txt and "sigma of the mean" in txt
+    import re
+    fwhm = [float(x) for x in re.findall(r"width ≲ ([0-9.]+) eV", txt)]
+    assert fwhm and all(1.5 < f < 9.0 for f in fwhm), fwhm     # bounded, not spanning both peaks
+    assert "measurable in aggregate" in txt and "not on literature values" in txt
+    # featureless cube: no peaks, honest wording
+    flat = 0.1 + rng.normal(0, 0.03, (10, 10, 120))
+    assert "featureless" in _render_data_facts(flat, E, "eV")
+    # the block lands in the codegen prompt ahead of the measurability gate
+    prompt = build_code_generation_prompt(target_desc="t", h=12, w=12, e=120, axis_units="eV",
+                                          axis_start=450, axis_end=570, processing_note="raw",
+                                          data_facts=txt)
+    assert prompt.index("DATA FACTS") < prompt.index("MEASURABILITY GATE")
+    assert "DATA FACTS" not in build_code_generation_prompt(target_desc="t", h=1, w=1, e=8, axis_units="eV",
+                                                            axis_start=0, axis_end=1, processing_note="raw")

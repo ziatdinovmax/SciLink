@@ -529,6 +529,97 @@ def _render_band_flux_table(data, axis, axis_units: str, aux: dict | None = None
         return ""
 
 
+def _render_data_facts(data, axis, axis_units: str, max_peaks: int = 4) -> str:
+    """Deterministic facts about THIS cube for the code-generation prompt.
+
+    Live anchors repeatedly failed on gates the model set from priors rather
+    than from the data: fit windows centred on textbook peak positions while
+    the measured peaks sat elsewhere, seeds railing at window edges, and
+    not-measurable declarations built on a noise sigma of the wrong scale.
+    This block gives the model the measured positions, widths and the noise
+    of the field mean up front, so windows, seeds and the measurability test
+    start from evidence. Computed once per run; advisory, never raises.
+    """
+    try:
+        from scipy.signal import find_peaks, peak_widths
+        axis = np.asarray(axis, dtype=float)
+        e = axis.size
+        flat = np.asarray(data, dtype=float).reshape(-1, e)
+        n_pix = flat.shape[0]
+        mean = np.nanmean(flat, axis=0)
+        if not np.isfinite(mean).all() or e < 8:
+            return ""
+        # per-pixel noise: residual of each spectrum from its 5-channel running
+        # mean, on a subsample of pixels (robust median of the per-pixel std)
+        step = max(1, n_pix // 2000)
+        sub = flat[::step]
+        k = np.ones(5) / 5.0
+        resid = sub - np.apply_along_axis(lambda y: np.convolve(y, k, mode="same"), 1, sub)
+        sigma_pix = float(np.nanmedian(np.nanstd(resid[:, 2:-2], axis=1)))
+        sigma_mean = sigma_pix / np.sqrt(max(n_pix, 1))
+        # Smooth the field mean only as much as its own noise requires: the
+        # mean of thousands of spectra is already clean, and a fixed 5-channel
+        # box on a coarse axis (1-2 eV/channel) smears a doublet into one peak.
+        raw_rng = float(np.nanmax(mean) - np.nanmin(mean))
+        noise_frac = sigma_mean / max(raw_rng, 1e-12)
+        kw = 1 if noise_frac < 0.01 else 3 if noise_frac < 0.03 else 5
+        smooth = mean if kw == 1 else np.convolve(mean, np.ones(kw) / kw, mode="same")
+        rng = float(np.nanmax(smooth) - np.nanmin(smooth))
+        baseline = float(np.nanpercentile(smooth, 10))
+        dx = float(abs(axis[-1] - axis[0])) / max(e - 1, 1)
+        min_prom = max(5.0 * sigma_mean, 0.02 * rng)
+        # Prominence within a LOCAL window (a quarter of the axis), so a slow
+        # ripple of the field mean is not scored against the global minimum,
+        # and a "peak" wider than half the axis is not a spectral feature.
+        peaks, props = find_peaks(smooth, prominence=min_prom, wlen=max(9, e // 4))
+        if peaks.size:
+            w_all = peak_widths(smooth, peaks, rel_height=0.5)[0] * dx
+            keep = w_all < 0.5 * abs(axis[-1] - axis[0])
+            peaks = peaks[keep]
+            props = {k: v[keep] for k, v in props.items()}
+        lines = ["### DATA FACTS (deterministic — computed from THIS dataset)",
+                 f"- axis: {axis[0]:.6g} to {axis[-1]:.6g} {axis_units}, {e} channels ({dx:.4g} {axis_units}/channel); {n_pix} spectra",
+                 f"- field-mean level: baseline (10th percentile) {baseline:.4g}, max {float(np.nanmax(smooth)):.4g} at {axis[int(np.nanargmax(smooth))]:.6g} {axis_units}",
+                 f"- noise: sigma_pixel ≈ {sigma_pix:.4g} per channel; sigma of the field mean ≈ {sigma_mean:.3g} (sigma_pixel/sqrt(N))"]
+        def _fwhm(i: int) -> float:
+            # Walk outward from the peak to the half-height crossing, stopping
+            # at a saddle (a neighbouring peak) — an upper bound there, never
+            # a width that spans two features.
+            half = baseline + 0.5 * (smooth[i] - baseline)
+            lo, hi = i, i
+            while lo > 0 and smooth[lo] > half and smooth[lo - 1] <= smooth[lo]:
+                lo -= 1
+            while hi < e - 1 and smooth[hi] > half and smooth[hi + 1] <= smooth[hi]:
+                hi += 1
+            return max(hi - lo, 1) * dx
+
+        if peaks.size:
+            order = np.argsort(props["prominences"])[::-1][:max_peaks]
+            widths = [_fwhm(int(peaks[j])) for j in order]
+            lines.append("- field-mean peaks (by prominence): "
+                         + "; ".join(
+                             f"{axis[peaks[j]]:.6g} {axis_units} (height {smooth[peaks[j]]:.4g}, "
+                             f"prominence {props['prominences'][j]:.4g} = "
+                             f"{props['prominences'][j] / max(sigma_mean, 1e-12):.0f} sigma of the mean, "
+                             f"width ≲ {widths[i]:.3g} {axis_units} (FWHM upper bound))"
+                             for i, j in enumerate(order)))
+            lines.append("- verdict: the strongest feature is measurable in aggregate "
+                         f"({props['prominences'][order[0]] / max(sigma_mean, 1e-12):.0f} sigma); "
+                         "per-pixel measurability still depends on sigma_pixel at the feature.")
+        else:
+            lines.append(f"- field-mean peaks: none exceeds {min_prom:.3g} prominence "
+                         f"(5 sigma of the mean / 2% of range) — the field mean looks featureless.")
+        lines.append(
+            "Centre fit windows, seeds and bounds on the MEASURED positions and widths "
+            "above — not on literature values — and make each window wide enough to "
+            "contain its peak with margin. After any background subtraction, confirm the "
+            "peak amplitudes at these positions survive before fitting. A not_measurable "
+            "declaration that contradicts these numbers is rejected.")
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001 - advisory block, never break the run
+        return ""
+
+
 def _render_attempt_history(entries: list) -> str:
     """Compact prior-attempt block for the combined result review.
 
@@ -643,6 +734,7 @@ def build_code_generation_prompt(
     reconstruction_available: bool = False,
     auxiliary_operands: dict | None = None,
     fit_mask_pixels: tuple | None = None,
+    data_facts: str | None = None,
 ) -> str:
     skill_section = ""
     if skill_implementation:
@@ -740,6 +832,8 @@ guard with `if auxiliary and "<name>" in auxiliary:` before use; `auxiliary`
 may be `None` or empty.
 """
 
+    data_facts_section = f"{data_facts}\n\n" if data_facts else ""
+
     reconstruction_section = ""
     if reconstruction_available:
         reconstruction_section = f"""
@@ -815,7 +909,7 @@ noise/spike/negative handling you judge necessary for a stable per-pixel fit —
 the goal is fittable spectra — but do NOT erase the feature you are measuring.
 If performing derivative-based operations (like `find_peaks` or `curve_fit`) on noisy data, apply appropriate smoothing to ensure convergence.
 
-### MEASURABILITY GATE — the honest null
+{data_facts_section}### MEASURABILITY GATE — the honest null
 BEFORE mapping any per-pixel feature, TEST that it is measurable. Do the
 statistics correctly:
 - Compare the feature's prominence in an AVERAGED spectrum against the noise
@@ -3131,6 +3225,12 @@ class RunDynamicAnalysisController:
         flux_table = _render_band_flux_table(
             optimal_data, state["energy_axis"], axis_units, auxiliary_operands
         )
+        # Deterministic data facts for the CODE-GENERATION prompt (the flux
+        # table used to reach only the reviews; the model that writes the
+        # gates never saw the numbers the judge holds it to).
+        data_facts = _render_data_facts(optimal_data, state["energy_axis"], axis_units)
+        if data_facts and flux_table:
+            data_facts += "\n\n" + flux_table
 
         # --- MAIN LOOP: Process each target description separately ---
         for i, target in enumerate(custom_targets, 1):
@@ -3225,6 +3325,7 @@ class RunDynamicAnalysisController:
                                       int(target.get("mask_component_index")
                                           or 0))
                                      if fit_mask is not None else None),
+                    data_facts=data_facts,
                 )
 
                 # Registered tools from the _shared registry (this agent + active

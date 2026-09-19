@@ -925,6 +925,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         series_plan = _series.plan_series_regimes(
             self.model, self.generation_config, self.safety_settings,
             self._parse_llm_response, plan_state, scout, self.logger)
+        series_plan = self._regime_plan_gate(series_plan, plan_state, scout,
+                                             series_metadata, n, reuse_locked_script)
         if series_plan:
             regimes = series_plan["regimes"]
         else:
@@ -1245,6 +1247,44 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.logger.info(f"   Output: {series_dir}")
         self.logger.info(f"{'='*80}\n")
         return response
+
+    _REGIME_GATE_MAX_ROUNDS = 3
+
+    def _regime_plan_gate(self, plan: dict | None, plan_state: dict, scout: dict,
+                          series_metadata: dict, n: int,
+                          reuse_locked_script: bool = False) -> dict | None:
+        """Human gate on the regime plan (co-pilot / autopilot), mirroring the
+        curve / image plan-refinement gate: show the plan, Enter accepts, any
+        text is analyst feedback the planner revises against, up to
+        ``_REGIME_GATE_MAX_ROUNDS`` times. Skipped when human feedback is off
+        (autonomous) or on a locked replay of a prior run, where the plan is
+        foreordained. EOF / interrupt on the prompt accepts the current plan."""
+        if not self.enable_human_feedback or reuse_locked_script:
+            return plan
+        from ...hitl import request_human_feedback
+        for _round in range(self._REGIME_GATE_MAX_ROUNDS):
+            print(_series.render_regime_plan(plan, series_metadata, scout, n))
+            try:
+                answer = request_human_feedback(
+                    "\nYour feedback on the regime plan (or Enter to accept): ",
+                    kind="review_plan",
+                    origin={"stage": "series_regime_plan", "round": _round + 1},
+                ).strip()
+            except (EOFError, KeyboardInterrupt):
+                self.logger.info("  Regime plan gate: no answer — plan accepted as is.")
+                return plan
+            if not answer:
+                print("Regime plan accepted.")
+                return plan
+            self.logger.info(f"  Regime plan gate: revising with feedback: {answer}")
+            self.state.setdefault("human_feedback_log", []).append(
+                {"stage": "series_regime_plan", "feedback": answer})
+            plan = _series.plan_series_regimes(
+                self.model, self.generation_config, self.safety_settings,
+                self._parse_llm_response, plan_state, scout, self.logger,
+                feedback=answer, previous_plan=plan)
+        self.logger.warning("  Regime plan gate: max revisions reached — using the latest plan.")
+        return plan
 
     @staticmethod
     def _outlier_groups(series_plan: dict | None, scout: dict | None) -> dict | None:

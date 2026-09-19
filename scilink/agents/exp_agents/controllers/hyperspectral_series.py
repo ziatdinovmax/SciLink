@@ -203,8 +203,11 @@ def detect_outliers(series_results: List[dict], outlier_sigma: float = 2.0,
 
     * >= 3 other datasets: deviation from a straight line fitted through the
       others against the control variable (``control_values``, else the
-      index), scaled by the others' residual scatter (a leave-one-out MEAN
-      would flag the endpoints of a plain linear trend);
+      index), scaled by the OLS prediction standard error (residual scatter
+      x leverage of the held-out point x a small-sample inflation) — a plain
+      leave-one-out mean would flag the endpoints of a linear trend, and a
+      bare residual scatter over-flags an endpoint extrapolated from a few
+      tightly scattered points;
     * exactly 3 successes: the population score, as in the image agent.
 
     The scale is floored at 5 % of the column's range so a noise-free column
@@ -295,12 +298,21 @@ def detect_outliers(series_results: List[dict], outlier_sigma: float = 2.0,
             others = [(i, x) for i, x in col.items() if i != idx]
             if len(others) >= 3:
                 xo = np.asarray([_x(i) for i, _ in others]); vo = np.asarray([x for _, x in others])
+                m_ = len(others)
                 if np.ptp(xo) > 0:
                     b, a = np.polyfit(xo, vo, 1)
                     pred, resid = a + b * _x(idx), vo - (a + b * xo)
+                    # Prediction standard error of an OLS line: leverage of
+                    # the held-out x (an endpoint is extrapolated, so it is
+                    # less certain) and a small-sample inflation for the
+                    # residual scatter estimated from m points with 2 dof.
+                    sxx = float(((xo - xo.mean()) ** 2).sum())
+                    lever = np.sqrt(1.0 + 1.0 / m_ + ((_x(idx) - xo.mean()) ** 2) / sxx)
+                    dof = np.sqrt(m_ / max(m_ - 2, 1))
                 else:
                     pred, resid = vo.mean(), vo - vo.mean()
-                scale, label = float(resid.std()), "the other datasets' trend"
+                    lever, dof = np.sqrt(1.0 + 1.0 / m_), np.sqrt(m_ / max(m_ - 1, 1))
+                scale, label = float(resid.std()) * float(lever * dof), "the other datasets' trend"
             else:
                 allv = np.asarray(list(col.values()))
                 pred, scale, label = float(allv.mean()), float(allv.std()), "the series mean"
@@ -1066,16 +1078,62 @@ def extract_series_plan(result: Any, n: int, reduction: Optional[dict],
     return plan
 
 
+def render_regime_plan(plan: Optional[dict], series_metadata: dict,
+                       scout: Optional[dict] = None, n: int = 0) -> str:
+    """Console rendering of a regime plan for the human gate."""
+    meta = series_metadata or {}
+    values = meta.get("values") if isinstance(meta.get("values"), list) else []
+    var, unit = meta.get("variable") or "index", meta.get("unit") or ""
+
+    def _lab(i):
+        return f"{i} ({var}={values[i]} {unit})".replace(" )", ")") if i < len(values) else str(i)
+    lines = ["", "=" * 60, "📋 PROPOSED SERIES REGIME PLAN", "=" * 60]
+    red = (scout or {}).get("reduction") or {}
+    if red:
+        ac = red.get("axis_coherence") or {}
+        lines.append(f"🔎 Change detection: change point ≈ {red.get('change_point'):g} "
+                     f"({var}), sharpness {red.get('change_sharpness')}, axis "
+                     f"{'coherent' if ac.get('coherent', True) else 'NOT coherent (regimes interleave)'}")
+    if not plan:
+        lines.append(f"\n1 regime — all {n} datasets share one locked script.")
+    else:
+        if plan.get("rationale"):
+            lines.append(f"\n💡 Rationale: {plan['rationale']}")
+        for k, r in enumerate(plan.get("regimes") or [], 1):
+            idx = r.get("dataset_indices") or []
+            lines.append(f"\n{k}. {r.get('name')}  — datasets {', '.join(_lab(i) for i in idx)}")
+            lines.append(f"   anchor: dataset {idx[0] if idx else '?'} (full analysis; its script is "
+                         f"locked and replayed on the rest)")
+            if r.get("description"):
+                lines.append(f"   {r['description']}")
+        for tp in plan.get("transition_points") or []:
+            lines.append(f"\n↕ transition between {tp.get('between_indices')}: {tp.get('description')}")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def plan_series_regimes(model, generation_config, safety_settings, parse_fn: Callable,
                         state: Dict[str, Any], scout: Dict[str, Any],
-                        logger: logging.Logger) -> Optional[dict]:
+                        logger: logging.Logger, feedback: Optional[str] = None,
+                        previous_plan: Optional[dict] = None) -> Optional[dict]:
     """One planning call over the scout evidence; ``None`` = single regime.
-    Never raises — a planning failure means one regime, not no analysis."""
+    With ``feedback`` (the human gate), the previous plan and the analyst's
+    words are appended and the planner revises. Never raises — a planning
+    failure means one regime, not no analysis."""
     n = state.get("num_images") or 0
     if n < 2:
         return None
     try:
         prompt = build_regime_plan_prompt(state, scout)
+        if feedback:
+            prev = (json.dumps({k: previous_plan.get(k) for k in ("rationale", "regimes", "transition_points")},
+                               indent=1, default=str)
+                    if previous_plan else "one regime containing every dataset")
+            prompt.append(
+                "\n## Analyst feedback on the previous plan\n"
+                f"Previous plan:\n{prev}\n\nThe analyst says: {feedback}\n"
+                "Revise the plan to honour this feedback (it overrides your own reading "
+                "of the evidence where they conflict) and return the full JSON again.")
         response = model.generate_content(
             contents=prompt, generation_config=generation_config,
             safety_settings=safety_settings)
