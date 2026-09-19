@@ -417,3 +417,55 @@ class TestReviewedVerbatimReuseCountsAsVerbatim:
 
     def test_any_edit_is_an_adaptation(self, monkeypatch):
         assert self._bump(3, monkeypatch)["adapted"] is True
+
+
+# ──────────────────────────────────────────────────────────────
+# B12 — concurrent writers
+# ──────────────────────────────────────────────────────────────
+
+def _hammer(args):
+    """Runs in a spawned process: bump one record's stats n times."""
+    home, rid, n, tag = args
+    import os
+    os.environ["SCILINK_HOME"] = home
+    os.environ["SCILINK_MEMORY"] = "1"
+    from scilink.skills._shared import _script_bank as bank
+    for i in range(n):
+        bank.record_failure("curve_fitting", rid, "gate_failed")
+        bank.mark_retrieved("curve_fitting", rid)
+        bank.record_success("curve_fitting", rid, session=f"{tag}-{i}")
+    return True
+
+
+class TestConcurrentWriters:
+    """Stats updates are read-modify-write; a series' replay pool, a meta
+    fan-out and a live loop's escalation worker all write the same bank."""
+
+    def test_no_update_is_lost_across_processes(self, tmp_path):
+        import multiprocessing as mp
+        rid = _bank()
+        n_proc, n_each = 4, 15
+        ctx = mp.get_context("spawn")
+        with ctx.Pool(n_proc) as pool:
+            assert all(pool.map(_hammer, [(str(tmp_path), rid, n_each, f"p{k}")
+                                          for k in range(n_proc)]))
+        rec = _rec(rid)
+        total = n_proc * n_each
+        assert rec["stats"]["n_failures"] == total
+        assert rec["stats"]["n_retrievals"] == total
+        assert rec["stats"]["n_successes"] == 1 + total
+        assert sb.verify_record(rec)
+
+    def test_the_lock_is_reentrant_within_a_write(self, monkeypatch):
+        # add_record -> aging sweep -> archive_records, all under one lock.
+        old = _bank(script="print('old')")
+        _age(old, 200)
+        _yesterday_sweep()
+        _bank(script="print('new')", fp=_fp(center=40, seed=2))     # must not deadlock
+        assert [r["id"] for r in sb.list_archived("curve_fitting")] == [old]
+
+    def test_public_names_are_the_locked_ones(self):
+        for name in ("add_record", "record_success", "record_failure",
+                     "mark_retrieved", "archive_records", "restore_records"):
+            assert getattr(sb, name).__name__ == name
+            assert getattr(sb, name).__wrapped__.__name__ == f"_{name}_unlocked"

@@ -74,6 +74,62 @@ def _domain_dir(domain: str, *, root: Optional[Path] = None) -> Path:
     return (root or bank_dir()) / safe_path_component(domain, fallback="unknown_domain")
 
 
+# ──────────────────────────────────────────────────────────────
+# Locking
+#
+# Every stats update is a read-modify-write of a record's JSON file, and the
+# bank is written from several processes at once — a series' replay pool, a
+# meta fan-out, a live loop's escalation worker. Without a lock the last
+# writer wins and the others' successes / failures / evidence vanish. One
+# advisory lock per domain (flock on ``<domain>/.lock``) serialises them; it
+# is reentrant within a thread because a bank write triggers the aging sweep,
+# which archives under the same lock. Platforms without ``fcntl`` run
+# unlocked, as before.
+# ──────────────────────────────────────────────────────────────
+
+import contextlib
+import threading
+
+_lock_state = threading.local()
+
+
+@contextlib.contextmanager
+def _domain_lock(domain: str, *, root: Optional[Path] = None):
+    try:
+        import fcntl
+    except ImportError:          # pragma: no cover - non-POSIX
+        yield
+        return
+    d = (root or bank_dir()) / safe_path_component(domain, fallback="unknown_domain")
+    key = str(d)
+    held = getattr(_lock_state, "held", None)
+    if held is None:
+        held = _lock_state.held = {}
+    if held.get(key):
+        held[key] += 1
+        try:
+            yield
+        finally:
+            held[key] -= 1
+        return
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        fh = open(d / ".lock", "a")
+    except OSError:              # read-only store: nothing to protect
+        yield
+        return
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        held[key] = 1
+        try:
+            yield
+        finally:
+            held[key] = 0
+            fcntl.flock(fh, fcntl.LOCK_UN)
+    finally:
+        fh.close()
+
+
 def script_hash(script: str) -> str:
     """Content hash identifying a script up to trailing whitespace."""
     normalized = "\n".join(line.rstrip() for line in (script or "").strip().splitlines())
@@ -190,7 +246,7 @@ def is_verbatim_proven(rec: Dict[str, Any]) -> bool:
 _MAX_SESSIONS = 20
 
 
-def add_record(domain: str, record: Dict[str, Any], *, root: Optional[Path] = None) -> Dict[str, Any]:
+def _add_record_unlocked(domain: str, record: Dict[str, Any], *, root: Optional[Path] = None) -> Dict[str, Any]:
     """Bank one successful script; return ``{"id", "action"}``.
 
     ``record`` must carry ``working_script``; everything else (context,
@@ -326,7 +382,7 @@ def get_record(domain: str, rid: str, *, root: Optional[Path] = None) -> Optiona
         return None
 
 
-def remove_records(domain: str, ids: List[str], *, root: Optional[Path] = None) -> int:
+def _remove_records_unlocked(domain: str, ids: List[str], *, root: Optional[Path] = None) -> int:
     """Delete bank records by id; return count removed."""
     d = _domain_dir(domain, root=root)
     n = 0
@@ -790,7 +846,7 @@ def find_exemplar(domain: str, fingerprint: Optional[Dict[str, Any]],
             for sc, sfp, rec in scored[:k]]
 
 
-def mark_retrieved(domain: str, rid: str, *, root: Optional[Path] = None) -> None:
+def _mark_retrieved_unlocked(domain: str, rid: str, *, root: Optional[Path] = None) -> None:
     """Increment a record's retrieval counter (usage stat; never raises)."""
     try:
         f = _domain_dir(domain, root=root) / f"{rid}.json"
@@ -803,7 +859,7 @@ def mark_retrieved(domain: str, rid: str, *, root: Optional[Path] = None) -> Non
         pass
 
 
-def record_success(domain: str, rid: str, session: Optional[str] = None,
+def _record_success_unlocked(domain: str, rid: str, session: Optional[str] = None,
                    *, fingerprint: Optional[Dict[str, Any]] = None,
                    adapted: bool = False,
                    root: Optional[Path] = None) -> None:
@@ -834,7 +890,7 @@ def record_success(domain: str, rid: str, session: Optional[str] = None,
         pass
 
 
-def record_failure(domain: str, rid: str, reason: str,
+def _record_failure_unlocked(domain: str, rid: str, reason: str,
                    session: Optional[str] = None,
                    *, root: Optional[Path] = None) -> None:
     """Note that a retrieved record did NOT deliver on new data.
@@ -962,7 +1018,7 @@ def stale_records(domain: Optional[str] = None, *,
     return out
 
 
-def archive_records(domain: str, ids: List[str], *, reason: Optional[str] = None,
+def _archive_records_unlocked(domain: str, ids: List[str], *, reason: Optional[str] = None,
                     root: Optional[Path] = None) -> int:
     """Move records into ``<domain>/_archive/``; return the count moved."""
     d = _domain_dir(domain, root=root)
@@ -1006,7 +1062,7 @@ def list_archived(domain: Optional[str] = None, *,
     return out
 
 
-def restore_records(domain: str, ids: List[str], *,
+def _restore_records_unlocked(domain: str, ids: List[str], *,
                     root: Optional[Path] = None) -> int:
     """Bring archived records back into the live bank."""
     d = _domain_dir(domain, root=root)
@@ -1527,3 +1583,29 @@ def hyperspectral_fingerprint(cube: Any, axis: Any = None,
     fp["snr"] = _snr_estimate(mean_spec)
     fp["peaks"] = _peak_summary(axis, mean_spec)
     return fp
+
+
+# ──────────────────────────────────────────────────────────────
+# Locked public entry points (see "Locking" above). Each takes the domain
+# lock around the read-modify-write implemented by its ``_<name>_unlocked``.
+# ──────────────────────────────────────────────────────────────
+
+def _locked(fn):
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(domain, *args, **kwargs):
+        with _domain_lock(domain, root=kwargs.get("root")):
+            return fn(domain, *args, **kwargs)
+    wrapper.__name__ = fn.__name__.replace("_unlocked", "").lstrip("_")
+    wrapper.__qualname__ = wrapper.__name__
+    return wrapper
+
+
+add_record = _locked(_add_record_unlocked)
+mark_retrieved = _locked(_mark_retrieved_unlocked)
+record_success = _locked(_record_success_unlocked)
+record_failure = _locked(_record_failure_unlocked)
+archive_records = _locked(_archive_records_unlocked)
+restore_records = _locked(_restore_records_unlocked)
+remove_records = _locked(_remove_records_unlocked)
