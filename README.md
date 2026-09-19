@@ -516,6 +516,18 @@ result = agent.analyze(
     ["pl_300K.csv", "pl_350K.csv", "pl_400K.csv"],
     series_metadata={"variable": "temperature", "values": [300, 350, 400], "unit": "K"}
 )
+
+# Hyperspectral series: the first cube is analysed in full, its verified
+# analysis scripts are locked and replayed verbatim on the rest, then
+# failures are re-analysed, outliers flagged and trends synthesized
+agent = HyperspectralAnalysisAgent(output_dir="./eels_series")
+result = agent.analyze(
+    ["eels_300K.npy", "eels_350K.npy", "eels_400K.npy"],
+    system_info={"technique": "EELS", "energy_range": {"start": 450, "end": 570, "units": "eV"}},
+    series_metadata={"variable": "temperature", "values": [300, 350, 400], "unit": "K"},
+    max_series_refits=1,
+    series_workers=3,          # locked replays run concurrently
+)
 ```
 
 ### Metadata Conversion

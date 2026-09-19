@@ -122,6 +122,68 @@ technique is, how to plan a use of it, how to write the code, how to
 read the output, and how to verify it. New skills should use this
 ordering; legacy `analysis` is accepted by the loader for backcompat.
 
+## Series analysis is one shape across the three analysis agents
+
+Curve, image and hyperspectral all run a series as **anchor + locked recipe**:
+the first unit is analysed in full, the verified recipe is locked, every later
+unit reuses it verbatim, failures are re-analysed within `max_series_refits`,
+feature outliers are flagged (never re-analysed — the anomaly may be the
+physics), then trend codegen and a series synthesis run over the per-unit
+feature table. The per-unit rows are written to `series_analysis_results.json`
+in one shape, so `feature_table.write_feature_table` and every downstream
+consumer read all three the same way.
+
+The hyperspectral instantiation differs in mechanics, not shape: the single-
+cube pipeline is bound to one output directory (decomposition, dynamic-analysis
+records, report), so the series driver (`_analyze_series`) runs **one child
+agent per dataset** in `dataset_NNNN/` instead of re-pointing controllers, and
+"locked recipe" *is* the existing locked-script replay (#172) pointed at the
+regime anchor's `dynamic_analysis_records.json`. The scout stage mirrors the
+curve agent: every cube's mean spectrum feeds the shared SVD change detection
+(`series_reduction.reduce_curves`) and an overlay, and one planning call
+declares regimes, each with its own anchor and locked script. The parent owns
+the once-per-series decisions (skill choice, script banking, T=2 staging);
+replay children skip them.
+
+**Feature names are aligned by construction, then completed.** The first
+dataset to lock a recipe is the series' *schema source*. Every later
+fresh-code run — another regime's anchor, an adaptive refit — runs in
+*locked-targets* mode (`analyze(locked_targets=...)`): the schema source's
+targets and required output names are fixed, planning and decomposition are
+skipped, and the code is regenerated through the full ladder, so the QC's
+required-outputs check enforces the names. What still drifts (a units suffix,
+a diagnostic-map prefix) is aliased onto the locked columns by
+`complete_locked_schema`; whatever cannot be matched is reported as
+`locked_schema_gap`, never silently NaN. Outliers are scored on the locked
+primary outputs only — a refit's diagnostics belong to a different method —
+and per regime when the planned regimes interleave along the axis.
+
+**Replays are gated on evidence, not re-judged.** Live stress runs showed
+the per-map LLM reviewer rejecting, on replays, the very map it approved on
+the anchor (judge variance), which punched holes in the series schema and
+cost minutes per replay. A locked-script replay therefore runs NO LLM map
+review: `_replay_map_gate` accepts a map on valid coverage (within the fit
+mask when scoped), a non-collapsed distribution and, for required outputs,
+a median inside the anchor's plausible range (its [min, max] widened by one
+span; the anchor's per-map stats travel as `replay_reference`). A rejection
+means the method broke on that dataset, which the driver answers with a
+locked-targets refit. Replay children also skip the synthesis critic/editor
+pair (`_light_synthesis`); the series synthesis interprets the series. A run
+that committed features from a salvaged attempt with no verified required
+output is `unverified`: flagged, excluded from the outlier statistics,
+refit-eligible after failures. The scout always includes the two datasets
+bracketing a sharp change point.
+
+**Replays fan out.** `series_workers` (or `SCILINK_HS_SERIES_WORKERS`) runs
+the locked replays on a spawned-process pool, each submitted the moment its
+regime locks so replays overlap with the anchors still running in the
+parent — replays are independent, and processes rather than threads keep
+matplotlib and the sandbox executor out of each other's way
+(`SCILINK_HS_SERIES_POOL=thread` exists for the offline tests). Each replay logs to its own
+`dataset_NNNN/replay.log`; the parent's sandbox approval travels with the
+spec. Anchors and refits stay serial: they are the LLM-heavy, human-gated
+part.
+
 ## Data preparation is a stage, not an agent
 
 Some instruments hand over a container that sits *upstream* of what the

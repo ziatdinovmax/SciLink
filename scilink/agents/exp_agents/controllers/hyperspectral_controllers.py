@@ -927,6 +927,50 @@ def _map_valid_coverage(result_map) -> tuple[float, int]:
     return 100.0 * n_valid / max(result_map.size, 1), n_valid
 
 
+def _replay_map_gate(result_map, fit_mask, reference: dict | None,
+                     required: bool) -> tuple[bool, str]:
+    """Deterministic acceptance of a map produced by a LOCKED-SCRIPT replay.
+
+    A verbatim replay re-runs a method the reviewer already approved on the
+    anchor; re-judging every map with the LLM only adds cost and judge
+    variance (observed live: the map approved on the anchor rejected on
+    replays, punching holes in the series schema). So replays are gated on
+    evidence alone: valid coverage (within the fit mask when scoped), a
+    non-collapsed value distribution, and — for a required output with the
+    anchor's stats as ``reference`` — a median inside the locked method's
+    plausible range (the anchor's [min, max] widened by one span on each
+    side, at least 0.5 % of the magnitude so a near-constant anchor map does
+    not reject trivial drift). A map outside that range is the
+    method breaking down on this dataset (e.g. the peak left the fit
+    window), which the series driver answers with a fresh-code refit.
+    """
+    m = np.asarray(result_map, dtype=float)
+    if fit_mask is not None:
+        try:
+            m = m[np.asarray(fit_mask, dtype=bool)]
+        except Exception:  # noqa: BLE001 - shape mismatch: judge the full frame
+            pass
+    m = m.ravel()
+    finite = np.isfinite(m)
+    cov = float(finite.mean()) if m.size else 0.0
+    if cov < 0.5:
+        return False, f"valid coverage {cov:.0%} < 50% (locked method did not converge here)"
+    vals = m[finite]
+    if vals.size > 8 and float(np.ptp(vals)) == 0.0:
+        return False, "map is constant across the frame (fit collapsed to a bound)"
+    if required and isinstance(reference, dict) and all(
+            isinstance(reference.get(k), (int, float)) for k in ("min", "max")):
+        lo, hi = float(reference["min"]), float(reference["max"])
+        mean = float(reference.get("mean", (lo + hi) / 2.0))
+        span = max(hi - lo, 0.005 * abs(mean), 1e-9)
+        med = float(np.median(vals))
+        if not (lo - span <= med <= hi + span):
+            return False, (f"median {med:.4g} outside the locked method's plausible "
+                           f"range [{lo - span:.4g}, {hi + span:.4g}] (anchor "
+                           f"[{lo:.4g}, {hi:.4g}]) — method breakdown on this dataset")
+    return True, ""
+
+
 def _wrap_console_text(text: str, width: int = 70) -> list:
     """Wrap text to the given width, preserving words (curve-agent style)."""
     if not text:
@@ -2040,14 +2084,16 @@ class DecompositionController:
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"):
             return state
-        if state.get("reuse_records"):
-            # Locked-script replay: bypass the whole decomposition composite —
-            # including its skip-decision LLM call, which would otherwise
-            # overwrite the pre-seeded skip_decomposition flag. The replayed
-            # per-pixel scripts consume the raw cube; seed the minimal
-            # contract that downstream prompts read.
+        if state.get("reuse_records") or state.get("locked_targets"):
+            # Locked-script replay (and the series' locked-targets mode, where
+            # the targets are fixed but the code is regenerated): bypass the
+            # whole decomposition composite — including its skip-decision LLM
+            # call, which would otherwise overwrite the pre-seeded
+            # skip_decomposition flag. The per-pixel scripts consume the raw
+            # cube; seed the minimal contract that downstream prompts read.
             self.logger.info(
-                "🔒 Locked-script replay → decomposition bypassed entirely.")
+                "🔒 Locked %s → decomposition bypassed entirely."
+                % ("script replay" if state.get("reuse_records") else "targets"))
             state["skip_decomposition"] = True
             if "preprocessing_mask" not in state:
                 state["preprocessing_mask"] = np.ones(
@@ -2259,6 +2305,49 @@ class SelectRefinementTargetController:
                 self.logger,
                 f"🔒 Locked-script replay plan: {len(targets)} prior "
                 f"approved target(s), no planning LLM call",
+                [(f"Target {i}", t["description"]) for i, t in
+                 enumerate(targets, 1)], level=logging.INFO)
+            return state
+        # Locked TARGETS, fresh code (series regime anchor / adaptive refit):
+        # the analysis targets and their required output NAMES are fixed by
+        # the series' schema source so every dataset reports the same
+        # quantities under the same names, but the script is regenerated
+        # through the full codegen ladder — the locked script did not fit
+        # this dataset (or this regime), so a new method is wanted. The
+        # required-outputs check downstream enforces the names.
+        if state.get("locked_targets"):
+            targets = []
+            for t in state["locked_targets"]:
+                if not isinstance(t, dict):
+                    continue
+                desc = str(t.get("target") or "locked analysis target")
+                extra = [str(x) for x in (t.get("extra_outputs") or []) if x]
+                if extra:
+                    # The schema source's additional maps: asked for by name
+                    # (not required — a different method may not have them)
+                    # so the series' feature columns stay aligned.
+                    desc += (
+                        "\n\nSERIES SCHEMA: the other datasets of this series "
+                        "also report these maps; return them under EXACTLY "
+                        "these names whenever your method can compute them: "
+                        + ", ".join(extra) + ".")
+                targets.append({
+                    "type": "custom_code",
+                    "description": desc,
+                    "required_outputs": list(t.get("required_outputs") or []),
+                })
+            state["refinement_decision"] = {
+                "refinement_needed": True,
+                "reasoning": ("Locked targets: regenerating code for the "
+                              "series' fixed analysis targets and output "
+                              "names on this dataset."),
+                "targets": targets,
+                "requires_custom_code": True,
+            }
+            _log_structured_block(
+                self.logger,
+                f"🔒 Locked-targets plan: {len(targets)} fixed target(s) "
+                f"and output name(s), fresh code, no planning LLM call",
                 [(f"Target {i}", t["description"]) for i, t in
                  enumerate(targets, 1)], level=logging.INFO)
             return state
@@ -3927,6 +4016,16 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                             f"    ♻️ {feature_name}: numerically identical "
                             f"to a previously passed version — review "
                             f"verdict reused.")
+                    elif getattr(ctx, "locked_script", None):
+                        # Locked-script replay: deterministic gate, no LLM
+                        # review (see _replay_map_gate).
+                        _ref = (state.get("replay_reference") or {}).get(feature_name)
+                        is_valid, critique = _replay_map_gate(
+                            result_map, fit_mask, _ref,
+                            feature_name in required_outputs)
+                        self.logger.info(
+                            f"    🔒 Deterministic replay gate on {feature_name}: "
+                            f"{'pass' if is_valid else 'REJECT — ' + critique}")
                     elif feature_name in required_outputs:
                         # Combined review (visual + physical + tool
                         # evidence) in ONE voted pass for the user-asked-
@@ -4021,7 +4120,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                             }
                         })
                     else:
-                        _review_kind = ("Combined review"
+                        _review_kind = ("Replay gate" if getattr(ctx, "locked_script", None)
+                                        else "Combined review"
                                         if feature_name in required_outputs
                                         else "Visual QC")
                         _log_qc_rejection(self.logger, feature_name,
