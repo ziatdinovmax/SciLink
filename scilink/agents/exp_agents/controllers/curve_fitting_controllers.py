@@ -2336,6 +2336,9 @@ class CurveFittingPlanningController:
         _append_auxiliary_context(prompt, state)
         _append_skill_context(prompt, state, "planning")
         _append_prior_knowledge_context(prompt, state)
+        from .._qc_profile import planning_addendum
+        if planning_addendum(state):
+            prompt.append(planning_addendum(state))
         _prior_runs = _prior_curve_fit_block(state)
         if _prior_runs:
             prompt.append(_prior_runs)

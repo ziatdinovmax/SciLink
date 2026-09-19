@@ -44,6 +44,25 @@ def reanchor(spec: Dict[str, Any]) -> None:
             "llm_calls": (res.get("stage_timings") or {}).get("llm_calls"),
             "error": res.get("error"),
         }
+        if res.get("status") == "success" and spec.get("pin_outputs"):
+            # The new recipe must report the same pinned names as the old one.
+            try:
+                from .measurement_loop import MeasurementLoop
+                from .pinning import agent_replay, pin_outputs
+
+                def factory(d):
+                    return CurveFittingAgent(output_dir=d, enable_human_feedback=False,
+                                             **spec["agent_kwargs"])
+                script, anchor_dir = MeasurementLoop._anchor_script(payload["output_directory"])
+                pinned = pin_outputs(
+                    script=script, outputs=spec["pin_outputs"], model=agent.model,
+                    replay=agent_replay(factory, str(anchor_dir), spec["data_path"],
+                                        spec.get("system_info"), str(out_dir / "pinning")))
+                payload["pin_edits"] = pinned["edits"]
+                payload["pin_features"] = pinned["features"]
+                payload["llm_calls"] = (payload.get("llm_calls") or 0) + pinned["attempts"]
+            except Exception as e:  # noqa: BLE001 - reported to the parent
+                payload["pin_error"] = f"{type(e).__name__}: {e}"
     except BaseException as e:  # noqa: BLE001 - reported, never raised
         payload = {"status": "error", "error": f"{type(e).__name__}: {e}"}
     payload["seconds"] = round(time.perf_counter() - t0, 2)

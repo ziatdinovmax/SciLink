@@ -86,6 +86,24 @@ LIGHT_SYNTHESIS_ADDENDUM = (
     "directly. Keep every required field of the output schema.")
 
 
+#: Appended to the PLANNING prompt when the caller named targets. The verifier
+#: clause above scopes what is JUDGED; this scopes what is MODELLED, which is
+#: where the time and the fragility come from — a feature the consumer never
+#: asked for still has to be fitted, verified and kept stable frame after frame.
+TARGET_PLANNING_TMPL = (
+    "\n\n## Scope\nThe result is needed for: {targets}. Model what measuring those "
+    "reliably requires — the features themselves, anything overlapping them, and the "
+    "background they sit on — and leave out structure they do not depend on; say in "
+    "the plan which region you fit and why it is sufficient.")
+
+
+def planning_addendum(state: Optional[dict]) -> Optional[str]:
+    """The scope clause for a planning prompt when targets were named."""
+    targets = [str(x).strip() for x in ((state or {}).get("analysis_targets") or [])
+               if str(x).strip()]
+    return TARGET_PLANNING_TMPL.format(targets=", ".join(targets)) if targets else None
+
+
 def stamp_profile(state: Optional[dict], series_results: Any) -> None:
     """Mark every item produced under a reduced-depth profile, at the point
     the results are published — so EVERY file written afterwards

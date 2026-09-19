@@ -126,9 +126,11 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
-def _numeric_features(result: Dict[str, Any]) -> Dict[str, float]:
+def _numeric_features(result: Dict[str, Any], lift: bool = True) -> Dict[str, float]:
     """Flat numeric features of one frame: every scalar fit parameter, plus the
-    fit-quality scalars under a ``fit_`` prefix."""
+    fit-quality scalars under a ``fit_`` prefix. Pinned outputs (see
+    :mod:`scilink.live.pinning`) are also exposed under their plain declared
+    names unless ``lift`` is off."""
     from ..agents.exp_agents.feature_table import _flatten_scalars
     out: Dict[str, float] = {}
     for prefix, block in (("", result.get("fitting_parameters")),
@@ -139,6 +141,9 @@ def _numeric_features(result: Dict[str, Any]) -> Dict[str, float]:
             if v != v or v in (float("inf"), float("-inf")):   # NaN / inf
                 continue
             out[f"{prefix}{k}"] = float(v)
+    if lift:
+        from .pinning import lift_outputs
+        out = lift_outputs(out)
     return out
 
 
@@ -152,8 +157,17 @@ class MeasurementLoop:
         system_info: Measurement metadata passed to every analysis.
         targets: The quantities the consumer needs, in plain words — handed to
             the reference analysis so its verifier judges those.
-        objective_key: Exact name of the feature a recommender optimizes;
-            validated against the reference's features at ``setup()``.
+        outputs: Pinned outputs — ``{name: definition in plain words}``, e.g.
+            ``{"peak1_height": "height of the first peak above the baseline"}``.
+            A generated script names its parameters as it pleases (seen live:
+            ``peak_1_amplitude`` was the height in one script, the area in the
+            next), so every recipe this loop locks — the first, and each
+            re-anchor — is extended to report exactly these names. See
+            :mod:`scilink.live.pinning`. Costs one model call per recipe, on
+            the slow clock.
+        objective_key: Exact name of the feature a recommender optimizes — a
+            pinned output name when ``outputs`` is used; validated against the
+            recipe's features at ``setup()``.
         frame_deadline_s: Per-frame latency budget. A slower frame is flagged
             (``deadline_missed``), not interrupted.
         breach_patience: Consecutive breaching frames (failed / below the gate
@@ -215,6 +229,7 @@ class MeasurementLoop:
                  api_key: Optional[str] = None, base_url: Optional[str] = None,
                  system_info: Any = None,
                  targets: Optional[List[str]] = None,
+                 outputs: Optional[Dict[str, str]] = None,
                  objective_key: Optional[str] = None,
                  frame_deadline_s: Optional[float] = None,
                  breach_patience: int = 2,
@@ -235,6 +250,7 @@ class MeasurementLoop:
         self.model_name, self.api_key, self.base_url = model_name, api_key, base_url
         self.system_info = system_info
         self.targets = [str(t) for t in (targets or []) if str(t).strip()]
+        self.outputs = {str(k): str(v) for k, v in (outputs or {}).items()}
         self.objective_key = objective_key
         self.frame_deadline_s = frame_deadline_s
         self.breach_patience = max(1, int(breach_patience))
@@ -279,6 +295,7 @@ class MeasurementLoop:
 
     def setup(self, reference: Optional[str] = None, *,
               anchor: Optional[str] = None,
+              reference_data: Optional[str] = None,
               profile: Optional[str] = None,
               script_edits: Optional[List[Dict[str, Any]]] = None,
               enable_human_feedback: bool = False) -> Dict[str, Any]:
@@ -299,6 +316,10 @@ class MeasurementLoop:
         ``script_edits`` (exact old/new snippet pairs) are applied to the
         anchor's script on every frame — tomorrow's loop from yesterday's
         recipe with one knob changed.
+
+        With pinned ``outputs`` the recipe is extended here to report them and
+        checked on the reference data; an adopted ``anchor`` then needs
+        ``reference_data`` — the file that run analysed — to be checked on.
         """
         if bool(reference) == bool(anchor):
             raise ValueError("setup() takes exactly one of `reference` (a data "
@@ -340,6 +361,15 @@ class MeasurementLoop:
             self._reference_features = _numeric_features(ref_result)
         else:
             self._reference_features = self._features_from_anchor(anchor_dir)
+        pinned = None
+        if self.outputs:
+            ref_data = reference or reference_data
+            if not ref_data:
+                raise ValueError(
+                    "pinned `outputs` are checked on the reference data: pass "
+                    "reference_data=<the file the anchor run analysed>.")
+            pinned = self._pin(script, str(ref_data), self.output_dir / "pinning")
+            self.recipe = self._recipe_record(script, source)
         if self.objective_key and self.objective_key not in self._reference_features:
             raise ValueError(
                 f"objective_key {self.objective_key!r} is not a feature this recipe "
@@ -355,6 +385,10 @@ class MeasurementLoop:
             "targets": self.targets, "objective_key": self.objective_key,
             "frame_deadline_s": self.frame_deadline_s,
         }
+        if pinned is not None:
+            record["pinned_outputs"] = {"definitions": self.outputs,
+                                        "rationale": pinned["rationale"],
+                                        "attempts": pinned["attempts"]}
         if ref_result is not None:
             st = ref_result.get("stage_timings") or {}
             record["llm_calls"] = st.get("llm_calls")
@@ -364,6 +398,23 @@ class MeasurementLoop:
             f"🔒 Loop armed: recipe {self.recipe['id']} from {source} "
             f"({record['seconds']:.1f}s); {len(self._reference_features)} features.")
         return record
+
+    def _pin(self, script: str, reference_data: str, work_dir: Path) -> Dict[str, Any]:
+        """Extend the locked recipe to report the pinned outputs (one model
+        call, slow clock), verified on the reference data. The pin edits join
+        the recipe's edit list after the caller's own."""
+        from .pinning import agent_replay, pin_outputs
+        model = getattr(self._agent_factory(str(work_dir / "model")), "model", None)
+        if model is None:
+            raise RuntimeError("pinning needs a model: the agent factory's agent has none")
+        result = pin_outputs(
+            script=(self._validate_edits(script, self._edits) if self._edits else script),
+            outputs=self.outputs, model=model, logger=self.logger,
+            replay=agent_replay(self._agent_factory, str(self.anchor_dir), reference_data,
+                                self.system_info, str(work_dir), base_edits=self._edits))
+        self._edits = list(self._edits) + result["edits"]
+        self._reference_features = result["features"]
+        return result
 
     @staticmethod
     def _anchor_script(anchor: str):
@@ -392,7 +443,10 @@ class MeasurementLoop:
     def _recipe_record(self, script: str, source: str) -> Dict[str, Any]:
         effective = self._validate_edits(script, self._edits) if self._edits else script
         digest = hashlib.sha1(effective.encode("utf-8")).hexdigest()[:12]
-        return {"id": digest, "source": source, "n_edits": len(self._edits)}
+        rec = {"id": digest, "source": source, "n_edits": len(self._edits)}
+        if self.outputs:
+            rec["pinned_outputs"] = sorted(self.outputs)
+        return rec
 
     # ------------------------------------------------------------------- step
     def step(self, data_path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -545,6 +599,10 @@ class MeasurementLoop:
                              "base_url": self.base_url},
             "analyze_kwargs": analyze_kwargs,
             "sandbox_approved": self._sandbox_approved(),
+            # A new recipe must report the SAME pinned names; the worker pins
+            # it (a model call — slow clock) on the frame it re-anchored on.
+            "pin_outputs": dict(self.outputs) or None,
+            "system_info": self.system_info,
         }
         self._escalation_meta = {"index": self._n_escalations, "data": str(data_path),
                                  "profile": analyze_kwargs["profile"],
@@ -599,12 +657,21 @@ class MeasurementLoop:
             self._append(record)
             self._save_state()
             return record
+        if self.outputs and not result.get("pin_edits"):
+            record = {"event": "escalation_failed", **base,
+                      "error": ("the new recipe could not be extended to report the pinned "
+                                f"outputs: {result.get('pin_error')}")[:300]}
+            self._append(record)
+            self._save_state()
+            return record
         # Adopt. Amendments were written against the OLD script and do not
         # carry; the plausible ranges belong to the old regime and re-learn.
-        self.anchor_dir, self._edits = anchor_dir, []
+        # The pin edits were produced for THIS script by the worker.
+        self.anchor_dir, self._edits = anchor_dir, list(result.get("pin_edits") or [])
         source = "bank" if result.get("cold_start") else f"reanchor:{meta.get('profile')}"
         self.recipe = self._recipe_record(script, source)
-        self._reference_features = self._features_from_anchor(anchor_dir)
+        self._reference_features = (result.get("pin_features")
+                                    or self._features_from_anchor(anchor_dir))
         self._ranges = {k: [v, v] for k, v in self._reference_features.items()}
         self._n_learned, self._out_of_range_streak = 0, []
         self._consecutive_breaches = 0
@@ -776,7 +843,8 @@ class MeasurementLoop:
             "ranges": self._ranges, "reference_features": self._reference_features,
             "n_learned": self._n_learned, "range_warmup": self.range_warmup,
             "range_adopt_after": self.range_adopt_after, "gate_keys": self.gate_keys,
-            "targets": self.targets, "objective_key": self.objective_key,
+            "targets": self.targets, "outputs": self.outputs,
+            "objective_key": self.objective_key,
             "frame_deadline_s": self.frame_deadline_s,
             "breach_patience": self.breach_patience, "range_widen": self.range_widen,
             "system_info": self.system_info,
@@ -790,7 +858,7 @@ class MeasurementLoop:
         """Re-arm a loop from ``loop_state.json`` after a crash or restart —
         no model call; the step counter continues where the log stopped."""
         state = json.loads((Path(output_dir) / LOOP_STATE_NAME).read_text())
-        for k in ("targets", "objective_key", "frame_deadline_s", "breach_patience",
+        for k in ("targets", "outputs", "objective_key", "frame_deadline_s", "breach_patience",
                   "range_widen", "range_warmup", "range_adopt_after", "gate_keys",
                   "system_info"):
             kwargs.setdefault(k, state.get(k))
