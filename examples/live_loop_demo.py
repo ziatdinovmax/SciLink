@@ -53,6 +53,12 @@ def main():
         print(f"frame {record['step']:3d}  {record['latency_s']:.1f}s  {values}  {record['flags']}")
 
     # apply="never": recommendations are recorded, parameters never change.
+    #
+    # Where the experiment can wait, a change in the data can be a decision
+    # point: add  pause_on="novelty", on_pause=decide  and the instrument is asked
+    # to hold (Instrument.pause / resume, or an MCP server's pause / resume
+    # tools) while  decide(event, record)  looks at what changed (event["where"])
+    # and returns "resume", "stop", or parameters to resume with.
     run_experiment(instrument, loop, n_frames=40, apply="never", on_frame=show)
     print(loop.status())
 

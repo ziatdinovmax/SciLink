@@ -767,6 +767,8 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .live-novelty { display: flex; align-items: center; gap: 12px; border: 1px solid var(--viz-series); border-radius: 8px; padding: 8px 12px; margin-bottom: 10px; font-size: 13px; }
 .live-novelty > div { flex: 1; }
 .live-novelty button { flex: 0 0 auto; }
+.live-novelty.paused { border-color: var(--viz-warning); border-width: 2px; }
+.live-state.paused { color: var(--text); border-color: var(--viz-warning); }
 .live-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 10px; margin-bottom: 10px; }
 .live-card { border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); padding: 10px 12px; min-width: 0; }
 .live-card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }

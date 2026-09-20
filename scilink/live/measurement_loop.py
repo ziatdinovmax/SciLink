@@ -256,6 +256,9 @@ class MeasurementLoop:
             normal for the stream. It reads the data only, never the recipe, so
             its verdict does not depend on which recipe was locked. LOWER
             either to catch weaker changes, RAISE if ordinary variation is flagged.
+        instrument: the instrument this loop serves — an ``Instrument`` or its
+            ``describe()`` dict. Stamped on the run, so that what is learned can
+            later be collected per instrument rather than per session.
         on_change: what the slow clock does when the data changes for good but
             the recipe still fits. The change is ALWAYS announced first (event
             ``novelty``: how much of the frames is new and where on the axis) —
@@ -328,7 +331,7 @@ class MeasurementLoop:
                  auto_escalate: bool = False,
                  reanchor_frames: int = 5,
                  drift_fraction: float = 0.10, drift_score: float = 3.0,
-                 on_change: str = "report",
+                 on_change: str = "report", instrument: Any = None,
                  audit_every: Optional[int] = None, audit_profile: str = "quick",
                  audit_tolerance: float = 0.05,
                  escalation_profile: str = "extract",
@@ -362,6 +365,8 @@ class MeasurementLoop:
         from .drift import DriftMonitor
         self.drift_fraction, self.drift_score = float(drift_fraction), float(drift_score)
         self._drift = DriftMonitor(fraction_bar=self.drift_fraction, score_bar=self.drift_score)
+        self.instrument = (instrument.describe() if hasattr(instrument, "describe")
+                           else (dict(instrument) if isinstance(instrument, dict) else None))
         if on_change not in ("report", "audit", "rebuild"):
             raise ValueError("on_change must be 'report', 'audit' or 'rebuild'")
         self.on_change = on_change
@@ -533,6 +538,7 @@ class MeasurementLoop:
             "seconds": round(time.perf_counter() - t0, 3),
             "reference_features": self._reference_features,
             "gate_calibration": self._calibration,
+            **({"instrument": self.instrument} if self.instrument else {}),
             **({"portability": portability} if portability else {}),
             **({"reference_frames": {k: v for k, v in series_info.items() if k != "data"}}
                if series_info else {}),
@@ -832,6 +838,10 @@ class MeasurementLoop:
             event["window_share"] = gate["drift_window_share"]
         self._append(event)
         self._novelty_open = True
+        # The frame that made it a lasting change carries it, so a driver can
+        # make this a decision point (run_experiment(pause_on="novelty")).
+        record["novelty"] = {k: event[k] for k in ("since_step", "step", "fraction", "where",
+                                                   "recipe_fits", "data") if k in event}
         self._notify(event)
         self.logger.info(f"✨ Novelty at frame {first}: {event['fraction']} of the frame is unlike the "
                          f"stream so far" + (f"; {where[0]['kind']} near {where[0]['x_peak']}" if where else "."))
@@ -1403,6 +1413,12 @@ class MeasurementLoop:
                 continue                     # a torn line from a killed run
         return out
 
+    def record_event(self, event: str, **fields: Any) -> None:
+        """Put something that happened AROUND the loop on its record — a pause,
+        an operator's decision. The log is the contract: what a person or an
+        instrument did to the experiment belongs beside what the analysis saw."""
+        self._append({"event": str(event), "step": self._step, **fields})
+
     def _append(self, record: Dict[str, Any]) -> None:
         rec = {"v": SCHEMA_VERSION, "timestamp": _now(), **record}
         with open(self.log_path, "a", encoding="utf-8") as fh:
@@ -1426,7 +1442,7 @@ class MeasurementLoop:
             "reanchor_frames": self.reanchor_frames, "recent_frames": self._recent_frames,
             "drift": self._drift.to_state(), "drift_fraction": self.drift_fraction,
             "drift_score": self.drift_score, "audit_every": self.audit_every,
-            "on_change": self.on_change,
+            "on_change": self.on_change, "instrument": self.instrument,
             "audit_profile": self.audit_profile, "audit_tolerance": self.audit_tolerance,
             "last_audit": self._last_audit, "last_audit_step": self._last_audit_step,
         }
@@ -1444,6 +1460,7 @@ class MeasurementLoop:
                   "system_info"):
             kwargs.setdefault(k, state.get(k))
         for k in ("reanchor_frames", "drift_fraction", "drift_score", "audit_every", "on_change",
+                  "instrument",
                   "audit_profile", "audit_tolerance"):
             if state.get(k) is not None:
                 kwargs.setdefault(k, state[k])

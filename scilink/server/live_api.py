@@ -45,7 +45,9 @@ def _instrument_info(inst: Any) -> Dict[str, Any]:
         if spec.get("description"):
             spec["description"] = _plain(spec["description"])
     return {
+        "id": getattr(inst, "id", inst.name),
         "name": inst.name,
+        "can_pause": bool(getattr(inst, "can_pause", False)),
         "technique": (inst.system_info or {}).get("technique"),
         "sample": (inst.system_info or {}).get("sample"),
         "x_axis": (inst.system_info or {}).get("x_axis"),
@@ -301,6 +303,11 @@ class LiveRun:
         n = len([p for p in root.glob("run_*") if p.is_dir()]) + 1
         self.run_dir = root / f"run_{n:03d}"
         self._stop = threading.Event()
+        # A decision point: the run waits here until the person answers.
+        self.pause_on = [w for w in (config.get("pause_on") or []) if w in ("novelty", "breach")]
+        self.paused: Optional[Dict[str, Any]] = None
+        self._decision: Any = None
+        self._decided = threading.Event()
         self._operator_params: Optional[Dict[str, Any]] = None
         self._oplock = threading.Lock()
         self.current_params: Dict[str, Any] = dict(self.instrument.defaults or {})
@@ -354,7 +361,7 @@ class LiveRun:
             if str(cfg.get("notes") or "").strip():
                 info["notes_from_the_user"] = str(cfg["notes"]).strip()[:2000]
             self.loop = MeasurementLoop(
-                str(self.run_dir / "loop"), system_info=info,
+                str(self.run_dir / "loop"), system_info=info, instrument=inst,
                 on_change=str(cfg.get("on_change") or "report"),
                 targets=list(inst.targets or []), outputs=outputs, schema=inst.schema,
                 objective_key=(cfg.get("objective_key") or None) if outputs else None,
@@ -404,7 +411,8 @@ class LiveRun:
                 apply=str(cfg.get("apply") or "never"),
                 interval_s=float(cfg.get("interval_s") or 2.0),
                 stop=self._stop.is_set, operator=self._operator,
-                on_frame=self._on_frame)
+                on_frame=self._on_frame,
+                pause_on=self.pause_on, on_pause=self._on_pause if self.pause_on else None)
             self.state = "stopped" if self._stop.is_set() else "done"
         except LiveError as e:
             self.state, self.error = "error", e.message
@@ -427,6 +435,43 @@ class LiveRun:
                 k: v for k, v in frame.truth.items() if isinstance(v, (int, float))}
             for old_step in [k for k in self._truth if k < int(record["step"]) - 1000]:
                 del self._truth[old_step]
+
+    def _on_pause(self, event: Dict[str, Any], record: Dict[str, Any]) -> Any:
+        """Wait for the person. Stop ends the wait; an optional time limit
+        resumes unchanged, for an experiment that cannot be held for long."""
+        limit = float(self.config.get("pause_timeout_s") or 0) or None
+        self._decision = None
+        self._decided.clear()
+        self.paused = {**event, "at": time.time(), "experiment_held": bool(self.instrument.can_pause),
+                       "timeout_s": limit}
+        self.state = "paused"
+        try:
+            while not self._decided.wait(0.25):
+                if self._stop.is_set():
+                    return "stop"
+                if limit and time.time() - self.paused["at"] > limit:
+                    self.note = "Nobody answered the pause in time. The run went on unchanged."
+                    return "resume"
+            return self._decision or "resume"
+        finally:
+            self.paused = None
+            self.state = "running"
+
+    def decide(self, action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """The person's answer to a pause: resume, resume with changed parameters, stop."""
+        if self.paused is None:
+            raise LiveError(409, "The run is not paused.")
+        if action not in ("resume", "stop"):
+            raise LiveError(400, "action is 'resume' or 'stop'.")
+        if params and self.instrument.schema is not None:
+            problems = self.instrument.schema.validate(params)
+            if problems:
+                raise LiveError(400, "; ".join(problems))
+        self._decision = "stop" if action == "stop" else (dict(params) if params else "resume")
+        if action == "stop":
+            self._stop.set()
+        self._decided.set()
+        return {"decision": action, "params": params or None}
 
     def _operator(self, current: Dict[str, Any], record: Dict[str, Any]):
         with self._oplock:
@@ -465,6 +510,7 @@ class LiveRun:
                            "drift_fraction_bar": self.loop.drift_fraction})
         return {
             "state": self.state, "error": self.error, "note": self.note,
+            "paused": self.paused, "pause_on": self.pause_on,
             "run_dir": str(self.run_dir), "elapsed_s": round(time.time() - self.started_at, 1),
             "config": self.config, "instrument": _instrument_info(self.instrument),
             "status": status, "current_params": self.current_params,
@@ -546,7 +592,7 @@ class LiveRun:
 def start(session: Any, config: Dict[str, Any], allow_custom: bool = True) -> Dict[str, Any]:
     with _LOCK:
         run = _RUNS.get(session.id)
-        if run is not None and run.state in ("arming", "running"):
+        if run is not None and run.state in ("arming", "running", "paused"):
             raise LiveError(409, "A live run is already active in this session. Stop it first.")
         run = LiveRun(session.id, session.session_dir, session.agent, dict(config or {}),
                       allow_custom=allow_custom)
@@ -577,15 +623,22 @@ def stop(session: Any) -> Dict[str, Any]:
 
 def set_params(session: Any, params: Dict[str, Any]) -> Dict[str, Any]:
     run = _RUNS.get(session.id)
-    if run is None or run.state != "running":
+    if run is None or run.state not in ("running", "paused"):
         raise LiveError(409, "No running live loop to send parameters to.")
     return run.set_params(dict(params or {}))
+
+
+def decide(session: Any, body: Dict[str, Any]) -> Dict[str, Any]:
+    run = _RUNS.get(session.id)
+    if run is None:
+        raise LiveError(404, "No live run in this session.")
+    return run.decide(str((body or {}).get("action") or "resume"), (body or {}).get("params") or None)
 
 
 def clear(session: Any) -> Dict[str, Any]:
     with _LOCK:
         run = _RUNS.get(session.id)
-        if run is not None and run.state in ("arming", "running"):
+        if run is not None and run.state in ("arming", "running", "paused"):
             raise LiveError(409, "Stop the run before starting a new one.")
         _RUNS.pop(session.id, None)
     return _idle(session)

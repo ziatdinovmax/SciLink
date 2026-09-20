@@ -47,6 +47,7 @@ def main(argv: List[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     sim = get_simulator(args[0] if args else "insitu_raman", seed=int(args[1]) if len(args) > 1 else 0)
     server = Server(f"scilink-demo-{sim.name}")
+    held = {"on": False}
 
     @server.list_tools()
     async def list_tools() -> List[types.Tool]:
@@ -55,13 +56,23 @@ def main(argv: List[str] | None = None) -> int:
                        inputSchema=tool_input_schema(sim)),
             types.Tool(name="describe_instrument", description="What this instrument measures.",
                        inputSchema={"type": "object", "properties": {}}),
+            types.Tool(name="pause", description="Hold the experiment (the ramp, the scan) where it is.",
+                       inputSchema={"type": "object", "properties": {}}),
+            types.Tool(name="resume", description="Continue a held experiment.",
+                       inputSchema={"type": "object", "properties": {}}),
         ]
 
     @server.call_tool()
     async def call_tool(name: str, arguments: Dict[str, Any]) -> List[types.TextContent]:
         if name == "describe_instrument":
-            reply: Dict[str, Any] = {"name": sim.name, "system_info": sim.system_info,
+            reply: Dict[str, Any] = {"id": f"demo-{sim.name}", "name": sim.name,
+                                     "system_info": sim.system_info,
                                      "outputs": sim.outputs, "targets": sim.targets}
+        elif name in ("pause", "resume"):
+            # The simulators advance per acquisition, not with the clock, so a
+            # hold is exact; a real server blanks the beam or holds the ramp here.
+            held["on"] = name == "pause"
+            reply = {"status": "ok", "held": held["on"]}
         elif name == "acquire":
             try:
                 frame = sim.acquire(dict(arguments or {}))

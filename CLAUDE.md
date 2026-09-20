@@ -850,6 +850,33 @@ which the server can supply through a `describe_instrument` tool. A Python
 `Instrument` subclass remains the in-process alternative. Uploaded skills stay
 markdown-only, so a driver never arrives through the skill uploader.
 
+**Novelty has two layers, and a pause is what connects them.** The loop's
+`novelty` event is *statistical*: this frame is unlike the stream so far, here,
+with no model. Whether it is *scientifically* new is the question the original
+SciLink pipeline asks (observation → falsifiable claims → novelty scored against
+the literature → follow-up measurement or theory; arXiv:2508.06569), and
+`assess_novelty` still asks it in analyze mode. The first layer is the trigger
+for the second; the second is slow-clock work and never runs on a frame's path.
+Where an experiment can wait, `run_experiment(pause_on=("novelty", "breach"),
+on_pause=...)` makes the change a decision point: the instrument is asked to
+hold (`Instrument.pause()` / `resume()`, mapped onto optional `pause` / `resume`
+MCP tools; `can_pause` says whether the experiment is really held or only the
+acquisition), the slow work happens while the sample is still in the state that
+looked new, and the decision — resume, resume with checked parameters, stop —
+comes back from a person (the Live tab's Resume / Stop) or a callable. A pause
+needs someone who can end it (`on_pause` is required), is off by default, and is
+recorded (`paused` / `resumed`) beside what the analysis saw.
+
+**The live layer is written for an instrument-centric SciLink.** The expected
+direction is one SciLink per instrument (the paper's "lab of labs"), so
+`scilink.live` stays free of session, chat and orchestrator imports: the
+contracts are `Instrument` (identity via `describe()`: id, technique, whether it
+can pause), `loop_log.jsonl`, and the recommendation schema. Every run records
+which instrument it served (`setup.instrument`), so recipes, accepted states and
+acquisition history can later be collected per instrument instead of per chat
+session. The web session is one host for a loop, not its owner; do not add live
+features that only work through `server/live_api.py`.
+
 ### Comparison with Anthropic Skills
 
 |  | Anthropic | SciLink |

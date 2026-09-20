@@ -647,6 +647,13 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         return _live(set_params, _session_or_404(request, session_id),
                      (body or {}).get("params") or {})
 
+    @app.post("/api/v1/sessions/{session_id}/live/resume")
+    async def live_resume(request: Request, session_id: str):
+        """The answer to a pause: {"action": "resume" | "stop", "params": {...}}."""
+        from .live_api import decide
+        body = await request.json()
+        return _live(decide, _session_or_404(request, session_id), body or {})
+
     @app.post("/api/v1/sessions/{session_id}/live/clear")
     def live_clear(request: Request, session_id: str):
         from .live_api import clear

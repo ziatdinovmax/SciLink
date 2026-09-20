@@ -353,7 +353,11 @@ export interface LiveParamSpec {
   choices?: (string | number)[];
 }
 export interface LiveInstrumentInfo {
+  /** Which instrument this is, stable across runs and sessions. */
+  id?: string;
   name: string;
+  /** True when a pause really holds the experiment, not only the acquisition. */
+  can_pause?: boolean;
   technique?: string;
   sample?: string;
   x_axis?: string;
@@ -420,7 +424,11 @@ export interface LiveNovelty {
   frame_abs_path: string;
 }
 export interface LiveSnapshot {
-  state: "idle" | "arming" | "running" | "stopped" | "done" | "error";
+  state: "idle" | "arming" | "running" | "paused" | "stopped" | "done" | "error";
+  /** The run is waiting for a decision: why, and what the data showed. */
+  paused?: (Partial<LiveNovelty> & { why: "novelty" | "breach"; experiment_held: boolean;
+                                     timeout_s?: number | null; flags?: string[] }) | null;
+  pause_on?: ("novelty" | "breach")[];
   error?: string | null;
   note?: string | null;
   simulators?: LiveInstrumentInfo[];
@@ -479,6 +487,10 @@ export interface LiveConfig {
   audit_every?: number;
   /** After a lasting change the recipe still fits: report (default), audit or rebuild. */
   on_change?: "report" | "audit" | "rebuild";
+  /** Stop acquiring and wait for a decision when the data changes or the recipe fails. */
+  pause_on?: ("novelty" | "breach")[];
+  /** Seconds a pause may last before the run goes on unchanged. Omit to wait. */
+  pause_timeout_s?: number;
   /** Anything the analysis should know. Context, not a constraint. */
   notes?: string;
   reference_analysis?: string;
@@ -702,6 +714,8 @@ export const api = {
     req<{ state: string }>(`/sessions/${id}/live/stop`, { method: "POST" }),
   liveParams: (id: string, params: Record<string, number | string>) =>
     req<{ queued: Record<string, number | string> }>(`/sessions/${id}/live/params`, json({ params })),
+  liveResume: (id: string, action: "resume" | "stop", params?: Record<string, number | string>) =>
+    req<{ decision: string }>(`/sessions/${id}/live/resume`, json({ action, params })),
   liveClear: (id: string) =>
     req<LiveSnapshot>(`/sessions/${id}/live/clear`, { method: "POST" }),
 

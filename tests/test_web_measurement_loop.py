@@ -290,6 +290,43 @@ def test_a_lasting_change_reaches_the_page_as_a_novelty_with_the_frame_to_hand_t
     assert live_api._RUNS[session.id].loop.on_change == "report"
 
 
+def test_a_run_can_wait_at_a_novelty_for_the_person_to_decide(session):
+    live_api.start(session, {**CONFIG, "n_frames": 31, "pause_on": ["novelty"]})
+    snap = _wait(session, lambda s: s["state"] in ("paused", "done", "error"))
+    assert snap["state"] == "paused", snap.get("error")
+    assert snap["paused"]["why"] == "novelty" and 24 <= snap["paused"]["since_step"] <= 27
+    assert snap["paused"]["experiment_held"] is False          # a simulator only stops acquiring
+    n = len(snap["frames"])
+    time.sleep(0.4)
+    assert len(live_api.snapshot(session)["frames"]) == n      # nothing is acquired while it waits
+    with pytest.raises(live_api.LiveError):                    # a bad answer is refused, the wait goes on
+        live_api.decide(session, {"action": "resume", "params": {"trigger_force_nN": 1e9}})
+    with pytest.raises(live_api.LiveError):                    # and no second run starts meanwhile
+        live_api.start(session, CONFIG)
+    live_api.decide(session, {"action": "resume", "params": {"trigger_force_nN": 12.5}})
+    snap = _wait(session, lambda s: s["state"] == "done")
+    assert snap["frames"][-1]["params"]["trigger_force_nN"] == 12.5 and snap["paused"] is None
+    kinds = [e["event"] for e in snap["events"]]
+    assert kinds.index("novelty") < kinds.index("paused") < kinds.index("resumed")
+    resumed = next(e for e in snap["events"] if e["event"] == "resumed")
+    assert resumed["decision"] == "change" and resumed["params"] == {"trigger_force_nN": 12.5}
+    assert snap["instrument"]["id"] == "afm_force_curve"
+    with pytest.raises(live_api.LiveError):
+        live_api.decide(session, {"action": "resume"})         # nothing to answer any more
+
+
+def test_stop_ends_a_pause_and_a_time_limit_resumes_unchanged(session):
+    live_api.start(session, {**CONFIG, "n_frames": 31, "pause_on": ["novelty"]})
+    _wait(session, lambda s: s["state"] == "paused")
+    live_api.decide(session, {"action": "stop"})
+    snap = _wait(session, lambda s: s["state"] in ("stopped", "done"))
+    assert snap["state"] == "stopped" and len(snap["frames"]) < 31
+    live_api.clear(session)
+    live_api.start(session, {**CONFIG, "n_frames": 31, "pause_on": ["novelty"], "pause_timeout_s": 0.3})
+    snap = _wait(session, lambda s: s["state"] == "done")
+    assert len(snap["frames"]) == 31 and "went on unchanged" in snap["note"]
+
+
 # ── replaying a folder of recorded measurements ──────────────────
 
 def _recording(tmp_path, n=5):

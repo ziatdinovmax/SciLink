@@ -12,6 +12,9 @@ loop's :class:`~scilink.live.instruments.Instrument`:
   held at its default; ``limits=`` supplies them from the caller's side;
 - ``acquire(params)`` calls the tool and reads the measurement from its JSON
   reply (see :func:`parse_measurement` for the accepted shapes);
+- optional ``pause`` / ``resume`` tools (also ``hold``) let the experiment be HELD
+  when the loop finds something worth a decision (``run_experiment(pause_on=...)``)
+  — blank the beam, hold the ramp; without them a pause only stops acquiring;
 - an optional description tool (``describe_instrument`` by default) supplies
   ``system_info`` / ``outputs`` / ``targets`` so the server can say what it
   measures; anything the caller passes wins.
@@ -42,6 +45,7 @@ from .instruments import Frame, Instrument, read_curve
 from .recommend import InstrumentSchema
 
 DESCRIBE_TOOLS = ("describe_instrument", "describe")
+PAUSE_TOOLS, RESUME_TOOLS = ("pause", "hold", "pause_experiment"), ("resume", "resume_experiment")
 
 
 def schema_from_tool(tool: Dict[str, Any], limits: Optional[Dict[str, Tuple[float, float]]] = None):
@@ -105,6 +109,14 @@ def _as_dict(payload: Any) -> Dict[str, Any]:
         except ValueError:
             pass
     return payload
+
+
+def parse_reply(payload: Any) -> Dict[str, Any]:
+    """A control tool's reply (pause / resume): an error reply raises."""
+    d = _as_dict(payload)
+    if str(d.get("status") or "").lower() == "error":
+        raise RuntimeError(f"the instrument reported an error: {d.get('message') or d.get('error')}")
+    return d
 
 
 def parse_measurement(payload: Any):
@@ -184,6 +196,11 @@ class MCPInstrument(Instrument):
                 except Exception:  # noqa: BLE001 - a description is optional
                     described = {}
                 break
+        self._pause_tool = next((t for t in PAUSE_TOOLS if t in schemas), None)
+        self._resume_tool = next((t for t in RESUME_TOOLS if t in schemas), None)
+        self.can_pause = bool(self._pause_tool and self._resume_tool)
+        if described.get("id"):
+            self.instrument_id = str(described["id"])
         self.name = name or str(described.get("name") or getattr(connection, "server_name", "mcp"))
         self.system_info = dict(system_info or described.get("system_info") or {})
         self.outputs = dict(outputs or described.get("outputs") or {})
@@ -208,6 +225,14 @@ class MCPInstrument(Instrument):
         args = {k: v for k, v in args.items() if k in self._properties}
         x, y, x_label, y_label, meta = parse_measurement(self.connection.call_tool(self.tool, args))
         return Frame(x=x, y=y, params=steer, meta=dict(meta), x_label=x_label, y_label=y_label)
+
+    def pause(self) -> None:
+        if self.can_pause:
+            parse_reply(self.connection.call_tool(self._pause_tool, {}))
+
+    def resume(self) -> None:
+        if self.can_pause:
+            parse_reply(self.connection.call_tool(self._resume_tool, {}))
 
     def close(self) -> None:
         if self._owns:

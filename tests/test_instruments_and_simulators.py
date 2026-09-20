@@ -248,3 +248,97 @@ class TestReplayInstrument:
                 return {"step": self.n, "flags": [], "params": params}
         records = run_experiment(inst, Loop(), 50, apply="never")
         assert [r["step"] for r in records] == [1, 2, 3]
+
+
+# ──────────────────────────────────────────────────────────────
+# a novelty can be a decision point: the experiment waits
+# ──────────────────────────────────────────────────────────────
+
+class TestPauseOnNovelty:
+    class Inst(Instrument):
+        name = "pausable"
+        instrument_id = "lab-7/raman-2"
+        schema = InstrumentSchema.from_dict({"dwell": {"low": 1, "high": 100}})
+        defaults = {"dwell": 10}
+        can_pause = True
+
+        def __init__(self):
+            self.log = []
+
+        def acquire(self, params):
+            self.log.append(("acquire", params["dwell"]))
+            return Frame(x=[0, 1, 2], y=[1, 2, 1], params=params)
+
+        def pause(self):
+            self.log.append("pause")
+
+        def resume(self):
+            self.log.append("resume")
+
+    class Loop:
+        def __init__(self, root, novelty_at=(), breach_at=()):
+            self.output_dir, self.n = str(root), 0
+            self.novelty_at, self.breach_at = set(novelty_at), set(breach_at)
+
+        def step(self, path, params=None):
+            self.n += 1
+            rec = {"step": self.n, "flags": [], "params": params,
+                   "needs_escalation": self.n in self.breach_at}
+            if self.n in self.novelty_at:
+                rec["novelty"] = {"since_step": self.n - 2, "fraction": 0.4,
+                                  "where": [{"kind": "new", "x_peak": 0.86}]}
+            return rec
+
+    def test_the_experiment_waits_and_resumes_with_the_decision(self, tmp_path):
+        inst, seen = self.Inst(), []
+
+        def decide(event, record):
+            seen.append((event["why"], event["where"][0]["x_peak"], record["step"]))
+            return {"dwell": 40}                                  # look closer
+        run_experiment(inst, self.Loop(tmp_path, novelty_at=[3]), 5, apply="never",
+                       pause_on="novelty", on_pause=decide)
+        assert seen == [("novelty", 0.86, 3)]
+        assert inst.log == [("acquire", 10)] * 3 + ["pause", "resume"] + [("acquire", 40)] * 2
+
+    def test_stop_ends_the_run_and_the_instrument_is_released(self, tmp_path):
+        inst = self.Inst()
+        records = run_experiment(inst, self.Loop(tmp_path, novelty_at=[2]), 9, apply="never",
+                                 pause_on=["novelty"], on_pause=lambda e, r: "stop")
+        assert len(records) == 2 and inst.log[-2:] == ["pause", "resume"]
+
+    def test_a_failing_recipe_can_be_a_decision_point_too_once_per_run(self, tmp_path):
+        inst, seen = self.Inst(), []
+        run_experiment(inst, self.Loop(tmp_path, breach_at=[2, 3, 4]), 6, apply="never",
+                       pause_on="breach", on_pause=lambda e, r: seen.append(e["why"]) or "resume")
+        assert seen == ["breach"]
+
+    def test_a_decision_is_checked_like_any_other_parameters(self, tmp_path):
+        with pytest.raises(ValueError, match="outside"):
+            run_experiment(self.Inst(), self.Loop(tmp_path, novelty_at=[1]), 3, apply="never",
+                           pause_on="novelty", on_pause=lambda e, r: {"dwell": 9999})
+
+    def test_a_pause_nobody_can_end_is_refused(self, tmp_path):
+        with pytest.raises(ValueError, match="hang"):
+            run_experiment(self.Inst(), self.Loop(tmp_path), 3, pause_on="novelty")
+        with pytest.raises(ValueError, match="pause_on accepts"):
+            run_experiment(self.Inst(), self.Loop(tmp_path), 3, pause_on="whenever",
+                           on_pause=lambda e, r: "resume")
+
+    def test_not_asked_not_paused(self, tmp_path):
+        inst = self.Inst()
+        run_experiment(inst, self.Loop(tmp_path, novelty_at=[2]), 4, apply="never")
+        assert "pause" not in inst.log
+
+    def test_an_instrument_has_an_identity(self):
+        d = self.Inst().describe()
+        assert d["id"] == "lab-7/raman-2" and d["can_pause"] is True and d["kind"] == "Inst"
+        assert BeamlineXRD().describe()["id"] == "beamline_xrd"
+
+
+def test_the_live_layer_does_not_depend_on_a_chat_session():
+    """It is written to run at an instrument: no server, chat or orchestrator imports."""
+    import re
+    import scilink.live as pkg
+    bad = re.compile(r"^\s*(?:from|import)\s+(?:scilink|\.)\S*(?:server|orchestrator|meta_agent)", re.M)
+    for path in Path(pkg.__file__).parent.glob("*.py"):
+        assert not bad.search(path.read_text()), path.name

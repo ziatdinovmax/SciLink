@@ -22,7 +22,13 @@ changes. :func:`run_experiment` is the driver both go through:
     acquire(params) -> loop.step(frame) -> (maybe) apply the recommendation
 
 SciLink never actuates: the only place parameters change is this driver, and
-only according to the ``apply`` policy the caller chose.
+only according to the ``apply`` policy the caller chose. The same holds for
+holding the experiment: ``pause()`` / ``resume()`` are called here only, and only
+when the caller asked for decision points (``pause_on``) and supplied someone to
+decide (``on_pause``).
+
+An instrument has an identity (``describe()``): runs record which instrument
+they served, so what is learned can be kept per instrument, not per session.
 """
 
 from __future__ import annotations
@@ -87,6 +93,32 @@ class Instrument:
 
     def acquire(self, params: Dict[str, Any]) -> Frame:  # pragma: no cover - interface
         raise NotImplementedError
+
+    @property
+    def id(self) -> str:
+        """A stable identifier of THIS instrument (default: its ``name``). Runs
+        are stamped with it, so that what is learned at an instrument — recipes,
+        states already seen, history — can belong to the instrument rather than
+        to whichever session happened to drive it."""
+        return str(getattr(self, "instrument_id", None) or self.name)
+
+    def describe(self) -> Dict[str, Any]:
+        info = self.system_info if isinstance(self.system_info, dict) else {}
+        return {"id": self.id, "name": self.name, "technique": info.get("technique"),
+                "kind": type(self).__name__, "can_pause": self.can_pause}
+
+    #: True when ``pause()`` really holds the experiment (not just the acquisition).
+    can_pause: bool = False
+
+    def pause(self) -> None:
+        """Hold the experiment where holding is possible: blank the beam, hold
+        the temperature ramp, park the stage. Default: nothing — then a pause
+        only stops acquiring, and a sample that evolves on its own keeps
+        evolving. Called by :func:`run_experiment`, only under a ``pause_on``
+        policy the caller chose."""
+
+    def resume(self) -> None:
+        """Undo ``pause()``."""
 
     def check(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """``defaults`` overlaid with ``params``, refused if the schema objects —
@@ -221,7 +253,9 @@ def run_experiment(instrument: Instrument, loop: Any, n_frames: int, *,
                    on_frame: Optional[Callable[[Frame, Dict[str, Any]], None]] = None,
                    stop: Optional[Callable[[], bool]] = None,
                    operator: Optional[Callable[[Dict[str, Any], Dict[str, Any]],
-                                               Optional[Dict[str, Any]]]] = None
+                                               Optional[Dict[str, Any]]]] = None,
+                   pause_on: Any = (),
+                   on_pause: Optional[Callable[[Dict[str, Any], Dict[str, Any]], Any]] = None
                    ) -> List[Dict[str, Any]]:
     """Acquire → analyse → (maybe) apply the recommendation, ``n_frames`` times.
 
@@ -241,6 +275,18 @@ def run_experiment(instrument: Instrument, loop: Any, n_frames: int, *,
     The loop must already be armed (``setup()``). Returns the frame records,
     each with the simulator's ``truth`` attached when there is one.
 
+    ``pause_on`` makes the experiment WAIT when something worth a decision
+    happens — ``"novelty"`` (the data changed for good: the loop's ``novelty``
+    event, with how much and where) and/or ``"breach"`` (a run of frames the
+    recipe fails on). Where an experiment can be held, this is what turns a
+    discovery from a log entry into a decision point: the frames stop, the
+    instrument is asked to hold (``instrument.pause()``), and the slow work —
+    a thorough analysis, a literature check, a person looking — happens while
+    the sample is still in the state that looked new. ``on_pause(event, record)``
+    blocks until that decision exists and returns ``"resume"``, ``"stop"``, or
+    a dict of acquisition parameters to resume with (checked like any other).
+    It is required with ``pause_on``: a pause nobody can end is a hang.
+
     The caller owns the loop: call ``loop.close()`` when the stream ends (or use
     the loop as a context manager) so a re-anchor still running in the
     background is stopped. A rebuild takes one to three minutes, so a recording
@@ -249,6 +295,12 @@ def run_experiment(instrument: Instrument, loop: Any, n_frames: int, *,
     """
     if apply not in APPLY_POLICIES:
         raise ValueError(f"apply must be one of {APPLY_POLICIES}")
+    pause_on = {pause_on} if isinstance(pause_on, str) else set(pause_on or ())
+    if pause_on - {"novelty", "breach"}:
+        raise ValueError("pause_on accepts 'novelty' and 'breach'")
+    if pause_on and on_pause is None:
+        raise ValueError("pause_on needs on_pause: a pause nobody can end is a hang")
+    was_breaching = False
     current = instrument.check(params or {})
     incoming = Path(loop.output_dir) / "incoming"
     records: List[Dict[str, Any]] = []
@@ -273,6 +325,29 @@ def run_experiment(instrument: Instrument, loop: Any, n_frames: int, *,
                 and (apply == "valid" or not rec.get("requires_approval"))):
             current = instrument.check({**current, **rec["params"]})
             applied_from = rec.get("based_on_step")
+        # A decision point, where the caller asked for one.
+        reason = None
+        if "novelty" in pause_on and record.get("novelty"):
+            reason = {"why": "novelty", **record["novelty"]}
+        elif "breach" in pause_on and record.get("needs_escalation") and not was_breaching:
+            reason = {"why": "breach", "step": record.get("step"), "flags": record.get("flags")}
+        was_breaching = bool(record.get("needs_escalation"))
+        if reason is not None:
+            note = getattr(loop, "record_event", None) or (lambda *a, **k: None)
+            t_pause = time.time()
+            note("paused", why=reason["why"], held=bool(instrument.can_pause))
+            instrument.pause()
+            try:
+                decision = on_pause(reason, record)
+            finally:
+                instrument.resume()
+            changed = decision if isinstance(decision, dict) and decision else None
+            note("resumed", waited_s=round(time.time() - t_pause, 1), params=changed,
+                 decision="stop" if decision == "stop" else "change" if changed else "resume")
+            if decision == "stop":
+                break
+            if changed:
+                current = instrument.check({**current, **changed})
         if operator is not None:
             chosen = operator(dict(current), record)
             if chosen:

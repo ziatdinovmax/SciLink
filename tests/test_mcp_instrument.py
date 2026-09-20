@@ -114,12 +114,27 @@ class TestMCPInstrument:
             MCPInstrument(FakeConnection(), tool="measure")
 
 
+def test_pause_and_resume_map_onto_the_servers_tools():
+    tool = lambda n: {"type": "function", "function": {"name": n, "parameters": {}}}   # noqa: E731
+    conn = FakeConnection(tools=[TOOL, tool("pause"), tool("resume")])
+    inst = MCPInstrument(conn, tool="acquire_spectrum")
+    assert inst.can_pause
+    inst.pause(); inst.resume()
+    assert [c[0] for c in conn.calls[-2:]] == ["pause", "resume"]
+    plain = MCPInstrument(FakeConnection(), tool="acquire_spectrum")
+    assert plain.can_pause is False
+    plain.pause()                                                # nothing to call: a no-op
+    assert plain.connection.calls == []
+
+
 def test_the_reference_server_end_to_end_over_stdio():
     pytest.importorskip("mcp")
     inst = MCPInstrument.connect(command=[sys.executable, "-m", "scilink.live.mcp_demo_server",
                                           "afm_force_curve"])
     try:
         assert inst.system_info["technique"].startswith("AFM") and "stiffness_N_per_m" in inst.outputs
+        assert inst.id == "demo-afm_force_curve" and inst.can_pause
+        inst.pause(); inst.resume()
         assert inst.schema.get("trigger_force_nN").high == 60 and inst.defaults["trigger_force_nN"] == 20
         a, b = inst.acquire({}), inst.acquire({"trigger_force_nN": 40})
         assert len(a.x) == len(a.y) > 50 and float(np.max(b.y)) > float(np.max(a.y))

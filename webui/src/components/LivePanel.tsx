@@ -102,6 +102,13 @@ function describeEvent(e: LiveEvent): string {
       const w = ((e.where ?? []) as LiveNovelty["where"])[0];
       return `The data changed from frame ${g("since_step")}. ${describeWhere(w)}`;
     }
+    case "paused":
+      return g("why") === "novelty" ? "Paused. The data changed and the run is waiting for a decision."
+        : "Paused. The recipe stopped fitting and the run is waiting for a decision.";
+    case "resumed":
+      return g("decision") === "stop" ? "Stopped from the pause."
+        : g("decision") === "change" ? `Resumed with changed parameters after ${g("waited_s")} s.`
+        : `Resumed after ${g("waited_s")} s.`;
     case "state_accepted":
       return e.verified ? "The new state is accepted. An audit agreed with the recipe."
         : e.settled === false ? "The data is still changing. Accepted to keep tracking."
@@ -179,6 +186,7 @@ export function LivePanel({
   const [auditEvery, setAuditEvery] = useState("");
   const [onChange, setOnChange] = useState<NonNullable<LiveConfig["on_change"]>>("report");
   const [notes, setNotes] = useState("");
+  const [pauseOn, setPauseOn] = useState<"" | "novelty" | "breach" | "both">("");
   const [replayDir, setReplayDir] = useState("");
   const [technique, setTechnique] = useState("");
   const [sample, setSample] = useState("");
@@ -197,7 +205,9 @@ export function LivePanel({
   }, [sessionId]);
 
   const state = snap?.state ?? "idle";
-  const live = state === "arming" || state === "running";
+  const live = state === "arming" || state === "running" || state === "paused";
+  /** Parameters can be set while the run waits: they take effect on resume. */
+  const steerableNow = state === "running" || state === "paused";
 
   useEffect(() => {
     if (!active) return;
@@ -257,6 +267,7 @@ export function LivePanel({
       frame_deadline_s: parseFloat(deadline) > 0 ? parseFloat(deadline) : null,
       audit_every: parseInt(auditEvery, 10) > 0 ? parseInt(auditEvery, 10) : undefined,
       on_change: onChange, notes: notes.trim() || undefined,
+      pause_on: pauseOn === "both" ? ["novelty", "breach"] : pauseOn ? [pauseOn] : undefined,
       ...(instrument === REPLAY || instrument === MCP ? {
         replay_dir: instrument === REPLAY ? replayDir.trim() : undefined,
         mcp_server: instrument === MCP ? mcpServer : undefined,
@@ -531,6 +542,21 @@ export function LivePanel({
                   <option value="rebuild">rebuild</option>
                 </select>
               </label>
+              <label><span>Pause
+                  <Info>
+                    The run stops acquiring and waits for you: look at the frame, analyse it in Chat, change
+                    the parameters, then resume or stop. An instrument that can hold the experiment (blank
+                    the beam, hold the ramp) is asked to. Otherwise only the acquisition stops and the
+                    sample keeps evolving.
+                  </Info>
+                </span>
+                <select value={pauseOn} onChange={(e) => setPauseOn(e.target.value as typeof pauseOn)}>
+                  <option value="">never</option>
+                  <option value="novelty">when the data changes</option>
+                  <option value="breach">when the recipe stops fitting</option>
+                  <option value="both">on either</option>
+                </select>
+              </label>
               <label><span>Audit every N frames
                   <Info>
                     An independent analysis of the current frame runs in the background and its tracked
@@ -632,6 +658,7 @@ export function LivePanel({
         <h3>{inst?.technique ?? inst?.name}</h3>
         <span className={`live-state ${state}`}>
           {state === "arming" ? "◌ preparing" : state === "running" ? "● running"
+            : state === "paused" ? "❚❚ paused"
             : state === "done" ? "✓ finished" : state === "stopped" ? "■ stopped" : "✕ error"}
         </span>
         {count > 0 && (
@@ -694,6 +721,31 @@ export function LivePanel({
         </div>
       )}
 
+      {state === "paused" && snap?.paused && (
+        <div className="live-novelty paused">
+          <div>
+            <b>Paused at frame {snap.paused.step ?? count}.</b>{" "}
+            {snap.paused.why === "novelty" ? "The data changed. " : "The recipe stopped fitting. "}
+            {snap.paused.experiment_held
+              ? "The instrument is holding the experiment."
+              : "Acquisition has stopped. The instrument cannot hold the experiment, so the sample may keep changing."}
+            {snap.paused.timeout_s ? ` Resumes unchanged after ${snap.paused.timeout_s} s.` : ""}
+            <Info>
+              Parameters you set below take effect when you resume. A thorough analysis of the frame in
+              Chat can run while the run waits.
+            </Info>
+          </div>
+          <button className="primary small" disabled={busy}
+            onClick={() => act(async () => {
+              await api.liveResume(sessionId, "resume", Object.keys(pending).length ? pending : undefined);
+              setEdits({});
+            })}>
+            {Object.keys(pending).length ? "Resume with changes" : "Resume"}
+          </button>
+          <button disabled={busy} onClick={() => act(() => api.liveResume(sessionId, "stop"))}>Stop</button>
+        </div>
+      )}
+
       {(snap?.novelties ?? []).slice(-2).reverse().map((n) => (
         <div key={n.since_step} className="live-novelty">
           <div>
@@ -713,7 +765,8 @@ export function LivePanel({
                 `Analyze ${n.frame_abs_path || n.frame_path} thoroughly. Context: it is frame ${n.step} of a live ` +
                 `${inst?.technique ?? "measurement"} run. From frame ${n.since_step} the data changed` +
                 (typeof n.fraction === "number" ? ` (${Math.round(100 * n.fraction)} % of a frame is unlike the earlier frames)` : "") +
-                `. ${describeWhere(n.where[0])} Say what changed and what it means.`)}
+                `. ${describeWhere(n.where[0])} Say what changed as specific, testable claims, ` +
+                `then assess how novel each claim is against the literature.`)}
             >
               Analyse in Chat
             </button>
@@ -829,7 +882,7 @@ export function LivePanel({
                     <label key={k}>
                       <span><code>{k}</code>{p.units ? ` (${p.units})` : ""}</span>
                       <input
-                        type="text" value={edits[k] ?? String(params[k] ?? "")} disabled={state !== "running"}
+                        type="text" value={edits[k] ?? String(params[k] ?? "")} disabled={!steerableNow}
                         onChange={(e) => setEdits((d) => ({ ...d, [k]: e.target.value }))}
                       />
                     </label>
@@ -865,7 +918,7 @@ export function LivePanel({
                     {!rec.valid && (
                       <p className="caption warn">Refused. {(rec.problems ?? []).join(". ")}</p>
                     )}
-                    {rec.valid && rec.params && state === "running" && !recIsCurrent && (
+                    {rec.valid && rec.params && steerableNow && !recIsCurrent && (
                       <button
                         className="success" disabled={busy}
                         onClick={() => act(() => api.liveParams(sessionId, rec.params as Record<string, number | string>))}
