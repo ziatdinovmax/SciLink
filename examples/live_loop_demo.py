@@ -14,8 +14,16 @@ To try it on data you have already recorded, swap the simulator for
 ``ReplayInstrument("path/to/folder", system_info={...}, outputs={...})``: every
 two-column file in the folder is served as one frame, in file order.
 
-To move to a real instrument, replace ``get_simulator(...)`` with your own
-``Instrument`` subclass (the sketch at the bottom). Nothing else changes; the
+To move to a real instrument there are two routes. If the instrument has (or
+can get) an MCP server in front of its controller, in any language, use
+
+    MCPInstrument.connect(command=["python", "my_instrument_server.py"], tool="acquire")
+
+The acquisition parameters and their limits are read from the tool's own input
+schema; ``scilink/live/mcp_demo_server.py`` is a reference server, and in the
+web UI the same server is connected in the MCP tab and picked in the Live tab.
+Otherwise replace ``get_simulator(...)`` with your own ``Instrument`` subclass
+(the sketch at the bottom). Nothing else changes; the
 same class also works in the web UI's Live tab as ``package.module:ClassName``.
 """
 

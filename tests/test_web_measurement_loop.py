@@ -230,6 +230,31 @@ def test_the_frame_deadline_comes_from_the_page(session):
     assert all(f["flags"] == [] for f in snap["frames"])
 
 
+# ── an instrument behind an MCP server connected in the MCP tab ──
+
+def test_an_mcp_server_in_the_session_can_be_the_instrument(session):
+    from tests.test_mcp_instrument import TOOL, FakeConnection
+    x = [float(i) for i in range(40)]
+    conn = FakeConnection(reply={"x": x, "y": [1.0 + (i == 20) * 5 for i in range(40)],
+                                 "meta": {"T_K": 300}})
+    session.agent._mcp_connections = {"raman-lab": conn}
+    assert live_api.snapshot(session)["mcp_servers"] == [
+        {"name": "raman-lab", "tools": ["acquire_spectrum"]}]
+    base = {**CONFIG, "instrument": "mcp", "mcp_server": "raman-lab", "mcp_tool": "acquire_spectrum"}
+    with pytest.raises(LiveError, match="technique"):                # the server did not describe itself
+        live_api.start(session, dict(base))
+    with pytest.raises(LiveError, match="Connect it in the MCP tab"):
+        live_api.start(session, {**base, "mcp_server": "nope"})
+    live_api.start(session, {**base, "system_info": {"technique": "Raman spectroscopy"}})
+    snap = _wait(session, lambda s: s["state"] in ("done", "error"))
+    assert snap["state"] == "done", snap.get("error")
+    assert len(snap["frames"]) == 4 and len(conn.calls) == 5         # reference + four frames
+    info = snap["instrument"]
+    assert "integration_s" in info["schema"] and any("stage_z_um" in h for h in info["held"])
+    # the measurement's own metadata reached the analysis through the sidecar
+    assert snap["frames"][0]["params"]["integration_s"] == 1.0
+
+
 # ── replaying a folder of recorded measurements ──────────────────
 
 def _recording(tmp_path, n=5):

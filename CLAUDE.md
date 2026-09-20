@@ -803,6 +803,20 @@ vendor's API, limits and file format belong to the `Instrument` subclass and its
 `schema`), and they stay out of the `run_analysis` skill menu, like
 `data_preparation`.
 
+**Onboarding an instrument has two halves, and neither is a SciLink class.**
+The *driver* — how to talk to the controller, its file formats, its real limits —
+is an MCP server in front of the instrument, in any language: one tool that
+takes acquisition parameters and returns a measurement.
+`scilink.live.MCPInstrument` turns that tool into the loop's instrument and
+reads the parameters and their limits from the tool's own `inputSchema` (a
+number with no declared limits is held at its default and never steered: the
+loop does not invent safe limits). `scilink/live/mcp_demo_server.py` is the
+reference server. The *knowledge* — how to steer this kind of measurement — is
+an acquisition skill per technique, selected from `system_info["technique"]`,
+which the server can supply through a `describe_instrument` tool. A Python
+`Instrument` subclass remains the in-process alternative. Uploaded skills stay
+markdown-only, so a driver never arrives through the skill uploader.
+
 ### Comparison with Anthropic Skills
 
 |  | Anthropic | SciLink |

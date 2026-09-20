@@ -58,6 +58,7 @@ def _instrument_info(inst: Any) -> Dict[str, Any]:
         "targets": list(inst.targets or []),
         "events": [{**e, "what": _plain(e.get("what"))}
                    for e in (getattr(inst, "events", []) or [])],
+        "held": [_plain(h) for h in (getattr(inst, "held", None) or [])],
     }
 
 
@@ -87,8 +88,50 @@ def _replay_instrument(config: Dict[str, Any]) -> Any:
         raise LiveError(400, str(e))
 
 
+def list_mcp_servers(agent: Any) -> List[Dict[str, Any]]:
+    """MCP servers connected in this session (the MCP tab) and their tools — any
+    of which may be an instrument's ``acquire``."""
+    out = []
+    for name, conn in (getattr(agent, "_mcp_connections", None) or {}).items():
+        tools = [(t.get("function") or {}).get("name") for t in (getattr(conn, "tool_schemas", None) or [])]
+        out.append({"name": name, "tools": [t for t in tools if t]})
+    return out
+
+
+def _described(config: Dict[str, Any]):
+    """What the form says about the measurement: system_info, outputs, targets."""
+    info = {k: str(v).strip() for k, v in (config.get("system_info") or {}).items()
+            if str(v or "").strip()}
+    outputs = {str(k).strip(): str(v).strip() for k, v in (config.get("outputs") or {}).items()
+               if str(k).strip() and str(v or "").strip()}
+    targets = [str(t).strip() for t in (config.get("targets") or []) if str(t).strip()]
+    return info, outputs, targets
+
+
+def _mcp_instrument(config: Dict[str, Any], agent: Any) -> Any:
+    """An instrument behind an MCP server already connected in the MCP tab. The
+    server is the driver; nothing is imported or executed here."""
+    from scilink.live.mcp_instrument import MCPInstrument
+    server = str(config.get("mcp_server") or "").strip()
+    conn = (getattr(agent, "_mcp_connections", None) or {}).get(server)
+    if conn is None:
+        raise LiveError(400, f"No MCP server named {server!r} is connected in this session. "
+                             "Connect it in the MCP tab first.")
+    info, outputs, targets = _described(config)
+    try:
+        inst = MCPInstrument(conn, tool=str(config.get("mcp_tool") or "acquire"),
+                             system_info=info or None, outputs=outputs or None,
+                             targets=targets or None)
+    except ValueError as e:
+        raise LiveError(400, str(e))
+    if not (inst.system_info or {}).get("technique"):
+        raise LiveError(400, "Say which measurement technique this is. The server did not "
+                             "describe itself and the analysis needs to know.")
+    return inst
+
+
 def _make_instrument(spec: str, seed: int, allow_custom: bool = True,
-                     config: Optional[Dict[str, Any]] = None) -> Any:
+                     config: Optional[Dict[str, Any]] = None, agent: Any = None) -> Any:
     """A simulator by name, recorded data (``replay``), or the user's own
     ``package.module:Class``.
 
@@ -99,6 +142,8 @@ def _make_instrument(spec: str, seed: int, allow_custom: bool = True,
     from scilink.live.simulators import SIMULATORS
     if spec in SIMULATORS:
         return SIMULATORS[spec](seed=seed)
+    if spec == "mcp":
+        return _mcp_instrument(config or {}, agent)
     if spec == "replay":
         if not allow_custom:
             raise LiveError(403, "Replaying a folder is only available when SciLink runs on "
@@ -109,7 +154,7 @@ def _make_instrument(spec: str, seed: int, allow_custom: bool = True,
                              "or your own as 'package.module:ClassName'.")
     if not allow_custom:
         raise LiveError(403, "Custom instruments are only available when SciLink runs on "
-                             "your own machine; this server offers the simulated experiments.")
+                             "your own machine. This server offers the simulated experiments.")
     module_name, _, cls_name = spec.partition(":")
     try:
         cls = getattr(importlib.import_module(module_name), cls_name)
@@ -234,7 +279,8 @@ class LiveRun:
         self.note: Optional[str] = None
         self.started_at = time.time()
         self.instrument = _make_instrument(str(config.get("instrument") or ""),
-                                           int(config.get("seed") or 0), allow_custom, config)
+                                           int(config.get("seed") or 0), allow_custom, config,
+                                           agent)
         # Frames to collect. None = open-ended, until Stop — the normal case
         # at an instrument. A recording is finite whatever was asked.
         n = config.get("n_frames")
@@ -481,6 +527,7 @@ def start(session: Any, config: Dict[str, Any], allow_custom: bool = True) -> Di
 
 def _idle(session: Any) -> Dict[str, Any]:
     return {"state": "idle", "simulators": list_simulators(),
+            "mcp_servers": list_mcp_servers(session.agent),
             "analyses": list_reference_analyses(session.session_dir)}
 
 

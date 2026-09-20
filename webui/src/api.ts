@@ -365,6 +365,8 @@ export interface LiveInstrumentInfo {
   targets: string[];
   events: { frame: number; what: string }[];
   simulated?: boolean;
+  /** Parameters the instrument takes but the loop will not steer, with the reason. */
+  held?: string[];
 }
 /** A curve analysis already in the session that a live loop can adopt as its reference. */
 export interface LiveReferenceAnalysis {
@@ -411,6 +413,8 @@ export interface LiveSnapshot {
   note?: string | null;
   simulators?: LiveInstrumentInfo[];
   analyses?: LiveReferenceAnalysis[];
+  /** MCP servers connected in this session; any tool may be an instrument's acquire. */
+  mcp_servers?: { name: string; tools: string[] }[];
   /** What to trace: the named outputs, else the recipe's own quantities. */
   output_keys?: string[];
   run_dir?: string;
@@ -455,6 +459,9 @@ export interface LiveConfig {
   auto_escalate: boolean;
   reference_profile?: string;
   seed?: number;
+  /** instrument === "mcp": a server connected in the MCP tab and its acquire tool. */
+  mcp_server?: string;
+  mcp_tool?: string;
   /** instrument === "replay": a folder of recorded measurements and what they are. */
   replay_dir?: string;
   system_info?: Record<string, string>;

@@ -16,6 +16,7 @@ import { fmt, fmtShort, LiveChart } from "./LiveChart";
 
 const CUSTOM = "__custom__";
 const REPLAY = "replay";
+const MCP = "mcp";
 const FIRST_FRAME = "__first_frame__";
 const POLL_MS = 1500;
 
@@ -142,6 +143,8 @@ export function LivePanel({
   const [xAxis, setXAxis] = useState("");
   const [yAxis, setYAxis] = useState("");
   const [outputsText, setOutputsText] = useState("");
+  const [mcpServer, setMcpServer] = useState("");
+  const [mcpTool, setMcpTool] = useState("");
 
   // running view
   const [edits, setEdits] = useState<Record<string, string>>({});
@@ -170,7 +173,18 @@ export function LivePanel({
 
   const chosen: LiveInstrumentInfo | undefined =
     state === "idle" ? simulators.find((s) => s.name === instrument) : snap?.instrument;
-  const formOutputs = useMemo(() => Object.keys(chosen?.outputs ?? {}), [chosen]);
+  const mcpServers = snap?.mcp_servers ?? [];
+  const mcpTools = mcpServers.find((m) => m.name === mcpServer)?.tools ?? [];
+  useEffect(() => {
+    if (mcpServers.length && !mcpServers.some((m) => m.name === mcpServer)) setMcpServer(mcpServers[0].name);
+  }, [mcpServers, mcpServer]);
+  useEffect(() => {
+    if (mcpTools.length && !mcpTools.includes(mcpTool))
+      setMcpTool(mcpTools.find((t) => t.toLowerCase().includes("acquire")) ?? mcpTools[0]);
+  }, [mcpTools, mcpTool]);
+  const formOutputs = useMemo(
+    () => (chosen ? Object.keys(chosen.outputs ?? {}) : Object.keys(parseOutputs(outputsText))),
+    [chosen, outputsText]);
   useEffect(() => {
     if (formOutputs.length && !formOutputs.includes(objectiveKey)) setObjectiveKey(formOutputs[0]);
   }, [formOutputs, objectiveKey]);
@@ -199,8 +213,10 @@ export function LivePanel({
       reference_analysis: reference === FIRST_FRAME ? undefined : reference,
       reference_frames: Math.max(1, Math.min(25, parseInt(refFrames, 10) || 1)),
       frame_deadline_s: parseFloat(deadline) > 0 ? parseFloat(deadline) : null,
-      ...(instrument === REPLAY ? {
-        replay_dir: replayDir.trim(),
+      ...(instrument === REPLAY || instrument === MCP ? {
+        replay_dir: instrument === REPLAY ? replayDir.trim() : undefined,
+        mcp_server: instrument === MCP ? mcpServer : undefined,
+        mcp_tool: instrument === MCP ? mcpTool : undefined,
         system_info: { technique, sample, x_axis: xAxis, y_axis: yAxis },
         outputs: parseOutputs(outputsText),
       } : {}),
@@ -214,6 +230,7 @@ export function LivePanel({
     const ready = !busy &&
       !(instrument === CUSTOM && !custom.includes(":")) &&
       !(instrument === REPLAY && !(replayDir.trim() && technique.trim())) &&
+      !(instrument === MCP && !(mcpServer && mcpTool)) &&
       !(steerable && recommender === "llm" && !objective.trim());
     return (
       <div className="live-panel">
@@ -243,6 +260,7 @@ export function LivePanel({
                 {simulators.map((s) => (
                   <option key={s.name} value={s.name}>{s.technique ?? s.name} (simulated)</option>
                 ))}
+                <option value={MCP}>Instrument on an MCP server</option>
                 {localFiles && <option value={REPLAY}>Recorded data in a folder</option>}
                 {localFiles && <option value={CUSTOM}>My instrument</option>}
               </select>
@@ -280,18 +298,57 @@ export function LivePanel({
             </label>
           )}
 
-          {instrument === REPLAY && (
-            <>
-              <label>
-                <span>Folder
+          {instrument === MCP && (mcpServers.length === 0 ? (
+            <p className="caption">Connect the instrument's server in the MCP tab first.</p>
+          ) : (
+            <div className="live-row">
+              <label className="grow">
+                <span>Server
                   <Info>
-                    Every two-column file in the folder (.csv .txt .xy .dat .tsv .npy) is one frame, in file
-                    order. Recorded data cannot be steered, so there is no recommender.
+                    An MCP server in front of your instrument controller, connected in the MCP tab. It can
+                    be written in any language. One tool takes the acquisition parameters and returns a
+                    measurement as x and y arrays, a data table, or the path of a two-column file. The
+                    parameters and their limits are read from the tool's own input schema. A number with no
+                    declared limits is held at its default and never steered.
+                    See <code>scilink/live/mcp_demo_server.py</code> for a reference server.
                   </Info>
                 </span>
-                <input type="text" placeholder="/path/to/recorded/series" value={replayDir}
-                  onChange={(e) => setReplayDir(e.target.value)} />
+                <select value={mcpServer} onChange={(e) => setMcpServer(e.target.value)}>
+                  {mcpServers.map((m) => <option key={m.name}>{m.name}</option>)}
+                </select>
               </label>
+              <label className="grow"><span>Acquire tool</span>
+                <select value={mcpTool} onChange={(e) => setMcpTool(e.target.value)}>
+                  {mcpTools.map((t) => <option key={t}>{t}</option>)}
+                </select>
+              </label>
+            </div>
+          ))}
+
+          {instrument === REPLAY && (
+            <label>
+              <span>Folder
+                <Info>
+                  Every two-column file in the folder (.csv .txt .xy .dat .tsv .npy) is one frame, in file
+                  order. Recorded data cannot be steered, so there is no recommender.
+                </Info>
+              </span>
+              <input type="text" placeholder="/path/to/recorded/series" value={replayDir}
+                onChange={(e) => setReplayDir(e.target.value)} />
+            </label>
+          )}
+
+          {(instrument === REPLAY || instrument === MCP) && (
+            <>
+              {instrument === MCP && (
+                <p className="caption">
+                  Optional when the server describes itself.
+                  <Info>
+                    If the server has a <code>describe_instrument</code> tool, its technique, sample and
+                    tracked quantities are used. Anything you enter here wins.
+                  </Info>
+                </p>
+              )}
               <div className="live-row">
                 <label className="grow"><span>Technique</span>
                   <input type="text" placeholder="Raman spectroscopy" value={technique}
@@ -357,9 +414,14 @@ export function LivePanel({
               {recommender === "gp" && (
                 <>
                   <label><span>Quantity</span>
-                    <select value={objectiveKey} onChange={(e) => setObjectiveKey(e.target.value)}>
-                      {formOutputs.map((k) => <option key={k}>{k}</option>)}
-                    </select>
+                    {formOutputs.length > 0 ? (
+                      <select value={objectiveKey} onChange={(e) => setObjectiveKey(e.target.value)}>
+                        {formOutputs.map((k) => <option key={k}>{k}</option>)}
+                      </select>
+                    ) : (
+                      <input type="text" placeholder="name of a tracked quantity" value={objectiveKey}
+                        onChange={(e) => setObjectiveKey(e.target.value)} />
+                    )}
                   </label>
                   <label><span>Direction</span>
                     <select value={direction} onChange={(e) => setDirection(e.target.value as "maximize" | "minimize")}>
@@ -602,9 +664,12 @@ export function LivePanel({
                   <Info>
                     The parameters in use. Change a value and press Use to apply it from the next frame. The
                     instrument's limits are checked first.
-                    <ul>{schema.map(([k, p]) => (
-                      <li key={k}><code>{k}</code> {p.low !== undefined ? `${p.low} to ${p.high}` : ""} {p.units ?? ""}. {p.description}</li>
-                    ))}</ul>
+                    <ul>
+                      {schema.map(([k, p]) => (
+                        <li key={k}><code>{k}</code> {p.low !== undefined ? `${p.low} to ${p.high}` : ""} {p.units ?? ""}. {p.description}</li>
+                      ))}
+                      {(inst?.held ?? []).map((h) => <li key={h}>Not steered. {h}</li>)}
+                    </ul>
                   </Info>
                 </div>
                 <div className="live-params">
