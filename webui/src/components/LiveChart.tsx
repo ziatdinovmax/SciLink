@@ -143,6 +143,7 @@ export function LiveChart({
   const hRef = hp && geo ? geo.refPts.find((p) => p.x === hp.x) : undefined;
   const hOv = hp && geo ? geo.ovPts.find((p) => p.x === hp.x) : undefined;
   const hFlag = hp ? flagged.find((f) => f.x === hp.x) : undefined;
+  const hRule = hp ? rules.find((r) => r.x === hp.x) : undefined;
   const dense = (geo?.pts.length ?? 0) > 120;
 
   return (
@@ -180,16 +181,7 @@ export function LiveChart({
             </text>
           )}
           {rules.filter((r) => r.x >= geo.x0 && r.x <= geo.x1).map((r, i) => (
-            <g key={`r${i}`}>
-              <line className="rule" x1={geo.sx(r.x)} x2={geo.sx(r.x)} y1={M.top} y2={H - M.bottom} />
-              <text
-                className="rule-label" y={M.top + 9 + (i % 2) * 11}
-                x={geo.sx(r.x) + (geo.sx(r.x) > M.left + geo.iw / 2 ? -4 : 4)}
-                textAnchor={geo.sx(r.x) > M.left + geo.iw / 2 ? "end" : "start"}
-              >
-                {r.label}
-              </text>
-            </g>
+            <line key={`r${i}`} className="rule" x1={geo.sx(r.x)} x2={geo.sx(r.x)} y1={M.top} y2={H - M.bottom} />
           ))}
           {geo.refPts.length > 1 && <path className="reference" d={geo.path(geo.refPts)} />}
           {geo.ordered ? (
@@ -216,6 +208,26 @@ export function LiveChart({
             const cx = geo.sx(p.x), cy = geo.sy(p.y as number);
             return <path key={`f${f.x}`} className="flag" d={`M${cx},${cy - 6}L${cx + 5.5},${cy + 4}L${cx - 5.5},${cy + 4}Z`} />;
           })}
+          {/* Event labels go over the lines, with a halo, in the first slot (top, middle,
+              bottom) where they cover no flagged frame. With none free the tooltip carries it. */}
+          {rules.filter((r) => r.x >= geo.x0 && r.x <= geo.x1).map((r, i) => {
+            const left = geo.sx(r.x) > M.left + geo.iw / 2;
+            const w = 6.2 * r.label.length + 6;
+            const xa = geo.sx(r.x) + (left ? -4 - w : 4), xb = xa + w;
+            const marks = flagged
+              .map((f) => geo.pts.find((q) => q.x === f.x))
+              .filter((q): q is ChartPoint => !!q)
+              .map((q) => [geo.sx(q.x), geo.sy(q.y as number)]);
+            const y = [M.top + 9 + (i % 2) * 11, M.top + geo.ih / 2 + 4, H - M.bottom - 5].find((yy) =>
+              !marks.some(([mx, my]) => mx > xa - 7 && mx < xb + 7 && my > yy - 16 && my < yy + 9));
+            if (y === undefined) return null;
+            return (
+              <text key={`rl${i}`} className="rule-label" y={y}
+                x={geo.sx(r.x) + (left ? -4 : 4)} textAnchor={left ? "end" : "start"}>
+                {r.label}
+              </text>
+            );
+          })}
           {hp && (
             <g>
               <line className="crosshair" x1={geo.sx(hp.x)} x2={geo.sx(hp.x)} y1={M.top} y2={H - M.bottom} />
@@ -240,6 +252,7 @@ export function LiveChart({
           {hOv && <div><i className="key overlay" /> <b>{fmt(hOv.y)}</b> <span>{overlayLabel}</span></div>}
           {hRef && <div><i className="key reference" /> <b>{fmt(hRef.y)}</b> <span>{referenceLabel}</span></div>}
           {hFlag && <div className="tt-flag">▲ {hFlag.label}</div>}
+          {hRule && <div className="tt-flag">{hRule.label}</div>}
         </div>
       )}
     </div>

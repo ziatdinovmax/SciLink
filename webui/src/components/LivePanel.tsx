@@ -488,7 +488,7 @@ export function LivePanel({
               {recommender === "llm" && (
                 <label className="grow"><span>Goal</span>
                   <input type="text" value={objective} onChange={(e) => setObjective(e.target.value)}
-                    placeholder="G position to ±0.5 cm⁻¹ with the shortest frames, no laser heating" />
+                    placeholder="what to get right, what to spare, and any limit that must hold" />
                 </label>
               )}
             </div>
@@ -636,8 +636,8 @@ export function LivePanel({
   const count = st.frames ?? frames.length;
   const flagCounts = Object.entries(st.flag_counts ?? {});
   const rules = events
-    .filter((e) => e.event === "reanchor" && typeof e.step === "number")
-    .map((e) => ({ x: e.step as number, label: "new recipe" }));
+    .filter((e) => (e.event === "reanchor" || e.event === "paused") && typeof e.step === "number")
+    .map((e) => ({ x: e.step as number, label: e.event === "paused" ? "paused" : "new recipe" }));
   const flagged = frames.filter((f) => f.flags.length).map((f) => ({
     x: f.step, label: f.flags.map((x) => FLAG_WORDS[x] ?? x).join(", "),
   }));
@@ -682,7 +682,7 @@ export function LivePanel({
           </ul>
         </Info>
         <span className="live-head-actions">
-          {live
+          {state === "paused" ? null : live
             ? <button onClick={() => act(() => api.liveStop(sessionId))} disabled={busy}>Stop</button>
             : <button className="primary small" onClick={() => act(() => api.liveClear(sessionId))} disabled={busy}>New run</button>}
         </span>
@@ -700,7 +700,7 @@ export function LivePanel({
           </Info>
         </p>
       )}
-      {latest && latest.flags.length > 0 && (
+      {latest && latest.flags.length > 0 && state !== "paused" && (
         <div className="live-flags">
           ▲ Frame {latest.step}: {latest.flags.map((f) => FLAG_WORDS[f] ?? f).join(", ")}.
           {st.escalating ? (st.background === "audit"
@@ -725,7 +725,7 @@ export function LivePanel({
         <div className="live-novelty paused">
           <div>
             <b>Paused at frame {snap.paused.step ?? count}.</b>{" "}
-            {snap.paused.why === "novelty" ? "The data changed. " : "The recipe stopped fitting. "}
+            {snap.paused.why === "breach" ? "The recipe stopped fitting. " : ""}
             {snap.paused.experiment_held
               ? "The instrument is holding the experiment."
               : "Acquisition has stopped. The instrument cannot hold the experiment, so the sample may keep changing."}
