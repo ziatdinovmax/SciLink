@@ -26,6 +26,7 @@ from rich.text import Text
 
 from scilink.sessions import register_session, resolve_session, touch_session
 from scilink.skills.loader import scilink_home
+from scilink.ui.session_meta import generate_session_title, load_session_name, save_session_name
 from scilink.ui import vocabulary as V
 
 from . import bootstrap
@@ -186,8 +187,30 @@ class Shell:
                        renderer=self.renderer, ask_question=self.widgets.ask)
         for k in self.totals:
             self.totals[k] += res.tokens.get(k, 0)
+        if res.result and not res.stopped:
+            self._auto_title(text, res.result)
         if res.error and not self.renderer.verbose:
             self.console.print("[dim]Ctrl+O or /verbose shows the full narration.[/]")
+
+    def _auto_title(self, first_user: str, first_reply: str) -> None:
+        """Name the session from the first exchange, as the web UI does (one
+        small model call); a name the user set is never overwritten."""
+        if self.session_dir is None or load_session_name(self.session_dir):
+            return
+        try:
+            title = generate_session_title(getattr(self.agent, "model", None),
+                                           first_user, first_reply)
+        except Exception:  # noqa: BLE001 - naming must never break a turn
+            title = None
+        if title and save_session_name(self.session_dir, title, named_by="agent"):
+            touch_session(self.session_dir)
+            self.console.print(Text(f"  session named: {title}  (/name changes it)", style="dim"))
+
+    def set_name(self, name: str) -> bool:
+        ok = save_session_name(self.session_dir, name, named_by="user")
+        if ok:
+            touch_session(self.session_dir)
+        return ok
 
     # ── the loop ───────────────────────────────────────────────
 

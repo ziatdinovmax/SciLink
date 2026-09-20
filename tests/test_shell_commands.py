@@ -150,3 +150,16 @@ def test_status_bar_fits_a_narrow_terminal(tmp_path, monkeypatch):
     assert len(lines[-1]) <= 80 - 4
     assert "autopilot" in lines[-1] and "verbose off" in lines[-1]
     assert "bedrock" not in lines[-1]           # the model was dropped first
+
+
+def test_name_command_sets_the_session_name_and_the_picker_shows_it(tmp_path, monkeypatch):
+    from scilink import sessions as S
+    from scilink.ui.session_meta import load_session_name
+    code, out, shell = _run_shell(tmp_path, monkeypatch, "/name Grain sizes in 304 steel\r/status\r/quit\r",
+                                  ask=False)
+    assert code == 0 and "session named" in out
+    assert load_session_name(shell.session_dir) == "Grain sizes in 304 steel"
+    import re as _re
+    assert _re.search(r"Name\s+Grain sizes in 304 steel", out)               # /status shows it
+    listed = S.list_sessions("meta", root=tmp_path)
+    assert listed[0]["label"].startswith("Grain sizes in 304 steel")       # the picker label

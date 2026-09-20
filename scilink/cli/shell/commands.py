@@ -85,6 +85,7 @@ def _status(shell, arg: str) -> None:
         ("Mode", f"{m['emoji']}  {m['name']}"),
         ("Autonomy", shell.adapter.get_autonomy(shell.agent)),
         ("Session", str(shell.session_dir)),
+        ("Name", _session_name(shell) or "[dim]none yet — /name <text>, or set after the first turn[/]"),
         ("Model", shell.model_label()),
         ("Messages", str(getattr(shell.agent, "message_count", "?"))),
         ("Human feedback", "on" if _feedback_on(shell.agent) else "off"),
@@ -102,6 +103,23 @@ def _status(shell, arg: str) -> None:
     for k, v in rows:
         t.add_row(k, str(v))
     shell.console.print(t)
+
+
+def _session_name(shell):
+    from scilink.ui.session_meta import load_session_name
+    return load_session_name(shell.session_dir) if shell.session_dir else None
+
+
+def _name(shell, arg: str) -> None:
+    if not arg:
+        current = _session_name(shell)
+        shell.console.print(f"Session name: [bold]{current}[/]" if current
+                            else "No name yet. Usage: /name <text>")
+        return
+    if shell.set_name(arg):
+        shell.console.print(f"[green]✓[/] session named [bold]{arg[:80]}[/]")
+    else:
+        shell.console.print("[red]Could not save the name[/]")
 
 
 def _feedback_on(agent) -> bool:
@@ -297,6 +315,7 @@ def core_commands() -> List[Command]:
         Command("/files", "Files in the session directory", _files, arg_hint="[subdir]"),
         Command("/verbose", "Toggle verbose narration (Ctrl+O, also mid-turn)", _verbose),
         Command("/cost", "LLM calls and tokens this session", _cost),
+        Command("/name", "Show or set this session's name", _name, arg_hint="[text]"),
         Command("/sessions", "Past sessions here that can be resumed", _sessions),
         Command("/resume", "Resume a past session", _resume, arg_hint="[id]"),
         Command("/checkpoint", "Save the session state now", _checkpoint),
