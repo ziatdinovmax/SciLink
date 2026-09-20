@@ -2714,16 +2714,19 @@ Select the most appropriate strategy:
             self.state["iteration_index"] = 0
         _tea_iteration = self.state.get("iteration_index", 0)
 
-        # 2. Build KB if needed
+        # 2. Build KB if needed. A missing / unbuilt knowledge base is NOT
+        # fatal, as in generate_plan: retrieval is grounding, not a dependency.
+        # The TEA still has its primary data and any literature file, and its
+        # FALLBACK tier exists for exactly the case where no economic context
+        # is retrievable (the result then says so in ``generation_mode``).
+        # Aborting here failed every TEA asked of a session with no documents
+        # ("KB Init Failed"), including one given a feedstock table and a
+        # completed economic-data literature search.
         if not self._ensure_kb_is_ready(knowledge_paths, code_paths=None):
-            error_result = {"error": "KB Init Failed"}
-            self._log_action(
-                action="perform_technoeconomic_analysis",
-                input_ctx={"objective": objective},
-                result=error_result,
-                rationale=None
+            logging.warning(
+                "Knowledge base unavailable — running the TEA on the primary "
+                "data, any supplied literature and general benchmarks."
             )
-            return error_result
         
         # 3. External context is caller-provided only (orchestrator's
         # search_literature economic_data type is the sanctioned path; the
