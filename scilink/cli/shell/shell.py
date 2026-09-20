@@ -54,6 +54,18 @@ def scilink_version() -> str:
         return "dev"
 
 
+def context_usage(agent) -> Optional[tuple]:
+    """(messages, limit) of the agent's chat history against the point where
+    the orchestrators trim it — the same test all four use
+    (``len(messages) > MAX_HISTORY_MESSAGES + TRIM_HYSTERESIS``). None when
+    the agent does not expose those."""
+    msgs = getattr(agent, "messages", None)
+    limit = getattr(agent, "MAX_HISTORY_MESSAGES", None)
+    if not isinstance(msgs, list) or not isinstance(limit, int):
+        return None
+    return len(msgs), limit + int(getattr(agent, "TRIM_HYSTERESIS", 0) or 0)
+
+
 class Shell:
     def __init__(self, adapter, args, *, console: Optional[Console] = None,
                  pt_input=None, pt_output=None) -> None:
@@ -177,15 +189,20 @@ class Shell:
         repeated here — the placeholder already names it."""
         autonomy = self.adapter.get_autonomy(self.agent) if self.agent is not None else "?"
         verbose = "verbose on" if self.renderer.verbose else "verbose off"
+        usage = context_usage(self.agent)
+        context = f" · context {100 * usage[0] // usage[1]}%" if usage else ""
         left = (f" {autonomy} · {self.session_dir.name if self.session_dir else ''} · "
-                f"{getattr(self.args, 'model', '')} · {verbose}")
+                f"{getattr(self.args, 'model', '')} · {verbose}{context}")
         right = f"scilink {scilink_version()} "
         try:
             width = get_app().output.get_size().columns
         except Exception:  # noqa: BLE001
             width = self.console.size.width
-        gap = max(1, width - len(left) - len(right))
-        rule = "\u2500" * width
+        # One column short of the width: a full-width line wraps in the
+        # toolbar and pushes the status line out of view.
+        usable = max(20, width - 1)
+        gap = max(1, usable - len(left) - len(right))
+        rule = "\u2500" * usable
         return HTML(f"{rule}\n{left}{' ' * gap}{right}")
 
     def _rule(self) -> None:

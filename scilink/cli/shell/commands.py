@@ -90,6 +90,11 @@ def _status(shell, arg: str) -> None:
         ("Human feedback", "on" if _feedback_on(shell.agent) else "off"),
         ("Verbose output", "on" if shell.renderer.verbose else "off"),
     ]
+    from .shell import context_usage
+    usage = context_usage(shell.agent)
+    if usage:
+        rows.append(("Context", f"{usage[0]} of {usage[1]} messages before history is trimmed "
+                                f"({100 * usage[0] // usage[1]}%)"))
     rows += shell.adapter.status_fields(shell.agent)
     t = Table.grid(padding=(0, 2))
     t.add_column(style="bold")

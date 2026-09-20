@@ -98,3 +98,15 @@ def test_unknown_command_and_session_dir(tmp_path, monkeypatch):
 def test_ctrl_d_quits(tmp_path, monkeypatch):
     code, out, _ = _run_shell(tmp_path, monkeypatch, "\x04", ask=False)
     assert code == 0 and "Session saved" in out
+
+
+def test_context_usage_matches_the_orchestrators_trim_rule():
+    from scilink.cli.shell.shell import context_usage
+
+    class Agent:
+        MAX_HISTORY_MESSAGES = 100
+        TRIM_HYSTERESIS = 20
+        messages = [{"role": "system"}] + [{"role": "user"}] * 29
+
+    assert context_usage(Agent()) == (30, 120)
+    assert context_usage(object()) is None
