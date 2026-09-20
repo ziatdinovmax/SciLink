@@ -869,7 +869,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         if realtime:
             effective_max_verification = 0
             n_candidates, candidate_escalation = 1, False
-            self.logger.info(
+            # Once per run is information; once per frame of a live stream is
+            # noise (a strict replay is one of thousands).
+            (self.logger.debug if strict_replay else self.logger.info)(
                 "⚡ REALTIME profile: skill suggestion, planning, literature, "
                 "verification, refit, trend and synthesis are skipped; the "
                 "locked script executes under the arithmetic gate with a "
@@ -882,7 +884,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             if max_verification_iterations is None:
                 effective_max_verification = qc_profile.max_verification_iterations
             _off = [label for label, on in (
-                ("plan validation", qc_profile.plan_validation),
+                # A loaded domain skill's rules are still checked against the
+                # plan; only the skill-free sanity pass is dropped.
+                ("plan sanity check (skill rules are still checked)", qc_profile.plan_validation),
                 ("plan conformance", qc_profile.check_plan_conformance),
                 ("literature", qc_profile.literature),
                 ("adaptive refit", qc_profile.adaptive_refit),

@@ -315,7 +315,9 @@ export function LivePanel({
                   <Info>
                     One quantity per line as <code>name: definition</code>. Each is reported under that name
                     for every frame, whatever recipe is in use. Leave empty to get the recipe's own
-                    quantities.
+                    quantities. Names use letters, digits and underscores and do not start with a digit.
+                    Write definitions that stay true through the run. "The strongest peak" changes meaning
+                    when two peaks trade places. "The reflection near 14.2 degrees" does not.
                   </Info>
                 </span>
                 <textarea rows={2} value={outputsText} onChange={(e) => setOutputsText(e.target.value)}
@@ -401,8 +403,9 @@ export function LivePanel({
                 <label><span>Reference frames
                     <Info>
                       How many frames the recipe is planned from. With several, the plan sees what moves,
-                      appears or is only noise before the recipe is locked on the last of them. Each extra
-                      frame adds a few seconds.
+                      appears or is only noise before the recipe is locked on the last of them. Use several
+                      when the signal strength varies along the run. A recipe locked on an unusually weak
+                      frame gets stronger frames flagged. Each extra frame adds a few seconds.
                     </Info>
                   </span>
                   <input type="number" min={1} max={25} value={refFrames}

@@ -90,6 +90,11 @@ class _ProcessEscalation:
             stdin=subprocess.PIPE, stdout=self._log, stderr=subprocess.STDOUT)
         self._proc.stdin.write(json.dumps(spec, default=str).encode("utf-8"))
         self._proc.stdin.close()
+        # A model-driven child must not outlive the caller. Observed in review:
+        # a run whose auto-escalation was still working when the frames ended
+        # left the worker running after the process exited.
+        import atexit
+        atexit.register(self.terminate)
 
     def poll(self) -> Optional[Dict[str, Any]]:
         result = self.out_dir / "result.json"
@@ -107,6 +112,20 @@ class _ProcessEscalation:
 
     def wait(self, timeout: Optional[float] = None) -> None:
         self._proc.wait(timeout)
+
+    def terminate(self) -> None:
+        """Stop the worker if it is still running. Idempotent, never raises."""
+        try:
+            if self._proc.poll() is None:
+                self._proc.terminate()
+                try:
+                    self._proc.wait(5)
+                except Exception:  # noqa: BLE001
+                    self._proc.kill()
+            if not self._log.closed:
+                self._log.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 class _InlineEscalation:
@@ -164,8 +183,13 @@ class MeasurementLoop:
             ``peak_1_amplitude`` was the height in one script, the area in the
             next), so every recipe this loop locks — the first, and each
             re-anchor — is extended to report exactly these names. See
-            :mod:`scilink.live.pinning`. Costs one model call per recipe, on
-            the slow clock.
+            :mod:`scilink.live.pinning`. Costs two model calls per recipe (the
+            code and an independent check of the values), on the slow clock.
+            Names must be Python identifiers (letters, digits and underscores,
+            not starting with a digit); anything else is refused at setup. Write
+            definitions that stay true through the run: "the strongest peak"
+            changes meaning when two peaks trade dominance through a
+            transition, "the reflection near 14.2 degrees" does not.
         objective_key: Exact name of the feature a recommender optimizes — a
             pinned output name when ``outputs`` is used; validated against the
             recipe's features at ``setup()``.
@@ -358,6 +382,10 @@ class MeasurementLoop:
           system arms in seconds) and that run becomes the anchor.
           ``enable_human_feedback`` keeps the analysis's plan / result gates
           for a caller attached to a person.
+          The reference should look like the run. Observed on real line
+          scans: a recipe locked on an atypically weak stretch kept the right
+          peak position but had most later, stronger frames flagged. When the
+          signal varies along the run, give the first several frames.
           A LIST of files (the first frames of the stream, in order) is
           analysed as a series instead: the plan is made with all of them in
           view — what moves, what appears, what is noise — which a single
@@ -387,7 +415,8 @@ class MeasurementLoop:
             agent = self._agent_factory(str(run_dir))
             # The plan is told the recipe will be replayed on frames it has not
             # seen; the structural half of that rule is the portability check.
-            kwargs: Dict[str, Any] = {"system_info": self.system_info, "stream_reference": True}
+            kwargs: Dict[str, Any] = {"system_info": self._with_sidecar(refs),
+                                      "stream_reference": True}
             if profile:
                 kwargs["profile"] = profile
             if self.targets:
@@ -588,7 +617,7 @@ class MeasurementLoop:
         try:
             agent = self._agent_factory(str(frame_dir))
             kwargs: Dict[str, Any] = dict(
-                system_info=self.system_info,
+                system_info=self._with_sidecar(data_path),
                 prior_analysis_paths=[str(self.anchor_dir)],
                 reuse_locked_script=True, profile="realtime",
                 # The fast clock never calls a model: a recipe that cannot run
@@ -707,7 +736,7 @@ class MeasurementLoop:
             raise RuntimeError("an escalation is already running")
         self._n_escalations += 1
         out_dir = self.output_dir / "escalations" / f"escalation_{self._n_escalations:03d}"
-        analyze_kwargs: Dict[str, Any] = {"system_info": self.system_info,
+        analyze_kwargs: Dict[str, Any] = {"system_info": self._with_sidecar(data_path),
                                           "profile": profile or self.escalation_profile,
                                           "stream_reference": True}
         if self.targets:
@@ -771,6 +800,42 @@ class MeasurementLoop:
     @property
     def escalating(self) -> bool:
         return self._escalation is not None
+
+    def close(self, wait: bool = False, timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        """End the loop's background work. Call it when the stream ends.
+
+        A re-anchor still running is stopped (``wait=False``, the default) or
+        waited for and adopted (``wait=True`` — worth it when the same loop
+        directory will be resumed, so the next run starts on the new recipe).
+        A stream shorter than a rebuild never sees its result: a re-anchor takes
+        one to three minutes, so recorded data replayed at full speed ends
+        first. Pace a replay (``interval_s``) when a rebuild should land.
+        Returns the adoption record when one happened. Also a context manager.
+        """
+        esc, adopted = self._escalation, None
+        if esc is None:
+            return None
+        if wait and hasattr(esc, "wait"):
+            try:
+                esc.wait(timeout)
+                adopted = self._poll_escalation()
+            except Exception as e:  # noqa: BLE001
+                self.logger.warning(f"close(): the re-anchor did not finish: {e}")
+        if self._escalation is not None:
+            if hasattr(esc, "terminate"):
+                esc.terminate()
+            self._append({"event": "escalation_cancelled", "step": self._step,
+                          "index": (self._escalation_meta or {}).get("index"),
+                          "why": "the loop was closed before the re-anchor finished"})
+            self._escalation, self._escalation_meta = None, None
+            self._save_state()
+        return adopted
+
+    def __enter__(self) -> "MeasurementLoop":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
 
     def _poll_escalation(self) -> Optional[Dict[str, Any]]:
         """Adopt a finished re-anchor (or record its failure). Never blocks."""
@@ -867,6 +932,34 @@ class MeasurementLoop:
             self.logger.warning(f"gate calibration skipped: {e}")
         if self._calibration:
             self.logger.info(f"   gates calibrated on the reference: {self._calibration}")
+
+    _SIDECAR_SKIP = ("truth", "params", "source_file", "index")
+
+    def _with_sidecar(self, data_path: Any) -> Any:
+        """``system_info`` with the measurement's own sidecar metadata merged in.
+
+        A same-stem ``.json`` next to a data file is how per-measurement facts
+        travel in SciLink (an instrument constant, the temperature of that
+        frame). Observed in review: a technique that needs such a constant
+        aborted at setup because the loop passed only ``system_info`` — the
+        value was sitting in the file's sidecar. The caller's ``system_info``
+        wins on a conflict; a simulator's ``truth`` never travels."""
+        base = self.system_info
+        try:
+            path = Path(str(data_path[-1] if isinstance(data_path, (list, tuple)) else data_path))
+            side = json.loads(path.with_suffix(".json").read_text())
+        except Exception:  # noqa: BLE001 - no sidecar, nothing to add
+            return base
+        if not isinstance(side, dict):
+            return base
+        meta = side["meta"] if isinstance(side.get("meta"), dict) else side
+        extra = {k: v for k, v in meta.items()
+                 if k not in self._SIDECAR_SKIP and isinstance(v, (str, int, float, bool))}
+        if not extra:
+            return base
+        if isinstance(base, dict) or base is None:
+            return {**extra, **(base or {})}
+        return base                      # free-text system_info: left as the caller wrote it
 
     @staticmethod
     def _fingerprint(data_path: str) -> Optional[Dict[str, Any]]:

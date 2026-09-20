@@ -855,3 +855,92 @@ class TestDriftRebase:
         self._reply(a); self._reply(b)
         assert moving.step(a)["flags"] == ["drift_suspected"]
         assert moving.step(b)["flags"] == ["drift_suspected"]    # frames disagree: still changing
+
+
+# ──────────────────────────────────────────────────────────────
+# review of PR 656: shutdown, and metadata that lives next to the data
+# ──────────────────────────────────────────────────────────────
+
+class TestClose:
+    class Running(FakeEscalation):
+        terminated = 0
+
+        def terminate(self):
+            type(self).terminated += 1
+
+        def wait(self, timeout=None):
+            self.result = {"status": "success", "seconds": 1, "llm_calls": 1,
+                           "output_directory": self.anchor}
+
+    def _loop(self, tmp_path):
+        loop = loop_at(tmp_path, escalation_runner=self.Running)
+        loop.setup(anchor=str(make_anchor(tmp_path)))
+        loop.step("a.csv")
+        loop.escalate("a.csv")
+        self.Running.terminated = 0
+        return loop
+
+    def test_a_running_reanchor_is_stopped_not_orphaned(self, tmp_path):
+        loop = self._loop(tmp_path)
+        assert loop.close() is None and self.Running.terminated == 1 and not loop.escalating
+        [event] = [e for e in loop.read_log() if e["event"] == "escalation_cancelled"]
+        assert "closed before" in event["why"]
+        assert loop.close() is None                              # idempotent
+
+    def test_or_waited_for_and_adopted(self, tmp_path):
+        loop = self._loop(tmp_path)
+        FakeEscalation.last.anchor = str(new_anchor(tmp_path))
+        adopted = loop.close(wait=True)
+        assert adopted["event"] == "reanchor" and self.Running.terminated == 0
+
+    def test_a_context_manager_closes(self, tmp_path):
+        with self._loop(tmp_path) as loop:
+            assert loop.escalating
+        assert self.Running.terminated == 1
+
+
+def test_sidecar_metadata_reaches_the_analysis_and_truth_never_does(tmp_path):
+    # Review: a technique needing an instrument constant aborted at setup; the
+    # value was in the file's sidecar, which the loop never read.
+    ref = tmp_path / "ref.csv"
+    ref.write_text("x,y\n0,1\n")
+    ref.with_suffix(".json").write_text(json.dumps({
+        "meta": {"microwave_frequency_GHz": 9.41, "technique": "from the sidecar"},
+        "params": {"power": 2}, "truth": {"g_factor": 2.0023}}))
+    native = tmp_path / "frame.csv"
+    native.write_text("x,y\n0,1\n")
+    native.with_suffix(".json").write_text(json.dumps({"temperature_K": 120, "truth": {"x": 1},
+                                                       "nested": {"ignored": True}}))
+    anchor = make_anchor(tmp_path)
+
+    class RefAgent(FakeAgent):
+        def analyze(self, data, **kw):
+            FakeAgent.calls.append({"data": data, **kw})
+            return {**good(6.0), "output_directory": str(anchor) if "ref" in str(data) else self.output_dir}
+    loop = MeasurementLoop(str(tmp_path / "loop"), agent_factory=RefAgent, check_portability=False,
+                           system_info={"technique": "EPR"})
+    loop.setup(reference=str(ref))
+    loop.step(str(native))
+    setup_info, frame_info = FakeAgent.calls[0]["system_info"], FakeAgent.calls[-1]["system_info"]
+    assert setup_info == {"microwave_frequency_GHz": 9.41, "technique": "EPR"}     # the caller's word wins
+    assert frame_info == {"temperature_K": 120, "technique": "EPR"}
+    assert "truth" not in json.dumps([setup_info, frame_info])
+
+
+def test_targets_do_not_override_a_skills_mandate():
+    from scilink.agents.exp_agents._qc_profile import planning_addendum
+    text = planning_addendum({"analysis_targets": ["G band position"]})
+    assert "the skill's rule stands" in text and "not what is fitted" in text
+
+
+def test_the_worker_process_is_really_terminated(tmp_path):
+    import subprocess
+    import sys
+    esc = ml._ProcessEscalation.__new__(ml._ProcessEscalation)
+    esc.out_dir = tmp_path
+    esc._log = open(tmp_path / "worker.out", "w")
+    esc._proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    assert esc._proc.poll() is None
+    esc.terminate()
+    assert esc._proc.poll() is not None and esc._log.closed
+    esc.terminate()                                               # idempotent

@@ -240,6 +240,12 @@ def run_experiment(instrument: Instrument, loop: Any, n_frames: int, *,
 
     The loop must already be armed (``setup()``). Returns the frame records,
     each with the simulator's ``truth`` attached when there is one.
+
+    The caller owns the loop: call ``loop.close()`` when the stream ends (or use
+    the loop as a context manager) so a re-anchor still running in the
+    background is stopped. A rebuild takes one to three minutes, so a recording
+    replayed with ``interval_s=0`` usually ends before one lands; give it a
+    realistic ``interval_s`` to see a rebuild adopted.
     """
     if apply not in APPLY_POLICIES:
         raise ValueError(f"apply must be one of {APPLY_POLICIES}")

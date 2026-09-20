@@ -219,7 +219,8 @@ Metadata Options:
               "'quick': a fast look — a couple of verification passes, short "
               "interpretation. 'extract': numbers only, no narrative (for an "
               "optimizer or a feature table). Deterministic quality gates are "
-              "kept under all three.")
+              "kept under all three. Reduced depth is a trade: a difficult fit "
+              "can end flagged or in error where 'thorough' would converge.")
     )
     
     # Deprecated arguments (hidden but functional)

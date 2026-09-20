@@ -356,6 +356,12 @@ class LiveRun:
             self.error = f"{type(e).__name__}: {e}"
             (self.run_dir).mkdir(parents=True, exist_ok=True)
             (self.run_dir / "error.txt").write_text(traceback.format_exc())
+        finally:
+            if self.loop is not None:
+                try:
+                    self.loop.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
     def _on_frame(self, frame: Any, record: Dict[str, Any]) -> None:
         self.current_params = dict(record.get("params") or {})

@@ -94,7 +94,9 @@ TARGET_PLANNING_TMPL = (
     "\n\n## Scope\nThe result is needed for: {targets}. Model what measuring those "
     "reliably requires — the features themselves, anything overlapping them, and the "
     "background they sit on — and leave out structure they do not depend on; say in "
-    "the plan which region you fit and why it is sufficient.")
+    "the plan which region you fit and why it is sufficient. Where a loaded domain "
+    "skill requires a particular fit range or model, the skill's rule stands: the "
+    "scope then decides what is verified and reported, not what is fitted.")
 
 
 # A series anchor is planned with the whole series in view; the reference of a
