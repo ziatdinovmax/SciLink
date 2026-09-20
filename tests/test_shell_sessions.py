@@ -53,13 +53,13 @@ def _pick(tmp_path, keys):
         return pick_session(console, session, tmp_path, "meta")
 
 
-def test_picker_enter_picks_newest_and_numbers_pick(tmp_path):
+def test_picker_arrows_and_enter(tmp_path):
     _mk(tmp_path, "meta_session_20260102_000000")
     _mk(tmp_path, "meta_session_20260103_000000")
-    assert _pick(tmp_path, "\r").endswith("meta_session_20260103_000000")   # a path now
-    assert _pick(tmp_path, "2\r").endswith("meta_session_20260102_000000")
-    assert _pick(tmp_path, "meta_session_20260102_000000\r").endswith("meta_session_20260102_000000")
-    assert _pick(tmp_path, "9\r") is None
+    assert _pick(tmp_path, "\r").endswith("meta_session_20260103_000000")        # newest highlighted
+    assert _pick(tmp_path, "\x1b[B\r").endswith("meta_session_20260102_000000")  # down, Enter
+    assert _pick(tmp_path, "2").endswith("meta_session_20260102_000000")          # a digit jumps
+    assert _pick(tmp_path, "\x1b") is None                                       # Esc cancels
 
 
 def test_picker_empty(tmp_path, capsys, monkeypatch):

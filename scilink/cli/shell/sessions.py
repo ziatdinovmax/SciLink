@@ -12,6 +12,8 @@ from typing import List, Optional
 from rich.table import Table
 
 from scilink.sessions import list_sessions
+
+from .channel import choose
 from scilink.ui import vocabulary as V
 
 
@@ -58,21 +60,18 @@ def print_sessions(console, root: Path, mode: str) -> List[dict]:
 
 
 def pick_session(console, prompt_session, root: Path, mode: str) -> Optional[str]:
-    """Show the table and read a number; Enter picks the newest, empty
-    input on an empty list returns None."""
-    sessions = print_sessions(console, root, mode)
+    """The arrow-key picker over the resumable sessions (newest highlighted);
+    Enter chooses, Esc / Ctrl+C returns None. The session's path is returned."""
+    sessions = list_sessions(mode, root=root)
     if not sessions:
+        console.print(f"[dim]No {V.mode(mode)['name']} sessions to resume[/]")
         return None
+    console.print(f"[bold]{V.NAMES['resume_past']}[/]")
+    options = [(s["path"], f"{s['label']}  [{s['id']}]",
+                " · ".join(x for x in (_folder(s, root), _summary(s)) if x))
+               for s in sessions]
     try:
-        ans = prompt_session.prompt(f"{V.NAMES['resume_session']} # (Enter = 1): ").strip()
+        return choose(options, 0, prompt_session=prompt_session,
+                      console_width=console.size.width)
     except (EOFError, KeyboardInterrupt):
         return None
-    if not ans:
-        return sessions[0]["path"]
-    if ans.isdigit() and 1 <= int(ans) <= len(sessions):
-        return sessions[int(ans) - 1]["path"]
-    for s in sessions:
-        if s["id"] == ans:
-            return s["path"]
-    console.print(f"[red]No session {ans!r}[/]")
-    return None
