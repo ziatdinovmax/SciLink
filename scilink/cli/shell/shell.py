@@ -198,9 +198,10 @@ class Shell:
         autonomy = self.adapter.get_autonomy(self.agent) if self.agent is not None else "?"
         verbose = "verbose on" if self.renderer.verbose else "verbose off"
         usage = context_usage(self.agent)
-        context = f" · context {100 * usage[0] // usage[1]}%" if usage else ""
-        left = (f" {autonomy} · {self.session_dir.name if self.session_dir else ''} · "
-                f"{getattr(self.args, 'model', '')} · {verbose}{context}")
+        parts = [autonomy, self.session_dir.name if self.session_dir else "",
+                 getattr(self.args, "model", ""), verbose]
+        if usage:
+            parts.append(f"context {100 * usage[0] // usage[1]}%")
         right = f"scilink {scilink_version()} "
         try:
             width = get_app().output.get_size().columns
@@ -210,6 +211,14 @@ class Shell:
         # writes the last column and wraps a line that reaches it, which
         # pushed the status line (with the version) out of the toolbar.
         usable = max(20, width - 4)
+        # On a narrow terminal the model name goes first, then the session,
+        # so the autonomy, verbose state, context and version always fit.
+        left = " " + " · ".join(p for p in parts if p)
+        for drop in (2, 1):
+            if len(left) + len(right) + 1 <= usable:
+                break
+            parts[drop] = ""
+            left = " " + " · ".join(p for p in parts if p)
         gap = max(1, usable - len(left) - len(right))
         rule = "\u2500" * usable
         return HTML(f"{rule}\n{left}{' ' * gap}{right}")

@@ -131,3 +131,22 @@ def test_exit_prints_the_resume_command_and_registers(tmp_path, monkeypatch):
                                   argv=["--session-dir", str(sdir)], ask=False)
     assert "--resume s" in out                       # indexed, so the id is enough
     assert S.resolve_session("s", "meta") == sdir.resolve()
+
+
+def test_status_bar_fits_a_narrow_terminal(tmp_path, monkeypatch):
+    """The bar drops the model, then the session name, before it would push
+    the version off the right edge."""
+    from prompt_toolkit.formatted_text import to_plain_text
+    monkeypatch.chdir(tmp_path)
+    adapter = FakeAdapter()
+    args = make_args(adapter, ["--yes", "--model", "bedrock/us.anthropic.claude-opus-4-8"])
+    console = Console(file=io.StringIO(), force_terminal=False, width=80)
+    shell = Shell(adapter, args, console=console, pt_output=DummyOutput())
+    shell.agent = adapter.build(args, None, tmp_path / "meta_session_20260920_120000",
+                                restore=False, extras={})
+    shell.session_dir = tmp_path / "meta_session_20260920_120000"
+    lines = to_plain_text(shell._toolbar()).split("\n")
+    assert lines[-1].endswith("scilink " + __import__("scilink.cli.shell.shell", fromlist=["x"]).scilink_version() + " ")
+    assert len(lines[-1]) <= 80 - 4
+    assert "autopilot" in lines[-1] and "verbose off" in lines[-1]
+    assert "bedrock" not in lines[-1]           # the model was dropped first
