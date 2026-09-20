@@ -39,6 +39,41 @@ _trace_path: Optional[str] = None
 _env_checked = False
 
 
+# ── Always-on call counters ──────────────────────────────────────
+# Independent of the opt-in file tracer: every LLM call through the
+# wrappers is counted, so a front-end can show "N calls · P/C tokens" per
+# turn by diffing two snapshots. Process-wide, so concurrent sessions in
+# one process (the web backend) cross-charge each other; a front-end that
+# runs one turn at a time (the terminal shell) reads them exactly.
+_counters: Dict[str, float] = {
+    "calls": 0, "seconds": 0.0, "prompt_tokens": 0, "completion_tokens": 0,
+}
+_counters_lock = threading.Lock()
+
+
+def note_llm_call(latency_s: Optional[float] = None,
+                  prompt_tokens: Optional[int] = None,
+                  completion_tokens: Optional[int] = None) -> None:
+    """Count one completed LLM call (missing token counts count as 0)."""
+    with _counters_lock:
+        _counters["calls"] += 1
+        _counters["seconds"] += float(latency_s or 0.0)
+        _counters["prompt_tokens"] += int(prompt_tokens or 0)
+        _counters["completion_tokens"] += int(completion_tokens or 0)
+
+
+def llm_counters() -> Dict[str, float]:
+    """A snapshot of the process-wide counters."""
+    with _counters_lock:
+        return dict(_counters)
+
+
+def counters_delta(before: Dict[str, float]) -> Dict[str, float]:
+    """What happened since ``before`` (a prior ``llm_counters()``)."""
+    now = llm_counters()
+    return {k: now[k] - before.get(k, 0) for k in now}
+
+
 def enable_tracing(path: str) -> None:
     """Append a JSON record (one line) for every subsequent LLM call to ``path``."""
     global _trace_path

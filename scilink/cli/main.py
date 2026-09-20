@@ -189,44 +189,30 @@ def main():
         sys.argv = [sys.argv[0] + ' serve'] + sys.argv[2:]
         return serve_main()
 
-    # Always show logo first
-    print_gradient_logo()
+    # The logo is for people: skip it when stdout is a pipe (headless -p
+    # output, scripts) so what comes out is only the result.
+    if sys.stdout.isatty():
+        print_gradient_logo()
 
-    if len(sys.argv) < 2:
-        # Bare `scilink` launches the meta-agent — the default entry point,
-        # which auto-routes work between the analyze and plan specialists.
-        # Explicit per-mode commands and `scilink help` still work below.
-        from scilink.cli.meta import main as meta_main
-        sys.argv = [sys.argv[0] + ' explore']
-        return meta_main()
+    # The four chat modes share one terminal shell (scilink.cli.shell);
+    # bare `scilink` is Mission Control (meta), the default entry point.
+    if len(sys.argv) < 2 or sys.argv[1].startswith('-') and sys.argv[1] not in ('-h', '--help'):
+        from scilink.cli.shell import main as shell_main
+        return shell_main(['meta', *sys.argv[1:]])
 
     command = sys.argv[1]
+    shell_modes = {'plan': 'plan', 'simulate': 'simulate', 'analyze': 'analyze',
+                   'explore': 'meta', 'meta': 'meta'}  # 'meta' kept as a back-compat alias
+    if command in shell_modes:
+        from scilink.cli.shell import main as shell_main
+        sys.argv = [f"{sys.argv[0]} {command}"] + sys.argv[2:]
+        return shell_main([shell_modes[command], *sys.argv[1:]])
     
     # Route to appropriate handler
-    if command == 'plan':
-        from scilink.cli.plan import main as plan_main
-        sys.argv = [sys.argv[0] + ' plan'] + sys.argv[2:]
-        return plan_main()
-    
-    elif command == 'simulate':
-        from scilink.cli.simulate import main as simulate_main
-        sys.argv = [sys.argv[0] + ' simulate'] + sys.argv[2:]
-        return simulate_main()
-
-    elif command == 'prepare-ff':
+    if command == 'prepare-ff':
         from scilink.cli.prepare_ff import main as prepare_ff_main
         sys.argv = [sys.argv[0] + ' prepare-ff'] + sys.argv[2:]
         return prepare_ff_main()
-
-    elif command == 'analyze':
-        from scilink.cli.analyze import main as analyze_main
-        sys.argv = [sys.argv[0] + ' analyze'] + sys.argv[2:]
-        return analyze_main()
-
-    elif command in ('explore', 'meta'):  # 'meta' kept as a back-compat alias
-        from scilink.cli.meta import main as meta_main
-        sys.argv = [f"{sys.argv[0]} {command}"] + sys.argv[2:]
-        return meta_main()
 
     elif command == 'memory':
         from scilink.cli.memory import main as memory_main
@@ -315,11 +301,16 @@ Available Commands:
                 (Claude Desktop, Cursor) can use SciLink's tools
 
 Examples:
-  scilink                                   # Launch the meta-agent
-  scilink explore --mode autopilot         # Meta-agent, autopilot autonomy
+  scilink                                   # Launch Mission Control (the meta-agent)
+  scilink --mode autonomous                 # ... with specialists running unattended
+  scilink --resume                          # Pick up a past session in this folder
+  scilink -p "Analyze ./grains.tif" --output-format json   # One task, no prompt
   scilink analyze --help                    # See analysis options
   scilink plan --model gemini-2.0-flash-exp # Use a different model
   scilink simulate --help                   # See simulation options
+
+In the chat: /help lists the commands, Ctrl+C stops a running turn,
+Ctrl+O shows the agents' full narration, Ctrl+D quits.
 
 Get Help:
   scilink <command> --help                  # Command-specific help

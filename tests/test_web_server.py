@@ -1043,6 +1043,38 @@ def test_delegation_events_during_turn(client, tmp_path):
     assert "running" in statuses() and statuses()[-1] == "success"
 
 
+def test_activity_events_during_turn(client, tmp_path):
+    """The runner derives the spinner label from the narration (the same
+    reader the terminal shell uses) and emits it as `activity` events —
+    one per change, ending with the answer's "Writing response…"."""
+    from scilink.server.session_manager import WebSession
+    from scilink.ui.vocabulary import ACTIVITY_LABELS
+    sdir = tmp_path / "analysis_session_20260101_121212"
+    sdir.mkdir()
+
+    class NarratingAgent:
+        def chat(self, text):
+            print("Executing generated code")
+            time.sleep(0.8)
+            print("Verification 2/7 (annealing level 1)")
+            time.sleep(0.8)
+            print("\n🤖 Agent:")
+            print("done")
+            time.sleep(0.8)
+            return "done"
+
+    session = WebSession(id=sdir.name, session_dir=str(sdir), mode="analyze",
+                         model="gpt-5.4", autonomy="autonomous", agent=NarratingAgent())
+    client.app.state.manager._sessions[sdir.name] = session
+    client.post(f"/api/v1/sessions/{sdir.name}/messages", json={"content": "go"})
+    session.turn.done.wait(15)
+    labels = [ev.data["label"] for ev in session.events._ring if ev.type == "activity"]
+    assert labels[0] == ACTIVITY_LABELS["executing_code"]
+    assert "Verification 2/7 · annealing level 1…" in labels
+    assert labels[-1] == ACTIVITY_LABELS["writing_response"]
+    assert len(labels) == len(set(labels))          # emitted on change only
+
+
 # ── Tools tab: inventory + MCP connect / disconnect ───────────────
 
 class _FakeMcpAgent:

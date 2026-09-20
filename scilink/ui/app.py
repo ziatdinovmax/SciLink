@@ -9,6 +9,7 @@ from pathlib import Path
 
 import streamlit as st
 
+from scilink.ui import vocabulary as _vocab
 from scilink.ui.state import init_session_state, ChatTask, FeedbackRequest
 from scilink.ui.components.sidebar import render_sidebar, start_session
 from scilink.ui.components.chat_uploads import render_pre_chat_uploads
@@ -1377,11 +1378,8 @@ else:
                             task.feedback_request.response = ""
                             task.feedback_request.event.set()
                             task.feedback_request = None
-                        _stop_label = (
-                            "Planning stopped by user."
-                            if st.session_state.app_mode == "plan"
-                            else "Analysis stopped by user."
-                        )
+                        _stop_label = _vocab.stop_message(
+                            st.session_state.app_mode)
                         st.session_state.chat_messages.append({
                             "role": "assistant",
                             "content": _stop_label,

@@ -357,35 +357,42 @@ scilink plan --model claude-opus-4-5
 
 ```
 $ scilink plan
+Research objective (e.g. optimize reaction yield): Optimize lithium extraction from brine
 
-📋 What's your research objective?
-Your objective: Optimize lithium extraction from brine
+📋 SciLink Plan  claude-opus-4-6 (Anthropic) · planning_session_20260919_101500
 
-👤 You: Generate a plan using papers in ./literature/
+❯ Generate a plan using papers in ./literature/
+  🔧 Calling tool: generate_initial_plan
+  💭 Retrieving the eight most relevant chunks first
+  ⠋ Writing analysis code…  12s
 
-🤖 Agent: ⚡ Generating Initial Plan...
-    📚 Retrieved 8 document chunks.
+## Experiment 1: pH-controlled selective precipitation
+**Hypothesis:** adjusting pH to 10–11 selectively precipitates Mg(OH)₂ while retaining Li⁺
+· 4 LLM calls · 18,204/1,930 tokens · 41s
 
-🔬 EXPERIMENT 1: pH-Controlled Selective Precipitation
-> 🎯 Hypothesis: Adjusting pH to 10-11 will selectively precipitate Mg(OH)₂ while retaining Li⁺
-
-👤 You: Analyze ./results/batch_001.csv and run optimization
-
-🤖 Agent: [calls analyze_file → {"metrics": {"yield": 78.5}}]
-  [calls run_optimization → {"recommended_parameters": {"temp": 85.2, "pH": 6.8}}]
+❯ Analyze ./results/batch_001.csv and run optimization
 ```
+
+Add `/objective` to the shared commands below to print the campaign objective.
 
 ### CLI Commands
 
+The chat runs in SciLink's terminal shell, shared by every mode: line editing
+and history, Tab completion of slash commands and paths, a status row while
+the agent works (Ctrl+O shows the full narration), Ctrl+C to stop a running
+turn, and every question rendered with the same labels the web UI uses
+(`Enter = Approve plan`, and so on).
+
 | Command | Description |
 |---------|-------------|
-| `/help` | Show available commands |
-| `/tools` | List all available agent tools |
-| `/files` | List files in workspace |
-| `/state` | Show current agent state |
-| `/autonomy [level]` | Show or change autonomy level |
-| `/checkpoint` | Save session checkpoint |
-| `/quit` | Exit session |
+| `/help` | Commands and keys |
+| `/status` | Session state (`/state` still works) |
+| `/mode [level]` | Show or change the autonomy level (`/autonomy` still works) |
+| `/tools`, `/skills`, `/memory`, `/files` | What the agent can use and what it produced |
+| `/sessions`, `/resume [id]` | Past sessions in this folder; pick one up |
+| `/verbose`, `/cost` | Toggle narration; LLM calls and tokens this session |
+| `/checkpoint` | Save session state now (also saved after every turn and on exit) |
+| `/quit` | Exit |
 
 ## Python API
 
@@ -455,31 +462,45 @@ scilink analyze --mode autonomous --data ./spectrum.npy
 ```
 $ scilink analyze --data ./stem_image.tif
 
-👤 You: Examine my data and suggest an analysis approach
+🔬 SciLink Analyze  claude-opus-4-6 (Anthropic) · analysis_session_20260919_101500
 
-🤖 Agent: ⚡ Examining data at ./stem_image.tif...
-  • Type: microscopy, Shape: 2048 x 2048
-  • Suggested agent: ImageAnalysisAgent (1)
+❯ Examine the data at ./stem_image.tif
+  🔧 Calling tool: examine_data
+Microscopy image, 2048 × 2048. Suggested agent: ImageAnalysisAgent (1).
+· 2 LLM calls · 6,410/480 tokens · 9s
 
-👤 You: Run the analysis
-
-🤖 Agent: ⚡ Running analysis...
-  Tier 1: Detected atomic columns with two distinct intensity populations.
-  Tier 2 recommended — sublattice separation and displacement field analysis.
-  **Scientific Claims Generated:** 3
+❯ Run the analysis
+  🔧 Calling tool: run_analysis
+  ⠋ Verification 2/7…  1m 40s
 ```
+
+Headless, for scripts and CI:
+
+```bash
+scilink analyze -p "Analyze ./stem_image.tif" --output-format json --yes
+```
+
+`/agents` (the analysis agents) and `/schema` (the metadata JSON schema)
+join the shared commands below.
 
 ### CLI Commands
 
+The chat runs in SciLink's terminal shell, shared by every mode: line editing
+and history, Tab completion of slash commands and paths, a status row while
+the agent works (Ctrl+O shows the full narration), Ctrl+C to stop a running
+turn, and every question rendered with the same labels the web UI uses
+(`Enter = Approve plan`, and so on).
+
 | Command | Description |
 |---------|-------------|
-| `/help` | Show available commands |
-| `/tools` | List orchestrator tools |
-| `/agents` | List analysis agents with descriptions |
-| `/status` | Show session state |
-| `/mode [level]` | Show or change analysis mode |
-| `/schema` | Show metadata JSON schema |
-| `/quit` | Exit session |
+| `/help` | Commands and keys |
+| `/status` | Session state (`/state` still works) |
+| `/mode [level]` | Show or change the autonomy level (`/autonomy` still works) |
+| `/tools`, `/skills`, `/memory`, `/files` | What the agent can use and what it produced |
+| `/sessions`, `/resume [id]` | Past sessions in this folder; pick one up |
+| `/verbose`, `/cost` | Toggle narration; LLM calls and tokens this session |
+| `/checkpoint` | Save session state now (also saved after every turn and on exit) |
+| `/quit` | Exit |
 
 ## Python API
 

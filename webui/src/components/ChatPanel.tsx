@@ -10,7 +10,9 @@ import { describeFolder, folderPromptLines, groupDirectoryInput } from "../folde
 import { ChatMessage } from "./ChatMessage";
 import { UploadMenu } from "./UploadMenu";
 import { FeedbackPanel } from "./FeedbackPanel";
-import { currentActivity, LogView } from "./LogView";
+import { LogView } from "./LogView";
+import { currentActivity } from "../narration";
+import { VOCAB } from "../vocabulary";
 
 export function ChatPanel({
   session,
@@ -18,6 +20,7 @@ export function ChatPanel({
   status,
   messages,
   liveLog,
+  activity: serverActivity,
   pendingQuestion,
   lastError,
   attachRequest,
@@ -32,6 +35,7 @@ export function ChatPanel({
   status: "idle" | "running" | "awaiting_input";
   messages: Msg[];
   liveLog: string;
+  activity: string | null;
   pendingQuestion: PresentedQuestion | null;
   lastError: string | null;
   attachRequest: string | null;
@@ -160,9 +164,12 @@ export function ChatPanel({
   };
 
   const running = status !== "idle";
-  // Short "what is it doing" line for the spinner pill, derived from the
-  // streaming narration — between the bare spinner and full verbose output.
-  const activity = useMemo(() => currentActivity(liveLog), [liveLog]);
+  // Short "what is it doing" line for the spinner pill — between the bare
+  // spinner and full verbose output. The server computes it from the
+  // narration (the reader the terminal shell shares); the local scan
+  // covers a snapshot-restored log that arrived without events.
+  const localActivity = useMemo(() => currentActivity(liveLog), [liveLog]);
+  const activity = serverActivity ?? localActivity;
 
   // "Attach to chat" from the Files tab: drop a backtick-quoted path into
   // the draft (the agents take paths in prompts).
@@ -181,12 +188,9 @@ export function ChatPanel({
   }, [messages.length, pendingQuestion, status]);
 
   const placeholder = running
-    ? "Agent is working…"
-    : mode === "meta"
-      ? "Message mission control..."
-      : mode === "plan"
-        ? "Message the planning agent..."
-        : "Message the analysis agent...";
+    ? VOCAB.default_activity
+    : ((VOCAB.modes as Record<string, { placeholder: string }>)[mode]?.placeholder
+      ?? "Message the agent...");
 
   const send = () => {
     const content = draft.trim();
@@ -231,10 +235,10 @@ export function ChatPanel({
                   className="agent-spinner-label"
                   title={activity ?? undefined}
                 >
-                  {activity ?? "Agent is working..."}
+                  {activity ?? VOCAB.default_activity}
                 </span>
               </div>
-              <button className="stop-btn danger-hover" title="Stop agent" onClick={onStop}>
+              <button className="stop-btn danger-hover" title={VOCAB.names.stop} onClick={onStop}>
                 ■
               </button>
             </div>
@@ -248,7 +252,7 @@ export function ChatPanel({
                   />
                   <span className="track" />
                 </span>
-                Show verbose output
+                {VOCAB.names.verbose_toggle}
               </label>
             )}
             {showVerbose && liveLog && <LogView text={liveLog} />}

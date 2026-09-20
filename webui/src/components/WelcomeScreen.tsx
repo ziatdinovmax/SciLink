@@ -2,38 +2,18 @@ import { useEffect, useRef, useState } from "react";
 import type { AppConfig, LiveSession } from "../api";
 import logoDark from "../assets/scilink_logo_dark_animated.svg";
 import logoLight from "../assets/scilink_logo_light_animated.svg";
+import { VOCAB } from "../vocabulary";
 
-// Richer client-side identity per mode; unknown keys (a future mode the
-// server starts listing, e.g. simulate) fall back to the server's own
-// label/description so they appear without a frontend change.
-const MODE_META: Record<
-  string,
-  { emoji: string; name: string; blurb: string }
-> = {
-  meta: {
-    emoji: "🎛️",
-    name: "Mission Control",
-    blurb:
-      "Describe a goal — the meta-agent routes work to the analysis and planning specialists and fuses the results",
-  },
-  analyze: {
-    emoji: "🔬",
-    name: "Analyze",
-    blurb:
-      "Interpret experimental data — images, spectra, hyperspectral cubes — with agentic fitting and reports",
-  },
-  plan: {
-    emoji: "📋",
-    name: "Plan",
-    blurb:
-      "Design experiments and optimization campaigns, grounded in your papers, code, and data",
-  },
-  simulate: {
-    emoji: "⚛️",
-    name: "Simulate",
-    blurb: "Build structures and run DFT/MD simulations end to end",
-  },
-};
+// Per-mode identity from the shared vocabulary; an unknown key (a mode
+// the server lists that the vocabulary lacks) falls back to the server's
+// own label/description so it appears without a frontend change.
+const MODE_META: Record<string, { emoji: string; name: string; blurb: string }> =
+  Object.fromEntries(
+    Object.values(VOCAB.modes).map((m) => [
+      m.key,
+      { emoji: m.emoji, name: m.name, blurb: m.blurb },
+    ]),
+  );
 
 function ModeSelect({
   modes,
@@ -103,11 +83,7 @@ function ModeSelect({
   );
 }
 
-const STATUS_LABEL: Record<string, string> = {
-  running: "🟢 running",
-  awaiting_input: "🟠 awaiting your input",
-  idle: "⚪ idle",
-};
+const STATUS_LABEL: Record<string, string> = VOCAB.status_badges;
 
 export function WelcomeScreen({
   config,

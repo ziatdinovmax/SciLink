@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { api, type PresentedQuestion } from "../api";
 import { MarkdownBody } from "./MarkdownBody";
+import { fill } from "../narration";
+import { VOCAB } from "../vocabulary";
 
 /** Renders the parked HITL question — the React twin of the Streamlit
  * feedback branch (app.py:1053-1327). The response contracts are identical:
@@ -26,6 +28,11 @@ export function FeedbackPanel({
     setSent(true);
     onRespond(response);
   };
+  // The empty answer accepts as-is on every surface; the terminal shell
+  // shows the same hint next to its prompt.
+  const hint = question.labels.accept
+    ? fill(VOCAB.enter_accepts_hint, { accept: question.labels.accept })
+    : "";
 
   const previews = question.preview_images.map((p) => {
     const base = p.split("/").pop() ?? p;
@@ -110,7 +117,15 @@ export function FeedbackPanel({
     const cands = question.candidates ?? [];
     const pick = question.judge_pick;
     return (
-      <div className="feedback-panel">
+      <div
+        className="feedback-panel"
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            respond("");
+          }
+        }}
+      >
         {previews}
         {contextBox}
         <p style={{ marginTop: 0 }}>{question.labels.select}</p>
@@ -139,10 +154,11 @@ export function FeedbackPanel({
             className="success"
             disabled={sent}
             onClick={() => respond("")}
-            title={`Accept the judge's pick (Candidate ${pick})`}
+            title={`${hint} — Candidate ${pick}`}
           >
             {question.labels.accept}
           </button>
+          <span className="caption">{hint}</span>
         </div>
       </div>
     );
@@ -159,6 +175,13 @@ export function FeedbackPanel({
         <textarea
           value={text}
           onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            // Enter sends: text is the feedback, empty accepts as-is.
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              respond(text.trim());
+            }
+          }}
           rows={3}
         />
       </label>
@@ -170,9 +193,10 @@ export function FeedbackPanel({
         >
           {question.labels.submit}
         </button>
-        <button className="primary" disabled={sent} onClick={() => respond("")}>
+        <button className="primary" disabled={sent} onClick={() => respond("")} title={hint}>
           {question.labels.accept}
         </button>
+        <span className="caption">{hint}</span>
       </div>
     </div>
   );

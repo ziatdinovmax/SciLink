@@ -29,6 +29,9 @@ interface SessionState {
   status: "idle" | "running" | "awaiting_input";
   messages: ChatMessage[];
   liveLog: string;
+  // Server-computed "what is it doing now" for the spinner (the same
+  // narration reader the terminal shell uses); null = no signal yet.
+  activity: string | null;
   // The turn's answer has arrived: log chunks that trail it (the capture
   // buffer's final flush) are dropped instead of showing under the reply.
   answered: boolean;
@@ -54,6 +57,7 @@ const emptyState: SessionState = {
   status: "idle",
   messages: [],
   liveLog: "",
+  activity: null,
   answered: false,
   pendingQuestion: null,
   name: null,
@@ -104,13 +108,17 @@ function reducer(state: SessionState, action: Action): SessionState {
         case "log":
           if (state.answered) return state;
           return { ...state, liveLog: state.liveLog + ev.chunk };
+        case "activity":
+          return { ...state, activity: ev.label };
         case "status":
           return {
             ...state,
             status: ev.status,
             // Turn over: the completion message carries the figures/report,
             // so the live log and the figure inset both stand down.
-            ...(ev.status === "idle" ? { liveLog: "", liveImages: [] } : {}),
+            ...(ev.status === "idle"
+              ? { liveLog: "", liveImages: [], activity: null }
+              : {}),
             ...(ev.status === "running" ? { answered: false } : {}),
           };
         case "question":
@@ -629,6 +637,7 @@ export default function App() {
                   status={state.status}
                   messages={state.messages}
                   liveLog={state.liveLog}
+                  activity={state.activity}
                   pendingQuestion={state.pendingQuestion}
                   lastError={state.lastError}
                   attachRequest={attachRequest}

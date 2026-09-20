@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from scilink.providers import provider_for
+from scilink.sessions import discover_resumable
 from scilink.ui.config import SESSION_DIR_PREFIXES
 from scilink.ui.session_meta import load_session_name, session_label
 
@@ -230,42 +231,11 @@ class SessionManager:
 
     # -- discovery (port of sidebar.py:983-1029) ------------------------
     def discover_resumable(self, mode: str) -> List[Dict[str, Any]]:
-        prefix = SESSION_DIR_PREFIXES.get(mode, "analysis_session")
-        sessions = sorted(self.session_root.glob(f"{prefix}_*"),
-                          key=lambda p: p.name, reverse=True)
-        result = []
-        for s in sessions:
-            if not s.is_dir() or s.name in self._sessions:
-                continue
-            has_checkpoint = (s / "checkpoint.json").exists()
-            has_chat = (s / "chat_history.json").exists()
-            if not has_checkpoint and not has_chat:
-                continue
-            summary: Dict[str, Any] = {}
-            if has_checkpoint:
-                try:
-                    ckpt = json.loads((s / "checkpoint.json").read_text())
-                    summary["analysis_count"] = len(ckpt.get("analysis_results", []))
-                    dp = ckpt.get("current_data_path")
-                    if dp:
-                        summary["data_file"] = Path(dp).name
-                except Exception:
-                    pass
-            if has_chat and "analysis_count" not in summary:
-                try:
-                    hist = json.loads((s / "chat_history.json").read_text())
-                    summary["message_count"] = sum(
-                        1 for m in hist if m.get("role") == "user")
-                except Exception:
-                    pass
-            result.append({
-                "id": s.name,
-                "label": session_label(s, prefix),
-                "has_checkpoint": has_checkpoint,
-                "has_chat_history": has_chat,
-                "summary": summary,
-            })
-        return result
+        """Past sessions of ``mode`` under the root that can be resumed —
+        the shared ``scilink.sessions.discover_resumable``, minus the ones
+        already live here."""
+        return discover_resumable(self.session_root, mode,
+                                  exclude=self._sessions)
 
     # -- create ---------------------------------------------------------
     def create(self, *, mode: str, model: str, autonomy: str, api_key: str,

@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from scilink import hitl as _hitl
+from scilink.ui import vocabulary as _vocab
+from scilink.ui.narration import current_activity
 from scilink.ui.output_capture import AgentStoppedError
 
 from .hitl_channel import HTTPChannel, PendingQuestion
@@ -174,8 +176,7 @@ def request_stop(session) -> bool:
         pending.response = ""
         pending.event.set()
         turn.pending_question = None
-    stop_label = ("Planning stopped by user." if session.mode == "plan"
-                  else "Analysis stopped by user.")
+    stop_label = _vocab.stop_message(session.mode)
     message = {"role": "assistant", "content": stop_label,
                "verbose": turn.verbose_log}
     session.chat_messages.append(message)
@@ -209,6 +210,7 @@ def _watch_log(session, turn, cap) -> None:
     """Emit incremental ``log`` events — and ``files_changed`` pings when
     the session tree changes — while the turn runs."""
     sent = 0
+    last_activity = None
     last_sig = None
     last_fs_check = 0.0
     seen_images = turn.seen_images  # seeded in start_turn, pre-thread
@@ -247,6 +249,12 @@ def _watch_log(session, turn, cap) -> None:
         if len(buf) > sent:
             session.events.emit("log", {"chunk": buf[sent:]})
             sent = len(buf)
+            # The one-line "what is it doing now" — computed here so the
+            # terminal shell and the web spinner read the same label.
+            label = current_activity(buf[-6000:])
+            if label != last_activity:
+                last_activity = label
+                session.events.emit("activity", {"label": label})
         now = time.time()
         if now - last_fs_check >= 2.0:
             last_fs_check = now
@@ -289,6 +297,46 @@ def _watch_log(session, turn, cap) -> None:
         pass
 
 
+_NOISY_LIBS = ("urllib3", "httpx", "httpcore", "google", "openai",
+               "anthropic", "matplotlib", "PIL", "fsspec", "asyncio",
+               "grpc", "absl", "uvicorn")
+
+
+def turn_log_handler(cap, owner_thread: int) -> logging.Handler:
+    """A root-logger handler that copies the turn's own log records into
+    its capture buffer — records from other threads are dropped (fan-out
+    workers map back to their owner through ``log_context``), and a
+    requested stop lands on the next record as ``AgentStoppedError``.
+    Shared by the web runner and the terminal shell."""
+    from scilink.utils.log_context import effective_thread, keep_in_fanout_panel
+
+    handler = logging.StreamHandler(cap.log_stream)
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+
+    def _panel_filter(record):
+        if effective_thread(record.thread) != owner_thread:
+            return False
+        if cap.stop_requested:
+            raise AgentStoppedError("Agent stopped by user")
+        return keep_in_fanout_panel(
+            record.thread, record.getMessage(), record.levelno)
+
+    handler.addFilter(_panel_filter)
+    return handler
+
+
+def quiet_third_party_loggers() -> None:
+    """Root logger at INFO (the agents narrate through it), HTTP and
+    plotting libraries at WARNING so their chatter stays out of the
+    narration."""
+    root_logger = logging.getLogger()
+    if root_logger.level > logging.INFO:
+        root_logger.setLevel(logging.INFO)
+    for _lib in _NOISY_LIBS:
+        logging.getLogger(_lib).setLevel(logging.WARNING)
+
+
 def _run_turn(session, turn: TurnState, user_input: str) -> None:
     agent = session.agent
     original_input = builtins.input
@@ -304,28 +352,9 @@ def _run_turn(session, turn: TurnState, user_input: str) -> None:
         # bypass the thread-local channel (app.py:576-580).
         return channel.ask(_hitl.FeedbackRequest(prompt=prompt))
 
-    log_handler = logging.StreamHandler(cap.log_stream)
-    log_handler.setLevel(logging.INFO)
-    log_handler.setFormatter(logging.Formatter("%(message)s"))
-    _this_thread = threading.get_ident()
-    from scilink.utils.log_context import effective_thread, keep_in_fanout_panel
-
-    def _panel_filter(record):
-        if effective_thread(record.thread) != _this_thread:
-            return False
-        if cap.stop_requested:
-            raise AgentStoppedError("Agent stopped by user")
-        return keep_in_fanout_panel(
-            record.thread, record.getMessage(), record.levelno)
-
-    log_handler.addFilter(_panel_filter)
     root_logger = logging.getLogger()
-    if root_logger.level > logging.INFO:
-        root_logger.setLevel(logging.INFO)
-    for _lib in ("urllib3", "httpx", "httpcore", "google", "openai",
-                 "anthropic", "matplotlib", "PIL", "fsspec", "asyncio",
-                 "grpc", "absl", "uvicorn"):
-        logging.getLogger(_lib).setLevel(logging.WARNING)
+    log_handler = turn_log_handler(cap, threading.get_ident())
+    quiet_third_party_loggers()
     root_logger.addHandler(log_handler)
 
     watcher = threading.Thread(target=_watch_log, args=(session, turn, cap),

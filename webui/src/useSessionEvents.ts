@@ -7,6 +7,7 @@ import type { ChatMessage, DelegationView, PresentedQuestion } from "./api";
 
 export type SessionEvent =
   | { type: "log"; chunk: string }
+  | { type: "activity"; label: string | null }
   | { type: "status"; status: "idle" | "running" | "awaiting_input" }
   | { type: "question"; question: PresentedQuestion }
   | { type: "question_cleared"; request_id: string }
@@ -37,6 +38,9 @@ export function useSessionEvents(
 
     src.addEventListener("log", (e) =>
       onEvent({ type: "log", chunk: parse(e).chunk ?? "" }),
+    );
+    src.addEventListener("activity", (e) =>
+      onEvent({ type: "activity", label: parse(e).label ?? null }),
     );
     src.addEventListener("status", (e) =>
       onEvent({ type: "status", status: parse(e).status }),

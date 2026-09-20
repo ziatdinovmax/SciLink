@@ -4,6 +4,7 @@ import avatarUser from "../assets/avatar_user.svg";
 import { resolveSessionPath } from "../filelink";
 import { useUIActions } from "../UIContext";
 import { LogView } from "./LogView";
+import { VOCAB } from "../vocabulary";
 import { MarkdownBody } from "./MarkdownBody";
 import { HtmlReportCard, MdReportCard } from "./ReportCards";
 
@@ -62,7 +63,7 @@ export function ChatMessage({
         ))}
         {message.verbose && (
           <details className="card">
-            <summary>Verbose output</summary>
+            <summary>{VOCAB.names.verbose_section}</summary>
             <div className="card-body">
               <LogView text={message.verbose} maxLines={2000} />
             </div>
