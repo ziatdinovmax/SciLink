@@ -1338,6 +1338,32 @@ class MeasurementLoop:
                             self.schema, source=source, based_on_step=idx,
                             closed_loop=self.closed_loop)
 
+    def recommend_now(self, timeout: Optional[float] = 180.0) -> Optional[Dict[str, Any]]:
+        """The recommender's answer NOW, validated like any other — for a
+        decision point. A slow recommender's result is normally collected by the
+        next ``step()``; during a pause there is no next step, so the answer it
+        was asked for because the data changed would never arrive. This waits for
+        the call in flight (or makes one), logs it, and returns it. ``None`` with
+        no recommender, or when nothing came back within ``timeout``."""
+        rec = self.recommender
+        if rec is None:
+            return None
+        from .recommend import finalize
+        source = getattr(rec, "name", rec.__class__.__name__)
+        if getattr(rec, "clock", "fast") != "slow":
+            return finalize(rec.suggest(), self.schema, source=source,
+                            based_on_step=self._step, closed_loop=self.closed_loop)
+        if not self._slot.busy and self._slot.start(rec, self._step) is not False:
+            rec.urgent = False
+        self._slot.wait(timeout)
+        done = self._slot.take()
+        if done is None:
+            return None
+        self._last_recommendation = self._adopt_recommendation(
+            finalize(done["raw"], self.schema, source=source,
+                     based_on_step=done["based_on_step"], closed_loop=self.closed_loop))
+        return self._last_recommendation
+
     def _adopt_recommendation(self, rec: Dict[str, Any]) -> Dict[str, Any]:
         """Log a slow recommender's result; write a protocol out as a file —
         an artifact for a person, never something SciLink runs."""

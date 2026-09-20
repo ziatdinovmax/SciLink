@@ -328,6 +328,21 @@ class TestLoopWithRecommenders:
         assert rec["source"] == "llm" and rec["requires_approval"] is True
         assert [e["event"] for e in loop.read_log()].count("recommendation") == 1
 
+    def test_at_a_decision_point_the_answer_is_fetched_not_waited_for_a_frame(self, tmp_path):
+        # Live (AFM behind MCP, paused at an inclusion): the recommendation asked for
+        # because the data changed is collected by the next step(), and a pause has none.
+        m = ScriptedModel(['{"params": {"dwell_ms": 200}, "rationale": "look closer"}',
+                           '{"params": {"dwell_ms": 9999}}'], delay=0.3)
+        loop = _loop(tmp_path, LLMRecommender(m, SCHEMA, "goal", every=1))
+        assert loop.step("f1.csv", {"dwell_ms": 100})["recommendation"] == {"pending": True}
+        rec = loop.recommend_now(timeout=5)                      # the call in flight, validated
+        assert rec["valid"] and rec["params"] == {"dwell_ms": 200} and rec["based_on_step"] == 1
+        assert len(m.prompts) == 1                               # waited for it, did not ask twice
+        bad = loop.recommend_now(timeout=5)                      # nothing in flight: asks now
+        assert bad["valid"] is False and bad["params"] is None   # and refuses like the loop does
+        assert [e["event"] for e in loop.read_log()].count("recommendation") == 2
+        assert _loop(tmp_path / "none", None).recommend_now() is None
+
     def test_the_model_is_told_what_the_experiment_is(self, tmp_path):
         # Observed live (in-situ Raman): with no context the model read an
         # anneal's G-band shift as laser heating and cut the power.

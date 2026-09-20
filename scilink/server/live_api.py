@@ -445,6 +445,10 @@ class LiveRun:
         self.paused = {**event, "at": time.time(), "experiment_held": bool(self.instrument.can_pause),
                        "timeout_s": limit}
         self.state = "paused"
+        # The recommender was asked because the data changed; with no next frame
+        # to collect its answer, fetch it here so the person deciding sees it.
+        threading.Thread(target=self._recommend_while_paused, daemon=True,
+                         name=f"scilink-live-pause-{self.session_id}").start()
         try:
             while not self._decided.wait(0.25):
                 if self._stop.is_set():
@@ -456,6 +460,12 @@ class LiveRun:
         finally:
             self.paused = None
             self.state = "running"
+
+    def _recommend_while_paused(self) -> None:
+        try:
+            self.loop.recommend_now()
+        except Exception:  # noqa: BLE001 - a recommendation never fails a run
+            pass
 
     def decide(self, action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """The person's answer to a pause: resume, resume with changed parameters, stop."""
@@ -502,6 +512,9 @@ class LiveRun:
         latest = frames[-1] if frames else None
         recs = [e for e in other if e.get("event") == "recommendation"]
         latest_rec = (latest or {}).get("recommendation") or (recs[-1] if recs else None)
+        if recs and latest_rec is not recs[-1] and (
+                int(recs[-1].get("based_on_step") or -1) > int((latest_rec or {}).get("based_on_step") or -1)):
+            latest_rec = recs[-1]            # one that arrived with no frame after it (a pause)
         status: Dict[str, Any] = self._tail.status()
         if self.loop is not None and self.loop.recipe is not None:
             meta = getattr(self.loop, "_escalation_meta", None) or {}
