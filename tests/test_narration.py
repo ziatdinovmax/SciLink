@@ -77,3 +77,17 @@ def test_classifier_specialist_marks_and_answer_body():
 def test_classify_convenience_is_stateful_per_call():
     kinds = [ln.kind for ln in classify("  💭 a\n     b\nc")]
     assert kinds == ["thought", "thought", "plain"]
+
+
+def test_bookkeeping_lines_close_a_specialist_answer():
+    """After a delegated specialist's 🤖 answer, its housekeeping lines
+    (mode change, auto-checkpoint) are not part of the answer and stay verbose."""
+    mark = vocabulary.THOUGHT_MARK
+    c = LineClassifier()
+    c.push(f"🤖{mark} Analysis specialist:")
+    assert c.push("The sample is a grain mosaic.").kind == "answer_body"
+    m = c.push("  🔄 Analysis mode changed: autopilot → co-pilot")
+    assert (m.kind, m.verbose) == ("bookkeeping", True)
+    assert c.push("     Human feedback enabled: True").kind == "bookkeeping"
+    assert c.push("      ✅ Auto-checkpoint saved").kind == "bookkeeping"
+    assert c.push("plain after").kind == "plain"

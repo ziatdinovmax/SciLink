@@ -33,7 +33,7 @@ def test_discover_lists_canonical_and_legacy_prefixes(tmp_path):
     assert [s["id"] for s in found] == ["campaign_session_20260103_000000",
                                         "planning_session_20260102_000000"]
     assert found[0]["summary"] == {"message_count": 1}
-    assert found[1]["summary"] == {"analysis_count": 2, "data_file": "grains.tif"}
+    assert found[1]["summary"] == {}          # analyses count only in analyze mode
     assert found[1]["label"].startswith("2026-01-02 00:00:00")
 
 

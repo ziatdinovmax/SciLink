@@ -105,6 +105,10 @@ class LineClassifier:
             kind = "memory"
         elif s.startswith("🔀"):
             kind = "fanout"
+        elif s.startswith(("🔄", "✅", "⚡", "🙋", "📊", "🧠", "📚", "🖼", "📄", "🗑")):
+            kind = "bookkeeping"     # the agents' own housekeeping / tool banners
+        elif s.startswith("Human feedback enabled"):
+            kind = "bookkeeping"
         elif _CAND_RE.match(s):
             kind = "candidate"
         elif _RULE_RE.match(s):

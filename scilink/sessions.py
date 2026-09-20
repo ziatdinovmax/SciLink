@@ -114,13 +114,21 @@ def _entry(sd: Path, mode: str, rec: Optional[Dict[str, Any]] = None) -> Optiona
     if not has_checkpoint and not has_chat:
         return None
     summary: Dict[str, Any] = {}
-    if has_checkpoint:
+    if has_checkpoint and mode == "analyze":       # analyses are an analyze-mode thing
         try:
             ckpt = json.loads((sd / "checkpoint.json").read_text())
             summary["analysis_count"] = len(ckpt.get("analysis_results", []))
             dp = ckpt.get("current_data_path")
             if dp:
                 summary["data_file"] = Path(dp).name
+        except Exception:
+            pass
+    if has_checkpoint and "analysis_count" not in summary:
+        try:
+            ckpt = json.loads((sd / "checkpoint.json").read_text())
+            n = len(ckpt.get("_delegation_ledger") or ckpt.get("delegation_ledger") or [])
+            if n:
+                summary["delegations"] = n
         except Exception:
             pass
     if has_chat and "analysis_count" not in summary:

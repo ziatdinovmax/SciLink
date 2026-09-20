@@ -41,6 +41,7 @@ export type LineKind =
   | "handoff"
   | "fanout"
   | "candidate"
+  | "bookkeeping"
   | "rule"
   | "blank"
   | "plain";
@@ -108,6 +109,8 @@ export class LineClassifier {
     else if (s.startsWith("📂") || s.startsWith("📁")) kind = "files";
     else if (s.startsWith("🧠 Memory:")) kind = "memory";
     else if (s.startsWith("🔀")) kind = "fanout";
+    else if (/^(?:🔄|✅|⚡|🙋|📊|🧠|📚|🖼|📄|🗑)/u.test(s)) kind = "bookkeeping";
+    else if (s.startsWith("Human feedback enabled")) kind = "bookkeeping";
     else if (CAND_RE.test(s)) kind = "candidate";
     else if (RULE_RE.test(s)) kind = "rule";
     if (kind !== null) {

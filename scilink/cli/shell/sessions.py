@@ -20,6 +20,8 @@ def _summary(s: dict) -> str:
     bits = []
     if "analysis_count" in sm:
         bits.append(f"{sm['analysis_count']} analyses")
+    if "delegations" in sm:
+        bits.append(f"{sm['delegations']} delegations")
     if sm.get("data_file"):
         bits.append(sm["data_file"])
     if "message_count" in sm:
