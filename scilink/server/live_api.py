@@ -224,7 +224,8 @@ class _LogTail:
         self.keep, self.offset = keep, 0
         self.frames: List[Dict[str, Any]] = []
         self.events: List[Dict[str, Any]] = []
-        self.n_frames = self.n_clean = self.llm_calls = self.reanchors = 0
+        self.n_frames = self.n_clean = self.llm_calls = self.reanchors = self.audits = 0
+        self.last_audit: Optional[Dict[str, Any]] = None
         self.flag_counts: Dict[str, int] = {}
         self.latencies: List[float] = []
         self.max_latency = 0.0
@@ -248,6 +249,9 @@ class _LogTail:
             if e.get("event") != "frame":
                 self.events = (self.events + [e])[-80:]
                 self.reanchors += e.get("event") == "reanchor"
+                if e.get("event") == "audit":
+                    self.audits += 1
+                    self.last_audit = e
                 continue
             self.n_frames += 1
             self.n_clean += not e.get("flags")
@@ -264,7 +268,7 @@ class _LogTail:
         return {"frames": self.n_frames, "clean_frames": self.n_clean,
                 "flag_counts": dict(self.flag_counts), "llm_calls_in_frames": self.llm_calls,
                 "latency_s": {"median": lat[len(lat) // 2], "max": self.max_latency},
-                "reanchors": self.reanchors}
+                "reanchors": self.reanchors, "audits": self.audits}
 
 
 class LiveRun:
@@ -351,6 +355,7 @@ class LiveRun:
                 auto_escalate=bool(cfg.get("auto_escalate", True)),
                 breach_patience=int(cfg.get("breach_patience") or 3),
                 reanchor_frames=int(cfg.get("reanchor_frames") or 5),
+                audit_every=(int(cfg["audit_every"]) if cfg.get("audit_every") else None),
                 closed_loop=(cfg.get("apply") == "valid"),
                 # How long a frame may take before it is flagged slow. It belongs to
                 # the instrument's cadence, so the page sets it; absent = 10 s (the
@@ -448,7 +453,10 @@ class LiveRun:
         latest_rec = (latest or {}).get("recommendation") or (recs[-1] if recs else None)
         status: Dict[str, Any] = self._tail.status()
         if self.loop is not None and self.loop.recipe is not None:
-            status.update({"recipe": self.loop.recipe, "escalating": bool(self.loop.escalating)})
+            meta = getattr(self.loop, "_escalation_meta", None) or {}
+            status.update({"recipe": self.loop.recipe, "escalating": bool(self.loop.escalating),
+                           "background": meta.get("mode") if self.loop.escalating else None,
+                           "drift_fraction_bar": self.loop.drift_fraction})
         return {
             "state": self.state, "error": self.error, "note": self.note,
             "run_dir": str(self.run_dir), "elapsed_s": round(time.time() - self.started_at, 1),
@@ -467,6 +475,7 @@ class LiveRun:
             "events": [{k: v for k, v in e.items() if k not in ("reference_features",)}
                        for e in other[-60:]],
             "recommendation": latest_rec,
+            "last_audit": self._tail.last_audit,
             # Before the first frame, the reference itself: something real to
             # look at during the minutes the loop is being armed.
             "latest": self._curve(latest) if latest else self._reference_curve(),

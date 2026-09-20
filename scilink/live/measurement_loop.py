@@ -41,6 +41,8 @@ import logging
 import shutil
 import time
 from datetime import datetime, timezone
+
+import numpy as np
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -51,7 +53,7 @@ SCHEMA_VERSION = 1
 #: Flags a frame record can carry. A flag never stops the loop.
 FLAG_FIT_FAILED = "fit_failed"            # the recipe did not produce a result
 FLAG_GATE_POOR = "gate_poor"              # below the deterministic fit gate
-FLAG_DRIFT = "drift_suspected"            # the data no longer looks like the reference
+FLAG_DRIFT = "drift_suspected"            # a material part of the frame is unlike the stream so far
 FLAG_DEADLINE = "deadline_missed"         # slower than frame_deadline_s
 FLAG_LLM_USED = "llm_used"                # the zero-LLM path was left (fallback codegen)
 FLAG_OUT_OF_RANGE = "out_of_reference_range"  # a target left its plausible range
@@ -211,13 +213,12 @@ class MeasurementLoop:
             fit gate is good and no drift is suspected before the new level is
             adopted: the data says the value is real, so the range moves to it
             (logged as ``range_adopted``) instead of flagging forever.
-        noise_gate_tolerance: The fit and drift gates are calibrated on the
-            reference run, in units of its own noise (see ``live/gates.py``): a
-            frame below the agent's R² bar is still accepted when its residual
-            scatter is within this factor of the reference's, and the drift bar
-            drops to what the reference's fingerprint does under its own noise.
-            Calibration only ever relaxes the constant bars. ``None`` keeps the
-            constant bars (R² 0.95, similarity 0.92) — right only for clean data.
+        noise_gate_tolerance: The fit gate is calibrated on the reference run, in
+            units of its own noise (see ``live/gates.py``): a frame below the
+            agent's R² bar is still accepted when its residual scatter is within
+            this factor of the reference's.
+            Calibration only ever relaxes the constant bar. ``None`` keeps the
+            constant bar (R² 0.95) — right only for clean data.
             The default rests on limited evidence: one locked recipe replayed
             over 225 real low-loss EELS spectra (untouched frames stayed within
             1.1× the reference; at 1.25 an injected feature 60 % / 30 % / 15 % of
@@ -249,6 +250,22 @@ class MeasurementLoop:
             mid-transition frame was stale when adopted and a second rebuild
             followed at once. The recipe is locked on the newest frame; the bank
             is still asked about that frame first. 1 = the breaching frame only.
+        drift_fraction / drift_score: bars of the change signal (``live/drift.py``):
+            a frame is suspected when more than ``drift_fraction`` of its
+            structure is new AND its residual is ``drift_score`` times what is
+            normal for the stream. It reads the data only, never the recipe, so
+            its verdict does not depend on which recipe was locked. LOWER
+            either to catch weaker changes, RAISE if ordinary variation is flagged.
+        audit_every: every this many frames an independent analysis of the
+            current frame runs in the background and its named outputs are
+            compared with the locked recipe's. A fit-quality gate cannot see a
+            model that fits well and is wrong (observed: D/G 0.59 against a true
+            1.19 at R² 0.99); only a second, independent analysis can. Needs
+            ``outputs``. A disagreement is reported, never acted on. ``None`` =
+            no periodic audits.
+        audit_profile: depth of an audit analysis (default ``quick``).
+        audit_tolerance: two values agree when they differ by less than this
+            fraction, or by less than three combined uncertainties.
         auto_escalate: Start a background re-anchor by itself the moment
             ``needs_escalation`` is raised (on the frame that raised it). Off
             by default — a re-anchor calls a model, and whether the loop may
@@ -298,6 +315,9 @@ class MeasurementLoop:
                  check_portability: bool = True,
                  auto_escalate: bool = False,
                  reanchor_frames: int = 5,
+                 drift_fraction: float = 0.10, drift_score: float = 3.0,
+                 audit_every: Optional[int] = None, audit_profile: str = "quick",
+                 audit_tolerance: float = 0.05,
                  escalation_profile: str = "extract",
                  escalation_runner: Optional[Callable[[Dict[str, Any]], Any]] = None,
                  recommender: Any = None,
@@ -326,11 +346,15 @@ class MeasurementLoop:
         self.auto_escalate = bool(auto_escalate)
         self.reanchor_frames = max(1, int(reanchor_frames or 1))
         self._recent_frames: List[str] = []
-        # The drift signal compares each frame with ONE reference frame. After a
-        # window-planned re-anchor that frame is stale by construction (see
-        # ``_rebase_drift``); the loop then holds the reference itself.
-        self._drift_reference: Optional[Dict[str, Any]] = None
-        self._rebase: Optional[List[Dict[str, Any]]] = None
+        from .drift import DriftMonitor
+        self.drift_fraction, self.drift_score = float(drift_fraction), float(drift_score)
+        self._drift = DriftMonitor(fraction_bar=self.drift_fraction, score_bar=self.drift_score)
+        self.audit_every = int(audit_every) if audit_every else None
+        self.audit_profile, self.audit_tolerance = audit_profile, float(audit_tolerance)
+        self._last_audit_step = 0
+        self._last_audit: Optional[Dict[str, Any]] = None
+        self._breach_kinds: List[str] = []
+        self._recent_features: List[Dict[str, float]] = []
         self.escalation_profile = escalation_profile
         self._escalation_runner = escalation_runner
         self._escalation: Any = None
@@ -480,6 +504,10 @@ class MeasurementLoop:
                 f"produces. Available: {sorted(self._reference_features)}")
         self._ranges = {k: [v, v] for k, v in self._reference_features.items()}
         self._n_learned, self._out_of_range_streak = 0, []
+        self._seed_drift(refs or reference_data)
+        if self.audit_every and not self.outputs:
+            self.logger.warning("audit_every is set but no `outputs` are declared: an audit "
+                                "compares named outputs, so none will run.")
         portability = self._check_portability(reference or reference_data)
 
         record = {
@@ -641,6 +669,12 @@ class MeasurementLoop:
             flags.append(FLAG_FIT_FAILED)
             if not error and result.get("error"):
                 error = json.dumps(result.get("error"), default=str)[:300]
+            # The change signal reads the data, not the fit: a frame the recipe
+            # cannot run on is exactly when "how different is it?" is wanted, and
+            # the monitor must see these frames to know the state a rebuild lands in.
+            gate_extra = self._judge({}, str(frame_dir), str(data_path))
+            gate_extra.pop("poor", None)
+            gate_extra.pop("drift", None)
         else:
             gate_extra = self._judge(validity, str(frame_dir), str(data_path))
             if gate_extra.pop("poor"):
@@ -673,11 +707,17 @@ class MeasurementLoop:
 
         breach = any(f in _BREACH_FLAGS for f in flags)
         self._consecutive_breaches = self._consecutive_breaches + 1 if breach else 0
+        # What kind of run this is decides what the slow clock does about it.
+        fit_breach = FLAG_FIT_FAILED in flags or FLAG_GATE_POOR in flags
+        self._breach_kinds = (self._breach_kinds + ["fit" if fit_breach else "change"]) if breach else []
         needs_escalation = self._consecutive_breaches >= self.breach_patience
         clean = not flags or flags == [FLAG_DEADLINE]
         if clean:
             self._widen_ranges(features)
             self._n_learned += 1
+            self._recent_features = (self._recent_features + [features])[-12:]
+            if getattr(self, "_verdict", None) is not None:
+                self._drift.learn(*self._verdict)     # only accepted frames teach
 
         record: Dict[str, Any] = {
             "event": "frame", "step": idx, "data": str(data_path),
@@ -702,20 +742,91 @@ class MeasurementLoop:
             self._recent_frames = (self._recent_frames + [str(data_path)])[-25:]
         record["recommendation"] = self._recommend(params, features, flags, idx)
         if self._escalation is not None:
-            record["escalation"] = "running"
+            record["escalation"] = ("audit" if (self._escalation_meta or {}).get("mode") == "audit"
+                                    else "running")
         self._append(record)
         self._save_state()
-        if needs_escalation and self.auto_escalate and self._escalation is None:
-            try:
-                self.escalate(data_path)
-                record["escalation"] = "started"
-            except Exception as e:  # noqa: BLE001 - never fails the frame
-                self.logger.warning(f"auto-escalation could not start: {e}")
+        self._slow_clock(data_path, record, needs_escalation, clean, features)
         return record
 
+    def _slow_clock(self, data_path: str, record: Dict[str, Any], needs_escalation: bool,
+                    clean: bool, features: Dict[str, float]) -> None:
+        """What the background does about this frame. One job at a time.
+
+        - A run of frames the recipe FAILS on: rebuild it (re-anchor).
+        - A run of frames that fit well but look different from the stream so
+          far: the recipe may be silently absorbing something new, or the sample
+          simply moved on. An independent analysis settles it (an audit): if its
+          named outputs agree with the locked recipe's, the new state is accepted
+          and nothing is rebuilt; if they disagree, its recipe is adopted.
+          Without named outputs there is nothing to compare, so it rebuilds.
+        - Every ``audit_every`` frames, the same independent check on a timer;
+          a disagreement there is reported, not acted on.
+        A periodic audit gives way to either of the first two.
+        """
+        try:
+            job = (self._escalation_meta or {}) if self._escalation is not None else None
+            if needs_escalation and self.auto_escalate:
+                if job is not None and job.get("reason") == "periodic":
+                    self._cancel_background("a breach run needs the background")
+                    job = None
+                if job is None:
+                    change_only = bool(self._breach_kinds) and "fit" not in self._breach_kinds[-self.breach_patience:]
+                    if change_only and self.outputs:
+                        self.audit(data_path, reason="change", locked=features)
+                        record["escalation"] = "audit_started"
+                    else:
+                        self.escalate(data_path)
+                        record["escalation"] = "started"
+            elif (self.audit_every and self.outputs and clean and job is None
+                  and self._step - self._last_audit_step >= self.audit_every):
+                self.audit(data_path, reason="periodic", locked=features)
+                record["escalation"] = "audit_started"
+        except Exception as e:  # noqa: BLE001 - never fails the frame
+            self.logger.warning(f"the background job could not start: {e}")
+
     # -------------------------------------------------------------- escalation
+    def audit(self, data_path: str, *, profile: Optional[str] = None, background: bool = True,
+              frames: Optional[List[str]] = None, reason: str = "manual",
+              locked: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+        """An independent analysis of ``data_path``, compared with the locked
+        recipe on the named ``outputs``. Same worker as a re-anchor (planned
+        from the recent frames, pinned to the same names, the current recipe
+        barred from the bank audition so the second opinion is a second
+        opinion); what differs is what happens to the result:
+
+        - ``reason="change"`` (the stream looks different but still fits): agree
+          -> the new state is accepted, the recipe stays; disagree -> the audit's
+          recipe is adopted.
+        - ``"periodic"`` / ``"manual"``: the comparison is reported (event
+          ``audit``, ``status()["last_audit"]``); nothing is adopted.
+
+        ``locked`` are the locked recipe's values for this frame (the frame
+        record's ``features``); without them the frame is replayed to get them.
+        """
+        if not self.outputs:
+            raise ValueError("an audit compares named outputs: declare `outputs` on the loop")
+        if locked is None:
+            locked = (self.step(data_path) or {}).get("features") or {}
+        return self.escalate(data_path, profile=profile or self.audit_profile,
+                             background=background, frames=frames, _mode="audit",
+                             _reason=reason, _locked=dict(locked))
+
+    def _cancel_background(self, why: str) -> None:
+        esc = self._escalation
+        if esc is None:
+            return
+        if hasattr(esc, "terminate"):
+            esc.terminate()
+        self._append({"event": "escalation_cancelled", "step": self._step,
+                      "index": (self._escalation_meta or {}).get("index"),
+                      "mode": (self._escalation_meta or {}).get("mode"), "why": why})
+        self._escalation, self._escalation_meta = None, None
+
     def escalate(self, data_path: str, *, profile: Optional[str] = None,
-                 background: bool = True, frames: Optional[List[str]] = None) -> Dict[str, Any]:
+                 background: bool = True, frames: Optional[List[str]] = None,
+                 _mode: str = "reanchor", _reason: str = "fit",
+                 _locked: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
         """Re-anchor on ``data_path`` (normally the frame that breached). The
         slow clock: this may call a model, which is why ``step()`` never calls
         it unless ``auto_escalate`` was asked for.
@@ -771,20 +882,25 @@ class MeasurementLoop:
             "pin_outputs": dict(self.outputs) or None,
             "system_info": self.system_info,
         }
+        if _mode == "audit":
+            self._last_audit_step = self._step
         self._escalation_meta = {"index": self._n_escalations, "data": str(data_path),
-                                 "window": len(window),
+                                 "window": len(window), "mode": _mode, "reason": _reason,
+                                 "locked": _locked, "frames": list(window),
                                  "profile": analyze_kwargs["profile"],
                                  "from_recipe": self.recipe["id"],
                                  "started_step": self._step, "t0": time.perf_counter()}
-        self._append({"event": "escalation_started", "step": self._step,
-                      **{k: v for k, v in self._escalation_meta.items() if k != "t0"}})
+        self._append({"event": "audit_started" if _mode == "audit" else "escalation_started",
+                      "step": self._step,
+                      **{k: v for k, v in self._escalation_meta.items()
+                         if k not in ("t0", "locked", "frames")}})
         runner = self._escalation_runner or (
             _ProcessEscalation if background else _InlineEscalation)
         self._escalation = runner(spec)
         if not background:
             return self._poll_escalation() or {"event": "escalation_started"}
-        return {"event": "escalation_started", **{
-            k: v for k, v in self._escalation_meta.items() if k != "t0"}}
+        return {"event": "audit_started" if _mode == "audit" else "escalation_started", **{
+            k: v for k, v in self._escalation_meta.items() if k not in ("t0", "locked", "frames")}}
 
     @staticmethod
     def _sandbox_approved() -> bool:
@@ -822,12 +938,7 @@ class MeasurementLoop:
             except Exception as e:  # noqa: BLE001
                 self.logger.warning(f"close(): the re-anchor did not finish: {e}")
         if self._escalation is not None:
-            if hasattr(esc, "terminate"):
-                esc.terminate()
-            self._append({"event": "escalation_cancelled", "step": self._step,
-                          "index": (self._escalation_meta or {}).get("index"),
-                          "why": "the loop was closed before the re-anchor finished"})
-            self._escalation, self._escalation_meta = None, None
+            self._cancel_background("the loop was closed before the re-anchor finished")
             self._save_state()
         return adopted
 
@@ -856,19 +967,46 @@ class MeasurementLoop:
         script, anchor_dir = (None, None)
         if result.get("status") == "success" and result.get("output_directory"):
             script, anchor_dir = self._anchor_script(result["output_directory"])
+        is_audit = meta.get("mode") == "audit"
+        failure = None
         if script is None:
-            record = {"event": "escalation_failed", **base,
-                      "error": str(result.get("error") or "the re-anchor produced no reusable run")[:300]}
+            failure = str(result.get("error") or "the analysis produced no reusable run")
+        elif self.outputs and not result.get("pin_edits"):
+            failure = ("the new recipe could not be extended to report the pinned "
+                       f"outputs: {result.get('pin_error')}")
+        if failure:
+            record = {"event": "audit_failed" if is_audit else "escalation_failed", **base,
+                      "error": failure[:300]}
+            if is_audit and meta.get("reason") == "change":
+                # The fit is good and no second opinion could be had. Accept the
+                # new state rather than ask again on every breach run.
+                record["state_accepted_unverified"] = self._drift.adopt()
+                self._consecutive_breaches, self._breach_kinds = 0, []
             self._append(record)
             self._save_state()
             return record
-        if self.outputs and not result.get("pin_edits"):
-            record = {"event": "escalation_failed", **base,
-                      "error": ("the new recipe could not be extended to report the pinned "
-                                f"outputs: {result.get('pin_error')}")[:300]}
-            self._append(record)
-            self._save_state()
-            return record
+        if is_audit:
+            comparison = self._compare(meta.get("locked") or {}, result.get("pin_features") or {})
+            agrees = all(c["agrees"] for c in comparison.values()) if comparison else False
+            audit = {"event": "audit", **base, "reason": meta.get("reason"), "agrees": agrees,
+                     "outputs": comparison, "audited_step": meta.get("started_step"),
+                     "audit_model": str((result.get("window") or {}).get("model") or "")[:200]}
+            self._last_audit = {k: audit[k] for k in ("step", "reason", "agrees", "outputs",
+                                                      "audited_step")}
+            if meta.get("reason") != "change" or agrees:
+                if meta.get("reason") == "change":
+                    audit["state_accepted"] = self._drift.adopt()
+                    self._consecutive_breaches, self._breach_kinds = 0, []
+                self._append(audit)
+                self._save_state()
+                self.logger.info(f"🔎 Audit of frame {audit['audited_step']}: "
+                                 + ("agrees with the locked recipe." if agrees else
+                                    "DISAGREES with the locked recipe: " + json.dumps(comparison)[:300]))
+                return audit
+            # A changed stream AND a second opinion that disagrees: the analysis
+            # made on the new data is the better informed one. Adopt it below.
+            self._append(audit)
+            base = {**base, "after_audit": True}
         # Adopt. Amendments were written against the OLD script and do not
         # carry; the plausible ranges belong to the old regime and re-learn.
         # The pin edits were produced for THIS script by the worker.
@@ -876,8 +1014,8 @@ class MeasurementLoop:
         source = "bank" if result.get("cold_start") else f"reanchor:{meta.get('profile')}"
         self.recipe = self._recipe_record(script, source)
         self._calibrate()
-        self._drift_reference = None
-        self._rebase = [] if result.get("window") else None
+        self._seed_drift(meta.get("frames") or [meta.get("data")], keep=True)
+        self._breach_kinds = []
         self._reference_features = (result.get("pin_features")
                                     or self._features_from_anchor(anchor_dir))
         self._ranges = {k: [v, v] for k, v in self._reference_features.items()}
@@ -920,6 +1058,49 @@ class MeasurementLoop:
                 f"   portability: {report['summary']} {report['positions_summary']}".rstrip())
         return report
 
+    def _scatter(self, name: str) -> float:
+        """How much this output moves from one clean frame to the next: the
+        stream's own measure of its precision (robust, from first differences).
+        Reported fit uncertainties are often missing or optimistic."""
+        vals = [f[name] for f in self._recent_features if isinstance(f.get(name), (int, float))]
+        if len(vals) < 4:
+            return 0.0
+        d = np.diff(np.asarray(vals, dtype=float))
+        return float(1.4826 * np.median(np.abs(d - np.median(d))) / np.sqrt(2.0))
+
+    def _compare(self, locked: Dict[str, float], audit: Dict[str, float]) -> Dict[str, Any]:
+        """Named outputs, locked recipe against audit. Two values agree when
+        they differ by less than ``audit_tolerance`` (relative), three combined
+        fit uncertainties, or three times the output's own frame-to-frame
+        scatter — two analyses cannot be asked to agree better than one
+        analysis agrees with itself."""
+        out: Dict[str, Any] = {}
+        for name in self.outputs:
+            a, b = locked.get(name), audit.get(name)
+            if a is None or b is None:
+                out[name] = {"locked": a, "audit": b, "agrees": False, "why": "missing"}
+                continue
+            err = float(np.hypot(locked.get(f"{name}_err") or 0.0, audit.get(f"{name}_err") or 0.0))
+            scatter = self._scatter(name)
+            diff, scale = abs(a - b), max(abs(a), abs(b), 1e-300)
+            out[name] = {"locked": a, "audit": b, "relative_difference": round(diff / scale, 5),
+                         "combined_uncertainty": round(err, 8), "frame_scatter": round(scatter, 8),
+                         "agrees": bool(diff <= self.audit_tolerance * scale or diff <= 3.0 * err
+                                        or diff <= 3.0 * scatter)}
+        return out
+
+    def _seed_drift(self, files: Any, keep: bool = False) -> None:
+        """(Re)start the change signal from reference frames. ``keep``: a new
+        recipe for the same stream keeps what the monitor has already seen."""
+        from .instruments import read_curve
+        curves = []
+        for f in ([files] if isinstance(files, (str, Path)) else list(files or [])):
+            try:
+                curves.append(read_curve(str(f))[:2])
+            except Exception:  # noqa: BLE001 - an unreadable reference seeds nothing
+                pass
+        self._drift.seed(curves, keep=keep)
+
     def _calibrate(self) -> None:
         """Ask the current anchor run what its noise does to the gates."""
         self._calibration = {}
@@ -961,57 +1142,14 @@ class MeasurementLoop:
             return {**extra, **(base or {})}
         return base                      # free-text system_info: left as the caller wrote it
 
-    @staticmethod
-    def _fingerprint(data_path: str) -> Optional[Dict[str, Any]]:
-        try:
-            from ..skills._shared import _script_bank
-            from .instruments import read_curve
-            x, y, _, _ = read_curve(data_path)
-            return _script_bank.curve_fingerprint(x, y)
-        except Exception:  # noqa: BLE001 - no fingerprint, no opinion
-            return None
-
-    def _rebase_drift(self, poor: bool, drift: bool, data_path: str,
-                      floor: float) -> Optional[bool]:
-        """After a window-planned re-anchor: is the drift reference just stale?
-
-        The recipe was planned across a change and locked on the window's last
-        frame; by the time it is adopted the stream has moved further along the
-        same change. Observed live (XRD through a phase transition): the new
-        recipe fitted every frame at R² 0.99 and the loop still rebuilt it at
-        once, because pure phase B no longer looked like the mid-transition
-        anchor frame. So: if the first frames under the new recipe all pass the
-        fit gate and look like EACH OTHER, the stream is stable and the
-        reference moves to them. A poor fit, or a frame that matches the anchor
-        after all, cancels it and the ordinary rules apply. Returns the frame's
-        drift verdict when it took the decision, else None."""
-        if self._rebase is None:
-            return None
-        if poor or not drift:
-            self._rebase = None
-            return None
-        fp = self._fingerprint(data_path)
-        if fp is None:
-            self._rebase = None
-            return None
-        from ..skills._shared import _script_bank
-        if any(_script_bank._curve_similarity(fp, other) < floor for other in self._rebase):
-            self._rebase = None                  # still moving: not a stable new state
-            return None
-        self._rebase.append(fp)
-        if len(self._rebase) < max(1, self.breach_patience - 1):
-            return None                          # flagged for now; not yet a breach run
-        self._drift_reference, self._rebase = self._rebase[0], None
-        self._append({"event": "drift_rebased", "step": self._step,
-                      "recipe_id": self.recipe["id"],
-                      "why": "first frames under the new recipe fit and agree with each other"})
-        return False
-
     def _judge(self, validity: Dict[str, Any], frame_dir: str,
                data_path: Optional[str] = None) -> Dict[str, Any]:
-        """The frame's fit and drift verdicts, with the agent's constant bars
-        relaxed to what the reference run achieved under its own noise. Returns
-        ``poor`` / ``drift`` plus whatever it measured, for the record."""
+        """The frame's fit and change verdicts. The fit gate is the agent's,
+        relaxed to what the reference run achieved under its own noise. The
+        change signal is the loop's own (``live/drift.py``): graded, read from
+        the data alone; the agent's fingerprint verdict is used only when the
+        frame cannot be read. Returns ``poor`` / ``drift`` plus what was
+        measured, for the record."""
         poor = validity.get("verdict") not in (None, "good")
         drift = validity.get("drift") == "suspected"
         out: Dict[str, Any] = {}
@@ -1024,23 +1162,21 @@ class MeasurementLoop:
                 out["reference_excess"] = cal["residual_excess"]
                 if excess <= self.noise_gate_tolerance * cal["residual_excess"]:
                     poor, out["accepted_in_noise_units"] = False, True
-        sim = validity.get("fingerprint_similarity")
-        floor = float(cal.get("drift_floor") if cal.get("drift_floor") is not None else 0.92)
-        if self._drift_reference is not None and data_path:
-            fp = self._fingerprint(data_path)     # the loop holds the reference (see _rebase_drift)
-            if fp is not None:
-                from ..skills._shared import _script_bank
-                sim = round(float(_script_bank._curve_similarity(fp, self._drift_reference)), 3)
-                out["fingerprint_similarity_rebased"] = sim
-                drift = sim < floor
-        if cal and drift and cal.get("drift_floor") is not None and sim is not None:
-            out["drift_floor"] = cal["drift_floor"]
-            if float(sim) >= cal["drift_floor"]:
-                drift = False
+        self._verdict = None
         if data_path:
-            decided = self._rebase_drift(poor, drift, data_path, floor)
-            if decided is not None:
-                drift = decided
+            try:
+                from .instruments import read_curve
+                x, y, _, _ = read_curve(str(data_path))
+                verdict = self._drift.judge(x, y)
+            except Exception:  # noqa: BLE001 - no opinion, the agent's verdict stands
+                verdict = {"available": False}
+            if verdict.get("available"):
+                drift = bool(verdict["suspected"])
+                self._verdict = (x, y, verdict)
+                out["drift_fraction"], out["drift_score"] = verdict["fraction"], verdict["score"]
+                for k in ("from_reference", "window_share"):
+                    if k in verdict:
+                        out[f"drift_{k}"] = verdict[k]
         return {"poor": poor, "drift": drift, **out}
 
     _UNCERTAINTY_SUFFIXES = ("_err", "_error", "_stderr", "_std", "_unc", "_uncertainty", "_sigma_err")
@@ -1170,6 +1306,8 @@ class MeasurementLoop:
             "needs_escalation": bool(frames and frames[-1].get("needs_escalation")),
             "escalating": self.escalating,
             "reanchors": sum(1 for r in self.read_log() if r.get("event") == "reanchor"),
+            "audits": sum(1 for r in self.read_log() if r.get("event") == "audit"),
+            "last_audit": self._last_audit,
         }
 
     # ------------------------------------------------------------ persistence
@@ -1209,7 +1347,10 @@ class MeasurementLoop:
             "gate_calibration": self._calibration,
             "noise_gate_tolerance": self.noise_gate_tolerance,
             "reanchor_frames": self.reanchor_frames, "recent_frames": self._recent_frames,
-            "drift_reference": self._drift_reference, "drift_rebase": self._rebase,
+            "drift": self._drift.to_state(), "drift_fraction": self.drift_fraction,
+            "drift_score": self.drift_score, "audit_every": self.audit_every,
+            "audit_profile": self.audit_profile, "audit_tolerance": self.audit_tolerance,
+            "last_audit": self._last_audit, "last_audit_step": self._last_audit_step,
         }
         tmp = self.output_dir / (LOOP_STATE_NAME + ".tmp")
         tmp.write_text(json.dumps(state, indent=2, default=str), encoding="utf-8")
@@ -1224,8 +1365,10 @@ class MeasurementLoop:
                   "range_widen", "range_warmup", "range_adopt_after", "gate_keys",
                   "system_info"):
             kwargs.setdefault(k, state.get(k))
-        if "reanchor_frames" in state:
-            kwargs.setdefault("reanchor_frames", state["reanchor_frames"])
+        for k in ("reanchor_frames", "drift_fraction", "drift_score", "audit_every",
+                  "audit_profile", "audit_tolerance"):
+            if state.get(k) is not None:
+                kwargs.setdefault(k, state[k])
         if "noise_gate_tolerance" in state:      # absent in older states: keep the default
             kwargs.setdefault("noise_gate_tolerance", state["noise_gate_tolerance"])
         loop = cls(output_dir, **kwargs)
@@ -1239,7 +1382,8 @@ class MeasurementLoop:
         loop._n_learned = int(state.get("n_learned") or 0)
         loop._calibration = state.get("gate_calibration") or {}
         loop._recent_frames = [str(f) for f in (state.get("recent_frames") or [])]
-        loop._drift_reference = state.get("drift_reference")
-        loop._rebase = state.get("drift_rebase")
+        loop._drift.load_state(state.get("drift"))
+        loop._last_audit = state.get("last_audit")
+        loop._last_audit_step = int(state.get("last_audit_step") or 0)
         loop._append({"event": "resume", "step": loop._step, "recipe": loop.recipe})
         return loop

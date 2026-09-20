@@ -33,7 +33,7 @@ const FLAG_WORDS: Record<string, string> = {
 const FLAG_HELP: Record<string, string> = {
   fit_failed: "The recipe could not run on this frame. No values are reported for it.",
   gate_poor: "The fit describes this frame clearly worse than it described the reference.",
-  drift_suspected: "The data looks different from what the recipe was built on, even if the fit is good.",
+  drift_suspected: "A material part of this frame is unlike the frames seen so far, even if the fit is good. The Change chart shows how much.",
   out_of_reference_range: "A tracked value left the range seen so far. If it stays there it is accepted as real.",
   deadline_missed: "The analysis took longer than the frame deadline set under Options. The values are still valid and nothing is rebuilt because of it.",
   llm_used: "A model was called while answering this frame. This should never happen.",
@@ -88,6 +88,24 @@ function describeEvent(e: LiveEvent): string {
     }
     case "escalation_started":
       return "Rebuilding the recipe in the background.";
+    case "audit_started":
+      return g("reason") === "change"
+        ? "The data changed but still fits. An independent analysis is checking the recipe."
+        : "Independent audit of the recipe started.";
+    case "audit": {
+      const outs = (e.outputs ?? {}) as Record<string, { locked: number; audit: number; agrees: boolean }>;
+      const bad = Object.entries(outs).filter(([, c]) => !c.agrees)
+        .map(([k, c]) => `${k} ${fmt(c.locked)} locked, ${fmt(c.audit)} audit`);
+      return e.agrees
+        ? `Audit of frame ${g("audited_step")} agrees with the recipe.` +
+          (g("reason") === "change" ? " The new state is accepted." : "")
+        : `Audit of frame ${g("audited_step")} disagrees. ${bad.join(". ")}.`;
+    }
+    case "audit_failed":
+      return `Audit could not be completed. ${String(g("error") ?? "").slice(0, 120)}`;
+    case "escalation_cancelled":
+      return `${g("mode") === "audit" ? "An audit" : "A rebuild"} was stopped before it finished. ` +
+        (String(g("why") ?? "").includes("closed") ? "The run ended first." : "A failing recipe needed the background.");
     case "reanchor": {
       const win = e.window as { n?: number } | undefined;
       return `New recipe adopted after ${g("seconds")} s${win?.n ? `, planned from the last ${win.n} frames` : ""}. ` +
@@ -137,6 +155,7 @@ export function LivePanel({
   const [profile, setProfile] = useState("thorough");
   const [refFrames, setRefFrames] = useState("1");
   const [deadline, setDeadline] = useState("10");
+  const [auditEvery, setAuditEvery] = useState("");
   const [replayDir, setReplayDir] = useState("");
   const [technique, setTechnique] = useState("");
   const [sample, setSample] = useState("");
@@ -213,6 +232,7 @@ export function LivePanel({
       reference_analysis: reference === FIRST_FRAME ? undefined : reference,
       reference_frames: Math.max(1, Math.min(25, parseInt(refFrames, 10) || 1)),
       frame_deadline_s: parseFloat(deadline) > 0 ? parseFloat(deadline) : null,
+      audit_every: parseInt(auditEvery, 10) > 0 ? parseInt(auditEvery, 10) : undefined,
       ...(instrument === REPLAY || instrument === MCP ? {
         replay_dir: instrument === REPLAY ? replayDir.trim() : undefined,
         mcp_server: instrument === MCP ? mcpServer : undefined,
@@ -458,6 +478,18 @@ export function LivePanel({
                 <input type="number" min={0} step={0.5} placeholder="none" value={deadline}
                   onChange={(e) => setDeadline(e.target.value)} />
               </label>
+              <label><span>Audit every N frames
+                  <Info>
+                    An independent analysis of the current frame runs in the background and its tracked
+                    quantities are compared with the recipe's. A fit can look perfect and still be the wrong
+                    model, and only a second analysis can show that. A disagreement is reported and nothing is
+                    changed. Each audit costs a few model calls. Leave empty for none. An audit also runs by
+                    itself when the data changes but the recipe still fits.
+                  </Info>
+                </span>
+                <input type="number" min={5} placeholder="none" value={auditEvery}
+                  onChange={(e) => setAuditEvery(e.target.value)} />
+              </label>
               <label><span>Pause between frames (s)</span>
                 <input type="number" min={0} step={0.5} value={interval} onChange={(e) => setIntervalS(e.target.value)} />
               </label>
@@ -563,6 +595,7 @@ export function LivePanel({
             ))}
             <li>{st.llm_calls_in_frames ?? 0} model calls while answering frames</li>
             <li>{st.reanchors ?? 0} recipe rebuilds</li>
+            <li>{st.audits ?? 0} independent audits</li>
             <li>Slowest frame {(st.latency_s?.max ?? 0).toFixed(1)} s</li>
             <li>Recipe {(st.recipe?.id ?? "").slice(0, 8) || "not locked yet"}</li>
             <li>{snap?.run_dir}</li>
@@ -590,7 +623,21 @@ export function LivePanel({
       {latest && latest.flags.length > 0 && (
         <div className="live-flags">
           ▲ Frame {latest.step}: {latest.flags.map((f) => FLAG_WORDS[f] ?? f).join(", ")}.
-          {st.escalating ? " Rebuilding the recipe. Frames are still answered." : ""}
+          {st.escalating ? (st.background === "audit"
+            ? " An independent analysis is checking the recipe. Frames are still answered."
+            : " Rebuilding the recipe. Frames are still answered.") : ""}
+        </div>
+      )}
+      {snap?.last_audit && !snap.last_audit.agrees && (
+        <div className="live-flags">
+          ▲ The audit of frame {snap.last_audit.audited_step} disagrees with the recipe.{" "}
+          {Object.entries(snap.last_audit.outputs).filter(([, c]) => !c.agrees)
+            .map(([k, c]) => `${k}: ${fmt(c.locked)} from the recipe, ${fmt(c.audit)} from the audit`).join(". ")}.
+          <Info>
+            Two independent analyses of the same frame report different values, so at least one model is
+            wrong for this data. The fit quality cannot tell which. Look at the fit on the latest frame,
+            and consider a thorough analysis of that frame in Chat.
+          </Info>
         </div>
       )}
 
@@ -614,6 +661,31 @@ export function LivePanel({
               )}
             </div>
             {keys.length === 0 && <p className="caption">This recipe reports no numeric quantities.</p>}
+            {frames.some((f) => typeof f.gate.drift_fraction === "number") && (
+              <div className="live-multiple">
+                <div className="live-multiple-head">
+                  <span>change</span>
+                  <b>{fmtShort(latest?.gate.drift_fraction as number)}</b>
+                  <Info>
+                    How much of each frame the frames seen so far cannot describe, from 0 (nothing new) to 1
+                    (nothing in common). It is read from the data alone and does not depend on the recipe.
+                    The dashed line is the same measure against the reference only. It shows how far the
+                    sample has moved since the recipe was locked, including slow changes the recipe simply
+                    follows.
+                    Above {fmtShort(st.drift_fraction_bar ?? 0.1)} a frame is flagged when it is also unusual
+                    for this stream.
+                  </Info>
+                </div>
+                <LiveChart
+                  compact xInteger height={96}
+                  series={frames.map((f) => ({ x: f.step, y: (f.gate.drift_fraction as number) ?? null }))}
+                  seriesLabel="new in this frame"
+                  reference={frames.map((f) => ({ x: f.step, y: (f.gate.drift_from_reference as number) ?? null }))}
+                  referenceLabel="moved since the reference"
+                  flagged={flagged} rules={rules}
+                />
+              </div>
+            )}
             {keys.map((k, i) => {
               const err = latest?.features[`${k}_err`];
               return (

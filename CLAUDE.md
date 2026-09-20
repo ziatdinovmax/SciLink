@@ -803,6 +803,25 @@ vendor's API, limits and file format belong to the `Instrument` subclass and its
 `schema`), and they stay out of the `run_analysis` skill menu, like
 `data_preparation`.
 
+**A live loop makes three judgements per stream, and they are deliberately
+separate.** (1) *Does the recipe still fit this frame?* — the fit gate, the
+agent's R² verdict relaxed to what the reference achieved in units of its own
+noise (`live/gates.py`). (2) *Has the data changed?* — a graded, model-free
+signal (`live/drift.py`): the share of a frame that the frames seen so far
+cannot describe, read from the data alone so it cannot depend on which recipe
+was locked (it replaced a thresholded peak-counting fingerprint that saturated on
+rich patterns and gave opposite verdicts on the same series under two recipes).
+(3) *Is a recipe that fits also right?* — no gate can answer that; only a second,
+independent analysis can, so the loop runs **audits** (the re-anchor worker with a
+different adoption rule) and compares named outputs. What the slow clock does
+follows from which judgement fired: a run of frames the recipe fails on is
+rebuilt; a run that fits but looks different is audited — agreement accepts the
+new state and keeps the recipe, disagreement adopts the audit's recipe; periodic
+audits only report. Two analyses are never asked to agree better than one agrees
+with itself (the output's own frame-to-frame scatter), and a state accepted once
+is remembered so the same kind of region is not asked about twice. The monitor
+works on any 1D curve, which is how it will watch a datacube (its mean spectrum).
+
 **Onboarding an instrument has two halves, and neither is a SciLink class.**
 The *driver* — how to talk to the controller, its file formats, its real limits —
 is an MCP server in front of the instrument, in any language: one tool that

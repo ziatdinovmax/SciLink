@@ -786,75 +786,155 @@ class TestReanchorWorker:
         assert len(calls) == 1 and calls[0]["data"] == "only.csv" and "bank_only" not in calls[0]
 
 
-class TestDriftRebase:
-    """After a window-planned re-anchor the anchor FRAME is stale by
-    construction. Observed live (XRD through a phase transition): the new recipe
-    fitted every frame at R² 0.99 and the loop rebuilt it at once, because pure
-    phase B no longer looked like the mid-transition anchor frame."""
+class TestChangeSignalAndAudit:
+    """The loop's own change signal (live/drift.py) and what the slow clock does
+    about a stream that changed: a rebuild when the recipe fails, an independent
+    audit when it still fits."""
 
-    def _curve(self, tmp_path, name, centers):
+    OUT = {"peak_1_center": "centre of the first peak"}
+
+    def _curve(self, tmp_path, name, centers, seed=0):
         import numpy as np
         x = np.linspace(0, 20, 600)
         y = 0.2 + sum(5.0 * np.exp(-0.5 * ((x - c) / 0.25) ** 2) for c in centers)
-        y = y + np.random.default_rng(len(name)).normal(0, 0.01, x.size)
+        y = y + np.random.default_rng(seed).normal(0, 0.02, x.size)
         p = tmp_path / name
         np.savetxt(p, np.column_stack([x, y]), delimiter=",", header="x,y", comments="")
         return str(p)
 
-    def _adopted(self, tmp_path, window):
-        loop = loop_at(tmp_path, escalation_runner=FakeEscalation, breach_patience=3,
-                       noise_gate_tolerance=None)
-        loop.setup(anchor=str(make_anchor(tmp_path)))
-        loop.step("a.csv")
-        loop.escalate("a.csv")
-        FakeEscalation.last.result = {"status": "success", "seconds": 60, "llm_calls": 6,
-                                      "output_directory": str(new_anchor(tmp_path)),
-                                      "window": window}
+    def _armed(self, tmp_path, **kw):
+        ref = self._curve(tmp_path, "ref.csv", [5, 9, 14], seed=1)
+        loop = loop_at(tmp_path, escalation_runner=FakeEscalation, breach_patience=2,
+                       auto_escalate=True, check_portability=False, **kw)
+        loop.setup(anchor=str(make_anchor(tmp_path)), reference_data=ref)
+        loop.outputs = dict(self.OUT)                   # named outputs, without a pinning model
+        for i in range(5):
+            assert loop.step(self._curve(tmp_path, f"n{i}.csv", [5, 9, 14], seed=10 + i))["flags"] == []
         return loop
 
-    def _reply(self, path, r2=0.99):
-        FakeAgent.replies[Path(path).name] = good(6.9, r2=r2, drift="suspected")
+    def _changed(self, tmp_path, n=4):
+        return [self._curve(tmp_path, f"c{i}.csv", [5, 9, 14, 17], seed=30 + i) for i in range(n)]
 
-    def test_a_stable_stream_that_fits_moves_the_reference(self, tmp_path):
-        loop = self._adopted(tmp_path, {"n": 5, "regimes": 2})
-        frames = [self._curve(tmp_path, f"b{i}.csv", [5, 9, 14]) for i in range(3)]
-        other = self._curve(tmp_path, "changed.csv", [3, 5, 7, 9, 11, 14, 17])
-        for f in frames + [other]:
-            self._reply(f)
-        first, second, third = (loop.step(f) for f in frames)
-        assert first["flags"] == ["drift_suspected"]              # one frame is not yet a pattern
-        assert second["flags"] == [] and third["flags"] == []
-        assert third["gate"]["fingerprint_similarity_rebased"] > 0.92
-        [event] = [e for e in loop.read_log() if e["event"] == "drift_rebased"]
-        assert event["recipe_id"] == loop.recipe["id"]
-        assert loop.step(other)["flags"] == ["drift_suspected"]   # a real change still shows
+    def _finish(self, tmp_path, center, **extra):
+        FakeEscalation.last.result = {
+            "status": "success", "seconds": 40, "llm_calls": 5, "pin_edits": [{"old_text": "THREE_PEAKS = True", "new_text": "THREE_PEAKS = True  # pinned"}],
+            "output_directory": str(new_anchor(tmp_path, name=f"audit_{center}")),
+            "pin_features": {"peak_1_center": center, "peak_1_center_err": 0.001}, **extra}
+
+    def test_the_signal_is_graded_and_on_every_frame(self, tmp_path):
+        loop = self._armed(tmp_path)
+        gate = loop.read_log()[-1]["gate"]
+        assert gate["drift_fraction"] < 0.05 and "drift_from_reference" in gate
+        changed = loop.step(self._changed(tmp_path)[0])
+        assert changed["flags"] == ["drift_suspected"] and changed["gate"]["drift_fraction"] > 0.2
+
+    def test_a_frame_the_recipe_fails_on_still_gets_a_change_reading(self, tmp_path):
+        loop = self._armed(tmp_path)
+        bad = self._changed(tmp_path)[0]
+        FakeAgent.replies = {Path(bad).name: RuntimeError("the script crashed")}
+        rec = loop.step(bad)
+        assert rec["flags"] == ["fit_failed"] and rec["gate"]["drift_fraction"] > 0.2
+
+    def test_a_change_that_still_fits_gets_an_audit_and_agreement_keeps_the_recipe(self, tmp_path):
+        loop = self._armed(tmp_path)
+        recipe = loop.recipe["id"]
+        frames = self._changed(tmp_path)
+        loop.step(frames[0])
+        second = loop.step(frames[1])
+        assert second["escalation"] == "audit_started"
+        spec = FakeEscalation.last.spec
+        assert spec["analyze_kwargs"]["profile"] == "quick" and spec["pin_outputs"] == self.OUT
+        assert "bank_exclude" in spec["analyze_kwargs"]              # a second opinion, not an echo
+        self._finish(tmp_path, 6.0)                                   # the audit agrees (locked: 6.0)
+        third = loop.step(frames[2])
+        [audit] = [e for e in loop.read_log() if e["event"] == "audit"]
+        assert audit["agrees"] and audit["reason"] == "change" and audit["state_accepted"] >= 2
+        assert audit["outputs"]["peak_1_center"]["relative_difference"] == 0.0
+        assert loop.recipe["id"] == recipe and not [e for e in loop.read_log() if e["event"] == "reanchor"]
+        assert loop.step(frames[3])["flags"] == []                   # the new state is normal now
+        assert third["recipe_id"] == recipe
+
+    def test_disagreement_on_a_changed_stream_adopts_the_audits_recipe(self, tmp_path):
+        loop = self._armed(tmp_path)
+        old = loop.recipe["id"]
+        frames = self._changed(tmp_path)
+        loop.step(frames[0]); loop.step(frames[1])
+        self._finish(tmp_path, 6.9)                                   # locked says 6.0
+        loop.step(frames[2])
+        log = loop.read_log()
+        audit = next(e for e in log if e["event"] == "audit")
+        assert audit["agrees"] is False and audit["outputs"]["peak_1_center"]["agrees"] is False
+        adopted = next(e for e in log if e["event"] == "reanchor")
+        assert adopted["after_audit"] is True and loop.recipe["id"] != old
+
+    def test_without_named_outputs_or_with_a_failing_fit_it_rebuilds(self, tmp_path):
+        loop = self._armed(tmp_path)
+        loop.outputs = {}
+        frames = self._changed(tmp_path)
+        loop.step(frames[0])
+        assert loop.step(frames[1])["escalation"] == "started"        # nothing to compare: re-anchor
+        assert FakeEscalation.last.spec["analyze_kwargs"]["profile"] == "extract"
+
+        (tmp_path / "b").mkdir()
+        failing = self._armed(tmp_path / "b")
+        bad = [self._curve(tmp_path, f"bad{i}.csv", [5, 9, 14, 17], seed=50 + i) for i in range(2)]
+        FakeAgent.replies = {Path(b).name: good(6.0, r2=0.4) for b in bad}
+        failing.step(bad[0])
+        assert failing.step(bad[1])["escalation"] == "started"        # the recipe fails: rebuild it
+
+    def test_an_audit_that_cannot_be_had_accepts_the_state_and_says_so(self, tmp_path):
+        loop = self._armed(tmp_path)
+        frames = self._changed(tmp_path)
+        loop.step(frames[0]); loop.step(frames[1])
+        FakeEscalation.last.result = {"status": "error", "error": "no model", "seconds": 3}
+        loop.step(frames[2])
+        failed = next(e for e in loop.read_log() if e["event"] == "audit_failed")
+        assert failed["state_accepted_unverified"] >= 2
+        assert loop.step(frames[3])["flags"] == []                   # and does not ask again
+
+    def test_periodic_audits_report_and_never_act(self, tmp_path):
+        loop = self._armed(tmp_path, audit_every=3)
+        started = [e for e in loop.read_log() if e["event"] == "audit_started"]
+        assert [e["step"] for e in started] == [3] and started[0]["reason"] == "periodic"
+        recipe = loop.recipe["id"]
+        self._finish(tmp_path, 7.5)                                   # disagrees with the locked 6.0
+        loop.step(self._curve(tmp_path, "n9.csv", [5, 9, 14], seed=99))
+        assert loop.recipe["id"] == recipe                           # reported, not acted on
+        last = loop.status()["last_audit"]
+        assert last["agrees"] is False and last["outputs"]["peak_1_center"]["audit"] == 7.5
         again = MeasurementLoop.resume(str(tmp_path / "loop"), agent_factory=FakeAgent)
-        assert again._drift_reference == loop._drift_reference
+        assert again.status()["last_audit"]["agrees"] is False and again.audit_every == 3
 
-    def test_only_a_window_planned_recipe_earns_it(self, tmp_path):
-        loop = self._adopted(tmp_path, None)                      # rebuilt from one snapshot
-        frames = [self._curve(tmp_path, f"b{i}.csv", [5, 9, 14]) for i in range(3)]
-        for f in frames:
-            self._reply(f)
-        assert [loop.step(f)["flags"] for f in frames] == [["drift_suspected"]] * 3
+    def test_a_breach_run_takes_the_background_from_a_periodic_audit(self, tmp_path):
+        loop = self._armed(tmp_path, audit_every=3)
+        assert loop.escalating                                        # the periodic audit from step 3
+        bad = [self._curve(tmp_path, f"bad{i}.csv", [5, 9, 14], seed=70 + i) for i in range(2)]
+        FakeAgent.replies = {Path(b).name: good(6.0, r2=0.4) for b in bad}
+        loop.step(bad[0])
+        assert loop.step(bad[1])["escalation"] == "started"
+        events = [e["event"] for e in loop.read_log()]
+        assert "escalation_cancelled" in events and events[-1] == "escalation_started"
 
-    def test_a_poor_fit_or_a_moving_stream_cancels_it(self, tmp_path):
-        loop = self._adopted(tmp_path, {"n": 5})
-        bad = self._curve(tmp_path, "bad.csv", [5, 9, 14])
-        self._reply(bad, r2=0.5)
-        ok = [self._curve(tmp_path, f"b{i}.csv", [5, 9, 14]) for i in range(2)]
-        for f in ok:
-            self._reply(f)
-        assert set(loop.step(bad)["flags"]) == {"gate_poor", "drift_suspected"}
-        assert [loop.step(f)["flags"] for f in ok] == [["drift_suspected"]] * 2
-        assert not [e for e in loop.read_log() if e["event"] == "drift_rebased"]
+    def test_values_within_their_uncertainties_agree(self, tmp_path):
+        loop = self._armed(tmp_path)
+        c = loop._compare({"peak_1_center": 6.00, "peak_1_center_err": 0.2},
+                          {"peak_1_center": 6.45, "peak_1_center_err": 0.2})
+        assert c["peak_1_center"]["agrees"]                           # 7 % apart, under 3 combined sigma
+        c = loop._compare({"peak_1_center": 6.00}, {"peak_1_center": 6.45})
+        assert not c["peak_1_center"]["agrees"]
+        assert loop._compare({}, {"peak_1_center": 6.0})["peak_1_center"]["why"] == "missing"
 
-        moving = self._adopted(tmp_path / "m", {"n": 5})
-        a = self._curve(tmp_path, "m0.csv", [5])
-        b = self._curve(tmp_path, "m1.csv", [2, 4, 6, 8, 10, 12, 14, 16, 18])
-        self._reply(a); self._reply(b)
-        assert moving.step(a)["flags"] == ["drift_suspected"]
-        assert moving.step(b)["flags"] == ["drift_suspected"]    # frames disagree: still changing
+    def test_two_analyses_need_not_agree_better_than_one_agrees_with_itself(self, tmp_path):
+        # Seen live on real EELS frames: a width 5.2 % apart counted as a
+        # disagreement and swapped the recipe, while the locked recipe's own
+        # width moved more than that from one frame to the next.
+        loop = self._armed(tmp_path)
+        loop._recent_features = [{"peak_1_center": v} for v in (6.0, 6.3, 5.8, 6.2, 5.9, 6.25, 5.85)]
+        c = loop._compare({"peak_1_center": 6.0}, {"peak_1_center": 6.45})["peak_1_center"]
+        assert c["agrees"] and c["frame_scatter"] > 0.15
+        loop._recent_features = [{"peak_1_center": 6.0 + 0.001 * i} for i in range(8)]
+        assert not loop._compare({"peak_1_center": 6.0}, {"peak_1_center": 6.45})["peak_1_center"]["agrees"]
+
 
 
 # ──────────────────────────────────────────────────────────────

@@ -428,6 +428,10 @@ export interface LiveSnapshot {
     llm_calls_in_frames?: number;
     latency_s?: { median: number; max: number };
     escalating?: boolean;
+    /** What the background is doing: a recipe rebuild or an independent audit. */
+    background?: "reanchor" | "audit" | null;
+    drift_fraction_bar?: number;
+    audits?: number;
     reanchors?: number;
     recipe?: { id?: string; source?: string } | null;
   };
@@ -437,6 +441,15 @@ export interface LiveSnapshot {
   frames?: LiveFrame[];
   events?: LiveEvent[];
   recommendation?: LiveRecommendation | null;
+  /** The most recent independent audit of the locked recipe's named outputs. */
+  last_audit?: {
+    step: number;
+    audited_step?: number;
+    reason: string;
+    agrees: boolean;
+    outputs: Record<string, { locked: number | null; audit: number | null; agrees: boolean;
+                              relative_difference?: number }>;
+  } | null;
   latest?: { step: number; x: number[]; y: number[]; fit?: (number | null)[] } | null;
 }
 export interface LiveConfig {
@@ -448,6 +461,8 @@ export interface LiveConfig {
   reference_frames?: number;
   /** Seconds a frame may take before it is flagged slow. null = no deadline. */
   frame_deadline_s?: number | null;
+  /** Independent audit of the locked recipe every N frames. Omit for none. */
+  audit_every?: number;
   reference_analysis?: string;
   interval_s: number;
   apply: "never" | "approved" | "valid";

@@ -255,6 +255,15 @@ def test_an_mcp_server_in_the_session_can_be_the_instrument(session):
     assert snap["frames"][0]["params"]["integration_s"] == 1.0
 
 
+def test_the_page_gets_the_change_signal_and_the_audit_setting(session):
+    live_api.start(session, {**CONFIG, "n_frames": 6, "audit_every": 4})
+    snap = _wait(session, lambda s: s["state"] == "done")
+    assert all("drift_fraction" in f["gate"] for f in snap["frames"][1:])
+    assert snap["status"]["drift_fraction_bar"] == 0.1 and snap["status"]["audits"] == 0
+    assert snap["last_audit"] is None
+    assert live_api._RUNS[session.id].loop.audit_every == 4
+
+
 # ── replaying a folder of recorded measurements ──────────────────
 
 def _recording(tmp_path, n=5):

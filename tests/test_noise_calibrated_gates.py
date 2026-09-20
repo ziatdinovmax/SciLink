@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from scilink.live import MeasurementLoop
-from scilink.live.gates import DEFAULT_DRIFT_BAR, calibrate, residual_excess
+from scilink.live.gates import calibrate, residual_excess
 
 X = np.linspace(0.0, 10.0, 800)
 
@@ -54,16 +54,11 @@ class TestResidualExcess:
 
 
 class TestCalibrate:
-    def test_clean_data_keeps_the_constant_bar(self, tmp_path):
+    def test_the_reference_says_what_as_good_as_approved_looks_like(self, tmp_path):
         cal = calibrate(write_run(tmp_path / "c", noisy(peak(height=50), 0.05), peak(height=50)))
-        assert cal["drift_floor"] == DEFAULT_DRIFT_BAR            # never tightened, not relaxed
-        assert cal["residual_excess"] == pytest.approx(1.0, abs=0.15)
-
-    def test_noisy_data_lowers_the_drift_bar_and_is_deterministic(self, tmp_path):
+        assert cal == {"residual_excess": pytest.approx(1.0, abs=0.15)}
         d = write_run(tmp_path / "n", noisy(peak(height=1), 0.35, correlated=True), peak(height=1))
-        cal = calibrate(d)
-        assert cal["drift_floor"] < DEFAULT_DRIFT_BAR
-        assert cal == calibrate(d)
+        assert calibrate(d) == calibrate(d) and calibrate(d)["residual_excess"] > 1.2
 
     def test_no_arrays_no_calibration(self, tmp_path):
         assert calibrate(str(tmp_path)) == {}
@@ -102,11 +97,10 @@ REF_Y, REF_FIT = noisy(peak(height=1), 0.35, correlated=True), peak(height=1)
 
 def test_a_frame_as_good_as_the_reference_is_clean_whatever_its_r_squared(tmp_path):
     loop = _loop(tmp_path, REF_Y, REF_FIT, {
-        "weak.csv": (noisy(peak(height=0.8), 0.35, seed=1, correlated=True), peak(height=0.8), 0.88, 0.85)})
+        "weak.csv": (noisy(peak(height=0.8), 0.35, seed=1, correlated=True), peak(height=0.8), 0.88, 0.99)})
     rec = loop.step("weak.csv")
     assert rec["flags"] == [] and rec["gate"]["accepted_in_noise_units"] is True
     assert rec["gate"]["verdict"] == "poor"                   # the agent's own verdict is kept on record
-    assert loop.read_log()[0]["gate_calibration"]["drift_floor"] < 0.92
 
 
 def test_a_missed_feature_is_still_poor_and_a_real_change_still_drifts(tmp_path):
