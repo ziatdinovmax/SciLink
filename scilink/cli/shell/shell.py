@@ -259,6 +259,10 @@ class Shell:
             history=self._history(), completer=self._completer(),
             key_bindings=self._bindings(), multiline=True, prompt_continuation="  ",
             bottom_toolbar=self._toolbar, complete_while_typing=False,
+            # No lines reserved under the input for the completion menu: the
+            # bar sits right under the message line and the input grows as
+            # the text does; the menu pops over the space below when used.
+            reserve_space_for_menu=0,
             style=Style.from_dict({"bottom-toolbar": "noreverse fg:#5c5c5c",
                                    "bottom-toolbar.text": "noreverse fg:#8a8a8a"}),
             **self._pt_kwargs)
