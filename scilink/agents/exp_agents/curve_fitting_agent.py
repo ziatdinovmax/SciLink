@@ -1076,6 +1076,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             profile=qc_profile,
             explicit_verification_budget=max_verification_iterations is not None,
             bank_recipe=bool(bank_first and cold_start_info is not None),
+            write_reports=not strict_replay,
         )
         
         # Execute pipeline

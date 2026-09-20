@@ -161,3 +161,36 @@ def test_a_new_recipe_keeps_what_the_stream_has_shown():
     fresh = armed()
     fresh.seed([new[0]])                                              # a different stream: start over
     assert fresh.n_learned == 1
+
+
+class TestLocate:
+    """Where a frame is new, from the part of it nothing seen so far explains."""
+
+    def _held(self, frames):
+        mon = armed(8)
+        for f in frames:
+            assert mon.judge(*f)["suspected"]
+        return mon.locate()
+
+    def test_a_new_peak_is_found_where_it_is(self):
+        [r] = self._held([curve(TWO + [(16.5, 2.0, 0.6)], seed=400 + i) for i in range(3)])
+        assert r["kind"] == "new" and abs(r["x_peak"] - 16.5) < 0.3 and r["share"] > 0.8
+        assert r["x_from"] < 16.5 < r["x_to"]
+
+    def test_a_vanished_peak_is_missing(self):
+        regions = self._held([curve(TWO[:1], seed=410 + i) for i in range(3)])
+        assert regions[0]["kind"] == "missing" and abs(regions[0]["x_peak"] - 12.0) < 0.5
+        assert regions[0]["share"] > 0.8                  # not smeared onto the peak that stayed
+
+    def test_a_peak_that_moved_is_one_shift_not_two_findings(self):
+        moved = [(6.0, 3.0, 0.5), (13.2, 1.4, 0.9)]
+        regions = self._held([curve(moved, seed=420 + i) for i in range(3)])
+        assert regions[0]["kind"] == "shifted" and 11.5 < regions[0]["x_peak"] < 13.5
+
+    def test_a_background_change_is_broad(self):
+        bent = [(x_, y_ + 0.02 * (x_ - 10.0) ** 2) for x_, y_ in
+                (curve(TWO, seed=430 + i) for i in range(3))]
+        assert self._held(bent)[0]["kind"] == "broad"
+
+    def test_nothing_held_nothing_located(self):
+        assert armed().locate() == []

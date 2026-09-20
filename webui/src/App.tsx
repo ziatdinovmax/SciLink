@@ -595,7 +595,10 @@ export default function App() {
               />
             </div>
             <div className="tab-body" hidden={tab !== "live"}>
-              <LivePanel sessionId={session.id} active={tab === "live"} localFiles={auth.local_files} />
+              <LivePanel
+                sessionId={session.id} active={tab === "live"} localFiles={auth.local_files}
+                onAskChat={(text) => { setTab("chat"); void sendMessage(text); }}
+              />
             </div>
             <div className="tab-body" hidden={tab !== "skills"}>
               <SkillsPanel sessionId={session.id} active={tab === "skills"} />

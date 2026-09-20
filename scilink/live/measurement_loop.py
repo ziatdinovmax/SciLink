@@ -256,6 +256,18 @@ class MeasurementLoop:
             normal for the stream. It reads the data only, never the recipe, so
             its verdict does not depend on which recipe was locked. LOWER
             either to catch weaker changes, RAISE if ordinary variation is flagged.
+        on_change: what the slow clock does when the data changes for good but
+            the recipe still fits. The change is ALWAYS announced first (event
+            ``novelty``: how much of the frames is new and where on the axis) —
+            in discovery work that announcement is the result, and neither
+            rebuilding around it nor accepting it may make it go away quietly.
+            ``"report"`` (default): then accept the new state for tracking once
+            the changed frames agree with each other; no model call.
+            ``"audit"``: an independent analysis checks the recipe's named
+            outputs first (agreement keeps the recipe, disagreement adopts the
+            audit's); needs ``outputs`` and ``auto_escalate``. ``"rebuild"``:
+            re-anchor, as when the recipe fails. A recipe that FAILS on the new
+            data is rebuilt under every setting.
         audit_every: every this many frames an independent analysis of the
             current frame runs in the background and its named outputs are
             compared with the locked recipe's. A fit-quality gate cannot see a
@@ -316,6 +328,7 @@ class MeasurementLoop:
                  auto_escalate: bool = False,
                  reanchor_frames: int = 5,
                  drift_fraction: float = 0.10, drift_score: float = 3.0,
+                 on_change: str = "report",
                  audit_every: Optional[int] = None, audit_profile: str = "quick",
                  audit_tolerance: float = 0.05,
                  escalation_profile: str = "extract",
@@ -349,6 +362,10 @@ class MeasurementLoop:
         from .drift import DriftMonitor
         self.drift_fraction, self.drift_score = float(drift_fraction), float(drift_score)
         self._drift = DriftMonitor(fraction_bar=self.drift_fraction, score_bar=self.drift_score)
+        if on_change not in ("report", "audit", "rebuild"):
+            raise ValueError("on_change must be 'report', 'audit' or 'rebuild'")
+        self.on_change = on_change
+        self._novelty_open = False          # the current run of changed frames has been announced
         self.audit_every = int(audit_every) if audit_every else None
         self.audit_profile, self.audit_tolerance = audit_profile, float(audit_tolerance)
         self._last_audit_step = 0
@@ -751,39 +768,97 @@ class MeasurementLoop:
 
     def _slow_clock(self, data_path: str, record: Dict[str, Any], needs_escalation: bool,
                     clean: bool, features: Dict[str, float]) -> None:
-        """What the background does about this frame. One job at a time.
+        """What happens about this frame off the fast path. One background job
+        at a time; nothing here ever fails a frame.
 
-        - A run of frames the recipe FAILS on: rebuild it (re-anchor).
-        - A run of frames that fit well but look different from the stream so
-          far: the recipe may be silently absorbing something new, or the sample
-          simply moved on. An independent analysis settles it (an audit): if its
-          named outputs agree with the locked recipe's, the new state is accepted
-          and nothing is rebuilt; if they disagree, its recipe is adopted.
-          Without named outputs there is nothing to compare, so it rebuilds.
-        - Every ``audit_every`` frames, the same independent check on a timer;
-          a disagreement there is reported, not acted on.
-        A periodic audit gives way to either of the first two.
+        - The data changed for good (a run of changed frames, not one glitch):
+          ANNOUNCE it — event ``novelty``, how much is new and where. Always,
+          whether or not the recipe still fits, and before anything else.
+        - The recipe FAILS on the run: rebuild it (re-anchor).
+        - The recipe still fits: ``on_change`` decides — ``report`` accepts the
+          new state for tracking once the changed frames agree with each other
+          (no model call), ``audit`` has an independent analysis check the named
+          outputs first, ``rebuild`` re-anchors.
+        - Every ``audit_every`` frames, an independent check on a timer; it only
+          reports, and gives way to anything above.
         """
         try:
+            if clean:
+                self._novelty_open = False
+            run = self._breach_kinds[-self.breach_patience:]
+            changed = needs_escalation and FLAG_DRIFT in (record.get("flags") or [])
+            if changed and not self._novelty_open:
+                self._announce(data_path, record)
             job = (self._escalation_meta or {}) if self._escalation is not None else None
-            if needs_escalation and self.auto_escalate:
+            fit_breach = needs_escalation and "fit" in run
+            if needs_escalation and (fit_breach or self.on_change != "report"):
+                if not self.auto_escalate:
+                    return
                 if job is not None and job.get("reason") == "periodic":
                     self._cancel_background("a breach run needs the background")
                     job = None
                 if job is None:
-                    change_only = bool(self._breach_kinds) and "fit" not in self._breach_kinds[-self.breach_patience:]
-                    if change_only and self.outputs:
+                    if not fit_breach and self.on_change == "audit" and self.outputs:
                         self.audit(data_path, reason="change", locked=features)
                         record["escalation"] = "audit_started"
                     else:
                         self.escalate(data_path)
                         record["escalation"] = "started"
+            elif needs_escalation:                       # fits, and the policy is to report
+                settled = self._drift.held_agree() or not self._drift.n_held
+                if settled or self._consecutive_breaches >= 4 * self.breach_patience:
+                    self._accept_state(verified=False, settled=settled)
             elif (self.audit_every and self.outputs and clean and job is None
                   and self._step - self._last_audit_step >= self.audit_every):
                 self.audit(data_path, reason="periodic", locked=features)
                 record["escalation"] = "audit_started"
         except Exception as e:  # noqa: BLE001 - never fails the frame
-            self.logger.warning(f"the background job could not start: {e}")
+            self.logger.warning(f"the slow clock could not act on frame {self._step}: {e}")
+
+    def _announce(self, data_path: str, record: Dict[str, Any]) -> Dict[str, Any]:
+        """The ``novelty`` event: the stream changed for good. How much, where,
+        since when, and what to look at — read from the data alone."""
+        gate = record.get("gate") or {}
+        first = self._step - self._consecutive_breaches + 1
+        where = self._drift.locate()
+        event = {"event": "novelty", "step": self._step, "since_step": first,
+                 "fraction": gate.get("drift_fraction"), "score": gate.get("drift_score"),
+                 "from_reference": gate.get("drift_from_reference"),
+                 "where": where, "recipe_fits": FLAG_GATE_POOR not in (record.get("flags") or [])
+                 and FLAG_FIT_FAILED not in (record.get("flags") or []),
+                 "data": str(data_path),
+                 "frames": [f for f in self._recent_frames[-self._consecutive_breaches:]]}
+        if gate.get("drift_window_share") is not None:
+            event["window_share"] = gate["drift_window_share"]
+        self._append(event)
+        self._novelty_open = True
+        self._notify(event)
+        self.logger.info(f"✨ Novelty at frame {first}: {event['fraction']} of the frame is unlike the "
+                         f"stream so far" + (f"; {where[0]['kind']} near {where[0]['x_peak']}" if where else "."))
+        return event
+
+    def _accept_state(self, verified: bool, settled: bool = True) -> None:
+        """The changed frames become the stream's new normal (for TRACKING — the
+        announcement has been made). When they cover a different window than the
+        monitor's, it restarts on theirs."""
+        n = self._drift.adopt()
+        if n == 0:
+            self._seed_drift(self._recent_frames[-self.breach_patience:])
+        self._append({"event": "state_accepted", "step": self._step, "frames": n or self.breach_patience,
+                      "verified": verified, "settled": settled,
+                      "how": "an audit agreed" if verified else
+                             ("the changed frames agree with each other and the recipe fits" if settled
+                              else "still changing after a long run of changed frames; accepted to keep tracking")})
+        self._consecutive_breaches, self._breach_kinds, self._novelty_open = 0, [], False
+
+    def _notify(self, event: Dict[str, Any]) -> None:
+        """Tell the recommender what the loop has learned about the stream."""
+        rec = self.recommender
+        if rec is not None and hasattr(rec, "notify"):
+            try:
+                rec.notify({k: v for k, v in event.items() if k not in ("frames", "data", "recipe")})
+            except Exception as e:  # noqa: BLE001
+                self.logger.warning(f"recommender.notify failed: {e}")
 
     # -------------------------------------------------------------- escalation
     def audit(self, data_path: str, *, profile: Optional[str] = None, background: bool = True,
@@ -977,12 +1052,11 @@ class MeasurementLoop:
         if failure:
             record = {"event": "audit_failed" if is_audit else "escalation_failed", **base,
                       "error": failure[:300]}
+            self._append(record)
             if is_audit and meta.get("reason") == "change":
                 # The fit is good and no second opinion could be had. Accept the
                 # new state rather than ask again on every breach run.
-                record["state_accepted_unverified"] = self._drift.adopt()
-                self._consecutive_breaches, self._breach_kinds = 0, []
-            self._append(record)
+                self._accept_state(verified=False)
             self._save_state()
             return record
         if is_audit:
@@ -994,10 +1068,10 @@ class MeasurementLoop:
             self._last_audit = {k: audit[k] for k in ("step", "reason", "agrees", "outputs",
                                                       "audited_step")}
             if meta.get("reason") != "change" or agrees:
-                if meta.get("reason") == "change":
-                    audit["state_accepted"] = self._drift.adopt()
-                    self._consecutive_breaches, self._breach_kinds = 0, []
                 self._append(audit)
+                if meta.get("reason") == "change":
+                    self._accept_state(verified=True)
+                self._notify(audit)
                 self._save_state()
                 self.logger.info(f"🔎 Audit of frame {audit['audited_step']}: "
                                  + ("agrees with the locked recipe." if agrees else
@@ -1030,6 +1104,8 @@ class MeasurementLoop:
                   "objective_key_present": (self.objective_key in self._reference_features
                                             if self.objective_key else None)}
         self._append(record)
+        self._novelty_open = False
+        self._notify({k: record[k] for k in ("event", "step", "source", "frames_answered_meanwhile")})
         self._save_state()
         self.logger.info(f"🔁 Re-anchored: recipe {self.recipe['id']} from {source} "
                          f"({record['seconds']}s, {record['llm_calls']} LLM call(s)).")
@@ -1240,8 +1316,9 @@ class MeasurementLoop:
                              based_on_step=done["based_on_step"],
                              closed_loop=self.closed_loop))
             every = max(1, int(getattr(rec, "every", 1)))
-            if observed and self._n_observed % every == 0:
-                self._slot.start(rec, idx)
+            if observed and (self._n_observed % every == 0 or getattr(rec, "urgent", False)):
+                if self._slot.start(rec, idx) is not False:
+                    rec.urgent = False
             if self._last_recommendation is None:
                 return {"pending": True} if self._slot.busy else None
             return {**self._last_recommendation, "pending": self._slot.busy}
@@ -1349,6 +1426,7 @@ class MeasurementLoop:
             "reanchor_frames": self.reanchor_frames, "recent_frames": self._recent_frames,
             "drift": self._drift.to_state(), "drift_fraction": self.drift_fraction,
             "drift_score": self.drift_score, "audit_every": self.audit_every,
+            "on_change": self.on_change,
             "audit_profile": self.audit_profile, "audit_tolerance": self.audit_tolerance,
             "last_audit": self._last_audit, "last_audit_step": self._last_audit_step,
         }
@@ -1365,7 +1443,7 @@ class MeasurementLoop:
                   "range_widen", "range_warmup", "range_adopt_after", "gate_keys",
                   "system_info"):
             kwargs.setdefault(k, state.get(k))
-        for k in ("reanchor_frames", "drift_fraction", "drift_score", "audit_every",
+        for k in ("reanchor_frames", "drift_fraction", "drift_score", "audit_every", "on_change",
                   "audit_profile", "audit_tolerance"):
             if state.get(k) is not None:
                 kwargs.setdefault(k, state[k])

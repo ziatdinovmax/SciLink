@@ -72,8 +72,9 @@ class TestPresets:
             QCProfile(name="x", time_budget_s=0)
 
 
-def _pipeline(profile):
+def _pipeline(profile, **kw):
     return create_unified_curve_fitting_pipeline(
+        **kw,
         model=None, logger=logging.getLogger("t"), generation_config=None,
         safety_settings=None, parse_fn=lambda *a, **k: None,
         store_fn=lambda *a, **k: None, plot_fn=lambda *a, **k: None,
@@ -140,6 +141,12 @@ class TestCurvePipelineHonoursTheProfile:
             "AnalyzeDataController", "UnifiedSeriesProcessingController",
             "StoreAnalysisResultsController", "GenerateCurveFittingReportController",
             "UnifiedCurveReportController"]
+
+    def test_a_live_frame_writes_no_html_report(self):
+        # Observed in the web UI: fifty per-frame reports listed under one chat turn.
+        assert _names(_pipeline("realtime", write_reports=False)) == [
+            "AnalyzeDataController", "UnifiedSeriesProcessingController",
+            "StoreAnalysisResultsController"]
 
 
 # ──────────────────────────────────────────────────────────────

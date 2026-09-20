@@ -828,6 +828,64 @@ class TestChangeSignalAndAudit:
         changed = loop.step(self._changed(tmp_path)[0])
         assert changed["flags"] == ["drift_suspected"] and changed["gate"]["drift_fraction"] > 0.2
 
+    # ── novelty: in discovery work the announcement IS the result ────────────
+    def test_a_lasting_change_is_announced_with_how_much_and_where(self, tmp_path):
+        loop = self._armed(tmp_path)                                  # default: on_change="report"
+        frames = self._changed(tmp_path)                              # a new peak at x = 17
+        first, second = loop.step(frames[0]), loop.step(frames[1])
+        assert first["flags"] == second["flags"] == ["drift_suspected"]
+        [novelty] = [e for e in loop.read_log() if e["event"] == "novelty"]
+        assert novelty["since_step"] == first["step"] and novelty["recipe_fits"] is True
+        assert novelty["fraction"] > 0.2 and novelty["frames"] == frames[:2]
+        [where] = novelty["where"]
+        assert where["kind"] == "new" and abs(where["x_peak"] - 17.0) < 0.3
+        # accepted for tracking, with no model call and nothing started in the background
+        accepted = next(e for e in loop.read_log() if e["event"] == "state_accepted")
+        assert accepted["verified"] is False and "agree with each other" in accepted["how"]
+        assert not loop.escalating and second.get("escalation") is None
+        assert loop.step(frames[2])["flags"] == []
+        assert [e["event"] for e in loop.read_log()].count("novelty") == 1     # once per change
+
+    def test_one_odd_frame_is_a_flag_not_a_discovery(self, tmp_path):
+        loop = self._armed(tmp_path)
+        assert loop.step(self._changed(tmp_path)[0])["flags"] == ["drift_suspected"]
+        assert loop.step(self._curve(tmp_path, "back.csv", [5, 9, 14], seed=77))["flags"] == []
+        assert not [e for e in loop.read_log() if e["event"] in ("novelty", "state_accepted")]
+
+    def test_a_change_the_recipe_fails_on_is_announced_and_rebuilt(self, tmp_path):
+        loop = self._armed(tmp_path)
+        bad = [self._curve(tmp_path, f"bad{i}.csv", [5, 9, 14, 17], seed=50 + i) for i in range(2)]
+        FakeAgent.replies = {Path(b).name: good(6.0, r2=0.4) for b in bad}
+        loop.step(bad[0])
+        assert loop.step(bad[1])["escalation"] == "started"
+        novelty = next(e for e in loop.read_log() if e["event"] == "novelty")
+        assert novelty["recipe_fits"] is False and novelty["where"][0]["kind"] == "new"
+
+    def test_a_stream_still_changing_is_accepted_eventually_and_says_so(self, tmp_path):
+        loop = self._armed(tmp_path)
+        moving = [self._curve(tmp_path, f"m{i}.csv", [5, 9, 14] + [2.0 + 1.9 * i], seed=90 + i)
+                  for i in range(9)]
+        for f in moving:
+            loop.step(f)
+        accepted = [e for e in loop.read_log() if e["event"] == "state_accepted"]
+        assert accepted and accepted[0]["settled"] is False and "still changing" in accepted[0]["how"]
+
+    def test_the_recommender_is_told(self, tmp_path):
+        notes = []
+
+        class Listening:
+            clock, name = "fast", "listening"
+
+            def observe(self, *a, **k): pass
+            def suggest(self): return {"params": {}, "rationale": "hold"}
+            def notify(self, event): notes.append(event)
+        loop = self._armed(tmp_path)
+        loop.recommender = Listening()
+        frames = self._changed(tmp_path)
+        loop.step(frames[0]); loop.step(frames[1])
+        assert [n["event"] for n in notes] == ["novelty"]
+        assert notes[0]["where"][0]["kind"] == "new" and "frames" not in notes[0]
+
     def test_a_frame_the_recipe_fails_on_still_gets_a_change_reading(self, tmp_path):
         loop = self._armed(tmp_path)
         bad = self._changed(tmp_path)[0]
@@ -836,7 +894,7 @@ class TestChangeSignalAndAudit:
         assert rec["flags"] == ["fit_failed"] and rec["gate"]["drift_fraction"] > 0.2
 
     def test_a_change_that_still_fits_gets_an_audit_and_agreement_keeps_the_recipe(self, tmp_path):
-        loop = self._armed(tmp_path)
+        loop = self._armed(tmp_path, on_change="audit")
         recipe = loop.recipe["id"]
         frames = self._changed(tmp_path)
         loop.step(frames[0])
@@ -848,14 +906,16 @@ class TestChangeSignalAndAudit:
         self._finish(tmp_path, 6.0)                                   # the audit agrees (locked: 6.0)
         third = loop.step(frames[2])
         [audit] = [e for e in loop.read_log() if e["event"] == "audit"]
-        assert audit["agrees"] and audit["reason"] == "change" and audit["state_accepted"] >= 2
+        assert audit["agrees"] and audit["reason"] == "change"
+        accepted = next(e for e in loop.read_log() if e["event"] == "state_accepted")
+        assert accepted["verified"] is True and accepted["how"] == "an audit agreed"
         assert audit["outputs"]["peak_1_center"]["relative_difference"] == 0.0
         assert loop.recipe["id"] == recipe and not [e for e in loop.read_log() if e["event"] == "reanchor"]
         assert loop.step(frames[3])["flags"] == []                   # the new state is normal now
         assert third["recipe_id"] == recipe
 
     def test_disagreement_on_a_changed_stream_adopts_the_audits_recipe(self, tmp_path):
-        loop = self._armed(tmp_path)
+        loop = self._armed(tmp_path, on_change="audit")
         old = loop.recipe["id"]
         frames = self._changed(tmp_path)
         loop.step(frames[0]); loop.step(frames[1])
@@ -868,7 +928,7 @@ class TestChangeSignalAndAudit:
         assert adopted["after_audit"] is True and loop.recipe["id"] != old
 
     def test_without_named_outputs_or_with_a_failing_fit_it_rebuilds(self, tmp_path):
-        loop = self._armed(tmp_path)
+        loop = self._armed(tmp_path, on_change="audit")
         loop.outputs = {}
         frames = self._changed(tmp_path)
         loop.step(frames[0])
@@ -883,13 +943,15 @@ class TestChangeSignalAndAudit:
         assert failing.step(bad[1])["escalation"] == "started"        # the recipe fails: rebuild it
 
     def test_an_audit_that_cannot_be_had_accepts_the_state_and_says_so(self, tmp_path):
-        loop = self._armed(tmp_path)
+        loop = self._armed(tmp_path, on_change="audit")
         frames = self._changed(tmp_path)
         loop.step(frames[0]); loop.step(frames[1])
         FakeEscalation.last.result = {"status": "error", "error": "no model", "seconds": 3}
         loop.step(frames[2])
-        failed = next(e for e in loop.read_log() if e["event"] == "audit_failed")
-        assert failed["state_accepted_unverified"] >= 2
+        events = [e["event"] for e in loop.read_log()]
+        assert "audit_failed" in events
+        accepted = next(e for e in loop.read_log() if e["event"] == "state_accepted")
+        assert accepted["verified"] is False
         assert loop.step(frames[3])["flags"] == []                   # and does not ask again
 
     def test_periodic_audits_report_and_never_act(self, tmp_path):

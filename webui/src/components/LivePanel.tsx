@@ -4,6 +4,7 @@ import {
   type LiveConfig,
   type LiveEvent,
   type LiveInstrumentInfo,
+  type LiveNovelty,
   type LiveSnapshot,
 } from "../api";
 import { fmt, fmtShort, LiveChart } from "./LiveChart";
@@ -73,6 +74,15 @@ function clock(seconds: number): string {
     : `${m}:${String(s % 60).padStart(2, "0")}`;
 }
 
+function describeWhere(w?: LiveNovelty["where"][number]): string {
+  if (!w) return "";
+  const at = `${fmt(w.x_from)} to ${fmt(w.x_to)}`;
+  return w.kind === "new" ? `New intensity from ${at}, strongest near ${fmt(w.x_peak)}.`
+    : w.kind === "missing" ? `Intensity is gone from ${at}, most near ${fmt(w.x_peak)}.`
+    : w.kind === "shifted" ? `A feature moved, around ${fmt(w.x_peak)}.`
+    : "The overall shape or background changed.";
+}
+
 function describeEvent(e: LiveEvent): string {
   const g = (k: string) => e[k] as string | number | undefined;
   switch (e.event) {
@@ -88,6 +98,14 @@ function describeEvent(e: LiveEvent): string {
     }
     case "escalation_started":
       return "Rebuilding the recipe in the background.";
+    case "novelty": {
+      const w = ((e.where ?? []) as LiveNovelty["where"])[0];
+      return `The data changed from frame ${g("since_step")}. ${describeWhere(w)}`;
+    }
+    case "state_accepted":
+      return e.verified ? "The new state is accepted. An audit agreed with the recipe."
+        : e.settled === false ? "The data is still changing. Accepted to keep tracking."
+        : "The new state is accepted for tracking. The recipe still fits.";
     case "audit_started":
       return g("reason") === "change"
         ? "The data changed but still fits. An independent analysis is checking the recipe."
@@ -128,9 +146,12 @@ export function LivePanel({
   sessionId,
   active,
   localFiles,
+  onAskChat,
 }: {
   sessionId: string;
   active: boolean;
+  /** Hand a frame to the session's chat for a thorough analysis (switches tab). */
+  onAskChat?: (message: string) => void;
   /** Importing a user's instrument class or reading a folder happens on the
    * server machine, so both are offered only when that machine is the user's. */
   localFiles: boolean;
@@ -156,6 +177,8 @@ export function LivePanel({
   const [refFrames, setRefFrames] = useState("1");
   const [deadline, setDeadline] = useState("10");
   const [auditEvery, setAuditEvery] = useState("");
+  const [onChange, setOnChange] = useState<NonNullable<LiveConfig["on_change"]>>("report");
+  const [notes, setNotes] = useState("");
   const [replayDir, setReplayDir] = useState("");
   const [technique, setTechnique] = useState("");
   const [sample, setSample] = useState("");
@@ -233,6 +256,7 @@ export function LivePanel({
       reference_frames: Math.max(1, Math.min(25, parseInt(refFrames, 10) || 1)),
       frame_deadline_s: parseFloat(deadline) > 0 ? parseFloat(deadline) : null,
       audit_every: parseInt(auditEvery, 10) > 0 ? parseInt(auditEvery, 10) : undefined,
+      on_change: onChange, notes: notes.trim() || undefined,
       ...(instrument === REPLAY || instrument === MCP ? {
         replay_dir: instrument === REPLAY ? replayDir.trim() : undefined,
         mcp_server: instrument === MCP ? mcpServer : undefined,
@@ -459,6 +483,20 @@ export function LivePanel({
             </div>
           )}
 
+          <label>
+            <span>Notes for the analysis
+              <Info>
+                Anything the analysis should know that is not in the data: what the sample is, what is
+                being done to it, what you are looking for, known artefacts of this instrument. It is
+                read as context by the reference analysis, by every rebuild and audit, and by the
+                recommender. It is not a constraint, and it is fine to leave empty when you do not know
+                what will happen.
+              </Info>
+            </span>
+            <textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)}
+              placeholder="optional" />
+          </label>
+
           <details className="live-options">
             <summary>Options</summary>
             <div className="live-row">
@@ -477,6 +515,21 @@ export function LivePanel({
                 </span>
                 <input type="number" min={0} step={0.5} placeholder="none" value={deadline}
                   onChange={(e) => setDeadline(e.target.value)} />
+              </label>
+              <label><span>When the data changes
+                  <Info>
+                    A lasting change in the data is always announced, with how much of a frame is new and
+                    where. This sets what happens next when the recipe still fits. Report accepts the new
+                    state for tracking once the changed frames agree with each other, with no model call.
+                    Audit has an independent analysis check the tracked quantities first. Rebuild makes a
+                    new recipe. A recipe that fails on the new data is always rebuilt.
+                  </Info>
+                </span>
+                <select value={onChange} onChange={(e) => setOnChange(e.target.value as typeof onChange)}>
+                  <option value="report">report</option>
+                  <option value="audit">audit</option>
+                  <option value="rebuild">rebuild</option>
+                </select>
               </label>
               <label><span>Audit every N frames
                   <Info>
@@ -640,6 +693,33 @@ export function LivePanel({
           </Info>
         </div>
       )}
+
+      {(snap?.novelties ?? []).slice(-2).reverse().map((n) => (
+        <div key={n.since_step} className="live-novelty">
+          <div>
+            <b>New from frame {n.since_step}.</b>{" "}
+            {typeof n.fraction === "number" ? `${Math.round(100 * n.fraction)} % of a frame is unlike the frames before it. ` : ""}
+            {describeWhere(n.where[0])}
+            {n.where.length === 0 && n.window_share ? " The measured window changed." : ""}
+            {n.recipe_fits ? "" : " The recipe no longer fits and is being rebuilt."}
+            <Info>
+              This is read from the data alone, with no model. The recipe reports the quantities you asked
+              for. It cannot tell you what this is. A thorough analysis of the frame in Chat can.
+            </Info>
+          </div>
+          {onAskChat && (
+            <button
+              onClick={() => onAskChat(
+                `Analyze ${n.frame_abs_path || n.frame_path} thoroughly. Context: it is frame ${n.step} of a live ` +
+                `${inst?.technique ?? "measurement"} run. From frame ${n.since_step} the data changed` +
+                (typeof n.fraction === "number" ? ` (${Math.round(100 * n.fraction)} % of a frame is unlike the earlier frames)` : "") +
+                `. ${describeWhere(n.where[0])} Say what changed and what it means.`)}
+            >
+              Analyse in Chat
+            </button>
+          )}
+        </div>
+      ))}
 
       <div className="live-grid">
         {frames.length > 0 && (

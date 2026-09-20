@@ -407,6 +407,18 @@ export interface LiveEvent {
   step?: number;
   [key: string]: unknown;
 }
+export interface LiveNovelty {
+  step: number;
+  since_step: number;
+  fraction: number | null;
+  from_reference?: number | null;
+  where: { kind: "new" | "missing" | "shifted" | "broad"; x_from: number; x_to: number;
+           x_peak: number; share: number }[];
+  recipe_fits: boolean;
+  window_share?: number | null;
+  frame_path: string;
+  frame_abs_path: string;
+}
 export interface LiveSnapshot {
   state: "idle" | "arming" | "running" | "stopped" | "done" | "error";
   error?: string | null;
@@ -441,6 +453,8 @@ export interface LiveSnapshot {
   frames?: LiveFrame[];
   events?: LiveEvent[];
   recommendation?: LiveRecommendation | null;
+  /** Lasting changes in the data: how much of a frame is new, and where on the axis. */
+  novelties?: LiveNovelty[];
   /** The most recent independent audit of the locked recipe's named outputs. */
   last_audit?: {
     step: number;
@@ -463,6 +477,10 @@ export interface LiveConfig {
   frame_deadline_s?: number | null;
   /** Independent audit of the locked recipe every N frames. Omit for none. */
   audit_every?: number;
+  /** After a lasting change the recipe still fits: report (default), audit or rebuild. */
+  on_change?: "report" | "audit" | "rebuild";
+  /** Anything the analysis should know. Context, not a constraint. */
+  notes?: string;
   reference_analysis?: string;
   interval_s: number;
   apply: "never" | "approved" | "valid";

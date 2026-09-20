@@ -21,6 +21,7 @@ from scilink.server import live_api
 from scilink.server.live_api import LiveError
 
 SCRIPT = "print('FIT_RESULTS_JSON: {}')\n"
+SEEN = []          # what the fake agent was called with
 
 
 def _anchor(root: Path) -> Path:
@@ -41,6 +42,7 @@ def _fake_agent(anchor: Path):
             self.output_dir = output_dir
 
         def analyze(self, data, **kw):
+            SEEN.append(kw)
             out = str(anchor) if "reference" in Path(str(data)).name else self.output_dir
             return {"status": "success", "output_directory": out,
                     "fitting_parameters": {"peak_1": {"center": 6.0}},
@@ -262,6 +264,30 @@ def test_the_page_gets_the_change_signal_and_the_audit_setting(session):
     assert snap["status"]["drift_fraction_bar"] == 0.1 and snap["status"]["audits"] == 0
     assert snap["last_audit"] is None
     assert live_api._RUNS[session.id].loop.audit_every == 4
+
+
+def test_a_lasting_change_reaches_the_page_as_a_novelty_with_the_frame_to_hand_to_chat(session):
+    SEEN.clear()
+    live_api.start(session, {**CONFIG, "n_frames": 31, "notes": "the tip may cross a stiff inclusion",
+                             "on_change": "report"})
+    snap = _wait(session, lambda s: s["state"] in ("done", "error"))
+    assert snap["state"] == "done", snap.get("error")
+    [novelty] = snap["novelties"]                              # the AFM simulator's inclusion, frame 26
+    assert 24 <= novelty["since_step"] <= 27 and novelty["recipe_fits"] is True
+    assert novelty["fraction"] > 0.5 and novelty["window_share"] < 0.9     # the curve now ends early
+    assert novelty["frame_path"].startswith("live/run_001/loop/incoming/frame_")
+    assert Path(novelty["frame_abs_path"]).is_file()           # what the Chat hand-off sends
+    # a live run's per-frame files are not artifacts of whatever chat turn finishes meanwhile
+    from scilink.server.artifacts import ArtifactTracker
+    tracker = ArtifactTracker(session.session_dir)
+    (Path(session.session_dir) / "live" / "run_001" / "frame_report.html").write_text("<html></html>")
+    (Path(session.session_dir) / "analysis_report.html").write_text("<html></html>")
+    assert [Path(p).name for p in tracker.find_new_html_reports()] == ["analysis_report.html"]
+    assert any(e["event"] == "state_accepted" for e in snap["events"])
+    assert snap["status"]["reanchors"] == 0                    # reported and tracked: nothing rebuilt
+    # the user's notes are context for every analysis
+    assert SEEN[0]["system_info"]["notes_from_the_user"] == "the tip may cross a stiff inclusion"
+    assert live_api._RUNS[session.id].loop.on_change == "report"
 
 
 # ── replaying a folder of recorded measurements ──────────────────

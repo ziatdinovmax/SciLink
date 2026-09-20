@@ -348,8 +348,14 @@ class LiveRun:
         try:
             creds = self._credentials()
             outputs = dict(inst.outputs or {}) if cfg.get("pin_outputs", True) else {}
+            # What the user wants the analysis to know — context, not a constraint.
+            # It reaches the reference analysis, rebuilds, audits and the recommender.
+            info = dict(inst.system_info or {})
+            if str(cfg.get("notes") or "").strip():
+                info["notes_from_the_user"] = str(cfg["notes"]).strip()[:2000]
             self.loop = MeasurementLoop(
-                str(self.run_dir / "loop"), system_info=inst.system_info,
+                str(self.run_dir / "loop"), system_info=info,
+                on_change=str(cfg.get("on_change") or "report"),
                 targets=list(inst.targets or []), outputs=outputs, schema=inst.schema,
                 objective_key=(cfg.get("objective_key") or None) if outputs else None,
                 auto_escalate=bool(cfg.get("auto_escalate", True)),
@@ -476,10 +482,24 @@ class LiveRun:
                        for e in other[-60:]],
             "recommendation": latest_rec,
             "last_audit": self._tail.last_audit,
+            "novelties": [self._novelty_view(e) for e in other if e.get("event") == "novelty"][-5:],
             # Before the first frame, the reference itself: something real to
             # look at during the minutes the loop is being armed.
             "latest": self._curve(latest) if latest else self._reference_curve(),
         }
+
+    def _novelty_view(self, e: Dict[str, Any]) -> Dict[str, Any]:
+        """A novelty event for the page, with the session-relative path of the
+        frame to hand to Chat."""
+        try:
+            rel = str(Path(str(e.get("data"))).resolve().relative_to(self._session_dir))
+        except Exception:  # noqa: BLE001
+            rel = str(e.get("data") or "")
+        return {k: e.get(k) for k in ("step", "since_step", "fraction", "from_reference", "where",
+                                      "recipe_fits", "window_share")} | {
+            # Shown relative; handed to Chat absolute — observed: the chat agent
+            # could not resolve a session-relative path and asked for the full one.
+            "frame_path": rel, "frame_abs_path": str(e.get("data") or "")}
 
     def _output_keys(self, latest: Optional[Dict[str, Any]], cap: int = 6) -> List[str]:
         """What to trace: the outputs the user named, else the recipe's own

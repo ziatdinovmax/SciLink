@@ -215,6 +215,17 @@ class Recommender:
                              "features": dict(features or {}),
                              "flags": list(flags or [])})
 
+    def notify(self, event: Dict[str, Any]) -> None:
+        """What the loop has learned about the stream, beyond the numbers: the
+        data changed (``novelty``: how much and where), a new recipe was adopted
+        (``reanchor``), an independent check agreed or not (``audit``). Default:
+        ignored. A recommender that reasons (an LLM) should hear it — observed
+        live, one concluded a bad tip had "cleared on its own" because nothing
+        told it the recipe had been rebuilt."""
+
+    #: Set by ``notify`` when the next ``suggest`` should not wait for its turn.
+    urgent = False
+
     def suggest(self) -> Dict[str, Any]:        # pragma: no cover - interface
         raise NotImplementedError
 
@@ -359,6 +370,12 @@ LLM_RECOMMENDER_PROMPT = """You are choosing the next measurement for a running 
 (A flag after a frame is the analysis loop's own quality signal for it, e.g. the
 fit was below its acceptance gate or the data looked unlike the reference.)
 
+## What the analysis loop reported about the stream
+{notes}
+When the data shows something new, the most informative next measurement is
+usually where it is new — more signal or finer steps there — as far as the goal
+and the instrument allow.
+
 ## What you recommended earlier in this run
 {decisions}
 Do not reverse an earlier decision unless the frames since then give a reason
@@ -412,6 +429,7 @@ class LLMRecommender(Recommender):
         #: live (in-situ Raman): without them it shortened the integration,
         #: restored it, and shortened it again — each call reasonable alone.
         self.decisions: List[Dict[str, Any]] = []
+        self.notes: List[str] = []
         if output not in ("params", "protocol"):
             raise ValueError("output must be 'params' or 'protocol'")
         self.model, self.schema, self.objective = model, schema, objective
@@ -449,6 +467,30 @@ class LLMRecommender(Recommender):
             self._guidance = render_guidance(self.skill) if self.skill else ""
         return self._guidance
 
+    def notify(self, event: Dict[str, Any]) -> None:
+        kind = event.get("event")
+        if kind == "novelty":
+            where = "; ".join(
+                f"{w['kind']} between {w['x_from']:g} and {w['x_to']:g} (strongest near {w['x_peak']:g})"
+                for w in (event.get("where") or [])) or "not localised"
+            fits = "the locked recipe still fits" if event.get("recipe_fits") else \
+                "the locked recipe no longer fits and is being rebuilt"
+            text = (f"step {event.get('since_step')}: the data changed — "
+                    f"{float(event.get('fraction') or 0):.0%} of a frame is unlike the stream so far; "
+                    f"{where}; {fits}.")
+            self.urgent = True                   # worth a recommendation now, not in N frames
+        elif kind == "reanchor":
+            text = (f"step {event.get('step')}: the analysis recipe was rebuilt to describe the "
+                    f"changed data. Fit quality recovering from here on is the new recipe, not the "
+                    f"sample or the instrument going back to how it was.")
+        elif kind == "audit":
+            text = (f"step {event.get('step')}: an independent analysis "
+                    + ("agreed with the recipe's values." if event.get("agrees")
+                       else "DISAGREED with the recipe's values — treat them with care."))
+        else:
+            return
+        self.notes = (self.notes + [text])[-8:]
+
     def _decisions_text(self, keep: int = 6) -> str:
         if not self.decisions:
             return "(nothing yet — this is your first recommendation)"
@@ -466,6 +508,7 @@ class LLMRecommender(Recommender):
             objective=self.objective, context=self._context_text(), guidance=guidance,
             schema=self.schema.describe(),
             history=self._history_table(), decisions=self._decisions_text(),
+            notes="\n".join(self.notes) or "(nothing beyond the numbers above)",
             output_contract=_PARAMS_CONTRACT if self.output == "params" else _PROTOCOL_CONTRACT)
 
     def suggest(self) -> Dict[str, Any]:

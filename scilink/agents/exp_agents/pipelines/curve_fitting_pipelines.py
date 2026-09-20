@@ -67,6 +67,7 @@ def create_unified_curve_fitting_pipeline(
     profile: Any = None,
     explicit_verification_budget: bool = False,
     bank_recipe: bool = False,
+    write_reports: bool = True,
 ) -> List:
     """
     Factory function to create the unified curve fitting pipeline.
@@ -176,10 +177,18 @@ def create_unified_curve_fitting_pipeline(
                 replanner=None,
             ),
             StoreAnalysisResultsController(logger, store_fn),
-            GenerateCurveFittingReportController(
-                logger, output_dir, r2_threshold=r2_threshold),
-            UnifiedCurveReportController(logger, output_dir),
         ]
+        # A frame of a live stream (strict replay) is one of thousands: an HTML
+        # report per frame is dead weight on the fast path, and in a web session
+        # each one surfaced as a chat artifact (observed: 50 reports listed
+        # under the next chat turn). The numbers, the plot and the arrays are
+        # still written; a one-off realtime run keeps its report.
+        if write_reports:
+            realtime_pipeline += [
+                GenerateCurveFittingReportController(
+                    logger, output_dir, r2_threshold=r2_threshold),
+                UnifiedCurveReportController(logger, output_dir),
+            ]
         logger.info(
             f"Realtime curve pipeline created: {len(realtime_pipeline)} steps "
             f"(zero-LLM happy path)"

@@ -764,6 +764,9 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .live-state.running { color: var(--text); border-color: var(--viz-good); }
 .live-state.error { color: var(--text); border-color: var(--viz-critical); }
 .live-flags { border: 1px solid var(--viz-warning); border-radius: 8px; padding: 6px 12px; margin-bottom: 10px; font-size: 13px; }
+.live-novelty { display: flex; align-items: center; gap: 12px; border: 1px solid var(--viz-series); border-radius: 8px; padding: 8px 12px; margin-bottom: 10px; font-size: 13px; }
+.live-novelty > div { flex: 1; }
+.live-novelty button { flex: 0 0 auto; }
 .live-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 10px; margin-bottom: 10px; }
 .live-card { border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); padding: 10px 12px; min-width: 0; }
 .live-card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }

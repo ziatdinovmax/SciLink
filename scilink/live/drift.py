@@ -95,6 +95,7 @@ class DriftMonitor:
         self.max_states = 8
         self._recent: List[np.ndarray] = []            # residuals of the last unsuspected frames
         self._held: List[np.ndarray] = []              # suspected frames, waiting for adopt()
+        self._held_resid: List[np.ndarray] = []        # ...and the part of each nothing explained
         self.coherent_frames = (3, 6)                  # runs over which a weak change is averaged
 
     # ------------------------------------------------------------------ grid
@@ -182,6 +183,7 @@ class DriftMonitor:
             states = (states + [self._basis])[-self.max_states:]
         self._x, self._rows, self._ratios = x, [], []
         self._seed, self._recent, self._held, self._states = [], [], [], states
+        self._held_resid = []
         for cx, cy in curves:
             g = self._to_grid(cx, cy)
             if g is not None:
@@ -247,6 +249,8 @@ class DriftMonitor:
             self._recent = (self._recent + [resid])[-max(self.coherent_frames):]
         if out["suspected"] and out["_grid"] is not None:
             self._held = (self._held + [out["_grid"]])[-self.window:]
+            if resid is not None:
+                self._held_resid = (self._held_resid + [resid])[-self.window:]
         return out
 
     def learn(self, x: Any, y: Any, verdict: Optional[Dict[str, Any]] = None) -> None:
@@ -259,7 +263,7 @@ class DriftMonitor:
         ratio = (verdict or {}).get("_ratio")
         if ratio is not None and np.isfinite(ratio):
             self._ratios = (self._ratios + [float(ratio)])[-self.window:]
-        self._held = []                              # an accepted frame ends a run of suspected ones
+        self._held, self._held_resid = [], []        # an accepted frame ends a run of suspected ones
         self._extend([g])
 
     def _extend(self, grids: Sequence[np.ndarray]) -> None:
@@ -280,6 +284,93 @@ class DriftMonitor:
         basis = self._make_basis(self._held[:-1])
         return self._measure(self._held[-1], basis)[0] <= self.fraction_bar
 
+    def _bin_x(self) -> Optional[np.ndarray]:
+        if self._x is None:
+            return None
+        block = max(1, self._x.size // self.n_grid)
+        n = (self._x.size // block) * block
+        return self._x[:n].reshape(-1, block).mean(axis=1)
+
+    def locate(self, max_regions: int = 3) -> List[Dict[str, Any]]:
+        """WHERE the held frames are new, from the part of them nothing seen so
+        far explains — no model, no fit. The held residuals are averaged (noise
+        cancels, the new structure does not) and contiguous stretches that stand
+        clear of the noise are reported, strongest first:
+
+        - ``kind``: ``"new"`` (intensity that was not there), ``"missing"``
+          (intensity that is gone), ``"shifted"`` (a gain right next to a loss of
+          similar size — a feature that moved), or ``"broad"`` (most of the
+          window: a background or overall shape change);
+        - ``x_from`` / ``x_to`` / ``x_peak`` in the data's own x units;
+        - ``share``: this stretch's share of everything unexplained.
+        Empty when nothing is held or the frames covered a different window."""
+        xs = self._bin_x()
+        if not self._held or xs is None or self._basis is None or xs.size != self._held[0].size:
+            return []
+        # A least-squares projection smears a change over everything it touches
+        # (take one of two peaks away and the other appears to grow). What is new
+        # is usually confined to part of the axis, so the fit is made robust: the
+        # bulk of the frame decides how the known shapes are scaled, and what is
+        # new stands out where it is.
+        mean = np.mean([self._robust_residual(g) for g in self._held], axis=0)
+        k = max(3, xs.size // 64)
+        smooth = np.convolve(mean, np.ones(k) / k, mode="same")
+        sigma = (_point_noise(mean) / np.sqrt(k)) or float(np.std(smooth)) or 1.0
+        hot = np.abs(smooth) > 4.0 * sigma
+        total = max(float(np.sum(smooth[hot] ** 2)), 1e-300)
+        regions, i = [], 0
+        while i < hot.size:
+            if not hot[i]:
+                i += 1
+                continue
+            j = i
+            while j + 1 < hot.size and hot[j + 1] and np.sign(smooth[j + 1]) == np.sign(smooth[i]):
+                j += 1
+            seg = slice(i, j + 1)
+            peak = i + int(np.argmax(np.abs(smooth[seg])))
+            regions.append({"i": i, "j": j, "sign": float(np.sign(smooth[peak])),
+                            "x_from": float(xs[i]), "x_to": float(xs[j]), "x_peak": float(xs[peak]),
+                            "share": float(np.sum(smooth[seg] ** 2)) / total})
+            i = j + 1
+        if not regions:
+            return []
+        if float(hot.mean()) > 0.5:                  # most of the window: shape or background
+            return [{"kind": "broad", "x_from": round(float(xs[0]), 6), "x_to": round(float(xs[-1]), 6),
+                     "x_peak": round(float(xs[int(np.argmax(np.abs(smooth)))]), 6), "share": 1.0}]
+        # A gain next to a loss of similar size is one feature that moved.
+        merged, used = [], set()
+        for a in range(len(regions)):
+            if a in used:
+                continue
+            r = regions[a]
+            b = regions[a + 1] if a + 1 < len(regions) else None
+            if b is not None and b["sign"] != r["sign"] \
+                    and b["i"] - r["j"] <= k + 0.5 * min(r["j"] - r["i"], b["j"] - b["i"]) \
+                    and 0.25 < r["share"] / max(b["share"], 1e-12) < 4.0:
+                used.add(a + 1)
+                merged.append({"kind": "shifted", "x_from": r["x_from"], "x_to": b["x_to"],
+                               "x_peak": (r["x_peak"] + b["x_peak"]) / 2.0,
+                               "share": r["share"] + b["share"]})
+            else:
+                merged.append({"kind": "new" if r["sign"] > 0 else "missing", "x_from": r["x_from"],
+                               "x_to": r["x_to"], "x_peak": r["x_peak"], "share": r["share"]})
+        merged.sort(key=lambda r: -r["share"])
+        return [{k_: (round(v, 6) if isinstance(v, float) else v) for k_, v in r.items()}
+                for r in merged[:max_regions] if r["share"] > 0.1]
+
+    def _robust_residual(self, g: np.ndarray, iterations: int = 8) -> np.ndarray:
+        """``g`` minus the known shapes, scaled by the bulk of the frame (Huber
+        weights) rather than by all of it."""
+        basis = self._basis
+        w = np.ones(g.size)
+        resid = g - basis @ (basis.T @ g)
+        for _ in range(iterations):
+            scale = 1.4826 * np.median(np.abs(resid - np.median(resid))) or 1e-300
+            w = 1.0 / np.maximum(1.0, np.abs(resid) / (1.345 * scale))
+            coef, *_ = np.linalg.lstsq(basis * w[:, None], g * w, rcond=None)
+            resid = g - basis @ coef
+        return resid
+
     def adopt(self) -> int:
         """The held frames are the new normal. Returns how many were adopted."""
         n = len(self._held)
@@ -287,7 +378,7 @@ class DriftMonitor:
             if self._basis is not None:              # remember the state being left
                 self._states = (self._states + [self._basis])[-self.max_states:]
             self._extend(self._held)
-            self._held, self._recent = [], []
+            self._held, self._held_resid, self._recent = [], [], []
         return n
 
     @property

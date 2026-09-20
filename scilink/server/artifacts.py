@@ -14,6 +14,10 @@ from typing import Any, Dict, List, Optional, Set
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 _UPLOAD_DIRS = {"uploads", "knowledge", "code", "data"}
+# A live measurement run is a background job with its own tab: it writes a plot
+# per frame for as long as it runs, and none of that belongs to whichever chat
+# turn happens to finish meanwhile (observed: 50 reports listed under one turn).
+_BACKGROUND_ROOT = "live"
 _MAX_INLINE_BYTES = 60_000
 _BULK_STEMS = ("literature_search", "chat_history", "session_log")
 # Evidence / provenance records a tool writes NEXT TO its deliverable, for
@@ -52,6 +56,13 @@ def load_deliverable_titles(session_dir: str) -> Dict[str, str]:
         return {}
 
 
+def _background(p: Path, root: Path) -> bool:
+    try:
+        return p.relative_to(root).parts[0] == _BACKGROUND_ROOT
+    except (ValueError, IndexError):
+        return False
+
+
 class ArtifactTracker:
     """Tracks which session-dir artifacts have already been surfaced."""
 
@@ -88,7 +99,7 @@ class ArtifactTracker:
         root = Path(session_dir)
         for ext in IMAGE_EXTENSIONS:
             for p in root.rglob(f"*{ext}"):
-                if "review" in p.stem:
+                if "review" in p.stem or _background(p, root):
                     continue
                 if p.parent.name == "bo_artifacts" and not p.stem.startswith("step_"):
                     continue
@@ -120,6 +131,8 @@ class ArtifactTracker:
         """Port of app.py:300 ``_find_new_html_reports``."""
         new: List[str] = []
         for p in Path(self.session_dir).rglob("*.html"):
+            if _background(p, Path(self.session_dir)):
+                continue
             s = str(p)
             try:
                 key = f"{p}:{p.stat().st_mtime_ns}"
@@ -145,6 +158,8 @@ class ArtifactTracker:
             pass
         new: List[str] = []
         for p in Path(self.session_dir).rglob("*.md"):
+            if _background(p, Path(self.session_dir)):
+                continue
             s = str(p)
             try:
                 key = f"{p}:{p.stat().st_mtime_ns}"

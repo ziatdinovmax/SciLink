@@ -255,6 +255,33 @@ class TestLLMRecommender:
         assert 'after step 8: {"dwell_ms": 50} — precision met; go faster' in m.prompts[1]
         assert "after step 16: no change — still fine" in m.prompts[2]
 
+    def test_it_hears_what_the_loop_found_and_a_discovery_does_not_wait_its_turn(self):
+        m = ScriptedModel(['{"params": {"dwell_ms": 300}, "rationale": "dwell where it is new"}'])
+        r = LLMRecommender(m, SCHEMA, "goal", skill=None)
+        assert r.urgent is False and "nothing beyond the numbers" in r.build_prompt()
+        r.notify({"event": "novelty", "since_step": 41, "fraction": 0.53, "recipe_fits": True,
+                  "where": [{"kind": "new", "x_from": 0.795, "x_to": 0.935, "x_peak": 0.867}]})
+        r.notify({"event": "reanchor", "step": 53})
+        r.notify({"event": "audit", "step": 60, "agrees": False})
+        r.notify({"event": "frame", "step": 61})                      # not news
+        assert r.urgent is True
+        prompt = r.build_prompt()
+        assert "step 41: the data changed — 53% of a frame is unlike the stream so far" in prompt
+        assert "new between 0.795 and 0.935 (strongest near 0.867)" in prompt
+        assert "the analysis recipe was rebuilt" in prompt and "DISAGREED" in prompt
+        assert "where it is new" in prompt
+
+    def test_an_urgent_recommender_is_asked_at_once(self, tmp_path):
+        m = ScriptedModel(['{"params": {"dwell_ms": 300}, "rationale": "look closer"}'])
+        rec = LLMRecommender(m, SCHEMA, "goal", every=50, skill=None)
+        loop = _loop(tmp_path, rec)
+        loop.step("f1.csv", {"dwell_ms": 100})
+        assert m.prompts == []                                        # not its turn for 49 more frames
+        rec.notify({"event": "novelty", "since_step": 1, "fraction": 0.4, "where": []})
+        loop.step("f2.csv", {"dwell_ms": 100})
+        loop._slot.wait(5)
+        assert len(m.prompts) == 1 and rec.urgent is False
+
     def test_json_in_a_fence_and_non_json(self):
         m = ScriptedModel(['```json\\n{"params": {"averages": 16}}\\n```'.replace("\\\\n", "\\n"),
                            "I would increase the dwell time.", "Still prose."])
