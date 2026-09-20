@@ -119,3 +119,12 @@ def test_arrows_move_between_lines_of_a_multiline_draft(tmp_path, monkeypatch):
     code, out, shell = _run_shell(tmp_path, monkeypatch, keys, ask=False)
     assert code == 0
     assert "The answer to aX" in out.replace("\n", " ") or "aX" in out
+
+
+def test_exit_prints_the_resume_command(tmp_path, monkeypatch):
+    code, out, shell = _run_shell(tmp_path, monkeypatch, "/quit\r", ask=False)
+    assert f"--resume {shell.session_dir.name}" in out          # in the current folder: by id
+    sdir = tmp_path / "elsewhere" / "s"
+    code, out, shell = _run_shell(tmp_path, monkeypatch, "/quit\r",
+                                  argv=["--session-dir", str(sdir)], ask=False)
+    assert f"--session-dir {sdir.resolve()} --restore" in out    # nested: by path

@@ -9,6 +9,7 @@ turn (``turn.py``); Ctrl+D or ``/quit`` saves a checkpoint and exits.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -286,10 +287,25 @@ class Shell:
                 continue
             self.turn(text)
 
+    def resume_command(self) -> str:
+        """The command that resumes this session: by id when the directory
+        sits in the current folder (the picker lists it there), else by path."""
+        launcher = os.environ.get("SCILINK_ARGV0", "scilink")
+        base = launcher if self.mode == "meta" else f"{launcher} {self.mode}"
+        sd = Path(self.session_dir).resolve()
+        try:
+            rel = sd.relative_to(Path.cwd().resolve())
+            if len(rel.parts) == 1:
+                return f"{base} --resume {rel}"
+        except ValueError:
+            pass
+        return f"{base} --session-dir {sd} --restore"
+
     def _shutdown(self) -> None:
         if self.agent is not None:
             save_checkpoint_quietly(self.agent)
         self.console.print(f"\n👋 Session saved: [dim]{self.session_dir}[/]")
+        self.console.print(f"   Resume it with: [bold]{self.resume_command()}[/]")
 
     def run(self) -> int:
         try:
