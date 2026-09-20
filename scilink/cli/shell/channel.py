@@ -17,7 +17,9 @@ from typing import Any, Dict, Optional
 from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
+from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Group
 from rich.rule import Rule
 from rich.text import Text
@@ -54,12 +56,36 @@ class Widgets:
         self.console = console
         self.session = prompt_session
         self.session_dir = session_dir
+        self._overflow: list = []   # the question's earlier lines cut from the panel
 
     # ── helpers ────────────────────────────────────────────────
 
+    def _bindings(self) -> KeyBindings:
+        """Ctrl+O at a question prompt shows the lines the panel cut, above the
+        prompt, and leaves the prompt open (prompt_toolkit's default for the key
+        accepted the line — observed live as an unintended plan approval)."""
+        kb = KeyBindings()
+        overflow = self._overflow
+        console = self.console
+
+        @kb.add("c-o")
+        def _show_earlier(event):
+            def _print():
+                if overflow:
+                    console.print(Panel(Text("\n".join(overflow)),
+                                        title=f"[bold yellow]{len(overflow)} earlier lines[/]",
+                                        border_style="yellow"))
+                    overflow.clear()
+                else:
+                    console.print(Text("  (nothing more to show for this question)", style="dim"))
+            run_in_terminal(_print)
+
+        return kb
+
     def _read(self, prompt: str, default: str = "") -> str:
         # A yellow question mark, so a question is told apart from the chat prompt.
-        text = self.session.prompt(HTML(f"<ansiyellow><b>?</b></ansiyellow> {prompt}"))
+        text = self.session.prompt(HTML(f"<ansiyellow><b>?</b></ansiyellow> {prompt}"),
+                                   key_bindings=self._bindings())
         return text if text.strip() else default
 
     _CONTEXT_MAX_LINES = 120
@@ -73,13 +99,14 @@ class Widgets:
         prompt = (q.get("prompt") or "").strip()
         context = (q.get("context_display") or "").strip()
         parts = []
+        self._overflow.clear()
         if context:
             lines = context.split("\n")
             if len(lines) > self._CONTEXT_MAX_LINES:
-                hidden = len(lines) - self._CONTEXT_MAX_LINES
+                self._overflow.extend(lines[:-self._CONTEXT_MAX_LINES])
                 lines = lines[-self._CONTEXT_MAX_LINES:]
-                parts.append(Text(f"… {hidden} earlier lines (Ctrl+O / /verbose shows the "
-                                  "full narration)", style="dim"))
+                parts.append(Text(f"… {len(self._overflow)} earlier lines (Ctrl+O shows them)",
+                                  style="dim"))
             parts.append(Text("\n".join(lines)))
         if prompt:
             if parts:

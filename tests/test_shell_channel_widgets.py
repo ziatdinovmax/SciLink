@@ -145,4 +145,13 @@ def test_long_context_is_capped_with_a_pointer():
         w.ask(q)
     out = buf.getvalue()
     assert "line 199" in out and "line 80 " in out and "line 79 " not in out   # last 120 lines kept
-    assert "80 earlier lines" in out
+    assert "80 earlier lines (Ctrl+O shows them)" in out
+
+
+def test_ctrl_o_at_a_question_shows_earlier_lines_and_keeps_the_prompt():
+    q = dict(GENERIC, context_display="\n".join(f"line {i}" for i in range(200)))
+    w, buf, stack = _widgets("\x0f\r")          # Ctrl+O, then Enter
+    with stack:
+        assert w.ask(q) == ""                     # accepted by Enter, not by Ctrl+O
+    out = buf.getvalue()
+    assert "80 earlier lines" in out and "line 0" in out and "line 79" in out
