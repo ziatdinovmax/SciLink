@@ -14,12 +14,14 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.application.current import get_app
 from prompt_toolkit.completion import NestedCompleter, PathCompleter, WordCompleter
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 from rich.console import Console
+from rich.text import Text
 
 from scilink.skills.loader import scilink_home
 from scilink.ui import vocabulary as V
@@ -30,6 +32,26 @@ from .commands import Registry, core_commands
 from .render import Renderer
 from .sessions import pick_session
 from .turn import quiet_console_logging, run_turn, save_checkpoint_quietly
+
+
+def scilink_version() -> str:
+    """The running version: from the source checkout's pyproject when the
+    package runs from one (an editable install's metadata goes stale),
+    else from the installed metadata."""
+    import re
+    import scilink
+    pyproject = Path(scilink.__file__).resolve().parent.parent / "pyproject.toml"
+    try:
+        m = re.search(r'^version\s*=\s*"([^"]+)"', pyproject.read_text(encoding="utf-8"), re.M)
+        if m:
+            return m.group(1)
+    except OSError:
+        pass
+    try:
+        from importlib.metadata import version
+        return version("scilink")
+    except Exception:  # noqa: BLE001
+        return "dev"
 
 
 class Shell:
@@ -150,13 +172,25 @@ class Shell:
     # ── the loop ───────────────────────────────────────────────
 
     def _toolbar(self):
-        m = V.mode(self.mode)
+        """The bar under the message line: a rule, then the session state on
+        the left and the running version on the right. The mode is not
+        repeated here — the placeholder already names it."""
         autonomy = self.adapter.get_autonomy(self.agent) if self.agent is not None else "?"
         verbose = "verbose on" if self.renderer.verbose else "verbose off"
-        # A blank line above the status line, and no reverse-video bar.
-        return HTML(f"\n {m['emoji']}  <b>{m['name']}</b> · {autonomy} · "
-                    f"{self.session_dir.name if self.session_dir else ''} · "
-                    f"{getattr(self.args, 'model', '')} · {verbose}")
+        left = (f" {autonomy} · {self.session_dir.name if self.session_dir else ''} · "
+                f"{getattr(self.args, 'model', '')} · {verbose}")
+        right = f"scilink {scilink_version()} "
+        try:
+            width = get_app().output.get_size().columns
+        except Exception:  # noqa: BLE001
+            width = self.console.size.width
+        gap = max(1, width - len(left) - len(right))
+        rule = "\u2500" * width
+        return HTML(f"{rule}\n{left}{' ' * gap}{right}")
+
+    def _rule(self) -> None:
+        """The bar above the message line."""
+        self.console.print(Text("\u2500" * self.console.size.width, style="grey35"))
 
     def _completer(self) -> NestedCompleter:
         options: Dict[str, Any] = {}
@@ -207,10 +241,11 @@ class Shell:
             history=self._history(), completer=self._completer(),
             key_bindings=self._bindings(), multiline=True, prompt_continuation="  ",
             bottom_toolbar=self._toolbar, complete_while_typing=False,
-            style=Style.from_dict({"bottom-toolbar": "noreverse",
-                                   "bottom-toolbar.text": "noreverse fg:ansibrightblack"}),
+            style=Style.from_dict({"bottom-toolbar": "noreverse fg:#5c5c5c",
+                                   "bottom-toolbar.text": "noreverse fg:#8a8a8a"}),
             **self._pt_kwargs)
         while not self._quit:
+            self._rule()
             try:
                 text = self.prompt_session.prompt(
                     HTML("<b><ansicyan>❯</ansicyan></b> "),
