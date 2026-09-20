@@ -416,7 +416,7 @@ export interface LiveNovelty {
   since_step: number;
   fraction: number | null;
   from_reference?: number | null;
-  where: { kind: "new" | "missing" | "shifted" | "broad"; x_from: number; x_to: number;
+  where: { kind: "new" | "missing" | "shifted" | "broad" | "window"; x_from: number; x_to: number;
            x_peak: number; share: number }[];
   recipe_fits: boolean;
   window_share?: number | null;

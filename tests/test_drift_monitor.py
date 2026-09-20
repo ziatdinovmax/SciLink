@@ -110,6 +110,34 @@ def test_a_shorter_window_is_compared_where_it_overlaps():
     assert mon.judge(x[:100], y[:100]) == {"available": False}          # too little in common
 
 
+def test_a_change_on_a_shorter_window_is_held_located_and_says_the_window_changed():
+    # Live (AFM force curves): moving onto a stiff inclusion ends the curve early, so
+    # every changed frame covered a shorter window, none was held, and the novelty
+    # said only that the window changed, not where the data was new.
+    mon = armed()
+    cut = 520                                                           # of 800 points, x from 0 to 20
+    frames = [curve(TWO + [(9.0, 4.0, 0.4)], seed=110 + i) for i in range(3)]
+    for x, y in frames:
+        assert mon.judge(x[:cut], y[:cut])["suspected"]
+    assert mon.n_held == 3 and mon.held_agree()                         # the same new state, three times
+    where = mon.locate()
+    new, window = where[0], where[-1]
+    assert new["kind"] == "new" and abs(new["x_peak"] - 9.0) < 0.4
+    assert window["kind"] == "window" and abs(window["x_from"] - frames[0][0][cut]) < 0.2
+    assert abs(window["x_to"] - 20.0) < 0.2 and 0.3 < window["share"] < 0.4
+    assert mon.adopt() == 0 and mon.n_held == 0                         # another window: the caller restarts on it
+    moving = armed()
+    x, y = curve(TWO + [(9.0, 4.0, 0.4)], seed=120)
+    moving.judge(x[:cut], y[:cut])
+    x, y = curve(TWO + [(3.0, 5.0, 0.4)], seed=121)
+    moving.judge(x[:cut], y[:cut])
+    assert not moving.held_agree()                                      # still changing: not a state
+    same_window = armed()
+    x, y = curve(TWO, seed=122)
+    same_window.judge(x[:cut], y[:cut])
+    assert same_window.locate() == []                                   # nothing suspected, nothing held
+
+
 def test_nothing_is_judged_before_a_few_frames_are_known():
     mon = DriftMonitor(warmup=4)
     mon.seed([curve(TWO, seed=1)])

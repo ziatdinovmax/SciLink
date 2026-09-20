@@ -839,11 +839,17 @@ class TestChangeSignalAndAudit:
         assert novelty["fraction"] > 0.2 and novelty["frames"] == frames[:2]
         [where] = novelty["where"]
         assert where["kind"] == "new" and abs(where["x_peak"] - 17.0) < 0.3
+        # The frame that announces it never also accepts it: a driver may pause there,
+        # and the decision made at the pause comes before the state is taken as normal.
+        assert second["novelty"]["since_step"] == first["step"]
+        assert not [e for e in loop.read_log() if e["event"] == "state_accepted"]
+        third = loop.step(frames[2])
         # accepted for tracking, with no model call and nothing started in the background
         accepted = next(e for e in loop.read_log() if e["event"] == "state_accepted")
-        assert accepted["verified"] is False and "agree with each other" in accepted["how"]
-        assert not loop.escalating and second.get("escalation") is None
-        assert loop.step(frames[2])["flags"] == []
+        assert accepted["step"] == third["step"] and accepted["verified"] is False
+        assert "agree with each other" in accepted["how"]
+        assert not loop.escalating and third.get("escalation") is None and "novelty" not in third
+        assert loop.step(frames[3])["flags"] == []
         assert [e["event"] for e in loop.read_log()].count("novelty") == 1     # once per change
 
     def test_one_odd_frame_is_a_flag_not_a_discovery(self, tmp_path):

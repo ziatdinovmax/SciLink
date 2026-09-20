@@ -67,6 +67,13 @@ function parseOutputs(text: string): Record<string, string> {
   return out;
 }
 
+/** Where the data is new, then whether the measured window changed with it. */
+function describeChange(where: LiveNovelty["where"]): string {
+  const data = where.find((w) => w.kind !== "window");
+  return [describeWhere(data), ...where.filter((w) => w.kind === "window").map(describeWhere)]
+    .filter(Boolean).join(" ");
+}
+
 function clock(seconds: number): string {
   const s = Math.max(0, Math.round(seconds));
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
@@ -77,7 +84,8 @@ function clock(seconds: number): string {
 function describeWhere(w?: LiveNovelty["where"][number]): string {
   if (!w) return "";
   const at = `${fmt(w.x_from)} to ${fmt(w.x_to)}`;
-  return w.kind === "new" ? `New intensity from ${at}, strongest near ${fmt(w.x_peak)}.`
+  return w.kind === "window" ? `No longer measured from ${at}.`
+    : w.kind === "new" ? `New intensity from ${at}, strongest near ${fmt(w.x_peak)}.`
     : w.kind === "missing" ? `Intensity is gone from ${at}, most near ${fmt(w.x_peak)}.`
     : w.kind === "shifted" ? `A feature moved, around ${fmt(w.x_peak)}.`
     : "The overall shape or background changed.";
@@ -99,8 +107,7 @@ function describeEvent(e: LiveEvent): string {
     case "escalation_started":
       return "Rebuilding the recipe in the background.";
     case "novelty": {
-      const w = ((e.where ?? []) as LiveNovelty["where"])[0];
-      return `The data changed from frame ${g("since_step")}. ${describeWhere(w)}`;
+      return `The data changed from frame ${g("since_step")}. ${describeChange((e.where ?? []) as LiveNovelty["where"])}`;
     }
     case "paused":
       return g("why") === "novelty" ? "Paused. The data changed and the run is waiting for a decision."
@@ -751,7 +758,7 @@ export function LivePanel({
           <div>
             <b>New from frame {n.since_step}.</b>{" "}
             {typeof n.fraction === "number" ? `${Math.round(100 * n.fraction)} % of a frame is unlike the frames before it. ` : ""}
-            {describeWhere(n.where[0])}
+            {describeChange(n.where)}
             {n.where.length === 0 && n.window_share ? " The measured window changed." : ""}
             {n.recipe_fits ? "" : " The recipe no longer fits and is being rebuilt."}
             <Info>
@@ -765,7 +772,7 @@ export function LivePanel({
                 `Analyze ${n.frame_abs_path || n.frame_path} thoroughly. Context: it is frame ${n.step} of a live ` +
                 `${inst?.technique ?? "measurement"} run. From frame ${n.since_step} the data changed` +
                 (typeof n.fraction === "number" ? ` (${Math.round(100 * n.fraction)} % of a frame is unlike the earlier frames)` : "") +
-                `. ${describeWhere(n.where[0])} Say what changed as specific, testable claims, ` +
+                `. ${describeChange(n.where)} Say what changed as specific, testable claims, ` +
                 `then assess how novel each claim is against the literature.`)}
             >
               Analyse in Chat

@@ -275,6 +275,8 @@ def test_a_lasting_change_reaches_the_page_as_a_novelty_with_the_frame_to_hand_t
     [novelty] = snap["novelties"]                              # the AFM simulator's inclusion, frame 26
     assert 24 <= novelty["since_step"] <= 27 and novelty["recipe_fits"] is True
     assert novelty["fraction"] > 0.5 and novelty["window_share"] < 0.9     # the curve now ends early
+    kinds = [w["kind"] for w in novelty["where"]]                          # located where it overlaps, and
+    assert kinds[-1] == "window" and "new" in kinds                        # the lost part of the axis is named
     assert novelty["frame_path"].startswith("live/run_001/loop/incoming/frame_")
     assert Path(novelty["frame_abs_path"]).is_file()           # what the Chat hand-off sends
     # a live run's per-frame files are not artifacts of whatever chat turn finishes meanwhile
@@ -307,7 +309,7 @@ def test_a_run_can_wait_at_a_novelty_for_the_person_to_decide(session):
     snap = _wait(session, lambda s: s["state"] == "done")
     assert snap["frames"][-1]["params"]["trigger_force_nN"] == 12.5 and snap["paused"] is None
     kinds = [e["event"] for e in snap["events"]]
-    assert kinds.index("novelty") < kinds.index("paused") < kinds.index("resumed")
+    assert kinds.index("novelty") < kinds.index("paused") < kinds.index("resumed") < kinds.index("state_accepted")
     resumed = next(e for e in snap["events"] if e["event"] == "resumed")
     assert resumed["decision"] == "change" and resumed["params"] == {"trigger_force_nN": 12.5}
     assert snap["instrument"]["id"] == "afm_force_curve"

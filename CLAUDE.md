@@ -824,8 +824,9 @@ call), `audit` (agreement keeps the recipe, disagreement adopts the audit's) or
 recipe is a hypothesis about what the data looks like, and in discovery work the
 hypothesis breaking is the result. So before anything is rebuilt or accepted the
 loop emits a `novelty` event — how much of a frame is unlike the stream so far
-and WHERE on the axis (new / missing / shifted / broad), read from the data with
-no model — once per change, after the usual patience so a glitch is not a
+and WHERE on the axis (new / missing / shifted / broad, and `window` when the
+frames now cover less of the axis: they are located where they overlap), read from
+the data with no model — once per change, after the usual patience so a glitch is not a
 discovery. The recommender is told (and asked at once: where the data is new is
 usually where to measure next), and the follow-up — a thorough analysis of that
 frame in chat — is one click for a person, never automatic. Do not add a path
@@ -833,7 +834,9 @@ that makes a change disappear without that event. Free-text notes from the user
 travel in `system_info` as context for every model-driven stage; they inform,
 they do not constrain. Two analyses are never asked to agree better than one agrees
 with itself (the output's own frame-to-frame scatter), and a state accepted once
-is remembered so the same kind of region is not asked about twice. The monitor
+is remembered so the same kind of region is not asked about twice. The frame that
+announces a change never also accepts it: a driver may pause there, and what is
+decided at the pause comes before the state is taken as normal. The monitor
 works on any 1D curve, which is how it will watch a datacube (its mean spectrum).
 
 **Onboarding an instrument has two halves, and neither is a SciLink class.**

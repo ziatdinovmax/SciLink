@@ -793,7 +793,8 @@ class MeasurementLoop:
                 self._novelty_open = False
             run = self._breach_kinds[-self.breach_patience:]
             changed = needs_escalation and FLAG_DRIFT in (record.get("flags") or [])
-            if changed and not self._novelty_open:
+            announced = changed and not self._novelty_open
+            if announced:
                 self._announce(data_path, record)
             job = (self._escalation_meta or {}) if self._escalation is not None else None
             fit_breach = needs_escalation and "fit" in run
@@ -810,7 +811,10 @@ class MeasurementLoop:
                     else:
                         self.escalate(data_path)
                         record["escalation"] = "started"
-            elif needs_escalation:                       # fits, and the policy is to report
+            elif needs_escalation and not announced:
+                # Fits, and the policy is to report. Never on the frame that
+                # announced it: a driver may make that frame a decision point, and
+                # what is decided there comes before the state is taken as normal.
                 settled = self._drift.held_agree() or not self._drift.n_held
                 if settled or self._consecutive_breaches >= 4 * self.breach_patience:
                     self._accept_state(verified=False, settled=settled)

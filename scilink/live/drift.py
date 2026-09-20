@@ -96,6 +96,7 @@ class DriftMonitor:
         self._recent: List[np.ndarray] = []            # residuals of the last unsuspected frames
         self._held: List[np.ndarray] = []              # suspected frames, waiting for adopt()
         self._held_resid: List[np.ndarray] = []        # ...and the part of each nothing explained
+        self._held_partial: List[Tuple[np.ndarray, np.ndarray]] = []   # suspected frames on a shorter window
         self.coherent_frames = (3, 6)                  # runs over which a weak change is averaged
 
     # ------------------------------------------------------------------ grid
@@ -183,7 +184,7 @@ class DriftMonitor:
             states = (states + [self._basis])[-self.max_states:]
         self._x, self._rows, self._ratios = x, [], []
         self._seed, self._recent, self._held, self._states = [], [], [], states
-        self._held_resid = []
+        self._held_resid, self._held_partial = [], []
         for cx, cy in curves:
             g = self._to_grid(cx, cy)
             if g is not None:
@@ -251,6 +252,8 @@ class DriftMonitor:
             self._held = (self._held + [out["_grid"]])[-self.window:]
             if resid is not None:
                 self._held_resid = (self._held_resid + [resid])[-self.window:]
+        elif out["suspected"]:                       # a changed frame on a shorter window is held too
+            self._held_partial = (self._held_partial + [(g, covered)])[-self.window:]
         return out
 
     def learn(self, x: Any, y: Any, verdict: Optional[Dict[str, Any]] = None) -> None:
@@ -263,7 +266,7 @@ class DriftMonitor:
         ratio = (verdict or {}).get("_ratio")
         if ratio is not None and np.isfinite(ratio):
             self._ratios = (self._ratios + [float(ratio)])[-self.window:]
-        self._held, self._held_resid = [], []        # an accepted frame ends a run of suspected ones
+        self._held, self._held_resid, self._held_partial = [], [], []   # an accepted frame ends a run of suspected ones
         self._extend([g])
 
     def _extend(self, grids: Sequence[np.ndarray]) -> None:
@@ -274,15 +277,30 @@ class DriftMonitor:
 
     @property
     def n_held(self) -> int:
-        return len(self._held)
+        return len(self._held) + len(self._held_partial)
+
+    def _held_common(self):
+        """The held frames where ALL of them were measured: (grids cut to the
+        common bins, the mask of those bins), or ``(None, None)``."""
+        entries = [(g, np.ones(g.size, dtype=bool)) for g in self._held] + list(self._held_partial)
+        if not entries or len({g.size for g, _ in entries}) != 1:
+            return None, None
+        common = np.logical_and.reduce([c for _, c in entries])
+        if common.sum() < 16:
+            return None, None
+        return [g[common] for g, _ in entries], common
 
     def held_agree(self) -> bool:
         """Do the held frames look like each other (a new stable state) rather
-        than like a stream that is still changing?"""
-        if len(self._held) < 2:
-            return bool(self._held)
-        basis = self._make_basis(self._held[:-1])
-        return self._measure(self._held[-1], basis)[0] <= self.fraction_bar
+        than like a stream that is still changing? Frames on a shorter window
+        are compared where they overlap."""
+        grids, _ = self._held_common()
+        if grids is None:
+            return False
+        if len(grids) < 2:
+            return True
+        basis = self._make_basis(grids[:-1])
+        return self._measure(grids[-1], basis)[0] <= self.fraction_bar
 
     def _bin_x(self) -> Optional[np.ndarray]:
         if self._x is None:
@@ -303,16 +321,38 @@ class DriftMonitor:
           window: a background or overall shape change);
         - ``x_from`` / ``x_to`` / ``x_peak`` in the data's own x units;
         - ``share``: this stretch's share of everything unexplained.
-        Empty when nothing is held or the frames covered a different window."""
-        xs = self._bin_x()
-        if not self._held or xs is None or self._basis is None or xs.size != self._held[0].size:
+
+        Frames that cover a shorter window than the stream did are located
+        where they overlap it, and the part of the axis that is no longer
+        measured is reported after the rest as ``kind="window"`` (``share``: its
+        share of the axis) — a scan that ends early is itself something that
+        changed, and often the consequence of what is new inside it.
+        Empty when nothing is held."""
+        xs_all = self._bin_x()
+        grids, common = self._held_common()
+        if grids is None or xs_all is None or self._basis is None or xs_all.size != common.size:
             return []
+        lost = []
+        if not common.all():
+            idx = np.flatnonzero(common)
+            for a, b in ((0, idx[0] - 1), (idx[-1] + 1, common.size - 1)):
+                if b >= a:
+                    lost.append({"kind": "window", "x_from": round(float(xs_all[a]), 6),
+                                 "x_to": round(float(xs_all[b]), 6),
+                                 "x_peak": round(float(xs_all[a if a else b]), 6),
+                                 "share": round(float(b - a + 1) / common.size, 6)})
+        return self._locate_in(grids, xs_all[common], self._basis[common], max_regions) + lost
+
+    def _locate_in(self, grids: Sequence[np.ndarray], xs: np.ndarray, basis: np.ndarray,
+                   max_regions: int) -> List[Dict[str, Any]]:
+        if basis.shape[0] != self._basis.shape[0]:
+            basis, _ = np.linalg.qr(basis)
         # A least-squares projection smears a change over everything it touches
         # (take one of two peaks away and the other appears to grow). What is new
         # is usually confined to part of the axis, so the fit is made robust: the
         # bulk of the frame decides how the known shapes are scaled, and what is
         # new stands out where it is.
-        mean = np.mean([self._robust_residual(g) for g in self._held], axis=0)
+        mean = np.mean([self._robust_residual(g, basis) for g in grids], axis=0)
         k = max(3, xs.size // 64)
         smooth = np.convolve(mean, np.ones(k) / k, mode="same")
         sigma = (_point_noise(mean) / np.sqrt(k)) or float(np.std(smooth)) or 1.0
@@ -358,10 +398,10 @@ class DriftMonitor:
         return [{k_: (round(v, 6) if isinstance(v, float) else v) for k_, v in r.items()}
                 for r in merged[:max_regions] if r["share"] > 0.1]
 
-    def _robust_residual(self, g: np.ndarray, iterations: int = 8) -> np.ndarray:
+    @staticmethod
+    def _robust_residual(g: np.ndarray, basis: np.ndarray, iterations: int = 8) -> np.ndarray:
         """``g`` minus the known shapes, scaled by the bulk of the frame (Huber
         weights) rather than by all of it."""
-        basis = self._basis
         w = np.ones(g.size)
         resid = g - basis @ (basis.T @ g)
         for _ in range(iterations):
@@ -374,11 +414,13 @@ class DriftMonitor:
     def adopt(self) -> int:
         """The held frames are the new normal. Returns how many were adopted."""
         n = len(self._held)
-        if n:
+        if self._held_partial:                       # a different window: the caller restarts on it
+            n = 0
+        elif n:
             if self._basis is not None:              # remember the state being left
                 self._states = (self._states + [self._basis])[-self.max_states:]
             self._extend(self._held)
-            self._held, self._held_resid, self._recent = [], [], []
+        self._held, self._held_resid, self._held_partial, self._recent = [], [], [], []
         return n
 
     @property
