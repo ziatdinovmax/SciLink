@@ -343,7 +343,7 @@ def test_refine_plan_threads_tea_as_its_own_block_not_literature(tmp_path, monke
     monkeypatch.setattr(t, "_collect_scalarizer_context", lambda *a, **k: [])
 
     out = json.loads(t.functions_map["refine_plan_with_results"](
-        result_data="Yield was 12%."))
+        result_data="Yield was 12%.", trigger="new_results"))
     assert out["status"] == "success", out
     assert "Data gaps for a quantitative TEA" in seen["external_context"]
     assert seen["literature_text"] is None          # provenance stays honest

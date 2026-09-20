@@ -21,7 +21,7 @@ def _natural_sort_key(s):
     return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', str(s))]
 
 from .parser_utils import write_experiments_to_disk
-from .user_interface import format_caveats
+from .user_interface import format_caveats, format_auto_repair
 from .instruct import (
     BO_OBJECTIVE_DISTILL_PROMPT,
     KNOWLEDGE_QUERY_CODEGEN_PROMPT,
@@ -285,6 +285,158 @@ class OrchestratorTools:
             self._register_tool,
             lambda: Path(self.orch.base_dir) / "events.jsonl",
         )
+
+    # Files that mirror planner state. They are written from that state and
+    # read back by nothing, so an in-place edit forks the plan: the disk copy
+    # says one thing, the state the next refinement and the report are built
+    # from says another.
+    _STATE_BACKED_FILES = {"plan.json", "plan_refined.json", "plan.html",
+                           "plan_refined.html", "plan_preview.html",
+                           "tea_analysis.json", "planning_state.json",
+                           "checkpoint.json"}
+
+    def _state_backed_refusal(self, path: Any) -> Optional[str]:
+        """JSON refusal for a file tool aimed at a state-backed artifact."""
+        name = Path(str(path)).name
+        if name not in self._STATE_BACKED_FILES and not name.endswith(".state.json"):
+            return None
+        return json.dumps({
+            "status": "declined",
+            "message": (
+                f"'{name}' is written from the planner's state; editing the "
+                "file would leave the state, the report and the next "
+                "refinement on the old plan. Change the plan through "
+                "refine_plan_with_results / adjust_plan_for_constraints / "
+                "refine_portfolio, which pass the human's review gate.")})
+
+    # One self-initiated rewrite per authored plan: past that the agent is
+    # chasing its own critic, which finds something new every round.
+    MAX_SELF_REVISIONS = 1
+
+    def _review_summary(self) -> Dict[str, Any]:
+        """What the orchestrator must know about the current plan's review."""
+        plan = (self.orch.planner.state or {}).get("current_plan") or {}
+        review = plan.get("human_review") or {}
+        if review and "turn" not in review:
+            # The chat turn the human settled the plan in — what makes a later
+            # "the user asked" checkable.
+            review["turn"] = getattr(self.orch, "message_count", None)
+        out: Dict[str, Any] = {"human_review": review.get("status", "not_reviewed")}
+        if review:
+            out["plan_status"] = (
+                "SETTLED — a human reviewed this plan. Change it only on new "
+                "experimental results, a user request, or a defect that makes "
+                "it impossible or unsafe to run; report any other concern as a "
+                "caveat in your summary.")
+        repair = plan.get("auto_repair") or {}
+        if repair.get("status"):
+            out["auto_repair"] = {"status": repair["status"],
+                                  "changes": format_auto_repair(repair)}
+        fallback = ((self.orch.planner.state or {}).get("plan_candidates")
+                    or {}).get("fallback")
+        if fallback:
+            out["candidate_fallback"] = fallback
+        blocker = self._standing_blocker()
+        if blocker:
+            out["unresolved_blocking_finding"] = {
+                "issue": blocker.get("issue"),
+                "conflict": blocker.get("conflict"),
+                "note": ("The critic says this plan cannot be run as written, "
+                         "and neither the automatic repair nor another "
+                         "candidate resolved it. The critic can be wrong about "
+                         "the limit it cites: check it, then fix the plan, "
+                         "proceed, or stop and report — and say which, and why.")}
+        return out
+
+    def _revision_refusal(self, trigger: Optional[str],
+                          reason: Optional[str]) -> Optional[str]:
+        """JSON refusal when a plan rewrite is not warranted, else None.
+
+        The trigger is self-declared, so each value is held to what can be
+        checked: a ``user_request`` needs a user message since the approval, a
+        ``blocking_defect`` needs a stated reason, has a budget, and is final
+        once the human has declined one.
+        """
+        from .planning_agent import PlanningAgent
+        triggers = PlanningAgent.REVISION_TRIGGERS
+        if trigger not in triggers:
+            return json.dumps({
+                "status": "error",
+                "message": (f"`trigger` is required — one of {list(triggers)}: "
+                            "what is driving this rewrite?")})
+        state = self.orch.planner.state or {}
+        review = (state.get("current_plan") or {}).get("human_review") or {}
+        caveat = ("Leave the plan as it is and report the concern to the user "
+                  "as a caveat in your summary.")
+        if (trigger == "user_request" and review
+                and review.get("turn") is not None
+                and review.get("turn") == getattr(self.orch, "message_count", None)):
+            return json.dumps({
+                "status": "declined",
+                "message": ("The human approved this plan earlier in this same "
+                            "turn and has sent no message since, so this is not "
+                            "a user request. " + caveat)})
+        if trigger == "blocking_defect":
+            if not (reason or "").strip():
+                return json.dumps({
+                    "status": "error",
+                    "message": ("`reason` is required with "
+                                "trigger='blocking_defect': one sentence naming "
+                                "what makes the plan impossible or unsafe to "
+                                "run as written.")})
+            if review.get("reopen_declined"):
+                return json.dumps({
+                    "status": "declined",
+                    "message": ("The human was already shown a proposed "
+                                "revision of this approved plan and kept the "
+                                "plan. " + caveat)})
+            if state.get("self_revisions", 0) >= self.MAX_SELF_REVISIONS:
+                return json.dumps({
+                    "status": "declined",
+                    "message": ("This plan has already had its one "
+                                "self-initiated revision. " + caveat)})
+        return None
+
+    def _standing_blocker(self) -> Optional[Dict[str, Any]]:
+        """The blocking finding nobody has dealt with yet, if any.
+
+        None once a human has reviewed the plan: they were shown the finding
+        and their decision binds. Unreviewed — an autonomous run — it is put
+        in front of the orchestrator as a fact to act on, not enforced: a hard
+        stop here failed runs on the critic's word alone, and live the critic
+        cited three different limits for one hazard in three passes.
+        """
+        from .planning_rag import blocking_findings
+        plan = (self.orch.planner.state or {}).get("current_plan") or {}
+        if plan.get("human_review"):
+            return None
+        found = blocking_findings(plan.get("critic_findings"))
+        return found[0] if found else None
+
+    def _revision_outcome(self, plan: Dict[str, Any]) -> Optional[str]:
+        """JSON result when a self-initiated revision did not take effect."""
+        state = self.orch.planner.state or {}
+        if state.get("status") == "revision_discarded":
+            return json.dumps({
+                "status": "declined",
+                "message": (f"The revision was discarded: "
+                            f"{state.get('last_discard_reason')}. A "
+                            "blocking_defect revision is a repair — it may not "
+                            "change the hypothesis, the experiment or most of "
+                            "the protocol. If the defect cannot be fixed "
+                            "locally, report it to the user; do not retry."),
+                "iteration": plan.get("iteration"),
+                **self._review_summary()})
+        if state.get("status") != "reopen_declined":
+            return None
+        return json.dumps({
+            "status": "declined_by_human",
+            "message": ("The human kept the plan they had approved; the "
+                        "proposed revision was discarded. Do not propose it "
+                        "again — carry the concern as a caveat in your "
+                        "summary."),
+            "iteration": plan.get("iteration"),
+            **self._review_summary()})
 
     def _get_human_feedback_enabled(self) -> bool:
         """
@@ -2716,7 +2868,8 @@ class OrchestratorTools:
                     "knowledge_used": knowledge_list is not None,
                     "primary_data_used": primary_dataset is not None,
                     "tea_context_included": self.orch.latest_tea_results is not None,
-                    "hint": "Use generate_implementation_code() to add executable code"
+                    "hint": "Use generate_implementation_code() to add executable code",
+                    **self._review_summary(),
                 }
                 if carried_literature:
                     _now = self._campaign_id()
@@ -3067,7 +3220,7 @@ class OrchestratorTools:
                     "status": "error",
                     "message": "No active plan. Generate a plan first using generate_initial_plan()"
                 })
-            
+
             current_plan = self.orch.planner.state["current_plan"]
             
             # Check if already has code
@@ -3363,6 +3516,8 @@ class OrchestratorTools:
         # 4. REFINE PLAN (based on results)
         def refine_plan_with_results(
             result_data: str,
+            trigger: str = None,
+            reason: str = None,
             use_literature_rag: bool = False,
             literature_context: str = None,
             molecule_context: str = None,
@@ -3382,6 +3537,9 @@ class OrchestratorTools:
             - File path: "./data.csv" or "./plot.png"
             - Comma-separated files: "./data.csv,./plot.png"
             """
+            refusal = self._revision_refusal(trigger, reason)
+            if refusal:
+                return refusal
             print(f"  ⚡ Tool: Refining Plan based on Results / Feedback...")
 
             # Parse input - handle both single paths and comma-separated lists
@@ -3438,7 +3596,9 @@ class OrchestratorTools:
                     enable_human_feedback=self._get_human_feedback_enabled(),
                     use_literature_rag=use_literature_rag,
                     external_context=ext_ctx,
-                    literature_text=lit_text
+                    literature_text=lit_text,
+                    trigger=trigger,
+                    reopen_reason=reason,
                 )
                 
                 if plan.get("error"):
@@ -3446,6 +3606,9 @@ class OrchestratorTools:
                         "status": "error",
                         "message": plan.get("error")
                     })
+                kept = self._revision_outcome(plan)
+                if kept:
+                    return kept
 
                 # Explicitly supplied literature files now belong to this
                 # campaign's corpus (issue #396).
@@ -3470,7 +3633,8 @@ class OrchestratorTools:
                     "num_experiments": len(plan.get('proposed_experiments', [])),
                     "output_path": str(output_path),
                     "html_report": str(html_path) if html_path else None,
-                    "hint": "Use refine_implementation_code() to update executable code"
+                    "hint": "Use refine_implementation_code() to update executable code",
+                    **self._review_summary(),
                 })
                 
             except Exception as e:
@@ -3493,6 +3657,30 @@ class OrchestratorTools:
                 "result_data": {
                     "type": "string",
                     "description": "Experimental results (text, file path, or comma-separated files)"
+                },
+                "trigger": {
+                    "type": "string",
+                    "enum": ["new_results", "user_request", "blocking_defect"],
+                    "description": (
+                        "What is driving this rewrite. 'new_results': the plan "
+                        "was executed and result_data is what came back. "
+                        "'user_request': the user asked for this change in "
+                        "their message. 'blocking_defect': your own finding "
+                        "that the plan is impossible or unsafe to run as "
+                        "written — never a weak design, a missing control or a "
+                        "critic caveat, which you report to the user instead. "
+                        "A reviewed plan is settled: the human sees a "
+                        "blocking_defect revision with their approved plan as "
+                        "the default, once."
+                    )
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Required with trigger='blocking_defect': one sentence "
+                        "naming what makes the plan impossible or unsafe to "
+                        "run. Shown to the human at the review gate."
+                    )
                 },
                 "use_literature_rag": {
                     "type": "boolean",
@@ -3521,22 +3709,34 @@ class OrchestratorTools:
                     "description": "Extra context (e.g., reference data from query_knowledge_data, constraints, observations) to inform refinement."
                 }
             },
-            required=["result_data"]
+            required=["result_data", "trigger"]
         )
         
         # 4b. ADJUST PLAN FOR CONSTRAINTS (pre-execution)
-        def adjust_plan_for_constraints(constraint_description: str):
+        def adjust_plan_for_constraints(constraint_description: str,
+                                        trigger: str = None):
             """
             Adjusts the experimental plan for implementation or instrument
             constraints discovered during protocol/code generation.
             Does NOT increment the iteration — the experiment hasn't run yet.
             """
+            # A constraint is either the user's or the agent's own finding that
+            # the plan cannot run as written; the description is the reason.
+            if trigger == "new_results":
+                return json.dumps({
+                    "status": "error",
+                    "message": ("A constraint adjustment is pre-execution. Use "
+                                "refine_plan_with_results for results.")})
+            refusal = self._revision_refusal(trigger, constraint_description)
+            if refusal:
+                return refusal
             print(f"  ⚡ Tool: Adjusting plan for implementation constraints...")
 
             try:
                 plan = self.orch.planner.adjust_plan_for_constraints(
                     constraint_description=constraint_description,
-                    enable_human_feedback=self._get_human_feedback_enabled()
+                    enable_human_feedback=self._get_human_feedback_enabled(),
+                    trigger=trigger,
                 )
 
                 if plan.get("error"):
@@ -3544,6 +3744,9 @@ class OrchestratorTools:
                         "status": "error",
                         "message": plan.get("error")
                     })
+                kept = self._revision_outcome(plan)
+                if kept:
+                    return kept
 
                 # Save
                 output_path = self._output_dir() / "plan.json"
@@ -3559,7 +3762,8 @@ class OrchestratorTools:
                     "num_experiments": len(plan.get('proposed_experiments', [])),
                     "output_path": str(output_path),
                     "html_report": str(html_path) if html_path else None,
-                    "hint": "Use generate_implementation_code() or refine_implementation_code() to update executable code for the adjusted plan."
+                    "hint": "Use generate_implementation_code() or refine_implementation_code() to update executable code for the adjusted plan.",
+                    **self._review_summary(),
                 })
 
             except Exception as e:
@@ -3589,9 +3793,20 @@ class OrchestratorTools:
                         "the constraint is, why it conflicts with the current plan, "
                         "and any proposed resolution if known."
                     )
-                }
+                },
+                "trigger": {
+                    "type": "string",
+                    "enum": ["user_request", "blocking_defect"],
+                    "description": (
+                        "'user_request': the user supplied this constraint. "
+                        "'blocking_defect': you found that the plan cannot be "
+                        "run as written on the stated equipment. On a reviewed "
+                        "plan the human sees the adjustment with their approved "
+                        "plan as the default, once."
+                    )
+                },
             },
-            required=["constraint_description"]
+            required=["constraint_description", "trigger"]
         )
 
         # 5. REFINE IMPLEMENTATION CODE (based on refined plan)
@@ -3606,7 +3821,7 @@ class OrchestratorTools:
                     "status": "error",
                     "message": "No active plan. Refine a plan first using refine_plan_with_results()"
                 })
-            
+
             current_plan = self.orch.planner.state["current_plan"]
             
             print(f"  ⚡ Tool: Refining implementation code for iteration {current_plan.get('iteration')}...")
@@ -5773,6 +5988,9 @@ class OrchestratorTools:
             Save text content (code, protocols, notes) to a file in the session
             directory.
             """
+            refusal = self._state_backed_refusal(filename)
+            if refusal:
+                return refusal
             print(f"  ⚡ Tool: Saving file '{filename}'...")
 
             # Sanitise: strip path separators from filename to prevent traversal.
@@ -5894,6 +6112,9 @@ class OrchestratorTools:
             if it doesn't exist). Companion to save_file for chunked writes
             of large content.
             """
+            refusal = self._state_backed_refusal(filename)
+            if refusal:
+                return refusal
             print(f"  ⚡ Tool: Appending to file '{filename}'...")
 
             safe_name = Path(filename).name
@@ -5954,6 +6175,9 @@ class OrchestratorTools:
             `edits` list applied atomically in one call. Content revisions
             go through write_technical_document(revise_path=...).
             """
+            refusal = self._state_backed_refusal(path)
+            if refusal:
+                return refusal
             print(f"  ⚡ Tool: Editing file '{path}'...")
             try:
                 from ...utils.file_edit import apply_surgical_edits
@@ -6098,6 +6322,12 @@ class OrchestratorTools:
             divergent duplicates.
             """
             verb_now = "Copying" if copy else "Renaming"
+            # A copy of a state-backed file is fine; moving it, or naming
+            # something over it, is not.
+            refusal = (self._state_backed_refusal(new_name)
+                       or (None if copy else self._state_backed_refusal(path)))
+            if refusal:
+                return refusal
             print(f"  ⚡ Tool: {verb_now} file '{path}' → '{new_name}'...")
             try:
                 from ...utils.file_edit import rename_or_copy_file
@@ -6294,7 +6524,9 @@ class OrchestratorTools:
                 # Check if knowledge synthesis might be valuable
                 planner_state = self.orch.planner.state if self.orch.planner.state else {}
                 plan_history = planner_state.get("plan_history", [])
-                iterations_with_results = len(planner_state.get("experimental_results", []))
+                iterations_with_results = sum(
+                    1 for r in planner_state.get("experimental_results", [])
+                    if r.get("kind") != "feedback")
                 existing_knowledge = len(self.orch.active_knowledge)
 
                 if iterations_with_results >= 2 and existing_knowledge == 0:
@@ -7616,7 +7848,10 @@ class OrchestratorTools:
                     for exp_result in matching_results:
                         data_summary = exp_result.get("data_summary", "")
                         if data_summary:
-                            parts.append(f"--- Experimental Outcome (iteration {pid}) ---")
+                            _label = ("Revision Request"
+                                      if exp_result.get("kind") == "feedback"
+                                      else "Experimental Outcome")
+                            parts.append(f"--- {_label} (iteration {pid}) ---")
                             parts.append(data_summary)
 
                     # Collect human feedback entries relevant to this iteration
@@ -8668,7 +8903,9 @@ class OrchestratorTools:
             required=["specific_objective"]
         )
 
-        def refine_portfolio(request: str, literature_context: str = None,
+        def refine_portfolio(request: str, trigger: str = None,
+                             reason: str = None,
+                             literature_context: str = None,
                              additional_context: str = None):
             """Revise a research PORTFOLIO: harden, drop, add, re-rank,
             consolidate.
@@ -8680,8 +8917,15 @@ class OrchestratorTools:
             a document ABOUT the revised portfolio and left the portfolio
             itself untouched.
             """
+            if trigger == "new_results":
+                return json.dumps({
+                    "status": "error",
+                    "message": ("refine_portfolio edits directions on request. "
+                                "Use refine_plan_with_results for results.")})
             return refine_plan_with_results(
                 result_data=request,
+                trigger=trigger,
+                reason=reason,
                 use_literature_rag=False,
                 literature_context=literature_context,
                 additional_context=additional_context,
@@ -8716,6 +8960,21 @@ class OrchestratorTools:
                         "re-rank the rest by feasibility'."
                     ),
                 },
+                "trigger": {
+                    "type": "string",
+                    "enum": ["user_request", "blocking_defect"],
+                    "description": (
+                        "'user_request': the user asked for this edit. "
+                        "'blocking_defect': your own finding that a direction "
+                        "is impossible as stated (give `reason`). A reviewed "
+                        "portfolio is settled: anything less is a caveat for "
+                        "your summary, not an edit."
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Required with trigger='blocking_defect': what is impossible, in one sentence.",
+                },
                 "literature_context": {
                     "type": "string",
                     "description": "Optional path to a literature file to ground the revision in.",
@@ -8725,7 +8984,7 @@ class OrchestratorTools:
                     "description": "Constraints or preferences to honour in the revision.",
                 },
             },
-            required=["request"]
+            required=["request", "trigger"]
         )
 
         self._register_tool(

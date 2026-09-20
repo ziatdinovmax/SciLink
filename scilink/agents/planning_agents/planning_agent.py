@@ -13,6 +13,7 @@ from datetime import datetime
 from scilink.knowledge import KnowledgeBase
 from .parser_utils import (
     plan_directions,
+    plan_is_portfolio,
     portfolio_to_experiment_shim,
     resync_portfolio,
     generate_repo_map,
@@ -48,7 +49,11 @@ from .planning_rag import (
     critique_plan,
     critique_tea,
     generate_plan_candidates,
-    judge_plan_candidates
+    judge_plan_candidates,
+    sort_findings,
+    blocking_findings,
+    repair_blocking_defects,
+    repair_preserves_scope,
 )
 
 from ...skills.loader import load_skill
@@ -60,7 +65,9 @@ from .user_interface import (
     get_user_feedback,
     display_plan_candidates,
     get_candidate_selection,
-    format_caveats
+    get_reopen_decision,
+    format_caveats,
+    format_auto_repair
 )
 
 from .html_generator import HTMLReportGenerator
@@ -1330,17 +1337,17 @@ class PlanningAgent(BaseAgent):
                 )
                 findings = verdict.get("findings", [])
                 if findings:
-                    # Order critical-first so the caveats list and warnings lead with
-                    # the most material concerns. Record on the plan (no rewrite).
-                    _order = {"critical": 0, "minor": 1}
-                    findings = sorted(findings, key=lambda f: _order.get(f.get("severity"), 1))
+                    # Order most-material-first so the caveats list and warnings lead
+                    # with the concerns that matter. Record on the plan (no rewrite).
+                    findings = sort_findings(findings)
                     res["critic_findings"] = findings
                     self.state["current_plan"] = res
                     # Stamp onto the latest history snapshot too so the HTML report
                     # (which renders plan_history, not current_plan) shows the caveats.
                     if self.state.get("plan_history"):
                         self.state["plan_history"][-1]["critic_findings"] = findings
-                    n_crit = sum(1 for f in findings if f.get("severity") == "critical")
+                    n_crit = sum(1 for f in findings
+                                 if f.get("severity") in ("blocking", "critical"))
                     print(f"\n⚠️  Critic noted {len(findings)} caveat(s)"
                           f"{f' ({n_crit} significant)' if n_crit else ''} "
                           "— recorded under Caveats & Potential Limitations (plan unchanged).")
@@ -1350,9 +1357,68 @@ class PlanningAgent(BaseAgent):
                         result=res,
                         rationale="Advisory caveats recorded; plan not modified."
                     )
+                    # 3) The one tier that is acted on: a plan that cannot be run
+                    # as written is repaired in place, once, before anyone sees it.
+                    res = self._auto_repair_blocking(
+                        res, iteration=current_iter,
+                        skill_context=skill_planning_context,
+                        critic_kwargs=dict(
+                            retrieved_context=author_context.get("retrieved_context"),
+                            primary_data=author_context.get("primary_data"),
+                            images=all_image_paths or None,
+                            image_descriptions=image_descriptions,
+                            additional_context=ctx_string,
+                        ))
             return res
 
+        self.state["self_revisions"] = 0     # a new plan, a new budget
+        self.state.pop("pre_repair_plan", None)
         res = _conform_and_critique(res)
+
+        # Nobody is at the gate to pick another candidate, so an unrunnable
+        # pick falls back down the judge's ranking. The one automatic switch of
+        # a selection: it rests on a checked conflict the repair could not
+        # remove, never on an advisory caveat. Bounded by the candidate count.
+        if (bestofn_candidates and len(bestofn_candidates) > 1
+                and not enable_human_feedback and not res.get("error")
+                and blocking_findings(res.get("critic_findings"))):
+            judge_pick, unrunnable = bestofn_selected, res
+            for idx in self._fallback_order(bestofn_judge, judge_pick,
+                                            len(bestofn_candidates)):
+                print(f"\n↪️  Candidate {bestofn_selected} cannot be run as "
+                      f"written and could not be repaired — trying Candidate {idx}.")
+                alt = copy.deepcopy(bestofn_candidates[idx - 1])
+                if external_context:
+                    alt["literature_search"] = external_context
+                alt["iteration"] = current_iter
+                alt["stage"] = "Science Draft (fallback candidate)"
+                self.state["plan_history"].append(self._stamp_campaign(alt).copy())
+                self.state["current_plan"] = alt
+                alt = _conform_and_critique(alt)
+                bestofn_selected = idx
+                if not alt.get("error") and not blocking_findings(
+                        alt.get("critic_findings")):
+                    res = alt
+                    break
+            else:
+                # None can be run: the judge's pick stands, caveat and all.
+                bestofn_selected = judge_pick
+                res = unrunnable
+                res["stage"] = "Science Draft (no runnable candidate)"
+                self.state["plan_history"].append(self._stamp_campaign(res).copy())
+                self.state["current_plan"] = res
+            self.state["plan_candidates"]["selected_index"] = bestofn_selected
+            if bestofn_selected != judge_pick:
+                self.state["plan_candidates"]["fallback"] = {
+                    "from": judge_pick, "to": bestofn_selected,
+                    "reason": "the judge's pick had a blocking defect that "
+                              "could not be repaired"}
+                self._log_action(
+                    action="bestofn_runnable_fallback",
+                    input_ctx={"judge_pick": judge_pick,
+                               "selected": bestofn_selected},
+                    result=res,
+                    rationale="Fell back to the best-ranked runnable candidate.")
 
         # Stage-1 best-of-N selection: candidate cards + judge pick + the
         # pick's caveats, then accept-or-override. Selection only — free-text
@@ -1365,7 +1431,13 @@ class PlanningAgent(BaseAgent):
             display_plan_candidates(
                 bestofn_candidates, bestofn_judge or {}, bestofn_selected,
                 report_paths=bestofn_reports,
-                pick_caveats=format_caveats(res.get("critic_findings")),
+                # The cards show the candidates as authored; if the pick was
+                # auto-corrected the reviewer must learn that here, not only at
+                # the plan gate after choosing.
+                pick_caveats=(
+                    [f"Auto-repair: {c}" for c in
+                     format_auto_repair(res.get("auto_repair"))]
+                    + format_caveats(res.get("critic_findings"))),
             )
             choice = get_candidate_selection(len(bestofn_candidates), bestofn_selected)
             if choice != bestofn_selected:
@@ -1396,9 +1468,16 @@ class PlanningAgent(BaseAgent):
         if enable_human_feedback and res.get("proposed_experiments") and not res.get("error"):
             display_plan_summary(res, ideation=self._is_ideation_campaign(),
                                  report_path=self._review_preview_path())
-            human_feedback = get_user_feedback()
-            
-            if human_feedback:
+            human_feedback = get_user_feedback(auto_repair=res.get("auto_repair"))
+
+            if human_feedback and self._is_revert_request(human_feedback, res):
+                res = self._revert_auto_repair(res)
+                human_feedback = None
+                self._stamp_human_review(res, "accepted")
+                # The human saw this exact fix and refused it: that is a
+                # declined reopen, so the agent may not propose it again.
+                res["human_review"]["reopen_declined"] = 1
+            elif human_feedback:
                 # Snapshot the pre-refinement plan + its caveats. The re-critique
                 # below gets the full before/criticism/request/after picture and
                 # reasons about the revised plan itself — the human may address the
@@ -1443,16 +1522,16 @@ class PlanningAgent(BaseAgent):
                     )
                     fresh = verdict.get("findings", [])
                     if fresh:
-                        _order = {"critical": 0, "minor": 1}
-                        fresh = sorted(fresh, key=lambda f: _order.get(f.get("severity"), 1))
-                        res["critic_findings"] = fresh
+                        res["critic_findings"] = sort_findings(fresh)
 
+                    self._stamp_human_review(res, "revised")
                     self.state["plan_history"].append(self._stamp_campaign(res).copy())
                     self.state["current_plan"] = res
                     display_plan_summary(res, ideation=self._is_ideation_campaign(),
                                  report_path=self._review_preview_path())
                     print("✅ Plan updated.")
             else:
+                self._stamp_human_review(res, "accepted")
                 print("✅ Plan accepted.")
         
         self._log_action(
@@ -1761,6 +1840,281 @@ class PlanningAgent(BaseAgent):
         
         return self.state
     
+    # Why a plan is being rewritten. Only ``new_results`` means the plan was
+    # executed; the other two revise a plan that has not been run.
+    REVISION_TRIGGERS = ("new_results", "user_request", "blocking_defect")
+
+    def _stamp_human_review(self, plan: Dict[str, Any], status: str) -> None:
+        """Record that a human settled this version of the plan at a gate.
+
+        ``status`` is accepted | revised | adopted. The stamp is what lets the
+        orchestrator tell a settled plan from a draft: an approved plan is
+        reopened only through the reopen gate (``_revision_gate``).
+        """
+        review = {"status": status, "iteration": plan.get("iteration"),
+                  "at": datetime.now().isoformat()}
+        plan["human_review"] = review
+        hist = self.state.get("plan_history") or []
+        if (hist and hist[-1].get("stage") == plan.get("stage")
+                and hist[-1].get("iteration") == plan.get("iteration")):
+            hist[-1]["human_review"] = dict(review)
+        self.state["current_plan"] = plan
+
+    def _auto_repair_blocking(self,
+                              res: Dict[str, Any],
+                              iteration: Any,
+                              skill_context: Optional[str] = None,
+                              critic_kwargs: Optional[Dict[str, Any]] = None
+                              ) -> Dict[str, Any]:
+        """One in-place repair of a plan the critic found unrunnable.
+
+        The critic stays advisory for ``critical`` and ``minor`` findings —
+        auto-applying those rescoped plans. A ``blocking`` finding is a
+        checkable conflict (the plan's value against a limit), so it gets one
+        fix-only rewrite, accepted only if it (a) left the hypothesis, the
+        names, the experiment count and most of the text alone
+        (``repair_preserves_scope``) and (b) a resolution re-critique confirms
+        the conflict is gone and the repair itself introduced no critical
+        finding. Anything else
+        keeps the plan as authored, with the blocking caveat and the reason on
+        the record. No loop: one attempt. Runs in every autonomy mode — it
+        matters most where no human reads the caveat before code generation.
+        """
+        blocking = blocking_findings(res.get("critic_findings"))
+        if not blocking or res.get("error") or plan_is_portfolio(res):
+            return res
+
+        print(f"\n🔧 {len(blocking)} blocking defect(s): the plan cannot be run "
+              "as written. Attempting one in-place repair...")
+        original = res
+
+        def _discard(reason: str) -> Dict[str, Any]:
+            record = {"status": "discarded", "reason": reason,
+                      "findings": blocking}
+            original["auto_repair"] = record
+            if self.state.get("plan_history"):
+                self.state["plan_history"][-1]["auto_repair"] = record
+            self.state["current_plan"] = original
+            print(f"    - ↩️  Repair discarded ({reason}); the plan stays as "
+                  "authored and the blocking caveat stands.")
+            self._log_action(action="auto_repair_discarded",
+                             input_ctx={"findings": blocking},
+                             result=original, rationale=reason)
+            return original
+
+        try:
+            repaired = repair_blocking_defects(
+                copy.deepcopy(original), blocking, self.state["objective"],
+                self.model, self.generation_config,
+                skill_context=skill_context)
+        except Exception as e:  # noqa: BLE001 - a repair must never fail the plan
+            logging.error(f"Auto-repair failed open: {e}")
+            return _discard("the repair call failed")
+
+        if not isinstance(repaired, dict) or repaired.get("error"):
+            return _discard("the repair returned no usable plan")
+        declined = repaired.pop("repair_declined", None)
+        notes = repaired.pop("repair_notes", None) or []
+        if declined:
+            return _discard(f"the author declined: {declined}")
+        if (repaired.get("proposed_experiments")
+                == original.get("proposed_experiments")):
+            return _discard("the repair changed nothing")
+        broken = repair_preserves_scope(original, repaired)
+        if broken:
+            return _discard(broken)
+
+        verdict = critique_plan(
+            self.state["objective"], repaired, self.model,
+            self.generation_config,
+            skill_context=skill_context,
+            prior_plan=original,
+            prior_findings=original.get("critic_findings"),
+            human_feedback=("Automatic repair of the blocking defect(s) only: "
+                            + json.dumps(notes)[:2000]),
+            **(critic_kwargs or {}))
+        if verdict.get("failed"):
+            return _discard("the repair could not be verified")
+        after = sort_findings(verdict.get("findings", []))
+        if blocking_findings(after):
+            return _discard("the blocking defect was not resolved")
+        # A critical finding counts against the repair only when the repair
+        # created it. Comparing counts does not work: the critic raises a
+        # different set of advisory findings every time it is asked.
+        if any(f.get("severity") == "critical" and f.get("introduced") is True
+               for f in after):
+            return _discard("the repair introduced a new critical finding")
+
+        # Accepted. Top-level keys the rewrite dropped travel with the plan.
+        for k, v in original.items():
+            if k not in ("critic_findings", "auto_repair", "human_review"):
+                repaired.setdefault(k, v)
+        repaired.pop("critic_findings", None)
+        if after:
+            repaired["critic_findings"] = after
+        repaired["auto_repair"] = {"status": "applied", "notes": notes,
+                                   "findings": blocking}
+        repaired["iteration"] = iteration
+        repaired["stage"] = "Auto-Corrected (critic)"
+        # Kept whole so the reviewer can restore the plan as authored.
+        self.state["pre_repair_plan"] = copy.deepcopy(original)
+        self.state["plan_history"].append(self._stamp_campaign(repaired).copy())
+        self.state["current_plan"] = repaired
+        print(f"    - ✅ Repair accepted ({len(notes)} change(s)); shown to the "
+              "reviewer as auto-corrected.")
+        self._log_action(action="auto_repair",
+                         input_ctx={"findings": blocking, "notes": notes},
+                         result=repaired,
+                         rationale="Blocking defect repaired in place; scope "
+                                   "guard and resolution re-critique passed.")
+        return repaired
+
+    @staticmethod
+    def _fallback_order(judge: Optional[Dict[str, Any]], pick: int,
+                        n: int) -> List[int]:
+        """The other candidates, best first by the judge's own scores."""
+        totals = {}
+        for sc in (judge or {}).get("scores") or []:
+            if isinstance(sc, dict) and isinstance(sc.get("candidate"), int):
+                totals[sc["candidate"]] = sum(
+                    v for k, v in sc.items() if k != "candidate"
+                    and isinstance(v, (int, float)) and not isinstance(v, bool))
+        rest = [i for i in range(1, n + 1) if i != pick]
+        return sorted(rest, key=lambda i: (-totals.get(i, 0), i))
+
+    def _discard_self_revision(self, new_plan: Dict[str, Any],
+                               current_plan: Dict[str, Any],
+                               hist_len: int) -> Optional[str]:
+        """Hold the agent's own revision to the repair contract.
+
+        A ``blocking_defect`` rewrite is a repair, so it passes the same checks
+        as the automatic one: the scope guard, and no critical finding the
+        revision itself introduced. One that fails them is a redesign — that
+        decision is the human's, reached by reporting the concern. Returns the
+        reason and restores the campaign state, or None when the revision
+        stands.
+        """
+        reason = repair_preserves_scope(current_plan, new_plan)
+        if not reason and any(
+                f.get("severity") == "critical" and f.get("introduced") is True
+                for f in new_plan.get("critic_findings") or []):
+            reason = "the revision introduced a new critical finding"
+        if not reason:
+            return None
+        del self.state["plan_history"][hist_len:]
+        self.state["current_plan"] = current_plan
+        self.state["status"] = "revision_discarded"
+        self.state["last_discard_reason"] = reason
+        print(f"↩️  Revision discarded ({reason}): a defect repair may not "
+              "redesign the plan. The plan is unchanged.")
+        self._log_action(action="self_revision_discarded",
+                         input_ctx={"reason": reason}, result=new_plan,
+                         rationale="Failed the repair contract.")
+        return reason
+
+    @staticmethod
+    def _is_revert_request(text: str, plan: Dict[str, Any]) -> bool:
+        """'revert' at a gate showing an auto-corrected plan restores it."""
+        return ((plan.get("auto_repair") or {}).get("status") == "applied"
+                and " ".join(text.lower().split()).rstrip(".!") in (
+                    "revert", "revert auto-correction",
+                    "revert the auto-correction"))
+
+    def _revert_auto_repair(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """Restore the plan as authored; the blocking caveat stands."""
+        original = self.state.pop("pre_repair_plan", None)
+        if not original:
+            return plan
+        original["auto_repair"] = {
+            "status": "reverted",
+            "findings": (plan.get("auto_repair") or {}).get("findings")}
+        original["stage"] = "Science Draft (auto-correction reverted)"
+        self.state["plan_history"].append(self._stamp_campaign(original).copy())
+        self.state["current_plan"] = original
+        print("↩️  Auto-correction reverted: the plan is as authored.")
+        self._log_action(action="auto_repair_reverted", input_ctx={},
+                         result=original,
+                         rationale="The reviewer restored the plan as authored.")
+        return original
+
+    def _revision_gate(self,
+                       new_plan: Dict[str, Any],
+                       approved_plan: Dict[str, Any],
+                       *,
+                       header: str,
+                       phase: str,
+                       refined_stage: str,
+                       hist_len: int,
+                       reopen_reason: Optional[str] = None,
+                       skill_context: Optional[str] = None):
+        """Human gate for a revision of the current plan.
+
+        Two defaults, one per kind of revision. A revision the human or new
+        data called for is accepted on ENTER, as before. A revision the agent
+        initiated on a plan the human ALREADY approved (``reopen_reason``)
+        keeps the approved plan on ENTER: a reviewer who waves the gate
+        through must get the plan they chose, not the agent's second thoughts.
+        Returns ``(plan, human_feedback, kept_approved)``.
+        """
+        print("\n" + "=" * 60)
+        print(header)
+        print("=" * 60)
+        display_plan_summary(new_plan, ideation=self._is_ideation_campaign(),
+                             report_path=self._review_preview_path())
+
+        if reopen_reason:
+            decision, feedback = get_reopen_decision(reopen_reason)
+            if decision == "keep":
+                # The revision never happened as far as the campaign goes:
+                # its snapshots leave the history, the record stays in the log.
+                del self.state["plan_history"][hist_len:]
+                review = approved_plan.setdefault("human_review", {})
+                review["reopen_declined"] = review.get("reopen_declined", 0) + 1
+                self.state["current_plan"] = approved_plan
+                self._log_action(
+                    action="reopen_declined",
+                    input_ctx={"reason": reopen_reason[:500]},
+                    result=new_plan,
+                    rationale="The reviewer kept the approved plan.")
+                print("✅ Approved plan kept; the proposed revision was discarded.")
+                return approved_plan, None, True
+            status = "adopted"
+        else:
+            feedback = get_user_feedback()
+            status = "accepted"
+
+        if feedback:
+            print(f"\n📝 Feedback received. Adjusting...")
+            self.state["human_feedback_history"].append(
+                {"phase": phase, "feedback": feedback})
+            prior_plan = new_plan
+            new_plan = refine_plan_with_feedback(
+                original_result=new_plan,
+                feedback=feedback,
+                objective=self.state["objective"],
+                model=self.model,
+                generation_config=self.generation_config,
+                skill_context=skill_context
+            )
+            if new_plan.get("error"):
+                print(f"⚠️  Revision failed: {new_plan.get('message', 'unknown error')}")
+                print("    Keeping the plan as shown.")
+                new_plan = prior_plan
+            else:
+                new_plan["iteration"] = prior_plan.get("iteration")
+                new_plan["stage"] = refined_stage
+                self.state["plan_history"].append(self._stamp_campaign(new_plan).copy())
+                self.state["current_plan"] = new_plan
+                new_plan = self._recritique_revision(
+                    new_plan, prior_plan=prior_plan,
+                    revision_request=feedback,
+                    skill_context=skill_context,
+                )
+                status = "revised"
+                print("✅ Revision updated.")
+        self._stamp_human_review(new_plan, status)
+        return new_plan, feedback, False
+
     def _recritique_revision(self,
                              new_plan: Dict[str, Any],
                              prior_plan: Dict[str, Any],
@@ -1804,9 +2158,7 @@ class PlanningAgent(BaseAgent):
             verdict = {"findings": []}
         findings = verdict.get("findings", [])
         if findings:
-            _order = {"critical": 0, "minor": 1}
-            findings = sorted(findings,
-                              key=lambda f: _order.get(f.get("severity"), 1))
+            findings = sort_findings(findings)
             new_plan["critic_findings"] = findings
             if self.state.get("plan_history"):
                 self.state["plan_history"][-1]["critic_findings"] = findings
@@ -1823,7 +2175,9 @@ class PlanningAgent(BaseAgent):
                     state_file_path: Optional[str] = None,
                     use_literature_rag: bool = False,
                     external_context: Optional[str] = None,
-                    literature_text: Optional[str] = None) -> Dict[str, Any]:
+                    literature_text: Optional[str] = None,
+                    trigger: Optional[str] = None,
+                    reopen_reason: Optional[str] = None) -> Dict[str, Any]:
         """
         Refines the experimental plan (science strategy only) based on new results.
 
@@ -1840,6 +2194,15 @@ class PlanningAgent(BaseAgent):
                 context, when the caller can separate it. Used to stamp the
                 refined plan's ``literature_search`` provenance; without it,
                 the prior plan's literature carries forward.
+            trigger: Why the plan is being rewritten — ``new_results`` (the
+                default: the plan was executed, so the iteration advances and
+                the input is logged as results), ``user_request`` or
+                ``blocking_defect`` (the plan was NOT executed: same iteration,
+                logged as feedback, minimal-change prompt). ``blocking_defect``
+                on a plan the human approved goes through the reopen gate,
+                whose ENTER keeps the approved plan.
+            reopen_reason: One sentence shown at the reopen gate; defaults to
+                the head of ``results``.
 
         Returns:
             Dict with refined plan (proposed_experiments)
@@ -1861,6 +2224,13 @@ class PlanningAgent(BaseAgent):
         
         print(f"\n--- 🔄 Refining Plan based on New Results / Feedback ---")
         executed_plan_idx = self.state["iteration_index"]
+        # Why the plan is being rewritten. Omitted = experimental results, the
+        # historical meaning of this call.
+        trigger = trigger or "new_results"
+        if trigger not in self.REVISION_TRIGGERS:
+            raise ValueError(f"trigger must be one of {self.REVISION_TRIGGERS}, "
+                             f"got {trigger!r}")
+        executed = (trigger == "new_results")
         
         # Extract from state
         objective = self.state["objective"]
@@ -1872,17 +2242,26 @@ class PlanningAgent(BaseAgent):
         # Update State History — store the parsed content so knowledge
         # synthesis can access full experimental outcomes without relying
         # on chat history (which may be compressed in long campaigns).
-        self.state["experimental_results"].append({
+        # This channel carries revision requests as well as results (#638), so
+        # each entry says which it is: only results mean the plan was executed,
+        # and only an executed plan opens a new iteration.
+        _entry = {
             "iteration": executed_plan_idx,
             "timestamp": datetime.now().isoformat(),
+            "kind": "results" if executed else "feedback",
+            "trigger": trigger,
             "data_summary": consolidated_feedback,
             "raw_input": str(results)
-        })
-        self.state["iteration_index"] += 1
+        }
+        self.state["experimental_results"].append(_entry)
+        if executed:
+            self.state["iteration_index"] += 1
         next_plan_idx = self.state["iteration_index"]
-        
+        _hist_len = len(self.state["plan_history"])
+
         # --- 2. BUILD FEEDBACK PROMPT ---
-        feedback_prompt = f"""We executed the previous plan. Here are the experimental results:
+        if executed:
+            feedback_prompt = f"""We executed the previous plan. Here are the experimental results:
 {consolidated_feedback}
 
 **TASK:** Analyze these results (including any attached plots) to Refine or Update the plan.
@@ -1892,6 +2271,15 @@ Select the most appropriate strategy:
 3. **INCONCLUSIVE:** If data is noisy, propose refined experiment.
 4. **OPERATIONAL FAILURE:** If failure was code/equipment, propose fix.
 5. **SCIENTIFIC FAILURE:** If hypothesis is disproven, propose new approach.
+"""
+        else:
+            _what = ("A defect was reported that makes the plan impossible or "
+                     "unsafe to run as written:" if trigger == "blocking_defect"
+                     else "A revision was requested:")
+            feedback_prompt = f"""The plan has NOT been executed; no experiment was run. {_what}
+{consolidated_feedback}
+
+**TASK:** Make the changes this calls for and keep every part of the plan it does not touch EXACTLY as it is. Do not treat this as experimental results.
 """
         
         # --- 3. RESULT-AWARE CONTEXT ---
@@ -1985,18 +2373,27 @@ Select the most appropriate strategy:
 
         # Snapshot: Reasoning Draft
         new_plan["iteration"] = next_plan_idx
-        new_plan["stage"] = "Reasoning Draft"
+        new_plan["stage"] = "Reasoning Draft" if executed else "Feedback Revision"
         self.state["plan_history"].append(self._stamp_campaign(new_plan).copy())
         self.state["current_plan"] = new_plan
+        if trigger == "blocking_defect":
+            # The agent's own initiative: counted, so the tool layer can cap it.
+            self.state["self_revisions"] = self.state.get("self_revisions", 0) + 1
 
         # Resolution-check re-critique so caveats describe the revised plan.
         new_plan = self._recritique_revision(
             new_plan, prior_plan=current_plan,
-            revision_request=("Plan revised in response to experimental "
-                             f"results:\n{consolidated_feedback[:2000]}"),
+            revision_request=(("Plan revised in response to experimental "
+                               "results:\n" if executed else
+                               "Plan revised on request, not executed:\n")
+                              + consolidated_feedback[:2000]),
             skill_context=skill_refine_context,
             images=loaded_images or None,
         )
+        if trigger == "blocking_defect" and self._discard_self_revision(
+                new_plan, current_plan, _hist_len):
+            self.state["experimental_results"].remove(_entry)
+            return current_plan
 
         self._log_action(
             action="refine_plan_reasoning",
@@ -2012,46 +2409,37 @@ Select the most appropriate strategy:
         # --- 5. HUMAN STRATEGY FEEDBACK ---
         human_feedback = None
         if enable_human_feedback and not new_plan.get("error"):
-            print("\n" + "="*60)
-            print("🧠 AGENT'S PROPOSED REVISION BASED ON RESULTS")
-            print("="*60)
-            display_plan_summary(new_plan, ideation=self._is_ideation_campaign(),
-                                 report_path=self._review_preview_path())
-            
-            human_feedback = get_user_feedback()
-            
-            if human_feedback: 
-                print(f"\n📝 Feedback received. Adjusting strategy...")
-                self.state["human_feedback_history"].append({
-                    "phase": "science_iteration", 
-                    "feedback": human_feedback
-                })
-                prior_plan = new_plan
-                new_plan = refine_plan_with_feedback(
-                    original_result=new_plan,
-                    feedback=human_feedback,
-                    objective=objective,
-                    model=self.model,
-                    generation_config=self.generation_config,
-                    skill_context=skill_refine_context
-                )
-                # Snapshot: Human Refined
-                new_plan["iteration"] = next_plan_idx
-                new_plan["stage"] = "Human Refined (Science)"
-                self.state["plan_history"].append(self._stamp_campaign(new_plan).copy())
-                self.state["current_plan"] = new_plan
-                new_plan = self._recritique_revision(
-                    new_plan, prior_plan=prior_plan,
-                    revision_request=human_feedback,
-                    skill_context=skill_refine_context,
-                )
-                print("✅ Strategic revision updated.")
+            # Reopening a plan the human approved, on the agent's own
+            # initiative, flips the gate's default (see _revision_gate).
+            _reopen = (trigger == "blocking_defect"
+                       and bool(current_plan.get("human_review")))
+            new_plan, human_feedback, _kept = self._revision_gate(
+                new_plan, current_plan,
+                header=("🧠 AGENT'S PROPOSED REVISION OF A PLAN YOU APPROVED"
+                        if _reopen else
+                        "🧠 AGENT'S PROPOSED REVISION BASED ON RESULTS"
+                        if executed else
+                        "🧠 AGENT'S PROPOSED REVISION"),
+                phase="science_iteration",
+                refined_stage="Human Refined (Science)",
+                hist_len=_hist_len,
+                reopen_reason=((reopen_reason or consolidated_feedback[:600])
+                               if _reopen else None),
+                skill_context=skill_refine_context,
+            )
+            if _kept:
+                # Nothing was revised: the request leaves the results channel
+                # (the action log keeps it) and the campaign state is as it was.
+                self.state["experimental_results"].remove(_entry)
+                self.state["status"] = "reopen_declined"
+                return new_plan
 
         self._log_action(
             action="refine_plan",
             input_ctx={
                 "iteration": next_plan_idx,
-                "results_provided": True
+                "results_provided": executed,
+                "trigger": trigger
             },
             result=new_plan,
             rationale=new_plan.get("proposed_experiments", [{}])[0].get("justification") if new_plan.get("proposed_experiments") else None,
@@ -2064,7 +2452,8 @@ Select the most appropriate strategy:
     
     def adjust_plan_for_constraints(self,
                                     constraint_description: str,
-                                    enable_human_feedback: bool = True) -> Dict[str, Any]:
+                                    enable_human_feedback: bool = True,
+                                    trigger: Optional[str] = None) -> Dict[str, Any]:
         """
         Adjusts the experimental plan to accommodate implementation or
         instrument constraints discovered during protocol/code generation.
@@ -2076,6 +2465,11 @@ Select the most appropriate strategy:
             constraint_description: Description of the constraint or
                 incompatibility that requires plan adjustment.
             enable_human_feedback: If True, pauses for user review.
+            trigger: ``blocking_defect`` when the constraint is the agent's own
+                finding: the adjustment is then held to the repair contract
+                (``_discard_self_revision``) and, on an approved plan, goes
+                through the reopen gate. ``user_request`` / omitted: the
+                human's constraint, the ordinary gate.
 
         Returns:
             Updated plan dict with the same JSON structure.
@@ -2084,6 +2478,8 @@ Select the most appropriate strategy:
             raise ValueError(
                 "No active plan to adjust. Generate a plan first."
             )
+        _self_initiated = (trigger == "blocking_defect")
+        _hist_len = len(self.state["plan_history"])
 
         print(f"\n--- 🔧 Adjusting Plan for Implementation Constraints ---")
 
@@ -2133,6 +2529,8 @@ Select the most appropriate strategy:
         new_plan["stage"] = "Constraint Adjusted"
         self.state["plan_history"].append(self._stamp_campaign(new_plan).copy())
         self.state["current_plan"] = new_plan
+        if _self_initiated:
+            self.state["self_revisions"] = self.state.get("self_revisions", 0) + 1
 
         # Resolution-check re-critique: a constraint adjustment often resolves
         # a recorded caveat — the caveat channel must reflect the CURRENT plan.
@@ -2141,6 +2539,9 @@ Select the most appropriate strategy:
             revision_request=constraint_description,
             skill_context=skill_constraint_context,
         )
+        if _self_initiated and self._discard_self_revision(
+                new_plan, current_plan, _hist_len):
+            return current_plan
 
         self._log_action(
             action="adjust_plan_for_constraints",
@@ -2150,41 +2551,22 @@ Select the most appropriate strategy:
         )
 
         # Human feedback
-        human_feedback = None
         if enable_human_feedback and not new_plan.get("error"):
-            print("\n" + "=" * 60)
-            print("🔧 AGENT'S PROPOSED PLAN ADJUSTMENT (Constraint)")
-            print("=" * 60)
-            display_plan_summary(new_plan, ideation=self._is_ideation_campaign(),
-                                 report_path=self._review_preview_path())
-
-            human_feedback = get_user_feedback()
-
-            if human_feedback:
-                print(f"\n📝 Feedback received. Adjusting...")
-                self.state["human_feedback_history"].append({
-                    "phase": "constraint_adjustment",
-                    "feedback": human_feedback
-                })
-                prior_plan = new_plan
-                new_plan = refine_plan_with_feedback(
-                    original_result=new_plan,
-                    feedback=human_feedback,
-                    objective=objective,
-                    model=self.model,
-                    generation_config=self.generation_config,
-                    skill_context=skill_constraint_context
-                )
-                new_plan["iteration"] = current_plan.get("iteration", 0)
-                new_plan["stage"] = "Human Refined (Constraint)"
-                self.state["plan_history"].append(self._stamp_campaign(new_plan).copy())
-                self.state["current_plan"] = new_plan
-                new_plan = self._recritique_revision(
-                    new_plan, prior_plan=prior_plan,
-                    revision_request=human_feedback,
-                    skill_context=skill_constraint_context,
-                )
-                print("✅ Constraint adjustment updated.")
+            _reopen = _self_initiated and bool(current_plan.get("human_review"))
+            new_plan, _fb, _kept = self._revision_gate(
+                new_plan, current_plan,
+                header=("🔧 AGENT'S PROPOSED ADJUSTMENT OF A PLAN YOU APPROVED "
+                        "(Constraint)" if _reopen else
+                        "🔧 AGENT'S PROPOSED PLAN ADJUSTMENT (Constraint)"),
+                phase="constraint_adjustment",
+                refined_stage="Human Refined (Constraint)",
+                hist_len=_hist_len,
+                reopen_reason=(constraint_description[:600] if _reopen else None),
+                skill_context=skill_constraint_context,
+            )
+            if _kept:
+                self.state["status"] = "reopen_declined"
+                return new_plan
 
         self.state["status"] = "constraint_adjusted"
         return new_plan
@@ -2788,8 +3170,7 @@ Select the most appropriate strategy:
             )
             findings = verdict.get("findings", [])
             if findings:
-                _order = {"critical": 0, "minor": 1}
-                findings = sorted(findings, key=lambda f: _order.get(f.get("severity"), 1))
+                findings = sort_findings(findings)
                 res["critic_findings"] = findings
                 self._log_action(
                     action="tea_critic_review",

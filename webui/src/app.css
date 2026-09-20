@@ -878,3 +878,26 @@ code.hljs { color: inherit; background: transparent; padding: 0; }   /* the pane
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 600; }
 .hljs-section { font-weight: 600; }
+
+/* What a review decision is about (an auto-correction, a reopened plan). */
+.feedback-notice {
+  margin: 10px 0;
+  padding: 10px 14px;
+  border-left: 4px solid #0ea5e9;
+  border-radius: 6px;
+  background: rgba(14, 165, 233, 0.12);
+  font-size: 0.92rem;
+  /* several changes must not push the buttons off screen */
+  max-height: 160px;
+  overflow-y: auto;
+}
+.feedback-notice ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+/* A secondary reply under the main decision buttons: set apart, not stacked. */
+.feedback-followup {
+  margin-top: 22px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-strong);
+}

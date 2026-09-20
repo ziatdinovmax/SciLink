@@ -18,7 +18,7 @@ from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .planning_agent import (
     PlanningAgent, compact_planner_state, expand_planner_state)
-from .user_interface import format_caveats
+from .user_interface import format_caveats, format_auto_repair
 from .scalarizer_agent import ScalarizerAgent
 from .bo_agent import BOAgent
 from .orchestrator_tools import OrchestratorTools
@@ -111,6 +111,7 @@ _AUTOPILOT_DIRECTIVE = """
 - You lead the research workflow. Human monitors and can intervene.
 - Proceed with reasonable next steps without asking for permission.
 - Human will still review generated plans and code through the standard review interface.
+- A plan the human has reviewed is SETTLED: change it only on new experimental results, a user request, or a defect that makes it impossible or unsafe to run; report any other concern as a caveat in your summary.
 - Do NOT ask clarifying questions unless truly ambiguous - make reasonable assumptions.
 - If a tool returns error or unexpected results, pause and report to human.
 - Periodically summarize progress (every 3-5 steps) but don't wait for response.
@@ -166,6 +167,7 @@ _AUTONOMOUS_DIRECTIVE = """
 - Chain tool calls as needed to achieve the objective.
 - Only pause for human input if you encounter unrecoverable errors.
 - Make decisions based on tool outputs and scientific reasoning.
+- The plan critic's caveats are advisory: report them. Rewrite a plan only on new experimental results, a user request, or a defect that makes it impossible or unsafe to run.
 - Save checkpoints regularly for human review later.
 - Proceed through: plan → execute → analyze → optimize → iterate.
 - Report final results and key decision points at the end.
@@ -322,6 +324,7 @@ Do NOT run TEA for purely scientific exploration (e.g., "study phase transitions
 
 4. `refine_plan_with_results`: Refine scientific strategy based on experimental results.
    - Use for: failures, pivots, qualitative observations, visual analysis
+   - `trigger` says what drives the rewrite: new_results | user_request | blocking_defect
    - Accepts: text descriptions, file paths, or comma-separated files
    - literature_context: File path from search_literature() (optional)
    - molecule_context: File path from query_molecules() (optional)
@@ -343,7 +346,7 @@ Do NOT run TEA for purely scientific exploration (e.g., "study phase transitions
    - In CO_PILOT mode: ONLY call when the user explicitly provides constraints.
      Do NOT call proactively after plan approval.
    - In AUTOPILOT/AUTONOMOUS mode: May be called proactively when you identify
-     clear implementation incompatibilities.
+     clear implementation incompatibilities (trigger="blocking_defect").
 
 **DATA TOOLS:**
 
@@ -1601,6 +1604,10 @@ class PlanningOrchestratorAgent:
         _plan = (self.planner.state or {}).get("current_plan") or {}
         for _c in format_caveats(_plan.get("critic_findings")):
             warnings.append(f"Plan caveat — {_c}")
+        # A headless caller has no review gate, so this is the only place it
+        # learns the plan it received is not the plan that was authored.
+        for _c in format_auto_repair(_plan.get("auto_repair")):
+            warnings.append(f"Plan auto-repair — {_c}")
 
         result = {
             "status": status,

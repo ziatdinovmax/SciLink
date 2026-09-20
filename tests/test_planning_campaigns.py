@@ -1234,6 +1234,7 @@ def refine_plan_with_literature_context():
     result_json = o.tools.execute_tool(
         "refine_plan_with_results",
         result_data="Nd recovery was 72% but Fe co-extraction was 65%, selectivity too low.",
+        trigger="new_results",
         literature_context=str(lit_path)
     )
     result = json.loads(result_json)
