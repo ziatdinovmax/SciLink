@@ -127,4 +127,5 @@ def test_exit_prints_the_resume_command(tmp_path, monkeypatch):
     sdir = tmp_path / "elsewhere" / "s"
     code, out, shell = _run_shell(tmp_path, monkeypatch, "/quit\r",
                                   argv=["--session-dir", str(sdir)], ask=False)
-    assert f"--session-dir {sdir.resolve()} --restore" in out    # nested: by path
+    flat = "".join(out.split())                                  # the console wraps long paths
+    assert "".join(f"--session-dir {sdir.resolve()} --restore".split()) in flat   # nested: by path
