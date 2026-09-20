@@ -320,3 +320,19 @@ def test_resume_after_a_question_does_not_erase_the_panel(tmp_path):
     # the restarted region actually drew (spinner row + at most 1 new line).
     ups = [int(m or 1) for m in _re.findall(r"\x1b\[(\d*)A", after)]
     assert all(n <= 2 for n in ups), ups
+
+
+def test_live_region_never_exceeds_the_screen_height():
+    """Long, wrapping narration lines must not make the region taller than
+    the terminal (rich would then re-print it every refresh)."""
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=True, width=60, height=12, highlight=False)
+    renderer = Renderer(console)
+    renderer._t0 = 0.0
+    for i in range(30):
+        renderer.feed(f"  💭 thought {i}: " + "a long line that wraps several times " * 4 + "\n")
+    with console.capture() as cap:
+        console.print(renderer._view())
+    frame = [l for l in cap.get().split("\n") if l != ""]
+    assert len(frame) <= console.size.height - 2, len(frame)
+    assert any("earlier lines" in l for l in frame)

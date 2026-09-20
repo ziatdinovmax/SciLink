@@ -91,25 +91,43 @@ class Renderer:
     def _row(self) -> Table:
         elapsed = time.monotonic() - self._t0
         hint = "ctrl+o hide verbose" if self.verbose else "ctrl+o verbose"
+        # One screen line, always: the region's height is what keeps the
+        # redraw in place, so the label is truncated rather than wrapped.
         grid = Table.grid(padding=(0, 1))
         grid.add_row(Spinner("dots", style="cyan"),
-                     Text(self._activity or V.DEFAULT_ACTIVITY, style="cyan"),
-                     Text(f"{elapsed:.0f}s", style="dim"),
-                     Text(f"({hint} · ctrl+c stop)", style="dim"))
+                     Text(self._activity or V.DEFAULT_ACTIVITY, style="cyan",
+                          no_wrap=True, overflow="ellipsis"),
+                     Text(f"{elapsed:.0f}s", style="dim", no_wrap=True),
+                     Text(f"({hint} · ctrl+c stop)", style="dim", no_wrap=True,
+                          overflow="ellipsis"))
         return grid
 
     def _visible(self, entries) -> List[Text]:
         return [e.text for e in entries if not e.verbose or self.verbose]
 
+    def _height(self, text: Text) -> int:
+        """Screen lines the text takes at the current width (it wraps)."""
+        return max(1, len(text.wrap(self.console, self.console.size.width)))
+
     def _view(self) -> Group:
         """What the live region shows: the tail of the uncommitted narration
-        that fits above the status row."""
+        that fits above the status row — measured in SCREEN lines, since a
+        long thought wraps. A region taller than the terminal cannot be
+        redrawn in place: rich re-prints it below itself on every refresh
+        (observed live as the same lines repeating and the screen scrolling)."""
         lines = self._visible(self._entries[self._committed:])
-        room = max(1, self.console.size.height - 3)
-        tail = lines[-room:]
-        if len(lines) > room:
-            tail = [Text(f"  … {len(lines) - room} earlier lines (shown when the turn ends)",
-                         style="dim")] + tail[1:]
+        room = max(2, self.console.size.height - 4)   # status row + margin
+        tail: List[Text] = []
+        used = 0
+        for t in reversed(lines):
+            h = self._height(t)
+            if used + h > room - 1:      # keep a line for the "earlier" note
+                break
+            tail.insert(0, t)
+            used += h
+        if len(tail) < len(lines):
+            tail.insert(0, Text(f"  … {len(lines) - len(tail)} earlier lines "
+                                "(shown when the turn ends)", style="dim"))
         return Group(*tail, self._row())
 
     def begin_turn(self) -> None:
