@@ -198,9 +198,10 @@ class Shell:
             width = get_app().output.get_size().columns
         except Exception:  # noqa: BLE001
             width = self.console.size.width
-        # One column short of the width: a full-width line wraps in the
-        # toolbar and pushes the status line out of view.
-        usable = max(20, width - 1)
+        # A few columns short of the width: prompt_toolkit's renderer never
+        # writes the last column and wraps a line that reaches it, which
+        # pushed the status line (with the version) out of the toolbar.
+        usable = max(20, width - 4)
         gap = max(1, usable - len(left) - len(right))
         rule = "\u2500" * usable
         return HTML(f"{rule}\n{left}{' ' * gap}{right}")
