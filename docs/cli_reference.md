@@ -130,6 +130,13 @@ startup with the web UI's consent sentence (`--yes` or
 `SCILINK_ACCEPT_CODE_EXECUTION=1` pre-approves it; a detected sandbox needs
 no confirmation).
 
+Sessions stay where they are created (next to your data), and every one is
+registered in a central index (`~/.scilink/sessions.jsonl`, or under
+`$SCILINK_HOME`), so `--resume` lists and resumes sessions from any folder;
+the web UI's "Resume past session" reads the same index. The shell prints the
+resume command when you quit. Set `SCILINK_SESSION_ROOT` to put new sessions
+in one folder instead of the current one.
+
 Shell flags, on every mode:
 
 ```bash

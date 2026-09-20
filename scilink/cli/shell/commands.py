@@ -259,6 +259,7 @@ def _sessions(shell, arg: str) -> None:
 def _resume(shell, arg: str) -> None:
     from .sessions import pick_session
     target = arg or pick_session(shell.console, shell.prompt_session, Path.cwd(), shell.mode)
+    # the picker returns a path; a typed argument is an id, a name here, or a path
     if not target:
         return
     shell.resume(target)

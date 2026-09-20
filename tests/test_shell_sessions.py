@@ -43,6 +43,7 @@ def test_discover_excludes_live(tmp_path):
 
 
 def _pick(tmp_path, keys):
+    import os; os.environ.setdefault("SCILINK_HOME", str(tmp_path / "home"))
     stack = ExitStack()
     pipe = stack.enter_context(create_pipe_input())
     pipe.send_text(keys)
@@ -55,13 +56,14 @@ def _pick(tmp_path, keys):
 def test_picker_enter_picks_newest_and_numbers_pick(tmp_path):
     _mk(tmp_path, "meta_session_20260102_000000")
     _mk(tmp_path, "meta_session_20260103_000000")
-    assert _pick(tmp_path, "\r") == "meta_session_20260103_000000"
-    assert _pick(tmp_path, "2\r") == "meta_session_20260102_000000"
-    assert _pick(tmp_path, "meta_session_20260102_000000\r") == "meta_session_20260102_000000"
+    assert _pick(tmp_path, "\r").endswith("meta_session_20260103_000000")   # a path now
+    assert _pick(tmp_path, "2\r").endswith("meta_session_20260102_000000")
+    assert _pick(tmp_path, "meta_session_20260102_000000\r").endswith("meta_session_20260102_000000")
     assert _pick(tmp_path, "9\r") is None
 
 
-def test_picker_empty(tmp_path, capsys):
+def test_picker_empty(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path / "home"))
     console = Console(force_terminal=False)
     assert print_sessions(console, tmp_path, "analyze") == []
     assert "No Analyze sessions" in capsys.readouterr().out

@@ -94,9 +94,16 @@ def resolve_optional_key(flag_value: Optional[str], *env_vars: str) -> Optional[
 
 # ── Session directory ────────────────────────────────────────────
 
-def new_session_dir(mode: str, root: Path = Path(".")) -> Path:
+def session_root() -> Path:
+    """Where NEW sessions go: the current folder, or SCILINK_SESSION_ROOT for
+    a central store. Either way every session is registered in the index."""
+    env = os.environ.get("SCILINK_SESSION_ROOT")
+    return Path(env).expanduser() if env else Path(".")
+
+
+def new_session_dir(mode: str, root: Optional[Path] = None) -> Path:
     prefix = V.mode(mode)["session_prefix"]
-    return root / f"{prefix}_{datetime.now():%Y%m%d_%H%M%S}"
+    return (root if root is not None else session_root()) / f"{prefix}_{datetime.now():%Y%m%d_%H%M%S}"
 
 
 # ── Code-execution consent ───────────────────────────────────────

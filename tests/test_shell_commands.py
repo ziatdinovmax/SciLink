@@ -121,11 +121,13 @@ def test_arrows_move_between_lines_of_a_multiline_draft(tmp_path, monkeypatch):
     assert "The answer to aX" in out.replace("\n", " ") or "aX" in out
 
 
-def test_exit_prints_the_resume_command(tmp_path, monkeypatch):
+def test_exit_prints_the_resume_command_and_registers(tmp_path, monkeypatch):
+    from scilink import sessions as S
     code, out, shell = _run_shell(tmp_path, monkeypatch, "/quit\r", ask=False)
-    assert f"--resume {shell.session_dir.name}" in out          # in the current folder: by id
+    assert f"--resume {shell.session_dir.name}" in out
+    assert S.resolve_session(shell.session_dir.name, "meta") == shell.session_dir.resolve()
     sdir = tmp_path / "elsewhere" / "s"
     code, out, shell = _run_shell(tmp_path, monkeypatch, "/quit\r",
                                   argv=["--session-dir", str(sdir)], ask=False)
-    flat = "".join(out.split())                                  # the console wraps long paths
-    assert "".join(f"--session-dir {sdir.resolve()} --restore".split()) in flat   # nested: by path
+    assert "--resume s" in out                       # indexed, so the id is enough
+    assert S.resolve_session("s", "meta") == sdir.resolve()

@@ -24,6 +24,7 @@ from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.text import Text
 
+from scilink.sessions import register_session, resolve_session, touch_session
 from scilink.skills.loader import scilink_home
 from scilink.ui import vocabulary as V
 
@@ -116,7 +117,11 @@ class Shell:
         if getattr(args, "session_dir", None):
             return restore or bool(resume), Path(args.session_dir)
         if isinstance(resume, str):
-            return True, Path(resume)
+            found = resolve_session(resume, self.mode)
+            if found is None:
+                raise bootstrap.BootstrapError(
+                    f"No session {resume!r} here or in the index; /sessions lists them.")
+            return True, found
         if resume is True or restore:
             pick = pick_session(self.console, self._plain_session, Path.cwd(), self.mode)
             if pick:
@@ -141,6 +146,7 @@ class Shell:
                 quiet_console_logging():
             self.agent = self.adapter.build(args, self.creds, session_dir,
                                             restore=restore, extras=self.extras)
+        register_session(session_dir, self.mode)
         bootstrap.register_extras(
             self.agent,
             skill_files=getattr(args, "skill_files", None) or (),
@@ -151,9 +157,9 @@ class Shell:
 
     def resume(self, target: str) -> None:
         """/resume <id>: rebuild the agent from that session's checkpoint."""
-        path = Path(target)
-        if not path.exists():
-            self.console.print(f"[red]No such session directory:[/] {path}")
+        path = resolve_session(target, self.mode)
+        if path is None:
+            self.console.print(f"[red]No such session:[/] {target} — /sessions lists them")
             return
         setattr(self.args, "restore", True)
         with self.console.status("[dim]Restoring session…[/]", spinner="dots"), \
@@ -162,6 +168,7 @@ class Shell:
                                             extras=self.extras)
         self.session_dir = path
         self.widgets.session_dir = str(path)
+        register_session(path, self.mode)
         self.console.print(f"[green]✓[/] resumed [bold]{path.name}[/]")
 
     def _banner(self) -> None:
@@ -288,22 +295,16 @@ class Shell:
             self.turn(text)
 
     def resume_command(self) -> str:
-        """The command that resumes this session: by id when the directory
-        sits in the current folder (the picker lists it there), else by path."""
+        """The command that resumes this session from anywhere: the session
+        is in the central index, so its id is enough."""
         launcher = os.environ.get("SCILINK_ARGV0", "scilink")
         base = launcher if self.mode == "meta" else f"{launcher} {self.mode}"
-        sd = Path(self.session_dir).resolve()
-        try:
-            rel = sd.relative_to(Path.cwd().resolve())
-            if len(rel.parts) == 1:
-                return f"{base} --resume {rel}"
-        except ValueError:
-            pass
-        return f"{base} --session-dir {sd} --restore"
+        return f"{base} --resume {Path(self.session_dir).name}"
 
     def _shutdown(self) -> None:
         if self.agent is not None:
             save_checkpoint_quietly(self.agent)
+            touch_session(self.session_dir)
         self.console.print(f"\n👋 Session saved: [dim]{self.session_dir}[/]")
         self.console.print(f"   Resume it with: [bold]{self.resume_command()}[/]")
 

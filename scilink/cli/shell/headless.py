@@ -61,6 +61,8 @@ def run(adapter, args, task: str, *, console: Console = None) -> int:
         session_dir = Path(args.session_dir) if getattr(args, "session_dir", None) \
             else bootstrap.new_session_dir(adapter.key)
         session_dir.mkdir(parents=True, exist_ok=True)
+        from scilink.sessions import register_session
+        register_session(session_dir, adapter.key)
         bootstrap.ensure_sandbox_consent(assume_yes=bool(getattr(args, "yes", False)),
                                          ask=_no_ask, console=err)
         extras = adapter.prepare(args, _no_ask)

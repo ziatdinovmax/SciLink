@@ -408,6 +408,11 @@ def _complete_turn(session, turn: TurnState) -> None:
     if turn.error is not None:
         session.events.emit("error", {"message": turn.error})
 
+    try:
+        from scilink.sessions import touch_session
+        touch_session(session.session_dir)
+    except Exception:  # noqa: BLE001
+        pass
     # Per-turn checkpoint (short sessions were otherwise unresumable).
     try:
         agent = session.agent

@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from scilink.providers import provider_for
-from scilink.sessions import discover_resumable
+from scilink.sessions import list_sessions, register_session, resolve_session
 from scilink.ui.config import SESSION_DIR_PREFIXES
 from scilink.ui.session_meta import load_session_name, session_label
 
@@ -231,11 +231,15 @@ class SessionManager:
 
     # -- discovery (port of sidebar.py:983-1029) ------------------------
     def discover_resumable(self, mode: str) -> List[Dict[str, Any]]:
-        """Past sessions of ``mode`` under the root that can be resumed —
-        the shared ``scilink.sessions.discover_resumable``, minus the ones
-        already live here."""
-        return discover_resumable(self.session_root, mode,
-                                  exclude=self._sessions)
+        """Past sessions of ``mode`` that can be resumed — the central index
+        (any folder) plus a scan of the root for sessions that predate it,
+        minus the ones already live here. An entry from another folder
+        carries that folder in its label."""
+        entries = list_sessions(mode, root=self.session_root, exclude=self._sessions)
+        for e in entries:
+            if Path(e["folder"]).resolve() != self.session_root:
+                e["label"] = f"{e['label']} · {e['folder']}"
+        return entries
 
     # -- create ---------------------------------------------------------
     def create(self, *, mode: str, model: str, autonomy: str, api_key: str,
@@ -289,6 +293,7 @@ class SessionManager:
         session = WebSession(id=session_dir.name, session_dir=str(session_dir),
                              mode=mode, model=model, autonomy=autonomy,
                              agent=agent)
+        register_session(session_dir, mode, launcher_cwd=self.session_root)
         with self._lock:
             self._sessions[session.id] = session
         return session
@@ -305,7 +310,12 @@ class SessionManager:
             raise SessionError("Invalid session directory name.")
         session_path = (self.session_root / resume_dir).resolve()
         if session_path.parent != self.session_root or not session_path.is_dir():
-            raise SessionError(f"No such session: {resume_dir}")
+            # Not under the root: an id the central index knows (a session
+            # from another folder, e.g. one the terminal shell created).
+            indexed = resolve_session(resume_dir, mode, root=self.session_root)
+            if indexed is None or not indexed.is_dir():
+                raise SessionError(f"No such session: {resume_dir}")
+            session_path = indexed
         if resume_dir in self._sessions:
             return self._sessions[resume_dir]
 
@@ -395,6 +405,7 @@ class SessionManager:
                              model=model, autonomy=autonomy, agent=agent,
                              chat_messages=display_messages)
         session.tracker.mark_all_existing()
+        register_session(session_path, mode, launcher_cwd=self.session_root)
         with self._lock:
             self._sessions[session.id] = session
         return session

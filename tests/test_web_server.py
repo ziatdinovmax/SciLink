@@ -1075,6 +1075,26 @@ def test_activity_events_during_turn(client, tmp_path):
     assert len(labels) == len(set(labels))          # emitted on change only
 
 
+def test_discover_lists_indexed_sessions_from_other_folders(tmp_path, monkeypatch):
+    """The web manager lists sessions the terminal shell created elsewhere
+    (through the central index), labels them with their folder, and
+    resumes them by id even though they are not under its root."""
+    import json as _json
+    from scilink import sessions as S
+    from scilink.server.session_manager import SessionManager
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path / "home"))
+    root = tmp_path / "webroot"; root.mkdir()
+    other = tmp_path / "project" / "analysis_session_20260920_150000"
+    other.mkdir(parents=True)
+    (other / "checkpoint.json").write_text(_json.dumps({"analysis_results": []}))
+    S.register_session(other, "analyze", launcher_cwd=other.parent)
+    mgr = SessionManager(root)
+    found = mgr.discover_resumable("analyze")
+    assert [e["id"] for e in found] == [other.name]
+    assert str(other.parent) in found[0]["label"]
+    assert S.resolve_session(other.name, "analyze", root=root) == other.resolve()
+
+
 # ── Tools tab: inventory + MCP connect / disconnect ───────────────
 
 class _FakeMcpAgent:
