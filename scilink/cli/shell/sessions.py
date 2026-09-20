@@ -23,11 +23,13 @@ def _summary(s: dict) -> str:
     if "analysis_count" in sm:
         bits.append(f"{sm['analysis_count']} analyses")
     if "delegations" in sm:
-        bits.append(f"{sm['delegations']} delegations")
+        n = sm["delegations"]
+        bits.append(f"{n} delegation{'' if n == 1 else 's'}")
     if sm.get("data_file"):
         bits.append(sm["data_file"])
     if "message_count" in sm:
-        bits.append(f"{sm['message_count']} messages")
+        n = sm["message_count"]
+        bits.append(f"{n} message{'' if n == 1 else 's'}")
     if not s.get("has_checkpoint"):
         bits.append("no checkpoint")
     return " · ".join(bits)
@@ -35,7 +37,8 @@ def _summary(s: dict) -> str:
 
 def _folder(s: dict, root: Path) -> str:
     try:
-        return str(Path(s["folder"]).resolve().relative_to(root.resolve())) or "."
+        rel = str(Path(s["folder"]).resolve().relative_to(root.resolve()))
+        return "" if rel == "." else rel      # the current folder needs no mention
     except ValueError:
         f = s["folder"]
         home = str(Path.home())
@@ -72,6 +75,6 @@ def pick_session(console, prompt_session, root: Path, mode: str) -> Optional[str
                for s in sessions]
     try:
         return choose(options, 0, prompt_session=prompt_session,
-                      console_width=console.size.width)
+                      console_width=console.size.width, esc_label="cancel")
     except (EOFError, KeyboardInterrupt):
         return None

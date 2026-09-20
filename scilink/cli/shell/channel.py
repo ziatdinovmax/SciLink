@@ -46,7 +46,8 @@ def enter_hint(labels: Dict[str, str], key: str = "accept") -> str:
     return V.ENTER_ACCEPTS_HINT.format(accept=accept) if accept else ""
 
 
-def choose(options, default: int, *, prompt_session, console_width: int = 120):
+def choose(options, default: int, *, prompt_session, console_width: int = 120,
+           esc_label: str = "stop"):
     """An arrow-key picker in place of typing a number: ``options`` is a list
     of (value, label, note); up/down move the highlight (starting on
     ``default``), Enter chooses, a digit or the option's key letter jumps,
@@ -73,7 +74,7 @@ def choose(options, default: int, *, prompt_session, console_width: int = 120):
             if note:
                 out.append(("class:pick.note", f"  {note}"))
             out.append(("", "\n"))
-        out.append(("class:pick.hint", "  ↑↓ move · Enter choose · Esc stop"))
+        out.append(("class:pick.hint", f"  ↑↓ move · Enter choose · Esc {esc_label}"))
         return out
 
     kb = KeyBindings()
