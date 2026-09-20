@@ -62,13 +62,15 @@ def test_keep_revert():
     q = {"widget": "keep_revert", "prompt": "", "labels": {"keep": "Keep user-guided fit",
                                                             "revert": "Revert to original fit"},
          "preview_images": [], "code_files": [], "candidate_captions": {}}
-    w, buf, stack = _widgets("k\r")
+    w, buf, stack = _widgets("\x1b[A\r")          # up from the default (revert) to keep
     with stack:
         assert w.ask(q) == "keep"
-    assert "Keep user-guided fit" in buf.getvalue()
-    w, _, stack = _widgets("\r")
+    w, _, stack = _widgets("\r")                    # Enter = the default, revert
     with stack:
         assert w.ask(q) == ""
+    w, _, stack = _widgets("k")                      # the letter jumps
+    with stack:
+        assert w.ask(q) == "keep"
 
 
 def test_fanout_confirm():
@@ -77,12 +79,12 @@ def test_fanout_confirm():
          "fanout": {"verdict": "complementary", "join_axis": "temperature",
                     "rationale": "same sample", "branches": ["a.csv", "b.csv"]},
          "preview_images": [], "code_files": [], "candidate_captions": {}}
-    w, buf, stack = _widgets("y\r")
+    w, buf, stack = _widgets("\x1b[B\r")          # down to "launch", Enter
     with stack:
         assert w.ask(q) == "y"
     out = buf.getvalue()
-    assert "Complementarity" in out and "a.csv" in out and "Launch parallel analysis" in out
-    w, _, stack = _widgets("\r")
+    assert "Complementarity" in out and "a.csv" in out
+    w, _, stack = _widgets("\r")                    # Enter = the default, cancel
     with stack:
         assert w.ask(q) == "no"
 
@@ -95,15 +97,25 @@ def test_bestofn_pick_and_judge_default():
                         {"idx": 2, "label": "Candidate 2 — chi2=0.04"}],
          "judge_pick": 2, "preview_images": ["figs/bestofn_candidate_1_review.png"],
          "code_files": [], "candidate_captions": {"bestofn_candidate_1_review.png": "Candidate 1"}}
-    w, buf, stack = _widgets("1\r")
+    w, buf, stack = _widgets("\x1b[A\r")          # highlight starts on the judge's pick (2); up -> 1
     with stack:
         assert w.ask(q) == "1"
-    out = buf.getvalue()
-    assert "judge's pick" in out and "Enter = Accept judge's pick (Candidate 2)" in out
-    assert "bestofn_candidate_1_review.png" in out
-    w, _, stack = _widgets("\r")
+    assert "Select the candidate to lock:" in buf.getvalue()
+    w, _, stack = _widgets("\r")                    # Enter on the judge's pick = accept ("")
     with stack:
         assert w.ask(q) == ""
+    w, _, stack = _widgets("1")                      # a digit jumps
+    with stack:
+        assert w.ask(q) == "1"
+
+
+def test_picker_escape_stops_the_turn():
+    import pytest as _pytest
+    q = {"widget": "keep_revert", "prompt": "", "labels": {"keep": "Keep", "revert": "Revert"},
+         "preview_images": [], "code_files": [], "candidate_captions": {}}
+    w, _, stack = _widgets("\x1b")
+    with stack, _pytest.raises(KeyboardInterrupt):
+        w.ask(q)
 
 
 def test_enter_hint_and_auto_accept():

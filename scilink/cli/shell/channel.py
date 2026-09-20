@@ -17,7 +17,9 @@ from typing import Any, Dict, Optional
 from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
-from prompt_toolkit.application import run_in_terminal
+from prompt_toolkit.application import Application, run_in_terminal
+from prompt_toolkit.layout import Layout, Window
+from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Group
@@ -42,6 +44,74 @@ class AutoAcceptChannel:
 def enter_hint(labels: Dict[str, str], key: str = "accept") -> str:
     accept = labels.get(key) or ""
     return V.ENTER_ACCEPTS_HINT.format(accept=accept) if accept else ""
+
+
+def choose(options, default: int, *, prompt_session, console_width: int = 120):
+    """An arrow-key picker in place of typing a number: ``options`` is a list
+    of (value, label, note); up/down move the highlight (starting on
+    ``default``), Enter chooses, a digit or the option's key letter jumps,
+    Esc / Ctrl+C raise KeyboardInterrupt (stop the turn). Returns the value."""
+    state = {"i": max(0, min(default, len(options) - 1))}
+    keys = {}
+    for n, (value, label, note) in enumerate(options):
+        keys[str(n + 1)] = n
+        first = (label or "").strip()[:1].lower()
+        if first and first not in keys:
+            keys[first] = n
+
+    def render():
+        out = []
+        width = max(30, console_width - 6)
+        for n, (value, label, note) in enumerate(options):
+            cur = n == state["i"]
+            text = f"{n + 1}  {label}"
+            if len(text) > width:
+                text = text[: width - 1] + "…"
+            marker = "❯ " if cur else "  "
+            style = "class:pick.current" if cur else ""
+            out.append((style, marker + text))
+            if note:
+                out.append(("class:pick.note", f"  {note}"))
+            out.append(("", "\n"))
+        out.append(("class:pick.hint", "  ↑↓ move · Enter choose · Esc stop"))
+        return out
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    def _up(event):
+        state["i"] = (state["i"] - 1) % len(options)
+
+    @kb.add("down")
+    def _down(event):
+        state["i"] = (state["i"] + 1) % len(options)
+
+    @kb.add("enter")
+    def _enter(event):
+        event.app.exit(result=state["i"])
+
+    @kb.add("escape", eager=True)
+    @kb.add("c-c")
+    @kb.add("c-d")
+    def _cancel(event):
+        event.app.exit(exception=KeyboardInterrupt())
+
+    for key, index in keys.items():
+        def _jump(event, index=index):
+            event.app.exit(result=index)
+        kb.add(key)(_jump)
+
+    from prompt_toolkit.styles import Style
+    app = Application(
+        layout=Layout(Window(FormattedTextControl(render, focusable=True),
+                             wrap_lines=False)),
+        key_bindings=kb, full_screen=False, mouse_support=False,
+        style=Style.from_dict({"pick.current": "bold ansicyan",
+                               "pick.note": "ansigreen",
+                               "pick.hint": "fg:ansibrightblack"}),
+        input=prompt_session.input, output=prompt_session.output)
+    chosen = app.run()
+    return options[chosen][0]
 
 
 class Widgets:
@@ -125,6 +195,10 @@ class Widgets:
                                             line_numbers=False, word_wrap=True),
                                      title=f"📄 {f.get('name')}", border_style="dim"))
 
+    def _choose(self, options, default: int) -> str:
+        return choose(options, default, prompt_session=self.session,
+                      console_width=self.console.size.width)
+
     # ── widgets ────────────────────────────────────────────────
 
     def ask(self, q: Dict[str, Any]) -> str:
@@ -132,10 +206,8 @@ class Widgets:
         labels = q.get("labels") or {}
         self._show_context(q)
         if widget == "keep_revert":
-            self.console.print(f"  [bold]k[/] {labels.get('keep')}    "
-                               f"[bold]r[/] {labels.get('revert')}  [dim](Enter = r)[/]")
-            ans = self._read("").strip().lower()
-            return "keep" if ans.startswith("k") else ""
+            return self._choose([("keep", labels.get("keep", "Keep"), ""),
+                                 ("", labels.get("revert", "Revert"), "")], default=1)
         if widget == "fanout_confirm":
             f = q.get("fanout") or {}
             self.console.print("[bold]🔀 Launch parallel multi-dataset analysis?[/]")
@@ -150,20 +222,19 @@ class Widgets:
             if f.get("rationale"):
                 self.console.print(f"  [bold]Why:[/] {f['rationale']}")
             self.console.print("  [dim]Branches run autonomously — no per-branch approval pauses.[/]")
-            self.console.print(f"  [bold]y[/] {labels.get('confirm')}    "
-                               f"[bold]n[/] {labels.get('cancel')}  [dim](Enter = n)[/]")
-            ans = self._read("").strip().lower()
-            return "y" if ans in ("y", "yes") else "no"
+            return self._choose([("no", labels.get("cancel", "Cancel"), ""),
+                                 ("y", labels.get("confirm", "Launch"), "")], default=0)
         if widget in ("bestofn", "plan_candidates"):
             pick = q.get("judge_pick")
+            cands = q.get("candidates") or []
             self.console.print(f"[bold]{labels.get('select')}[/]")
-            for c in q.get("candidates") or []:
-                mark = " [green]← judge's pick[/]" if c.get("idx") == pick else ""
-                self.console.print(f"  [bold]{c.get('idx')}[/]  {c.get('label')}{mark}")
-            hint = enter_hint(labels)
-            self.console.print(f"  [dim]{hint}[/]" if hint else "")
-            ans = self._read("").strip()
-            return ans if ans.isdigit() else ""
+            options = [(str(c.get("idx")), str(c.get("label")),
+                        f"← {V.NAMES['judge_pick']}" if c.get("idx") == pick else "")
+                       for c in cands]
+            default = next((n for n, c in enumerate(cands) if c.get("idx") == pick), 0)
+            chosen = self._choose(options, default=default)
+            # The empty answer is "accept the judge's pick", as on the web.
+            return "" if chosen == str(pick) else chosen
         # generic / dataset_description / code_review
         hint = enter_hint(labels)
         self.console.print(f"[bold]{labels.get('input', 'Your feedback (optional):')}[/]"

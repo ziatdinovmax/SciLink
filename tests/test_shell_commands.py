@@ -110,3 +110,12 @@ def test_context_usage_matches_the_orchestrators_trim_rule():
 
     assert context_usage(Agent()) == (30, 120)
     assert context_usage(object()) is None
+
+
+def test_arrows_move_between_lines_of_a_multiline_draft(tmp_path, monkeypatch):
+    """Alt+Enter adds a line; Up moves the cursor to the line above (history
+    is browsed only from the first line), so the draft can be edited."""
+    keys = "a\x1b\rb\x1b[AX\r/quit\r"     # a, Alt+Enter, b, Up, X, Enter -> "aX\nb"
+    code, out, shell = _run_shell(tmp_path, monkeypatch, keys, ask=False)
+    assert code == 0
+    assert "The answer to aX" in out.replace("\n", " ") or "aX" in out
