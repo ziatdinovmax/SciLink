@@ -893,6 +893,18 @@ class TestChangeSignalAndAudit:
         assert len(events) <= 3 and all(b >= 2 * a for a, b in zip(levels, levels[1:]))
         assert not [e for e in loop.read_log() if e["event"] in ("escalation_started", "state_accepted")]
 
+    def test_a_change_that_arrives_slowly_gets_the_same_policy_as_any_change(self, tmp_path):
+        """Seen live on an image stream, where the audit is the correctness check:
+        the slow alarm announced a nucleation and nothing looked at the recipe."""
+        loop = self._armed(tmp_path, on_change="audit")
+        records = [loop.step(self._growing(tmp_path, i)) for i in range(1, 41)]
+        first = next(r for r in records if r.get("novelty"))
+        assert first["novelty"]["onset"] == "gradual" and first["escalation"] == "audit_started"
+        started = [e for e in loop.read_log() if e["event"] == "audit_started"]
+        assert len(started) == 1 and started[0]["reason"] == "change" and started[0]["step"] == first["step"]
+        assert loop.pending_work()["mode"] == "audit"
+        loop.close()
+
     def test_the_slow_alarm_can_be_turned_off_and_does_not_repeat_an_abrupt_change(self, tmp_path):
         (tmp_path / "quiet").mkdir()
         (tmp_path / "abrupt").mkdir()
@@ -1101,6 +1113,20 @@ class TestClose:
         FakeEscalation.last.anchor = str(new_anchor(tmp_path))
         adopted = loop.close(wait=True)
         assert adopted["event"] == "reanchor" and self.Running.terminated == 0
+
+    def test_a_host_can_ask_what_is_still_running_and_stop_waiting_for_it(self, tmp_path):
+        """A run that ends with an audit still working should be able to wait
+        for its verdict, and a person should be able to end that wait."""
+        loop = self._loop(tmp_path)
+        pending = loop.pending_work()
+        assert pending["mode"] == "reanchor" and pending["started_step"] == 1
+        FakeEscalation.last.wait = lambda timeout=None: None         # never finishes
+        asked = []
+        assert loop.close(wait=True, stop=lambda: asked.append(1) or len(asked) > 2) is None
+        assert self.Running.terminated == 1 and loop.pending_work() is None and len(asked) >= 3
+        loop2 = self._loop(tmp_path / "again")
+        FakeEscalation.last.wait = lambda timeout=None: None
+        assert loop2.close(wait=True, timeout=0.2) is None and self.Running.terminated == 1
 
     def test_a_context_manager_closes(self, tmp_path):
         with self._loop(tmp_path) as loop:

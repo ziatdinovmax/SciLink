@@ -399,6 +399,8 @@ export interface RememberedRecipe {
   last_used?: string | null;
   uses: number;
   size_mb: number;
+  /** Adopted because two audits rejected the recipe before it, never verified. */
+  contested?: boolean;
 }
 
 export interface RememberedRun {
@@ -476,7 +478,9 @@ export interface LiveNovelty {
   frame_abs_path: string;
 }
 export interface LiveSnapshot {
-  state: "idle" | "arming" | "running" | "paused" | "stopped" | "done" | "error";
+  state: "idle" | "arming" | "running" | "paused" | "finishing" | "stopped" | "done" | "error";
+  /** The frames have ended and a background analysis is being waited for. */
+  finishing?: { mode?: string; reason?: string; profile?: string; started_step?: number; seconds?: number } | null;
   /** The run is waiting for a decision: why, and what the data showed. */
   paused?: (Partial<LiveNovelty> & { why: "novelty" | "breach"; experiment_held: boolean;
                                      timeout_s?: number | null; flags?: string[] }) | null;
@@ -487,6 +491,8 @@ export interface LiveSnapshot {
   assessing?: boolean;
   /** What the changed frames turned out to be: claims, and how new each is (1 to 5). */
   discoveries?: { about_step: number; status: string; literature?: string; highest_novelty?: number;
+    compared?: Record<string, { recipe: number; analysis: number }>;
+    retried?: boolean; analysis_error?: string;
                   claims: { claim: string; question?: string; novelty_score?: number;
                             novelty_explanation?: string }[] }[];
   error?: string | null;
@@ -536,7 +542,7 @@ export interface LiveSnapshot {
   } | null;
   latest?: { step: number; x: number[]; y: number[]; fit?: (number | null)[] } | null;
   /** A datacube frame's maps, as session files (the tracked outputs' first). */
-  maps?: { name: string; path: string; step: number; tracked: boolean }[];
+  maps?: { name: string; path: string; step: number; tracked: boolean; raw?: boolean }[];
 }
 export interface LiveConfig {
   instrument: string;

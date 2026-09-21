@@ -249,6 +249,7 @@ def test_a_recipe_two_audits_reject_is_replaced_by_the_deeper_one_and_called_con
     # Live: the recipe counted 40 of 105 particles, the audits said 56 and 89. Keeping a recipe
     # two independent analyses rejected is the worst of the three choices.
     assert out["event"] == "reanchor" and out["contested"] is True and loop.recipe["id"] != before
+    assert loop.recipe["contested"] is True                  # it says so wherever the recipe goes
     assert "b2" in str(loop.anchor_dir)                          # the deeper one, told what changed
     unresolved = next(e for e in loop.read_log() if e["event"] == "audit_unresolved")
     assert unresolved["between_audits"]["particle_count"]["agrees"] is False

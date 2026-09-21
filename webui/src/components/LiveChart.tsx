@@ -57,6 +57,13 @@ function useWidth(): [React.RefObject<HTMLDivElement>, number] {
     setW(el.clientWidth);
     return () => ro.disconnect();
   }, []);
+  // Resize notifications are deferred while a document is hidden (a background
+  // window), and the layout can change meanwhile (one column to two when the
+  // first frame arrives). The panel re-renders on every poll, so re-measure then.
+  useEffect(() => {
+    const el = ref.current;
+    if (el && el.clientWidth !== w) setW(el.clientWidth);
+  });
   return [ref, w];
 }
 

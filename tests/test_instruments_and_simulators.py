@@ -346,3 +346,18 @@ def test_the_live_layer_does_not_depend_on_a_chat_session():
     bad = re.compile(r"^\s*(?:from|import)\s+(?:scilink|\.)\S*(?:server|orchestrator|meta_agent)", re.M)
     for path in Path(pkg.__file__).parent.glob("*.py"):
         assert not bad.search(path.read_text()), path.name
+
+
+def test_recorded_data_is_remembered_under_its_instrument_or_its_folder(tmp_path):
+    """A folder of recorded data is not an instrument called "replay": two
+    folders must not share a memory by accident."""
+    import numpy as np
+    from scilink.live import ReplayInstrument
+    for name in ("monday", "tuesday"):
+        (tmp_path / name).mkdir()
+        np.savetxt(tmp_path / name / "s_001.csv", np.column_stack([np.arange(50.0), np.ones(50)]),
+                   delimiter=",", header="x,y")
+    monday, tuesday = (ReplayInstrument(str(tmp_path / n)) for n in ("monday", "tuesday"))
+    assert (monday.id, tuesday.id) == ("replay-monday", "replay-tuesday")
+    named = ReplayInstrument(str(tmp_path / "tuesday"), system_info={"instrument": "Titan 2"})
+    assert named.id == "Titan 2" and named.describe()["id"] == "Titan 2"

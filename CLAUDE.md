@@ -940,7 +940,27 @@ neither may break a run that is using it. The store is readable without a
 session (`known_instruments`, `remembered`, `forget_recipe` in the same module):
 `scilink instrument list/show/forget` and the Live tab's Instrument memory card
 are two views of those functions, and on a shared multi-user server the card is
-read-only.
+read-only. A recipe adopted as `contested` is remembered as contested and tried
+after every verified one. Recorded data is not an instrument called "replay": a
+`ReplayInstrument` is remembered under the instrument its metadata names
+(`system_info["instrument"]`, "Recorded on" in the tab), else under its folder,
+so two folders never share a memory by accident.
+
+**What a driven run through the tab taught (real HAADF and EELS tiles, an image
+instrument behind MCP), each now structural.** (1) A change that arrives slowly
+is a change: the slow alarm applies `on_change` like the abrupt path does (an
+image stream's nucleation was announced and nothing looked at the recipe).
+(2) A run that ends with an audit still working waits for it
+(`pending_work()`, `close(wait=True, stop=...)`, the tab's `finishing` state): a
+24-frame run had cancelled the second audit of a disagreed change, which is the
+answer the run was asked. Stop ends the wait; the instrument's run summary is
+written after it. (3) The pause-time assessment asks for the tracked quantities
+by name and its numbers go BESIDE the recipe's for the same frame (`compared`):
+that, not the prose, is what a person at a pause decides on. An assessment whose
+analysis failed is tried once deeper, and if it still has no measurement it is
+`unmeasured` and says its claims come from looking at the frame. (4) For an
+image or a cube the tab shows the frame itself (the reference while arming), not
+only the curve the change signal reads.
 
 **The fast path runs in one long-lived interpreter** (`executors.WarmScriptExecutor`,
 `warm_replay=True`): a fresh process paid the recipe's imports on every frame (a

@@ -181,3 +181,24 @@ def test_the_cli_lists_shows_and_forgets(tmp_path, monkeypatch, capsys):
     code, out = run("forget", "raman-1", "abc123", "--yes")
     assert code == 0 and not recipe.exists() and home.dir.is_dir()
     assert run("forget", "raman-1", "--all", "-y")[0] == 0 and not home.dir.exists()
+
+
+def test_a_contested_recipe_is_remembered_as_contested_and_tried_last(tmp_path):
+    """Seen live: two audits rejected a recipe without agreeing with each other,
+    the deeper one's recipe was adopted as contested, and the store kept it as
+    the newest, so the next run would have tried the unverified recipe first."""
+    sim, setup = _remembered_run(tmp_path)
+    home = InstrumentHome(sim, root=str(tmp_path / "instruments"))
+    verified = home.recipes()[0]
+    newer = home.dir / "recipes" / "zzz999"
+    (newer / "anchor").mkdir(parents=True)
+    (newer / "recipe.json").write_text(json.dumps({**{k: v for k, v in verified.items() if k != "anchor_dir"},
+                                                   "recipe_id": "zzz999", "contested": True,
+                                                   "last_used": "2099-01-01T00:00:00"}))
+    assert [r["recipe_id"] for r in home.recipes()] == [verified["recipe_id"], "zzz999"]
+
+    class Loop:                                   # what save_recipe reads off a loop
+        recipe = {"id": "abc", "source": "reanchor:thorough", "contested": True}
+        anchor_dir, modality = verified["anchor_dir"], type("M", (), {"name": "image"})
+        system_info, instrument, outputs, targets, _edits, _reference_features = {}, {}, {}, [], [], {}
+    assert home.save_recipe(Loop)["contested"] is True

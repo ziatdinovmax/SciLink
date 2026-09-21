@@ -94,7 +94,10 @@ class InstrumentHome:
             if outputs and not set(outputs) <= set(meta.get("reports") or []):
                 continue
             found.append({**meta, "anchor_dir": str(anchor)})
+        # Most recently used first, and a contested recipe (adopted because two
+        # audits rejected the old one, never verified) after every other.
         found.sort(key=lambda m: str(m.get("last_used") or m.get("created") or ""), reverse=True)
+        found.sort(key=lambda m: bool(m.get("contested")))
         return found
 
     def save_recipe(self, loop: Any, source: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -114,7 +117,8 @@ class InstrumentHome:
                 "sample": info.get("sample"), "outputs": dict(loop.outputs or {}),
                 "targets": list(loop.targets or []), "edits": list(loop._edits or []),
                 "reports": sorted(loop._reference_features or {}),
-                "source": source or loop.recipe.get("source"), "created": _now(), "uses": 0}
+                "source": source or loop.recipe.get("source"), "created": _now(), "uses": 0,
+                "contested": bool(loop.recipe.get("contested"))}
         if meta_path.is_file():
             try:
                 old = json.loads(meta_path.read_text())

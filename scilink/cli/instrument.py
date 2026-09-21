@@ -63,7 +63,7 @@ def main():
         print(f"first seen {info.get('first_seen')}, last seen {info.get('last_seen')}")
         print(f"\nRecipes ({len(record['recipes'])}):")
         for r in record["recipes"]:
-            print(f"  {r['recipe_id']}  recalled {r.get('uses', 0)}x, last used {r.get('last_used')}, "
+            print(f"  {r['recipe_id']}{'  [contested]' if r.get('contested') else ''}  recalled {r.get('uses', 0)}x, last used {r.get('last_used')}, "
                   f"{r.get('size_mb')} MB, from {r.get('source') or 'a reference analysis'}")
             print(f"      sample: {r.get('sample') or '-'}   tracks: {_outputs(r)}")
         print(f"\nRuns ({len(record['runs'])} most recent):")

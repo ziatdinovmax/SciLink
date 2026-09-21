@@ -50,7 +50,11 @@ def _instrument_info(inst: Any) -> Dict[str, Any]:
         "can_pause": bool(getattr(inst, "can_pause", False)),
         "technique": (inst.system_info or {}).get("technique"),
         "sample": (inst.system_info or {}).get("sample"),
-        "x_axis": (inst.system_info or {}).get("x_axis"),
+        # a cube's chart is its mean spectrum: labelled with the spectral axis's units
+        "x_axis": ((inst.system_info or {}).get("x_axis")
+                   or ((inst.system_info or {}).get("energy_range") or {}).get("units")
+                   if isinstance((inst.system_info or {}).get("energy_range"), dict)
+                   else (inst.system_info or {}).get("x_axis")),
         "y_axis": (inst.system_info or {}).get("y_axis"),
         "about": _plain(inst.__class__.__doc__),
         "simulated": inst.__class__.__module__.endswith(".simulators"),
@@ -525,7 +529,16 @@ class LiveRun:
                 stop=self._stop.is_set, operator=self._operator,
                 on_frame=self._on_frame,
                 pause_on=self.pause_on, on_pause=self._on_pause if self.pause_on else None)
-            self.state = "stopped" if self._stop.is_set() else "done"
+            # The frames ended on their own with an audit (or a rebuild) still
+            # working: its verdict is what the run was asked, so wait for it. Seen
+            # live: a 24-frame run ended with the second audit of a disagreed
+            # change cancelled. Stop ends the wait.
+            ended_itself = not self._stop.is_set()
+            if ended_itself and self.loop.pending_work():
+                self.state = "finishing"
+                self.loop.close(wait=True, stop=self._stop.is_set,
+                                timeout=float(cfg.get("finish_timeout_s") or 1800))
+            self.state = "done" if ended_itself else "stopped"     # a Stop while finishing ends the wait only
         except LiveError as e:
             self.state, self.error = "error", e.message
         except Exception as e:  # noqa: BLE001 - reported to the page
@@ -652,6 +665,8 @@ class LiveRun:
             "paused": self.paused, "pause_on": self.pause_on,
             "assessing": self.assessing,
             "discoveries": [e for e in other if e.get("event") == "discovery"][-3:],
+            "finishing": (self.loop.pending_work() if self.state == "finishing" and self.loop is not None
+                          else None),
             "run_dir": str(self.run_dir), "elapsed_s": round(time.time() - self.started_at, 1),
             "config": self.config,
             "instrument": getattr(self, "_instrument_view", None) or _instrument_info(self.instrument),
@@ -675,7 +690,9 @@ class LiveRun:
             # look at during the minutes the loop is being armed.
             "latest": self._curve(latest) if latest else self._reference_curve(),
             # A datacube frame's result is its maps: the dashboards the replay wrote.
-            "maps": self._maps(latest) if latest else [],
+            # and, for an image or a cube, the frame itself (the reference while arming).
+            "maps": ((self._maps(latest) if latest else [])
+                     + self._frame_view(latest or self._reference_frame())),
         }
 
     def _novelty_view(self, e: Dict[str, Any]) -> Dict[str, Any]:
@@ -723,10 +740,45 @@ class LiveRun:
         out.sort(key=lambda d: (not d["tracked"], d["name"]))
         return out[:cap]
 
-    def _reference_curve(self) -> Optional[Dict[str, Any]]:
+    def _reference_frame(self) -> Optional[Dict[str, Any]]:
         refs = sorted(p for p in (self.run_dir / "reference").glob("reference_*")
                       if p.suffix.lower() != ".json")
-        return self._curve({"step": 0, "data": str(refs[-1])}) if refs else None
+        return {"step": 0, "data": str(refs[-1])} if refs else None
+
+    def _reference_curve(self) -> Optional[Dict[str, Any]]:
+        ref = self._reference_frame()
+        return self._curve(ref) if ref else None
+
+    def _frame_view(self, frame: Optional[Dict[str, Any]], max_side: int = 512) -> List[Dict[str, Any]]:
+        """What the instrument actually delivered, as a picture: the image, or a
+        cube summed over its spectral axis. A person at a microscope recognises
+        the frame, not its power spectrum. Written once per frame, and only the
+        reference and the newest are kept."""
+        kind = getattr(self.instrument, "modality", "curve")
+        if kind == "curve" or not frame or not frame.get("data"):
+            return []
+        try:
+            import numpy as np
+            from scilink.live.modality import load_cube, load_image
+            step = int(frame.get("step") or 0)
+            out_dir = self.run_dir / "frame_views"
+            dest = out_dir / f"frame_{step:06d}.png"
+            if not dest.is_file():
+                a = load_image(frame["data"]) if kind == "image" else load_cube(frame["data"]).sum(axis=2)
+                stride = max(1, int(np.ceil(max(a.shape) / max_side)))
+                a = np.nan_to_num(a[::stride, ::stride])
+                lo, hi = np.percentile(a, [1, 99])
+                a = np.clip((a - lo) / (hi - lo if hi > lo else 1.0), 0, 1)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                from matplotlib import image as mpl_image
+                mpl_image.imsave(str(dest), a, cmap="gray", vmin=0, vmax=1)
+                for old in out_dir.glob("frame_*.png"):
+                    if old.name not in (dest.name, "frame_000000.png"):
+                        old.unlink(missing_ok=True)
+            return [{"name": "frame" if kind == "image" else "total intensity", "raw": True, "tracked": False,
+                     "path": str(dest.resolve().relative_to(self._session_dir)), "step": step}]
+        except Exception:  # noqa: BLE001 - a view, never a reason to fail a snapshot
+            return []
 
     def _curve(self, frame: Dict[str, Any], max_points: int = 600) -> Optional[Dict[str, Any]]:
         """The frame's data and, when the analysis left one, the fitted model on

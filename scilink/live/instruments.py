@@ -235,6 +235,11 @@ class ReplayInstrument(Instrument):
             self.files = [p for p in self.files if p.suffix.lower() in IMAGE_SUFFIXES]
         self.name = name
         self.system_info = dict(system_info or {})
+        # Recorded data is not an instrument, and two folders are not the same
+        # one: what is remembered is kept under the instrument the metadata names
+        # (system_info["instrument"]), else under the folder the data came from.
+        self.instrument_id = (str(self.system_info.get("instrument") or "").strip()
+                              or f"{name}-{self.files[0].parent.name or 'files'}")
         self.outputs = dict(outputs or {})
         self.targets = list(targets or [])
         self.events = [{"frame": 1, "what": f"{len(self.files)} recorded measurements, "

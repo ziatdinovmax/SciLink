@@ -241,6 +241,7 @@ export function LivePanel({
   const [replayDir, setReplayDir] = useState("");
   const [technique, setTechnique] = useState("");
   const [sample, setSample] = useState("");
+  const [recordedOn, setRecordedOn] = useState("");
   const [xAxis, setXAxis] = useState("");
   const [yAxis, setYAxis] = useState("");
   const [outputsText, setOutputsText] = useState("");
@@ -256,7 +257,7 @@ export function LivePanel({
   }, [sessionId]);
 
   const state = snap?.state ?? "idle";
-  const live = state === "arming" || state === "running" || state === "paused";
+  const live = state === "arming" || state === "running" || state === "paused" || state === "finishing";
   /** Parameters can be set while the run waits: they take effect on resume. */
   const steerableNow = state === "running" || state === "paused";
 
@@ -284,7 +285,9 @@ export function LivePanel({
       track: "particle_count: number of particles in the field\nmean_diameter_nm: mean particle diameter" },
   } as Record<string, { technique: string; sample: string; track: string }>);
   const wantedModality: string = framesAre || (simulators.find((x) => x.name === instrument)?.modality ?? "curve");
-  const hint = hints[wantedModality] ?? hints.curve;
+  const hint = instrument === MCP && framesAre === ""
+    ? { technique: "from the server", sample: "from the server", track: "from the server, or name: definition per line" }
+    : hints[wantedModality] ?? hints.curve;
   const chosen: LiveInstrumentInfo | undefined =
     state === "idle" ? simulators.find((s) => s.name === instrument) : snap?.instrument;
   const mcpServers = snap?.mcp_servers ?? [];
@@ -336,7 +339,8 @@ export function LivePanel({
         replay_dir: instrument === REPLAY ? replayDir.trim() : undefined,
         mcp_server: instrument === MCP ? mcpServer : undefined,
         mcp_tool: instrument === MCP ? mcpTool : undefined,
-        system_info: { technique, sample, x_axis: xAxis, y_axis: yAxis },
+        system_info: { technique, sample, x_axis: xAxis, y_axis: yAxis,
+          instrument: instrument === REPLAY ? recordedOn.trim() : "" },
         frames_are: framesAre || undefined,
         frame_metadata: framesAre === "hyperspectral"
           ? { axis_start: axisStart, axis_end: axisEnd, axis_units: axisUnits }
@@ -485,6 +489,18 @@ export function LivePanel({
                   <input type="text" placeholder={hint.sample} value={sample}
                     onChange={(e) => setSample(e.target.value)} />
                 </label>
+                {instrument === REPLAY && (
+                  <label><span>Recorded on
+                      <Info>
+                        The instrument that recorded this data. With Remember this instrument on, recipes are
+                        kept under this name. Left empty, they are kept under the folder's name, so two folders
+                        never share a memory by accident.
+                      </Info>
+                    </span>
+                    <input type="text" placeholder="optional" value={recordedOn}
+                      onChange={(e) => setRecordedOn(e.target.value)} />
+                  </label>
+                )}
                 <label><span>A frame is
                     <Info>
                       A spectrum, an image or a datacube. Each is followed with its own analysis. Leave it
@@ -501,7 +517,7 @@ export function LivePanel({
                 </label>
               </div>
               <div className="live-row">
-                {(framesAre === "" || framesAre === "curve") && (
+                {(framesAre === "curve" || (framesAre === "" && instrument !== MCP)) && (
                   <>
                     <label className="grow"><span>x axis</span>
                       <input type="text" placeholder="Raman shift (cm^-1)" value={xAxis}
@@ -850,6 +866,7 @@ export function LivePanel({
         <span className={`live-state ${state}`}>
           {state === "arming" ? "◌ preparing" : state === "running" ? "● running"
             : state === "paused" ? "❚❚ paused"
+            : state === "finishing" ? "◌ finishing"
             : state === "done" ? "✓ finished" : state === "stopped" ? "■ stopped" : "✕ error"}
         </span>
         {count > 0 && (
@@ -881,6 +898,16 @@ export function LivePanel({
       {error && <div className="error-banner">{error}</div>}
       {snap?.error && <div className="error-banner">{snap.error}</div>}
       {snap?.note && <p className="caption">{snap.note}</p>}
+      {state === "finishing" && (
+        <p className="caption">
+          The frames have ended. Waiting for the {snap?.finishing?.mode === "audit" ? "audit" : "rebuild"}
+          {typeof snap?.finishing?.started_step === "number" ? ` of frame ${snap.finishing.started_step}` : ""}.
+          <Info>
+            An independent analysis was still working when the last frame arrived. Its verdict is what the
+            run was asked, so the run waits for it. Stop ends the wait and keeps everything measured.
+          </Info>
+        </p>
+      )}
       {state === "arming" && (
         <p className="caption">
           Locking the recipe.
@@ -946,13 +973,23 @@ export function LivePanel({
             <h4>What changed</h4>
             <Info>
               A closer analysis of the changed frame, told where the data is new, made while the run
-              waits. With a literature key each claim is searched and scored from 1 (well known) to 5
+              waits. Its numbers for the tracked quantities are shown beside the recipe's for the same frame.
+              With a literature key each claim is searched and scored from 1 (well known) to 5
               (not found). Without one the claims are shown as they are.
             </Info>
           </div>
           {snap?.assessing && <p className="caption">Analysing the changed frame…</p>}
           {(snap?.discoveries ?? []).slice(-1).map((d) => (
             <ul key={d.about_step}>
+              {Object.keys(d.compared ?? {}).length > 0 && (
+                <li className="live-compared">
+                  {Object.entries(d.compared ?? {}).map(([name, v]) => (
+                    <span key={name}>
+                      <code>{name}</code> {fmt(v.recipe)} from the recipe, <b>{fmt(v.analysis)}</b> from this analysis
+                    </span>
+                  ))}
+                </li>
+              )}
               {d.claims.map((c, i) => (
                 <li key={i}>
                   {typeof c.novelty_score === "number" && <b>novelty {c.novelty_score} of 5. </b>}
@@ -960,6 +997,12 @@ export function LivePanel({
                 </li>
               ))}
               {d.claims.length === 0 && <li className="caption">No claim could be made about this frame.</li>}
+              {d.status === "unmeasured" && (
+                <li className="caption">
+                  The analysis of this frame did not finish{d.retried ? ", also when tried again more thoroughly" : ""}.
+                  These claims come from looking at the frame, not from a measurement.
+                </li>
+              )}
               {d.literature && <li className="caption">Literature: {d.literature}.</li>}
             </ul>
           ))}
@@ -1100,24 +1143,30 @@ export function LivePanel({
               seriesLabel="data"
               overlay={curve.fit ? curve.x.map((x, i) => ({ x, y: curve.fit?.[i] ?? null })) : undefined}
               overlayLabel="fit"
-              xLabel={inst?.x_axis} yLabel={inst?.y_axis} height={keys.length > 2 ? 300 : 240}
+              xLabel={inst?.x_axis || (isImage ? "spatial frequency (cycles per pixel)" : undefined)}
+              yLabel={inst?.y_axis || (isImage ? "log power" : isCube ? "mean intensity" : undefined)}
+              height={keys.length > 2 ? 300 : 240}
             />
             {maps.length > 0 && (
               <div className="live-maps">
                 <div className="live-card-head">
-                  <h4>{isImage ? "Analysis" : "Map"}</h4>
+                  <h4>{shownMap?.raw ? "Frame" : isImage ? "Analysis" : "Map"}</h4>
                   <select value={shownMap?.name} onChange={(e) => setMapName(e.target.value)}>
                     {maps.map((m) => <option key={m.name} value={m.name}>{m.name}</option>)}
                   </select>
                   <Info>
-                    {isImage
+                    {shownMap?.raw
+                      ? "The measurement itself, as the instrument delivered it. A datacube is shown summed over "
+                        + "its spectral axis."
+                      : isImage
                       ? "What the recipe found in this frame. Produced without a model call."
                       : "What the recipe computed for this frame, per pixel. The tracked number is the mean "
                         + "of the map. Produced without a model call."}
                   </Info>
                 </div>
                 {shownMap && (
-                  <img src={api.fileUrl(sessionId, shownMap.path, shownMap.step)} alt={`${shownMap.name} map, frame ${shownMap.step}`} />
+                  <img className={shownMap.raw ? "raw" : undefined}
+                    src={api.fileUrl(sessionId, shownMap.path, shownMap.step)} alt={`${shownMap.name} map, frame ${shownMap.step}`} />
                 )}
               </div>
             )}

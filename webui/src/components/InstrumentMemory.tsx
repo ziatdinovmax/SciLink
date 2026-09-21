@@ -90,6 +90,12 @@ export function InstrumentMemory({ currentId, refreshKey, info }: { currentId?: 
                       <tr key={r.recipe_id}>
                         <td title={Object.entries(r.outputs).map(([n, d]) => `${n}: ${d}`).join("\n")}>
                           {names.join(", ") || "not recorded"}
+                          {r.contested && (
+                            <span className="live-memory-tag warn"
+                              title="Adopted because two independent analyses rejected the recipe before it. It was never verified, so verified recipes are tried first.">
+                              contested
+                            </span>
+                          )}
                         </td>
                         <td>{r.sample || "not recorded"}</td>
                         <td>{r.uses ? plural(r.uses, "time") : "never"}</td>

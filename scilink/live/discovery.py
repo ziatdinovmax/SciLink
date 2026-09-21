@@ -35,11 +35,15 @@ def assess_change(data_path: str, *, modality: Any, system_info: Any, what_chang
                   futurehouse_api_key: Optional[str] = None, max_claims: int = 3,
                   agent_factory: Optional[Callable[[str], Any]] = None,
                   literature: Any = None, scorer: Any = None,
+                  analysis_kwargs: Optional[Dict[str, Any]] = None,
                   logger: Optional[logging.Logger] = None) -> Dict[str, Any]:
     """Claims about a changed frame, and how new each is. Never raises.
 
     ``literature`` / ``scorer`` are injectable (tests, another search backend);
-    by default they are ``OwlLiteratureAgent`` and ``NoveltyScorer``."""
+    by default they are ``OwlLiteratureAgent`` and ``NoveltyScorer``.
+    ``analysis_kwargs`` go to the analysis as they are (the loop uses it to ask
+    for the tracked quantities by name, so the result's ``features`` can be put
+    beside the recipe's)."""
     log = logger or logging.getLogger("scilink.live.discovery")
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -53,20 +57,43 @@ def assess_change(data_path: str, *, modality: Any, system_info: Any, what_chang
         modality = resolve_modality(modality)
         shim = SimpleNamespace(api_key=agent_kwargs.get("api_key"), model_name=agent_kwargs.get("model_name"),
                                base_url=agent_kwargs.get("base_url"), _human_feedback=False)
-        agent = (agent_factory(str(out / "analysis")) if agent_factory is not None
-                 else modality.make_agent(shim, str(out / "analysis")))
-        kwargs: Dict[str, Any] = {"system_info": with_sidecar(system_info, data_path), "profile": profile}
+        kwargs: Dict[str, Any] = {**(analysis_kwargs or {}),
+                                  "system_info": with_sidecar(system_info, data_path)}
         if what_changed:
             kwargs["hints"] = what_changed
-        res = agent.analyze(str(data_path), **kwargs) or {}
+        usable = tuple(getattr(modality, "usable_status", ("success",)))
+        res: Dict[str, Any] = {}
+        # An analysis that fails leaves claims made from LOOKING at the frame and
+        # no numbers (seen live: a quick image script that raised, one attempt).
+        # Like an audit that could not be formed, it is tried once more, deeper.
+        for attempt, depth in enumerate(dict.fromkeys([profile, _deeper(profile)])):
+            if depth is None:
+                continue
+            where = str(out / ("analysis" if attempt == 0 else "analysis_retry"))
+            agent = agent_factory(where) if agent_factory is not None else modality.make_agent(shim, where)
+            res = agent.analyze(str(data_path), **{**kwargs, "profile": depth}) or {}
+            result["profile"] = depth
+            if res.get("status") in usable:
+                break
+            result["retried"] = True
+        measured = res.get("status") in usable
         result["analysis_status"] = res.get("status")
         result["analysis_dir"] = res.get("output_directory")
         result["summary"] = str(res.get("detailed_analysis") or "")[:1500]
         result["llm_calls"] = (res.get("stage_timings") or {}).get("llm_calls")
+        try:
+            result["features"] = ({k: float(v) for k, v in (modality.features(res) or {}).items()}
+                                  if measured else {})
+        except Exception:  # noqa: BLE001 - the claims stand without the numbers
+            result["features"] = {}
         claims = [c for c in (res.get("scientific_claims") or []) if isinstance(c, dict) and c.get("claim")]
         result["claims"] = [{"claim": c.get("claim"), "question": c.get("has_anyone_question"),
                              "impact": c.get("scientific_impact")} for c in claims[:max_claims]]
-        result["status"] = "success" if claims else "no_claims"
+        # "unmeasured": there are claims, and no analysis behind them finished.
+        result["status"] = ("no_claims" if not claims else "success" if measured else "unmeasured")
+        if not measured:
+            err = res.get("error")
+            result["analysis_error"] = str((err or {}).get("error") if isinstance(err, dict) else err or "")[:300]
     except Exception as e:  # noqa: BLE001 - reported, never raised
         result["error"] = f"{type(e).__name__}: {e}"
         log.warning(f"the analysis of the changed frame failed: {e}")
@@ -106,6 +133,11 @@ def assess_change(data_path: str, *, modality: Any, system_info: Any, what_chang
     except OSError:
         pass
     return result
+
+
+def _deeper(profile: Any) -> Optional[str]:
+    from .measurement_loop import MeasurementLoop
+    return MeasurementLoop._deeper_profile(profile)
 
 
 def describe(result: Dict[str, Any]) -> List[str]:

@@ -994,9 +994,10 @@ class MeasurementLoop:
           reports, and gives way to anything above.
         """
         try:
+            moved = False
             if clean:
                 self._novelty_open = False
-                self._watch_gradual(data_path, record)
+                moved = self._watch_gradual(data_path, record)
             run = self._breach_kinds[-self.breach_patience:]
             changed = needs_escalation and FLAG_DRIFT in (record.get("flags") or [])
             announced = changed and not self._novelty_open
@@ -1022,6 +1023,17 @@ class MeasurementLoop:
                     else:
                         self.escalate(data_path)
                         record["escalation"] = "started"
+            elif moved and policy != "report" and self.auto_escalate and job is None:
+                # A change that arrived slowly is a change: the same question ("is
+                # the recipe still right?") and the same policy. Seen live on an
+                # image stream, where the audit IS the correctness check: the slow
+                # alarm announced a nucleation and nothing looked at the recipe.
+                if policy == "audit" and self.outputs:
+                    self.audit(data_path, reason="change", locked=features)
+                    record["escalation"] = "audit_started"
+                else:
+                    self.escalate(data_path)
+                    record["escalation"] = "started"
             elif needs_escalation and not announced:
                 # Fits, and the policy is to report. Never on the frame that
                 # announced it: a driver may make that frame a decision point, and
@@ -1073,13 +1085,14 @@ class MeasurementLoop:
 
     GRADUAL_BASELINE_FRAMES = 6
 
-    def _watch_gradual(self, data_path: str, record: Dict[str, Any]) -> None:
+    def _watch_gradual(self, data_path: str, record: Dict[str, Any]) -> bool:
         """The slow alarm: the stream has moved far from its reference without any
         frame ever looking new. Announced like any lasting change (so a recommender
-        is told and a driver may pause), once per level of distance."""
+        is told and a driver may pause), once per level of distance. True when it
+        announced, so the change policy is applied to it as to any change."""
         far = (record.get("gate") or {}).get("drift_from_reference")
         if self._gradual_level is None or not isinstance(far, (int, float)):
-            return
+            return False
         # How far ORDINARY frames sit from the reference is learned first: one
         # reference frame spans little, so frame-to-frame variation alone reads as
         # distance (live, an image stream: 0.26 to 0.32 within four quiet frames,
@@ -1093,13 +1106,13 @@ class MeasurementLoop:
                 # frames carry the drift, and the floor is what is wanted.
                 usual = float(np.percentile(self._gradual_baseline, 25))
                 self._gradual_level = max(self._gradual_level, 2.0 * usual)
-            return
+            return False
         self._gradual_streak = self._gradual_streak + 1 if far > self._gradual_level else 0
         # Twice the usual patience: what arrived slowly is still there a few frames
         # later, and a two-frame wobble in one noisy region is not (live, real HAADF
         # tiles: one quarter of the field read 0.30 and 0.25 for two tiles, then 0.15).
         if self._gradual_streak < max(2 * self.breach_patience, 4):
-            return
+            return False
         gate = record.get("gate") or {}
         where = self.modality.annotate_where(self._drift.locate_from_reference(), str(data_path),
                                              self.system_info)
@@ -1118,6 +1131,7 @@ class MeasurementLoop:
                          + (f"; {where[0]['kind']} near {where[0]['x_peak']}" if where else "."))
         # The same distance is not news twice: next at double (past 1 it never fires).
         self._gradual_level, self._gradual_streak = max(2.0 * far, 2.0 * self._gradual_level), 0
+        return True
 
     def _accept_state(self, verified: bool, settled: bool = True) -> None:
         """The changed frames become the stream's new normal (for TRACKING — the
@@ -1184,15 +1198,41 @@ class MeasurementLoop:
             return {"status": "error", "error": "no frame to assess", "claims": []}
         step = int(ev.get("step") or self._step)
         kwargs.setdefault("agent_factory", self._agent_factory)     # the loop's own way of making an agent
+        # Ask for the tracked quantities by name, the way a rebuild does, so the
+        # assessment's numbers can be put beside the recipe's for the same frame.
+        objective = getattr(self.modality, "_objective", None)
+        asked = objective(self) if callable(objective) and self.outputs else None
+        if asked:
+            kwargs.setdefault("analysis_kwargs", {"objective": asked})
         result = assess_change(
             data, modality=self.modality, system_info=self.system_info, what_changed=self._what_changed(),
             agent_kwargs={"api_key": self.api_key, "model_name": self.model_name, "base_url": self.base_url},
             out_dir=str(self.output_dir / "discovery" / f"step_{step:06d}"), profile=profile,
             futurehouse_api_key=futurehouse_api_key, logger=self.logger, **kwargs)
+        result["compared"] = self._beside_recipe(step, result.get("features") or {})
         self.record_event("discovery", about_step=step,
                           **{k: result.get(k) for k in ("status", "claims", "literature", "highest_novelty",
-                                                        "summary", "seconds", "llm_calls", "error") if k in result})
+                                                        "summary", "seconds", "llm_calls", "error", "compared",
+                                                        "profile", "retried", "analysis_error")
+                             if k in result})
         return result
+
+    def _beside_recipe(self, step: int, features: Dict[str, float]) -> Dict[str, Dict[str, float]]:
+        """The tracked quantities for one frame, from the locked recipe and from
+        a fresh analysis of it: what a person at a pause decides on. Only names
+        both report; nothing is judged here."""
+        frame = next((r for r in reversed(self.read_log())
+                      if r.get("event") == "frame" and r.get("step") == step), None)
+        mine = (frame or {}).get("features") or {}
+        out: Dict[str, Dict[str, float]] = {}
+        for name in (self.outputs or mine):
+            want = str(name).lower().replace(" ", "_")
+            theirs = next((k for k in features if k.lower() == want), None) \
+                or next((k for k in features if want in k.lower()), None)
+            ours = name if name in mine else next((k for k in mine if want in k.lower()), None)
+            if theirs is not None and ours is not None:
+                out[str(name)] = {"recipe": float(mine[ours]), "analysis": float(features[theirs])}
+        return out
 
     def _what_changed(self) -> Optional[str]:
         """The latest announced change, in words an analysis can use."""
@@ -1368,12 +1408,28 @@ class MeasurementLoop:
     def escalating(self) -> bool:
         return self._escalation is not None
 
-    def close(self, wait: bool = False, timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    def pending_work(self) -> Optional[Dict[str, Any]]:
+        """The slow-clock work still running (an audit, a rebuild), or ``None``.
+        A host that reaches the end of its frames asks this before closing: an
+        audit started because the data changed is the answer to "is the recipe
+        still right", and a run that ends first should not lose it."""
+        meta = self._escalation_meta
+        if self._escalation is None or not meta:
+            return None
+        return {"mode": meta.get("mode"), "reason": meta.get("reason"), "profile": meta.get("profile"),
+                "started_step": meta.get("started_step"),
+                "seconds": round(time.perf_counter() - float(meta.get("t0") or time.perf_counter()), 1)}
+
+    def close(self, wait: bool = False, timeout: Optional[float] = None,
+              stop: Optional[Callable[[], bool]] = None) -> Optional[Dict[str, Any]]:
         """End the loop's background work. Call it when the stream ends.
 
-        A re-anchor still running is stopped (``wait=False``, the default) or
-        waited for and adopted (``wait=True`` — worth it when the same loop
-        directory will be resumed, so the next run starts on the new recipe).
+        A re-anchor or an audit still running is stopped (``wait=False``, the
+        default) or waited for and adopted (``wait=True`` — worth it when the same
+        loop directory will be resumed, and when an audit was started because the
+        data changed: its verdict is what the run was asked). An audit that
+        disagrees asks for a second one, which is waited for too, all within
+        ``timeout``; ``stop`` (a callable) ends the wait early.
         A stream shorter than a rebuild never sees its result: a re-anchor takes
         one to three minutes, so recorded data replayed at full speed ends
         first. Pace a replay (``interval_s``) when a rebuild should land.
@@ -1385,24 +1441,34 @@ class MeasurementLoop:
             except Exception:  # noqa: BLE001
                 pass
             self._warm = None
+        adopted = None
+        if wait and self._escalation is not None:
+            deadline = (time.monotonic() + float(timeout)) if timeout else None
+            try:
+                for _ in range(3):                       # an audit, its second opinion, a retry
+                    esc = self._escalation
+                    if esc is None:
+                        break
+                    while esc.poll() is None:
+                        if (stop is not None and stop()) or (deadline is not None and time.monotonic() > deadline):
+                            raise TimeoutError("stopped" if (stop is not None and stop()) else "not finished in time")
+                        try:                             # in short slices, so a stop is heard
+                            esc.wait(0.5) if hasattr(esc, "wait") else time.sleep(0.5)
+                        except Exception:  # noqa: BLE001 - still running
+                            pass
+                    adopted = self._poll_escalation() or adopted
+            except Exception as e:  # noqa: BLE001
+                self.logger.warning(f"close(): the background analysis did not finish: {e}")
+        if self._escalation is not None:
+            self._cancel_background("the loop was closed before the background analysis finished")
+            self._save_state()
+        # After the wait, so the run's summary has the audit and any adoption in it.
         if self._home is not None and self.recipe is not None and not getattr(self, "_run_recorded", False):
             try:
                 self._home.record_run(self)
                 self._run_recorded = True
             except Exception as e:  # noqa: BLE001
                 self.logger.warning(f"could not record the run for the instrument: {e}")
-        esc, adopted = self._escalation, None
-        if esc is None:
-            return None
-        if wait and hasattr(esc, "wait"):
-            try:
-                esc.wait(timeout)
-                adopted = self._poll_escalation()
-            except Exception as e:  # noqa: BLE001
-                self.logger.warning(f"close(): the re-anchor did not finish: {e}")
-        if self._escalation is not None:
-            self._cancel_background("the loop was closed before the re-anchor finished")
-            self._save_state()
         return adopted
 
     def __enter__(self) -> "MeasurementLoop":
@@ -1553,6 +1619,10 @@ class MeasurementLoop:
         source = ("recalled" if result.get("recalled") else
                   "bank" if result.get("cold_start") else f"reanchor:{meta.get('profile')}")
         self.recipe = self._recipe_record(script, source)
+        if base.get("contested"):
+            # Adopted because two analyses rejected the old one, not because it was
+            # verified: it says so wherever it goes (the log, the instrument's memory).
+            self.recipe["contested"] = True
         self._calibrate()
         self._seed_drift(meta.get("frames") or [meta.get("data")], keep=True)
         self._breach_kinds = []

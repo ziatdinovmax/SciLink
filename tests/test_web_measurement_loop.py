@@ -212,9 +212,10 @@ def test_open_ended_until_stopped_and_the_log_is_read_incrementally(session):
     snap = _wait(session, lambda s: s["state"] == "running" and len(s["frames"]) >= 3)
     assert snap["n_frames_total"] is None
     run = live_api._RUNS[session.id]
-    offset = run._tail.offset
+    offset, seen = run._tail.offset, snap["status"]["frames"]
     assert offset > 0
-    _wait(session, lambda s: s["status"]["frames"] >= 6)
+    # more frames than were in when the offset was read (frames can outrun this test)
+    _wait(session, lambda s: s["status"]["frames"] >= seen + 3)
     assert run._tail.offset > offset                         # continued from where it stopped
     live_api.stop(session)
     done = _wait(session, lambda s: s["state"] == "stopped")
@@ -373,7 +374,9 @@ def test_a_stream_of_datacubes_runs_in_the_tab(tmp_path, monkeypatch):
     assert len(snap["latest"]["x"]) == 160 and abs(snap["latest"]["x"][0] - 0.30) < 1e-6   # mean spectrum, in eV
     assert "fit" not in snap["latest"]
     # the frame's result is its maps: served as session files, the tracked output's first
-    assert [m["name"] for m in snap["maps"]] == ["Plasmon_Energy", "fit_R2"] and snap["maps"][0]["tracked"]
+    assert [m["name"] for m in snap["maps"]] == ["Plasmon_Energy", "fit_R2", "total intensity"]
+    assert snap["maps"][0]["tracked"] and snap["maps"][-1]["raw"]        # the cube itself, last
+    assert (sdir / snap["maps"][-1]["path"]).is_file()
     assert snap["maps"][0]["path"].startswith("live/run_001/loop/frames/frame_000003/")
     assert (sdir / snap["maps"][0]["path"]).is_file()
     replay = SEEN[-1]                                    # the fast path asked for a strict replay
@@ -422,7 +425,10 @@ def test_a_stream_of_images_runs_in_the_tab(tmp_path, monkeypatch):
     assert live_api._RUNS[session.id].loop.on_change == "audit"
     assert snap["output_keys"] == ["particle_count", "mean_diameter_nm"]
     assert len(snap["latest"]["x"]) == 96 and 0.01 < snap["latest"]["x"][0] < 0.02     # the power spectrum
-    [overlay] = snap["maps"]
+    overlay, frame_view = snap["maps"]                     # the analysis first, then the frame itself
+    assert frame_view["name"] == "frame" and frame_view["raw"] and (sdir / frame_view["path"]).is_file()
+    views = sorted(p.name for p in (sdir / frame_view["path"]).parent.glob("frame_*.png"))
+    assert len(views) <= 2                                 # the reference and the newest, no more
     assert overlay["name"] == "analysis overlay" and overlay["path"].endswith("image_0000/visualization.png")
     replay = SEEN[-1]
     assert replay["strict_replay"] is True and replay["replay_reference"] == {"particle_count": 70.0,
@@ -564,3 +570,36 @@ def test_the_instrument_memory_routes_read_and_forget(tmp_path, monkeypatch):
     assert client.delete("/api/v1/live/instruments/tem-2/recipes/nope").status_code == 404
     after = client.delete("/api/v1/live/instruments/tem-2/recipes/abc123").json()
     assert after["recipes"] == [] and len(after["runs"]) == 1 and not recipe.exists()
+
+
+def test_a_run_that_ends_with_an_audit_still_working_waits_for_its_verdict(session, monkeypatch):
+    """Seen live: a 24-frame run ended while the second audit of a disagreed
+    change was working, and the audit was cancelled. The run now says it is
+    finishing and waits; Stop ends the wait and the run still counts as done."""
+    calls, release = [], {"pending": True}
+
+    def pending_work(self):
+        return ({"mode": "audit", "reason": "change", "profile": "thorough", "started_step": 3, "seconds": 1.0}
+                if release["pending"] else None)
+
+    real_close = MeasurementLoop.close
+
+    def close(self, wait=False, timeout=None, stop=None):
+        calls.append({"wait": wait, "timeout": timeout, "stoppable": callable(stop)})
+        if wait:
+            t0 = time.time()
+            while release["pending"] and not stop() and time.time() - t0 < 30:
+                time.sleep(0.02)
+            release["pending"] = False
+        return real_close(self)
+
+    monkeypatch.setattr(MeasurementLoop, "pending_work", pending_work)
+    monkeypatch.setattr(MeasurementLoop, "close", close)
+    live_api.start(session, dict(CONFIG))
+    snap = _wait(session, lambda s: s["state"] == "finishing")
+    assert snap["finishing"]["mode"] == "audit" and snap["finishing"]["started_step"] == 3
+    assert len(snap["frames"]) == 4                                   # every frame is in
+    live_api.stop(session)                                            # a person ends the wait
+    snap = _wait(session, lambda s: s["state"] in ("done", "stopped"))
+    assert snap["state"] == "done" and snap.get("finishing") is None
+    assert calls[0] == {"wait": True, "timeout": 1800.0, "stoppable": True}

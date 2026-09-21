@@ -75,3 +75,57 @@ def test_the_loop_runs_it_for_the_latest_change_and_puts_it_on_the_log(tmp_path)
     assert out["highest_novelty"] == 5 and "new structure appeared from 16.5 to 17.5" in Agent.seen[0]["hints"]
     event = next(e for e in loop.read_log() if e["event"] == "discovery")
     assert event["about_step"] == 7 and event["claims"][0]["novelty_score"] == 5
+
+
+def test_the_assessments_numbers_are_put_beside_the_recipes_for_the_same_frame(tmp_path):
+    """What a person at a pause decides on: the recipe says 52, a fresh look says
+    115. The analysis is asked for the tracked names, like a rebuild is."""
+    from scilink.live import MeasurementLoop
+    from scilink.live.simulators import get_simulator
+    from tests.test_image_measurement_loop import _anchor, _factory
+
+    class Counts(Agent):
+        def analyze(self, data, **kw):
+            res = super().analyze(data, **kw)
+            return {**res, "extracted_features": {"particle_count": 115, "Mean_Diameter_nm_all": 3.9, "other": 1.0}}
+
+    sim = get_simulator("particle_coarsening_images", seed=2)
+    loop = MeasurementLoop(str(tmp_path / "loop"), system_info=sim.system_info, instrument=sim,
+                           outputs=sim.outputs, agent_factory=_factory, check_portability=False)
+    ref = sim.acquire({}).save(str(tmp_path / "ref"), 0, stem="reference")
+    loop.setup(anchor=str(_anchor(tmp_path, {"particle_count": 70, "mean_diameter_nm": 5.0})), reference_data=ref)
+    frame = sim.acquire({})
+    record = loop.step(frame.save(str(tmp_path / "frames"), 1))
+    loop._last_novelty = {"step": record["step"], "since_step": 1, "data": record["data"], "where": []}
+    Agent.seen = []
+    out = loop.assess_change(agent_factory=Counts)
+    assert "particle_count" in Agent.seen[0]["objective"]                  # asked for by name
+    assert out["compared"]["particle_count"] == {"recipe": record["features"]["particle_count"], "analysis": 115.0}
+    assert out["compared"]["mean_diameter_nm"]["analysis"] == 3.9         # matched by name, not by luck
+    assert "other" not in out["compared"]
+    event = next(e for e in loop.read_log() if e["event"] == "discovery")
+    assert event["compared"] == out["compared"]
+    loop.close()
+
+
+def test_an_assessment_whose_analysis_failed_is_tried_once_deeper_and_never_called_measured(tmp_path):
+    """Seen live: a quick image script raised, and the write-up still carried
+    claims made from looking at the frame. That is not a measurement."""
+    class Flaky(Agent):
+        def analyze(self, data, **kw):
+            res = super().analyze(data, **kw)
+            ok = kw["profile"] == "thorough" and Flaky.recovers
+            return {**res, "status": "success" if ok else "error", "error": {"error": "All 1 image analysis(es) failed"},
+                    "extracted_features": {"particle_count": 115} if ok else {}}
+
+    Agent.seen, Flaky.recovers = [], True
+    out = assess_change(str(tmp_path / "f.npy"), modality="image", system_info={}, what_changed=None,
+                        agent_kwargs={}, out_dir=str(tmp_path / "a"), agent_factory=Flaky)
+    assert [k["profile"] for k in Agent.seen] == ["quick", "thorough"]
+    assert out["status"] == "success" and out["retried"] and out["features"] == {"particle_count": 115.0}
+
+    Agent.seen, Flaky.recovers = [], False
+    out = assess_change(str(tmp_path / "f.npy"), modality="image", system_info={}, what_changed=None,
+                        agent_kwargs={}, out_dir=str(tmp_path / "b"), agent_factory=Flaky)
+    assert out["status"] == "unmeasured" and out["claims"] and out["features"] == {}
+    assert "failed" in out["analysis_error"] and len(Agent.seen) == 2
