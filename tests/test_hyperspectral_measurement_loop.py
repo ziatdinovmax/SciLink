@@ -201,16 +201,28 @@ def test_a_reference_whose_required_map_never_passed_does_not_arm_the_loop(tmp_p
         loop.setup(reference=str(tmp_path / "reference_000000.npy"))
 
 
-def test_a_slow_red_shift_is_announced_as_the_whole_field_moving(tmp_path):
+def test_a_slow_red_shift_is_announced_as_the_whole_field_moving(tmp_path, monkeypatch):
     """No frame of the ramp ever looks new. The slow alarm says the stream has
     moved from its reference, what moved, and that no one region did it."""
+    real = SpectrumImageSeries._acquire
+
+    def ramp_only(self, params, rng):                       # the red-shift goes on, the second mode never comes
+        frame = self.frame
+        energy = self.energy
+        self.energy = lambda f: 0.62 - 0.0015 * (frame - 1)
+        self.frame = min(frame, 12)
+        try:
+            return real(self, params, rng)
+        finally:
+            self.frame, self.energy = frame, energy
+    monkeypatch.setattr(SpectrumImageSeries, "_acquire", ramp_only)
     sim = get_simulator("spectrum_image_series", seed=3)
     first = sim.acquire({})
     ref = first.save(str(tmp_path / "reference"), 0, stem="reference")
     loop = MeasurementLoop(str(tmp_path / "loop"), system_info=sim.system_info, instrument=sim,
                            agent_factory=_factory, breach_patience=2, gradual_bar=0.15)
     loop.setup(anchor=str(_anchor(tmp_path, first.cube)), reference_data=ref)
-    records = run_experiment(sim, loop, 11, apply="never")           # ends before the second mode
+    records = run_experiment(sim, loop, 18, apply="never")
     assert all(r["flags"] == [] for r in records)
     [slow] = [e for e in loop.read_log() if e["event"] == "novelty"]
     assert slow["onset"] == "gradual" and slow["fraction"] > 0.15 and "region" not in slow

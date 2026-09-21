@@ -62,6 +62,8 @@ class Frame:
     y_label: str = "y"
     #: A datacube frame (H, W, channels). ``None`` for a curve.
     cube: Any = None
+    #: An image frame (H, W); ``x`` / ``y`` are then its radial power spectrum.
+    image: Any = None
 
     def save(self, directory: str, index: int, stem: str = "frame") -> str:
         """Write ``<stem>_<index>.csv`` (a curve) or ``.npy`` (a datacube) and a
@@ -69,9 +71,10 @@ class Frame:
         return the data file's path."""
         d = Path(directory)
         d.mkdir(parents=True, exist_ok=True)
-        if self.cube is not None:
+        if self.cube is not None or self.image is not None:
             path = d / f"{stem}_{index:06d}.npy"
-            np.save(path, np.asarray(self.cube, dtype=np.float32))
+            np.save(path, np.asarray(self.cube if self.cube is not None else self.image,
+                                     dtype=np.float32))
         else:
             path = d / f"{stem}_{index:06d}.csv"
             np.savetxt(path, np.column_stack([np.asarray(self.x, float), np.asarray(self.y, float)]),
@@ -99,8 +102,8 @@ class Instrument:
     outputs: Dict[str, str] = {}
     #: Suggested targets, in plain words.
     targets: List[str] = []
-    #: What a frame IS: ``"curve"`` (a 1D spectrum) or ``"hyperspectral"`` (a
-    #: datacube). A loop given this instrument follows it accordingly.
+    #: What a frame IS: ``"curve"`` (a 1D spectrum), ``"hyperspectral"`` (a
+    #: datacube) or ``"image"``. A loop given this instrument follows it accordingly.
     modality: str = "curve"
 
     def acquire(self, params: Dict[str, Any]) -> Frame:  # pragma: no cover - interface
@@ -211,8 +214,8 @@ class ReplayInstrument(Instrument):
     def __init__(self, source: Any, *, system_info: Optional[Dict[str, Any]] = None,
                  outputs: Optional[Dict[str, str]] = None, targets: Optional[List[str]] = None,
                  name: str = "replay", modality: Optional[str] = None) -> None:
-        from .modality import CUBE_SUFFIXES
-        suffixes = tuple(dict.fromkeys(_CURVE_SUFFIXES + CUBE_SUFFIXES))
+        from .modality import CUBE_SUFFIXES, IMAGE_SUFFIXES
+        suffixes = tuple(dict.fromkeys(_CURVE_SUFFIXES + CUBE_SUFFIXES + IMAGE_SUFFIXES))
         if isinstance(source, (str, Path)):
             root = Path(source).expanduser()
             if not root.is_dir():
@@ -228,6 +231,8 @@ class ReplayInstrument(Instrument):
         self.modality = modality or self._sniff(self.files[0])
         if self.modality == "hyperspectral":
             self.files = [p for p in self.files if p.suffix.lower() in CUBE_SUFFIXES]
+        elif self.modality == "image":
+            self.files = [p for p in self.files if p.suffix.lower() in IMAGE_SUFFIXES]
         self.name = name
         self.system_info = dict(system_info or {})
         self.outputs = dict(outputs or {})
@@ -248,8 +253,13 @@ class ReplayInstrument(Instrument):
             raise EndOfData(f"all {len(self.files)} recorded measurements have been replayed")
         path = self.files[self._next]
         self._next += 1
-        cube = None
-        if self.modality == "hyperspectral":
+        cube = image = None
+        if self.modality == "image":
+            from .modality import ImageModality, load_image
+            image = load_image(path)
+            x, y = ImageModality().read_signal(str(path), self.system_info)
+            x_label, y_label = "spatial_frequency_cycles_per_px", "log10_power"
+        elif self.modality == "hyperspectral":
             from .modality import HyperspectralModality, load_cube
             cube = load_cube(path)
             x, y = HyperspectralModality().read_signal(str(path), self.system_info)
@@ -270,17 +280,24 @@ class ReplayInstrument(Instrument):
             k: v for k, v in recorded.items() if k not in ("params", "truth")}
         return Frame(x=x, y=y, params={**rec_params, **(params or {})},
                      meta={**meta, "source_file": path.name, "index": self._next},
-                     x_label=x_label, y_label=y_label, cube=cube)
+                     x_label=x_label, y_label=y_label, cube=cube, image=image)
 
     @staticmethod
     def _sniff(path: Path) -> str:
-        if path.suffix.lower() in (".h5", ".hdf5", ".nxs"):
+        suffix = path.suffix.lower()
+        if suffix in (".h5", ".hdf5", ".nxs"):
             return "hyperspectral"
-        if path.suffix.lower() == ".npy":
+        if suffix in (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"):
+            return "image"
+        if suffix == ".npy":
             try:
-                return "hyperspectral" if np.load(path, mmap_mode="r").ndim == 3 else "curve"
+                shape = np.load(path, mmap_mode="r").shape
             except Exception:  # noqa: BLE001
                 return "curve"
+            if len(shape) == 3:
+                return "hyperspectral"
+            # (N, 2) / (2, N) / (N,) is a curve; anything wider both ways is an image
+            return "image" if len(shape) == 2 and min(shape) >= 16 else "curve"
         return "curve"
 
 

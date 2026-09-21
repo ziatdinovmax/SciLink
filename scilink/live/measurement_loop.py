@@ -294,6 +294,13 @@ class MeasurementLoop:
             normal for the stream. It reads the data only, never the recipe, so
             its verdict does not depend on which recipe was locked. LOWER
             either to catch weaker changes, RAISE if ordinary variation is flagged.
+        keep_frame_dirs: how many per-frame working folders to keep (the newest).
+            A frame's numbers, flags and the path of its data are in the log for
+            good; its folder holds what the replay wrote (the script, an overlay
+            or maps, copies of the data) and whatever a recipe chooses to write,
+            which an open-ended run cannot keep for every frame (observed live:
+            a recipe's tool left 770 MB per frame, 12 GB in eleven frames). The
+            measured data itself is never touched. ``None`` keeps every folder.
         gradual_bar: the slow alarm. A change that arrives gradually never makes
             one frame suspected (each is explained by the frames just before
             it), so the loop also watches how far the stream has moved FROM ITS
@@ -377,7 +384,7 @@ class MeasurementLoop:
                  auto_escalate: bool = False,
                  reanchor_frames: int = 5,
                  drift_fraction: float = 0.10, drift_score: float = 3.0,
-                 gradual_bar: Optional[float] = 0.25,
+                 gradual_bar: Optional[float] = 0.25, keep_frame_dirs: Optional[int] = 100,
                  on_change: str = "report", instrument: Any = None, modality: Any = None,
                  audit_every: Optional[int] = None, audit_profile: str = "quick",
                  audit_tolerance: float = 0.05,
@@ -422,12 +429,14 @@ class MeasurementLoop:
             raise ValueError("on_change must be 'report', 'audit' or 'rebuild'")
         self.on_change = on_change
         self._novelty_open = False          # the current run of changed frames has been announced
+        self.keep_frame_dirs = int(keep_frame_dirs) if keep_frame_dirs else None
         self.gradual_bar = float(gradual_bar) if gradual_bar else None
         #: Recipes this run has used and left, newest last. A stream that returns
         #: to a state it has been in is served by recall (a strict replay, no
         #: model call) instead of a new analysis.
         self._known_recipes: List[Dict[str, Any]] = []
         self._gradual_level = self.gradual_bar      # the distance that is news next
+        self._gradual_baseline: List[float] = []    # from_reference of the first accepted frames
         self._gradual_streak = 0
         self.audit_every = int(audit_every) if audit_every else None
         self.audit_profile, self.audit_tolerance = audit_profile, float(audit_tolerance)
@@ -831,7 +840,19 @@ class MeasurementLoop:
         self._append(record)
         self._save_state()
         self._slow_clock(data_path, record, needs_escalation, clean, features)
+        self._prune_frame_dirs(idx)
         return record
+
+    def _prune_frame_dirs(self, idx: int) -> None:
+        """Keep the newest ``keep_frame_dirs`` per-frame folders. Never the data."""
+        if not self.keep_frame_dirs or idx <= self.keep_frame_dirs:
+            return
+        old = self.output_dir / "frames" / f"frame_{idx - self.keep_frame_dirs:06d}"
+        try:
+            if old.is_dir():
+                shutil.rmtree(old, ignore_errors=True)
+        except Exception:  # noqa: BLE001 - housekeeping never fails a frame
+            pass
 
     def _slow_clock(self, data_path: str, record: Dict[str, Any], needs_escalation: bool,
                     clean: bool, features: Dict[str, float]) -> None:
@@ -892,7 +913,7 @@ class MeasurementLoop:
         since when, and what to look at — read from the data alone."""
         gate = record.get("gate") or {}
         first = self._step - self._consecutive_breaches + 1
-        where = self._drift.locate()
+        where = self.modality.annotate_where(self._drift.locate(), str(data_path), self.system_info)
         event = {"event": "novelty", "step": self._step, "since_step": first,
                  "fraction": gate.get("drift_fraction"), "score": gate.get("drift_score"),
                  "from_reference": gate.get("drift_from_reference"),
@@ -921,6 +942,8 @@ class MeasurementLoop:
                          f"stream so far" + (f"; {where[0]['kind']} near {where[0]['x_peak']}" if where else "."))
         return event
 
+    GRADUAL_BASELINE_FRAMES = 6
+
     def _watch_gradual(self, data_path: str, record: Dict[str, Any]) -> None:
         """The slow alarm: the stream has moved far from its reference without any
         frame ever looking new. Announced like any lasting change (so a recommender
@@ -928,11 +951,29 @@ class MeasurementLoop:
         far = (record.get("gate") or {}).get("drift_from_reference")
         if self._gradual_level is None or not isinstance(far, (int, float)):
             return
+        # How far ORDINARY frames sit from the reference is learned first: one
+        # reference frame spans little, so frame-to-frame variation alone reads as
+        # distance (live, an image stream: 0.26 to 0.32 within four quiet frames,
+        # and a false "moved from the reference" at frame 4). The bar is at least
+        # twice that baseline, and nothing is announced while it is being learned.
+        if len(self._gradual_baseline) < self.GRADUAL_BASELINE_FRAMES:
+            self._gradual_baseline.append(float(far))
+            if len(self._gradual_baseline) == self.GRADUAL_BASELINE_FRAMES:
+                # The lower quartile, not the median: if the stream is already
+                # drifting while the baseline is learned, the later of these
+                # frames carry the drift, and the floor is what is wanted.
+                usual = float(np.percentile(self._gradual_baseline, 25))
+                self._gradual_level = max(self._gradual_level, 2.0 * usual)
+            return
         self._gradual_streak = self._gradual_streak + 1 if far > self._gradual_level else 0
-        if self._gradual_streak < self.breach_patience:
+        # Twice the usual patience: what arrived slowly is still there a few frames
+        # later, and a two-frame wobble in one noisy region is not (live, real HAADF
+        # tiles: one quarter of the field read 0.30 and 0.25 for two tiles, then 0.15).
+        if self._gradual_streak < max(2 * self.breach_patience, 4):
             return
         gate = record.get("gate") or {}
-        where = self._drift.locate_from_reference()
+        where = self.modality.annotate_where(self._drift.locate_from_reference(), str(data_path),
+                                             self.system_info)
         event = {"event": "novelty", "onset": "gradual", "step": self._step,
                  "since_step": self._step - self._gradual_streak + 1,
                  "fraction": far, "from_reference": far, "score": gate.get("drift_score"),
@@ -1165,6 +1206,19 @@ class MeasurementLoop:
         elif self.outputs and self.modality.pinning and not result.get("pin_edits"):
             failure = ("the new recipe could not be extended to report the pinned "
                        f"outputs: {result.get('pin_error')}")
+        elif (self.outputs and self.modality.require_outputs_after_rebuild
+              and not result.get("recalled")
+              and [k for k in self.outputs if k not in (result.get("pin_features") or {})]):
+            # Names that are only asked for must be checked: a recipe that does
+            # not report what is tracked would leave holes in the run.
+            lost = [k for k in self.outputs if k not in (result.get("pin_features") or {})]
+            named = [k for k in lost if k in (result.get("reported") or [])]
+            failure = (
+                (f"the new analysis reports no value for the tracked output(s) {named} "
+                 "(it found nothing to measure them on); " if named else "")
+                + (f"it does not report {[k for k in lost if k not in named]}; "
+                   if len(named) < len(lost) else "")
+                + f"what it has values for: {sorted(result.get('pin_features') or {})[:8]}")
         if failure:
             record = {"event": "audit_failed" if is_audit else "escalation_failed", **base,
                       "error": failure[:300]}
@@ -1291,7 +1345,7 @@ class MeasurementLoop:
             except Exception:  # noqa: BLE001 - an unreadable reference seeds nothing
                 pass
         self._drift.seed(curves, keep=keep)
-        self._gradual_level, self._gradual_streak = self.gradual_bar, 0
+        self._gradual_level, self._gradual_streak, self._gradual_baseline = self.gradual_bar, 0, []
 
     def _calibrate(self) -> None:
         """Ask the current anchor run what its noise does to the gates."""
@@ -1557,6 +1611,8 @@ class MeasurementLoop:
             "reanchor_frames": self.reanchor_frames, "recent_frames": self._recent_frames,
             "drift": self._drift.to_state(), "drift_fraction": self.drift_fraction,
             "gradual_bar": self.gradual_bar, "gradual_level": self._gradual_level,
+            "keep_frame_dirs": self.keep_frame_dirs,
+            "gradual_baseline": self._gradual_baseline,
             "known_recipes": self._known_recipes,
             "drift_score": self.drift_score, "audit_every": self.audit_every,
             "on_change": self.on_change, "instrument": self.instrument,
@@ -1576,7 +1632,8 @@ class MeasurementLoop:
                   "range_widen", "range_warmup", "range_adopt_after", "gate_keys",
                   "system_info"):
             kwargs.setdefault(k, state.get(k))
-        for k in ("reanchor_frames", "drift_fraction", "drift_score", "gradual_bar", "audit_every", "on_change",
+        for k in ("reanchor_frames", "drift_fraction", "drift_score", "gradual_bar", "keep_frame_dirs",
+                  "audit_every", "on_change",
                   "instrument", "modality",
                   "audit_profile", "audit_tolerance"):
             if state.get(k) is not None:
@@ -1591,6 +1648,7 @@ class MeasurementLoop:
         loop._known_recipes = [r for r in (state.get("known_recipes") or []) if isinstance(r, dict)]
         if state.get("gradual_level") is not None and loop.gradual_bar is not None:
             loop._gradual_level = float(state["gradual_level"])
+            loop._gradual_baseline = [float(v) for v in (state.get("gradual_baseline") or [])]
         loop._step = int(state.get("step") or 0)
         loop._consecutive_breaches = int(state.get("consecutive_breaches") or 0)
         loop._ranges = {k: list(v) for k, v in (state.get("ranges") or {}).items()}

@@ -146,6 +146,21 @@ class TestStep:
         loop.setup(anchor=str(make_anchor(tmp_path)))
         return loop
 
+    def test_an_open_ended_run_does_not_keep_every_frames_folder(self, tmp_path):
+        # Live: a recipe's tool left 770 MB in each frame's folder, 12 GB in eleven frames.
+        loop = self._armed(tmp_path, keep_frame_dirs=3)
+        for i in range(1, 8):
+            rec = loop.step(f"f{i}.csv")
+            Path(rec["frame_dir"]).mkdir(parents=True, exist_ok=True)      # what a replay leaves
+            (Path(rec["frame_dir"]) / "heavy.bin").write_bytes(b"x")
+        kept = sorted(p.name for p in (loop.output_dir / "frames").iterdir())
+        assert kept == ["frame_000005", "frame_000006", "frame_000007"]
+        assert len([e for e in loop.read_log() if e["event"] == "frame"]) == 7   # the record is whole
+        everything = self._armed(tmp_path / "all", keep_frame_dirs=None)
+        for i in range(1, 6):
+            Path(everything.step(f"g{i}.csv")["frame_dir"]).mkdir(parents=True, exist_ok=True)
+        assert len(list((everything.output_dir / "frames").iterdir())) == 5
+
     def test_a_frame_is_a_locked_zero_llm_replay(self, tmp_path):
         loop = self._armed(tmp_path, objective_key="peak_1_center")
         rec = loop.step("f1.csv", params={"T": 300})

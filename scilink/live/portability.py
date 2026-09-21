@@ -133,7 +133,8 @@ CUBE_TOLERANCE = 0.05
 
 def check_cube_portability(replay: Callable[[str, str], Optional[Dict[str, float]]],
                            reference_cube: str, work_dir: str, tracked: Optional[List[str]] = None,
-                           scales=SCALES, tolerance: float = CUBE_TOLERANCE) -> Dict[str, Any]:
+                           scales=SCALES, tolerance: float = CUBE_TOLERANCE,
+                           load: Optional[Callable[[Any], np.ndarray]] = None) -> Dict[str, Any]:
     """The same question for a locked CUBE recipe, asked of its outputs.
 
     ``replay(cube_path, tag)`` runs the locked script on a cube and returns its
@@ -149,7 +150,7 @@ def check_cube_portability(replay: Callable[[str, str], Optional[Dict[str, float
     Zero model calls. ``{}`` when the reference itself cannot be replayed."""
     from .modality import load_cube
     try:
-        cube = load_cube(reference_cube)
+        cube = (load or load_cube)(reference_cube)        # an image is asked the same question
     except (OSError, ValueError):
         return {}
     base = replay(str(reference_cube), "x1")

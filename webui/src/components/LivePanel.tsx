@@ -86,6 +86,15 @@ function clock(seconds: number): string {
 
 function describeWhere(w?: LiveNovelty["where"][number]): string {
   if (!w) return "";
+  if (w.length_units && w.kind !== "window") {
+    // An image's change is located in spatial frequency. A person reads a length scale.
+    const u = w.length_units;
+    const span = `${fmtShort(w.length_from, 2)} to ${fmtShort(w.length_to, 2)} ${u}`;
+    return w.kind === "new" ? `New structure at length scales of ${span}, strongest near ${fmtShort(w.length_peak, 2)} ${u}.`
+      : w.kind === "missing" ? `Structure is gone at length scales of ${span}, most near ${fmtShort(w.length_peak, 2)} ${u}.`
+      : w.kind === "shifted" ? `A characteristic length moved, around ${fmtShort(w.length_peak, 2)} ${u}.`
+      : "The overall texture, sharpness or noise changed.";
+  }
   // A located stretch is known to a few bins, not to five figures.
   const at = `${fmtShort(w.x_from, 3)} to ${fmtShort(w.x_to, 3)}`;
   const peak = fmtShort(w.x_peak, 3);
@@ -656,6 +665,7 @@ export function LivePanel({
     x: f.step, label: f.flags.map((x) => FLAG_WORDS[x] ?? x).join(", "),
   }));
   const isCube = inst?.modality === "hyperspectral";
+  const isImage = inst?.modality === "image";
   const maps = snap?.maps ?? [];
   const shownMap = maps.find((m) => m.name === mapName) ?? maps[0];
   const hasTruth = keys.some((k) => frames.some((f) => f.truth && k in f.truth));
@@ -875,9 +885,16 @@ export function LivePanel({
             <div className="live-card-head">
               <h4>{curve.step === 0 ? "Reference" : `Frame ${curve.step}`}</h4>
               {isCube && <span className="caption">mean spectrum</span>}
+              {isImage && <span className="caption">radial power spectrum</span>}
               {typeof r2 === "number" && curve.step > 0 && <span className="caption">R² {r2.toFixed(3)}</span>}
               <Info>
-                {isCube
+                {isImage
+                  ? "Each frame is an image. This is its radial power spectrum, which is what the change "
+                    + "signal reads, for the whole field and for each quarter of it. It answers to feature "
+                    + "size, periodicity, focus and noise, and not to a field of view that drifts. The "
+                    + "analysis of the frame is the overlay below, produced without a model call and "
+                    + "checked only for whether the method still runs and still finds something."
+                  : isCube
                   ? "Each frame is a datacube. This is its mean spectrum, which is also what the change "
                     + "signal reads, for the whole field and for each quarter of it. The tracked quantities "
                     + "are the means of the maps the recipe computes, produced without a model call."
@@ -895,13 +912,15 @@ export function LivePanel({
             {maps.length > 0 && (
               <div className="live-maps">
                 <div className="live-card-head">
-                  <h4>Map</h4>
+                  <h4>{isImage ? "Analysis" : "Map"}</h4>
                   <select value={shownMap?.name} onChange={(e) => setMapName(e.target.value)}>
                     {maps.map((m) => <option key={m.name} value={m.name}>{m.name}</option>)}
                   </select>
                   <Info>
-                    What the recipe computed for this frame, per pixel. The tracked number is the mean of
-                    the map. Produced without a model call.
+                    {isImage
+                      ? "What the recipe found in this frame. Produced without a model call."
+                      : "What the recipe computed for this frame, per pixel. The tracked number is the mean "
+                        + "of the map. Produced without a model call."}
                   </Info>
                 </div>
                 {shownMap && (

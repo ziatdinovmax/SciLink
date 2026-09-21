@@ -31,7 +31,7 @@ class TestEverySimulator:
         for _ in range(3):
             fa, fb = a.acquire({}), b.acquire({})
         assert np.array_equal(fa.y, fb.y) and np.all(np.isfinite(fa.y))
-        assert len(fa.x) == len(fa.y) > 100 and fa.truth
+        assert len(fa.x) == len(fa.y) > 90 and fa.truth      # an image frame's curve is its 96-bin power spectrum
         assert not np.array_equal(get_simulator(name, seed=4).acquire({}).y,
                                   get_simulator(name, seed=3).acquire({}).y)
 
@@ -46,8 +46,9 @@ class TestEverySimulator:
     def test_a_frame_saves_as_data_plus_sidecar(self, name, tmp_path):
         f = get_simulator(name).acquire({})
         path = Path(f.save(str(tmp_path), 7))
-        if f.cube is not None:                            # a datacube frame
-            assert path.name == "frame_000007.npy" and np.load(path).shape == f.cube.shape
+        if f.cube is not None or f.image is not None:     # a datacube or an image frame
+            array = f.cube if f.cube is not None else f.image
+            assert path.name == "frame_000007.npy" and np.load(path).shape == array.shape
         else:
             assert path.name == "frame_000007.csv"
             data = np.loadtxt(path, delimiter=",", skiprows=1)

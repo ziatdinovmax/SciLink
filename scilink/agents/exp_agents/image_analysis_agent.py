@@ -285,6 +285,14 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # profile — see _qc_profile.verification_addendum. None = judge the
         # whole analysis (today's behavior).
         targets: Optional[List[str]] = None,
+        # A live frame: the locked replay runs with ZERO model calls — no skill
+        # selection, no planning, no vision review, no in-frame repair, no tier
+        # 2, no synthesis, no report — and is judged on evidence alone
+        # (_replay_feature_gate) against ``replay_reference``, the quantities the
+        # approved script reported on its reference (default: the prior run's
+        # own). Needs reuse_locked_script.
+        strict_replay: bool = False,
+        replay_reference: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -392,6 +400,26 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 return _edits_error(
                     "script_edits do not apply", _res["message"],
                     failed_edit=_res.get("failed_edit"))
+
+        if strict_replay:
+            from .controllers.image_analysis_controllers import (
+                _first_prior_image_script, _load_prior_state)
+            _script, _ = (_first_prior_image_script({"prior_analysis_paths": prior_analysis_paths})
+                          if (prior_analysis_paths and reuse_locked_script) else (None, None))
+            if not _script:
+                return {"status": "error",
+                        "error": {"error": "strict_replay requires reuse_locked_script",
+                                  "details": ("A strict replay executes a prior run's approved "
+                                              "script with no model call; pass prior_analysis_paths="
+                                              "[<a prior image run with a saved script>] and "
+                                              "reuse_locked_script=True.")},
+                        "output_directory": str(self.output_dir)}
+            if replay_reference is None:
+                for _p in prior_analysis_paths:
+                    _dir, _data = _load_prior_state(_p)
+                    if _data and isinstance(_data.get("extracted_features"), dict):
+                        replay_reference = _data["extracted_features"]
+                        break
 
         # Parse input
         data_path, data_paths, data_array, error = self._parse_data_input(data)
@@ -535,16 +563,18 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         # Operating profile. The fit-for-purpose presets (quick / extract)
         # are honoured: the pipeline builder drops the stages they turn off
-        # and tier 2 is gated on them. 'realtime' is NOT wired for images
-        # (no deterministic per-frame gate metric — a design decision to make
-        # before a zero-LLM image frame is honest) and falls back to thorough.
-        from ._qc_profile import THOROUGH, resolve_profile
+        # and tier 2 is gated on them. 'realtime' means something for a STRICT
+        # locked replay only (a live frame, judged by the deterministic replay
+        # gate); any other use falls back to thorough, because a fresh image
+        # analysis has no deterministic per-frame gate.
+        from ._qc_profile import REALTIME, THOROUGH, resolve_profile
         qc_profile = resolve_profile(profile)
-        if qc_profile.name == "realtime":
+        if strict_replay:
+            qc_profile = REALTIME
+        elif qc_profile.name == "realtime":
             self.logger.warning(
-                "profile='realtime' is not wired for image analysis yet "
-                "(no deterministic per-frame gate metric); running under "
-                "the thorough profile."
+                "profile='realtime' applies to a strict locked replay only for "
+                "image analysis; running under the thorough profile."
             )
             qc_profile = THOROUGH
         if qc_profile.name != "thorough":
@@ -600,6 +630,8 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # Opt-in verbatim reuse of the prior locked script (#172); default
             # False — prior runs are agent-judged reference material.
             "reuse_locked_script": bool(reuse_locked_script),
+            "_strict_replay": bool(strict_replay),
+            "replay_reference": replay_reference,
             # Surgical follow-up edits applied to the reused script (already
             # validated at entry; the series controller applies them).
             "script_edits": script_edits or [],
@@ -668,6 +700,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             num_plan_candidates=self.num_plan_candidates,
             profile=qc_profile,
             explicit_verification_budget=max_verification_iterations is not None,
+            write_reports=not strict_replay,
         )
 
         # Execute pipeline. The timer lives on the instance so the Tier 2

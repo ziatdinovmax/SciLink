@@ -534,9 +534,20 @@ class DriftBank:
         names = list(signals)
         if len(names) < 2:
             return
-        lender = self._monitor(names[0])._basis
-        for n in names[1:]:
-            self._monitor(n)._borrowed = lender
+        # Only between curves of the SAME kind: a region's spectrum shares the
+        # field's axis; an image's intensity histogram has nothing to learn from
+        # its power spectrum. The first curve on an axis lends to the others on it.
+        lenders: List[Tuple[np.ndarray, str]] = []
+        for n in names:
+            x = np.asarray(signals[n][0], dtype=float).ravel()
+            owner = next((m for ax, m in lenders
+                          if ax.size == x.size and np.allclose(ax, x, rtol=0, atol=1e-9 * max(1.0, float(np.ptp(x)) or 1.0))),
+                         None)
+            if owner is None:
+                lenders.append((x, n))
+                self._monitor(n)._borrowed = None
+            else:
+                self._monitor(n)._borrowed = self._monitor(owner)._basis
 
     def judge(self, signals: Any) -> Dict[str, Any]:
         signals = self.as_signals(signals)

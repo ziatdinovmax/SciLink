@@ -32,7 +32,7 @@ class Model:
 
 def test_every_skill_is_complete_and_on_vocabulary():
     names = list_skills(DOMAIN)
-    assert {"raman", "powder_xrd", "afm_force_curve", "sts_didv"} <= set(names)
+    assert {"raman", "powder_xrd", "afm_force_curve", "sts_didv", "em_imaging"} <= set(names)
     for name in names:
         parsed = load_skill(name, domain=DOMAIN)
         assert all((parsed.get(s) or "").strip() for s in SECTIONS), name

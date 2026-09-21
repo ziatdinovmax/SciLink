@@ -577,14 +577,15 @@ class LiveRun:
         session file route), the tracked outputs' first."""
         import re
         try:
-            found = sorted(Path(str(frame.get("frame_dir"))).glob("*_Dashboard_*.jp*g"))
+            root = Path(str(frame.get("frame_dir")))
+            found = sorted(root.glob("*_Dashboard_*.jp*g")) or sorted(root.glob("image_*/visualization.png"))
         except Exception:  # noqa: BLE001
             return []
         tracked = [k.lower() for k in (self.loop.outputs if self.loop is not None else {})]
         out = []
         for p in found:
             m = re.search(r"_T\d+_(.+)_Dashboard_", p.name)
-            name = m.group(1) if m else p.stem
+            name = m.group(1) if m else ("analysis overlay" if p.name == "visualization.png" else p.stem)
             try:
                 rel = str(p.resolve().relative_to(self._session_dir))
             except Exception:  # noqa: BLE001 - outside the session: not served
@@ -605,9 +606,12 @@ class LiveRun:
         is shown as its mean spectrum (what the change signal reads)."""
         try:
             import numpy as np
-            if getattr(self.instrument, "modality", "curve") == "hyperspectral":
-                from scilink.live.modality import HyperspectralModality
-                x, y = HyperspectralModality().read_signal(
+            kind = getattr(self.instrument, "modality", "curve")
+            if kind != "curve":
+                # A datacube is shown as its mean spectrum, an image as its radial
+                # power spectrum: the curve the change signal reads for that frame.
+                from scilink.live.modality import resolve_modality
+                x, y = resolve_modality(kind).read_signal(
                     str(frame["data"]), getattr(self.instrument, "system_info", None))
                 data = np.column_stack([x, y])
             else:

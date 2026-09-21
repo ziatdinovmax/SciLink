@@ -876,8 +876,39 @@ region for a shift of the whole field), while the field sees that direction at
 full signal. Do not add a per-region monitor that stands on its own history. Several first cubes are a
 reference too: they go to the hyperspectral series driver (scout, regime plan,
 anchor, replays) and the loop locks the recipe of the regime the LAST cube
-belongs to. Images come next through the same seam and need a deterministic
-per-item gate first.
+belongs to.
+
+`ImageModality` is the third instantiation. Its fast path is
+`ImageAnalysisAgent.analyze(strict_replay=True)`: an ordinary image reuse still
+made about six model calls (skill suggestion, planning, plan validation, one
+vision review, the tier-2 decision, synthesis); a strict replay makes none, does
+not repair a script that raises, and writes no report. **An image analysis has no
+R², so its replay verdict is evidence of method HEALTH only** (`_replay_feature_gate`:
+the approved script still reports every quantity it reported on its reference,
+finite, and still finds something). It cannot see a segmentation that runs and
+is wrong. Observed live on a simulated coarsening series: when a second
+population of small particles nucleated, the locked recipe kept counting only the
+large ones (60 of 117) and its gate said good; what caught it was the change
+signal, on the exact frame. So for images the change signal and the audit are not
+extras, they are the correctness checks, and nobody should be told an image frame
+was "verified". Tracked names are only ASKED for (in the objective) and therefore
+checked: a rebuilt recipe that does not report a tracked output is refused
+(`require_outputs_after_rebuild`). The change signal reads the radially averaged
+power spectrum (log power on 96 linear bins from k = 0.01, whole field and
+quarters, after a robust normalisation): chosen by benchmark on the simulated
+series and on tiles of a real HAADF image, where linear-power variants missed a
+defocus blur and doubled noise and misfired on slow coarsening, and an intensity
+histogram added nothing. A located change is reported as a LENGTH SCALE
+(`annotate_where`), not a spatial frequency.
+
+**What a frame leaves on disk is bounded, and heavy assets are per machine.** A
+live run is open-ended, so the loop keeps the newest `keep_frame_dirs` per-frame
+folders (the log and the measured data are never pruned). Model weights a skill
+tool needs are cached once under `~/.scilink/models` (`SCILINK_MODELS` relocates
+it), never relative to the working directory: generated scripts run in a fresh
+per-item folder, and a relative default re-downloaded a 770 MB ensemble into
+every image's folder (live: 36 s a frame and a full disk; 8 s once cached, of
+which 5 s is importing torch in a fresh subprocess).
 
 **A change that arrives slowly has its own alarm.** Every frame of a gradual
 onset is explained by the frames just before it, so no frame is ever suspected

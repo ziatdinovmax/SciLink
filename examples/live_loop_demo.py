@@ -23,6 +23,12 @@ model call, the tracked quantities are the means of the maps it computes, and a
 change is reported with where on the spectral axis and in which part of the
 field it is.
 
+IMAGES are the third kind of frame (``get_simulator("particle_coarsening_images")``,
+or a folder of ``.npy`` / ``.tif`` / ``.png`` images). One caution that does not
+apply to spectra: an image analysis has no fit quality, so a replayed frame is
+checked only for whether the method still runs and still finds something. Whether
+it is still RIGHT is what the change signal and ``audit_every`` are for.
+
 To move to a real instrument there are two routes. If the instrument has (or
 can get) an MCP server in front of its controller, in any language, use
 

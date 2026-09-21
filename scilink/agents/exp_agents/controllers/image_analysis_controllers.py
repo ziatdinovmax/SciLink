@@ -547,6 +547,49 @@ def _load_prior_state(raw_path):
     return anchor_dir, data
 
 
+def _replay_feature_gate(features, reference) -> tuple:
+    """Evidence-only acceptance of an image analysed by a LOCKED-SCRIPT replay.
+
+    A strict replay (a live frame) has no model to look at the overlay, and an
+    image analysis has no R²: what it has is the numbers the approved script
+    reports, and what that script reported on its reference. The gate judges
+    METHOD HEALTH from them and nothing else:
+
+    - every numeric quantity the reference run reported is reported again, and
+      is finite (a script that silently stops measuring something is broken);
+    - the analysis still finds SOMETHING: if every quantity that was non-zero on
+      the reference is zero now (no particles, no mask, no lattice), the method
+      collapsed on this image or there is nothing in it, and either way the
+      frame is not one to track quietly.
+
+    It does not ask whether the values are plausible: in a stream they are
+    expected to move, and that is the live loop's range gate (which flags a
+    jump and adopts a value that persists) and its audits. What no gate here
+    can see is a segmentation that runs, reports finite numbers and is wrong;
+    the independent audit is the check for that. Returns ``(ok, reason)``."""
+    import math
+    ref = {k: v for k, v in (reference or {}).items()
+           if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)}
+    got = features if isinstance(features, dict) else {}
+    if not ref:
+        numeric = [v for v in got.values() if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        if not numeric or not all(math.isfinite(v) for v in numeric):
+            return False, "the replay reported no finite quantity"
+        return True, ""
+    missing = [k for k in ref if not isinstance(got.get(k), (int, float)) or isinstance(got.get(k), bool)]
+    if missing:
+        return False, ("the locked script no longer reports "
+                       + ", ".join(sorted(missing)[:4]) + " (it did on the reference)")
+    broken = [k for k in ref if not math.isfinite(float(got[k]))]
+    if broken:
+        return False, "not finite: " + ", ".join(sorted(broken)[:4])
+    alive = [k for k, v in ref.items() if v != 0]
+    if alive and all(float(got[k]) == 0.0 for k in alive):
+        return False, ("every quantity that was non-zero on the reference is zero here "
+                       "(nothing was found: the method collapsed on this image, or it is empty)")
+    return True, ""
+
+
 def _first_prior_image_script(state: dict):
     """Return the first reusable analysis script for locked-script reuse (#172).
 
@@ -1047,7 +1090,7 @@ class SkillSuggestionController:
         # Skip when a skill was already provided (orchestrator/user) — check
         # both the multi-skill list and the legacy singular field.
         if (state.get("error_dict") or state.get("skills_loaded")
-                or state.get("skill_sections")):
+                or state.get("skill_sections") or state.get("_strict_replay")):
             return state
 
         from ....skills._shared._skill_selector import select_relevant_skills
@@ -1812,6 +1855,20 @@ class ImagePlanningController:
 
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"):
+            return state
+
+        if state.get("_strict_replay"):
+            # A live frame: the approved script IS the plan. No model call.
+            state.setdefault("observations", "")
+            state["analysis_approach"] = "Locked-script replay (strict): no planning"
+            state["processing_pipeline"] = "The prior run's approved script, verbatim"
+            state.setdefault("features_to_extract", [])
+            state.setdefault("quality_criteria", "deterministic replay gate")
+            state.setdefault("expected_outputs", [])
+            state["literature_query"] = None
+            state.setdefault("locked_analysis_config", {})
+            state["series_analysis_plan"] = None
+            state["regime_configs"] = None
             return state
 
         is_single = state.get("is_single_image", True)
@@ -2609,6 +2666,14 @@ Your guidance: '''
                             "    Justified plan deviations: %s",
                             "; ".join(conformance["justified_deviations"]),
                         )
+                elif base_script is not None and state.get("_strict_replay"):
+                    # Strict replay (a live loop's fast clock): repairing the
+                    # locked script means calling a model, which a frame never
+                    # does. Stop; the failure is the signal.
+                    self.logger.warning(
+                        f"    🔒 Strict replay: the locked script failed on this "
+                        f"image ({str(last_error)[:120]}) — not repaired in-frame.")
+                    break
                 else:
                     if should_escalate_timeout_model(
                             base_script, attempt, self.MAX_ATTEMPTS,
@@ -3565,6 +3630,35 @@ Return JSON with:
             image_name=ctx.item_name, image_idx=ctx.item_idx,
             base_script=ctx.reuse_script,
         )
+        if reuse_result.get("success") and ctx.state.get("_strict_replay"):
+            # A live frame: no vision review. The verdict is evidence only —
+            # what the approved script reports, against what it reported on its
+            # reference (see _replay_feature_gate for what that can and cannot see).
+            ok, reason = _replay_feature_gate(
+                reuse_result.get("extracted_features"),
+                ctx.state.get("replay_reference"))
+            (self.logger.info if ok else self.logger.warning)(
+                "   🔒 Deterministic replay gate: " + ("pass" if ok else f"REJECT — {reason}"))
+            reuse_result["reuse_validity"] = {
+                "reused": True, "source": ctx.reuse_source, "gate": "deterministic",
+                "verdict": "good" if ok else "poor", "message": reason or "replay gate passed"}
+            reuse_result["quality_history"] = self._build_quality_history(
+                0.0, ctx.quality_threshold, [], [], None)
+            reuse_result["quality_history"]["approved_by"] = "replay_gate" if ok else None
+            if not ok:
+                reuse_result["quality_warning"] = reason
+            from .._qc_engine import attach_script_edit_provenance
+            attach_script_edit_provenance(ctx, reuse_result)
+            return reuse_result
+        if ctx.state.get("_strict_replay"):
+            # No re-derivation on the fast clock: the failure is the item's result.
+            reuse_result.setdefault(
+                "error", "the locked script could not execute on this image")
+            reuse_result["reuse_validity"] = {
+                "reused": True, "source": ctx.reuse_source, "verdict": "failed",
+                "message": "Strict replay: the locked script failed on this image; "
+                           "no in-frame repair or re-derivation."}
+            return reuse_result
         if reuse_result.get("success"):
             # Softer validity guard: a single vision-verification pass,
             # no iterative re-derivation.

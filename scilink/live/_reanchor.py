@@ -45,8 +45,8 @@ def reanchor(spec: Dict[str, Any]) -> None:
         if recalled is not None:
             payload = recalled
             raise _Done()
-        if spec.get("modality") == "hyperspectral":
-            payload = _hyperspectral(spec, out_dir)
+        if spec.get("modality") in ("hyperspectral", "image"):
+            payload = _fresh_run(spec, out_dir)
             raise _Done()
         from ..agents.exp_agents.curve_fitting_agent import CurveFittingAgent
         agent = CurveFittingAgent(output_dir=str(out_dir / "run"),
@@ -160,19 +160,23 @@ def _recall(spec: Dict[str, Any], out_dir: Path) -> Any:
     return None
 
 
-def _hyperspectral(spec: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
-    """A datacube's rebuild or audit: fresh code for the SAME targets and output
-    names (``locked_targets`` in the spec's analyze kwargs), so nothing is pinned.
-    ``pin_features`` carries what the new run reports, which is what an audit
-    compares and what a rebuilt recipe starts its plausible ranges from."""
-    from ..agents.exp_agents.hyperspectral_analysis_agent import HyperspectralAnalysisAgent
-    from .modality import HyperspectralModality
-    agent = HyperspectralAnalysisAgent(output_dir=str(out_dir / "run"),
-                                       enable_human_feedback=False, **spec["agent_kwargs"])
+def _fresh_run(spec: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
+    """A datacube's or an image's rebuild or audit: one fresh analysis of the
+    newest frame. Nothing is pinned: a cube's names are fixed by construction
+    (``locked_targets`` in the spec's analyze kwargs), an image's are asked for in
+    the objective and checked by the loop at adoption. ``pin_features`` carries
+    what the new run reports, which is what an audit compares and what a rebuilt
+    recipe starts its plausible ranges from."""
+    from types import SimpleNamespace
+    from .modality import resolve_modality
+    modality = resolve_modality(spec["modality"])
+    shim = SimpleNamespace(api_key=spec["agent_kwargs"].get("api_key"),
+                           model_name=spec["agent_kwargs"].get("model_name"),
+                           base_url=spec["agent_kwargs"].get("base_url"), _human_feedback=False)
+    agent = modality.make_agent(shim, str(out_dir / "run"))
     data = spec["data_path"]
     data = data[-1] if isinstance(data, (list, tuple)) else data
     res = agent.analyze(str(data), **dict(spec["analyze_kwargs"])) or {}
-    modality = HyperspectralModality()
     usable = res.get("status") in modality.usable_status
     return {
         "status": "success" if usable else (res.get("status") or "error"),
@@ -181,6 +185,9 @@ def _hyperspectral(spec: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
         "error": res.get("error"),
         "window": None,
         "pin_features": modality.features(res) if usable else {},
+        # every name the run reported, with or without a value
+        "reported": sorted(str(k) for k in (res.get("extracted_features") or {}))
+        if isinstance(res.get("extracted_features"), dict) else [],
         "partial": res.get("status") == "partial",
     }
 

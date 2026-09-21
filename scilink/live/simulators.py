@@ -336,8 +336,91 @@ class SpectrumImageSeries(_Simulator):
                             "second_mode": bool(self.frame >= 13)})
 
 
+class ParticleCoarseningImages(_Simulator):
+    """In-situ TEM images of nanoparticles coarsening on a support (30 frames).
+
+    Bright round particles on a noisy, slowly varying background. They coarsen:
+    the mean diameter grows from 5 to 8 nm while their number falls (large ones
+    grow at the expense of small ones), and every frame the field of view drifts
+    by a few pixels, which is not a change. At frame 16 a second population
+    nucleates: many small particles, about 2 nm, in the lower half of the field.
+    ``dose`` sets the noise (it falls as 1/sqrt(dose)); ``defocus_nm`` blurs the
+    image, and a blurred image loses the small particles first.
+    """
+
+    name = "particle_coarsening_images"
+    modality = "image"
+    SIZE, NM_PER_PX = 256, 0.4
+    system_info = {"technique": "TEM bright-field imaging, in-situ heating",
+                   "microscopy_type": "TEM",
+                   "sample": ("metal nanoparticles on an amorphous support, imaged at each "
+                              "temperature step, so sizes and numbers may change from frame to frame"),
+                   "experimental_details": {"spatial_info": {
+                       "field_of_view_x": 102.4, "field_of_view_y": 102.4, "field_of_view_units": "nm"}}}
+    schema = InstrumentSchema.from_dict({
+        "dose": {"low": 0.2, "high": 10.0, "units": "relative",
+                 "description": "electron dose per frame; noise falls as 1/sqrt(dose), damage rises with it"},
+        "defocus_nm": {"low": 0.0, "high": 60.0, "units": "nm",
+                       "description": "defocus; blurs the image, small particles are lost first"}})
+    defaults = {"dose": 1.0, "defocus_nm": 0.0}
+    outputs = {"particle_count": "number of particles in the field of view",
+               "mean_diameter_nm": "mean equivalent circular diameter of the particles (nm)"}
+    targets = ["particle count", "particle size"]
+    events = [{"frame": 1, "what": "about 70 particles, mean diameter 5 nm, coarsening"},
+              {"frame": 16, "what": "a second population of 2 nm particles nucleates in the lower half"},
+              {"frame": 30, "what": "end of the ramp: about 45 large particles, mean 8 nm"}]
+    N = 30
+
+    def _population(self, frame: int):
+        """The particles of this frame: (y, x, diameter_nm) rows. Deterministic in
+        the seed and the frame, so the truth is known."""
+        rng = np.random.default_rng(self.seed * 7919 + 17)
+        n0 = 70
+        pos = []                                         # kept apart, so a count is a count
+        while len(pos) < n0:
+            c = rng.uniform(8, self.SIZE - 8, 2)
+            if all(np.hypot(*(c - q)) > 22.0 for q in pos):
+                pos.append(c)
+        pos = np.array(pos)
+        rank = rng.permutation(n0)                       # which ones dissolve first
+        base = rng.normal(5.0, 0.8, n0).clip(3.0, None)
+        t = float(np.clip((frame - 1) / (self.N - 1), 0, 1))
+        alive = rank >= int(round(25 * t))               # 70 -> 45
+        d = base * (1.0 + 0.6 * t)                       # mean 5 -> 8 nm
+        drift = np.array([1.5, -1.0]) * (frame - 1)      # the field of view drifts: not a change
+        rows = [((p[0] + drift[0]) % self.SIZE, (p[1] + drift[1]) % self.SIZE, di)
+                for p, di, a in zip(pos, d, alive) if a]
+        if frame >= 16:
+            rng2 = np.random.default_rng(self.seed * 104729 + 5)
+            for _ in range(60):
+                rows.append((rng2.uniform(self.SIZE / 2, self.SIZE - 6), rng2.uniform(6, self.SIZE - 6),
+                             float(rng2.normal(2.0, 0.25))))
+        return rows
+
+    def _acquire(self, params, rng) -> Frame:
+        from scipy.ndimage import gaussian_filter
+        n = self.SIZE
+        yy, xx = np.mgrid[0:n, 0:n].astype(float)
+        img = 100.0 + 6.0 * np.sin(xx / 60.0) * np.cos(yy / 45.0)          # uneven support
+        rows = self._population(self.frame)
+        for y, x, d_nm in rows:
+            r = 0.5 * d_nm / self.NM_PER_PX
+            img += 80.0 / (1.0 + np.exp((np.hypot(yy - y, xx - x) - r) / 0.6))   # soft-edged disc
+        if params["defocus_nm"] > 0:
+            img = gaussian_filter(img, params["defocus_nm"] / 15.0)
+        img = img + rng.normal(0.0, 12.0 / np.sqrt(params["dose"]), img.shape)
+        from .modality import normalised, radial_power_spectrum
+        k, p = radial_power_spectrum(normalised(img))
+        big = [d for *_, d in rows if d > 3.0]
+        return Frame(x=k, y=p, image=img, params=params, x_label="spatial_frequency_cycles_per_px",
+                     y_label="log10_power", meta={"temperature_step": self.frame},
+                     truth={"particle_count": float(len(rows)), "large_particle_count": float(len(big)),
+                            "mean_diameter_nm": float(np.mean([d for *_, d in rows])),
+                            "second_population": bool(self.frame >= 16)})
+
+
 SIMULATORS = {cls.name: cls for cls in (BeamlineXRD, InSituRaman, AFMForceCurve, STMdIdV,
-                                        SpectrumImageSeries)}
+                                        SpectrumImageSeries, ParticleCoarseningImages)}
 
 
 def get_simulator(name: str, seed: int = 0) -> Instrument:

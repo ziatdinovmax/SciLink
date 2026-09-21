@@ -84,14 +84,14 @@ CONFIG = {"instrument": "afm_force_curve", "n_frames": 4, "interval_s": 0.0,
 def test_the_simulated_experiments_are_offered():
     names = {s["name"] for s in live_api.list_simulators()}
     assert names == {"beamline_xrd", "insitu_raman", "afm_force_curve", "stm_didv",
-                     "spectrum_image_series"}
+                     "spectrum_image_series", "particle_coarsening_images"}
     for s in live_api.list_simulators():
         assert s["schema"] and s["outputs"] and s["events"] and s["about"]
 
 
 def test_idle_session_lists_simulators(session):
     snap = live_api.snapshot(session)
-    assert snap["state"] == "idle" and len(snap["simulators"]) == 5
+    assert snap["state"] == "idle" and len(snap["simulators"]) == 6
 
 
 def test_a_run_arms_streams_and_finishes(session):
@@ -381,6 +381,52 @@ def test_a_stream_of_datacubes_runs_in_the_tab(tmp_path, monkeypatch):
     live_api._RUNS.clear()
 
 
+def test_a_stream_of_images_runs_in_the_tab(tmp_path, monkeypatch):
+    """Images are the third kind of frame: shown as the overlay the replay wrote,
+    with the radial power spectrum (what the change signal reads) as the chart."""
+    import json as _json
+    anchor = tmp_path / "img_anchor"
+    (anchor / "scripts").mkdir(parents=True)
+    (anchor / "scripts" / "analysis_script.py").write_text("print('locked')\n")
+    feats = {"particle_count": 70, "mean_diameter_nm": 5.0}
+    (anchor / "analysis_results.json").write_text(_json.dumps({"status": "success", "extracted_features": feats}))
+
+    class Agent:
+        def __init__(self, output_dir):
+            self.output_dir = output_dir
+
+        def analyze(self, data, **kw):
+            SEEN.append(kw)
+            item = Path(self.output_dir) / "image_0000"
+            item.mkdir(parents=True, exist_ok=True)
+            (item / "visualization.png").write_bytes(b"png")
+            return {"status": "success", "extracted_features": feats,
+                    "output_directory": str(anchor) if "reference" in Path(str(data)).name else self.output_dir,
+                    "reuse_validity": {"reused": True, "verdict": "good", "gate": "deterministic"},
+                    "stage_timings": {"llm_calls": 0}}
+
+    live_api._RUNS.clear()
+    SEEN.clear()
+    monkeypatch.setattr(live_pkg, "MeasurementLoop", functools.partial(MeasurementLoop, agent_factory=Agent))
+    sdir = tmp_path / "session"
+    sdir.mkdir()
+    session = SimpleNamespace(id="img", session_dir=str(sdir),
+                              agent=SimpleNamespace(model_name="m", api_key=None, base_url=None))
+    live_api.start(session, {**CONFIG, "instrument": "particle_coarsening_images", "n_frames": 3,
+                             "pin_outputs": True})
+    snap = _wait(session, lambda s: s["state"] in ("done", "error"))
+    assert snap["state"] == "done", snap.get("error")
+    assert snap["instrument"]["modality"] == "image" and [f["flags"] for f in snap["frames"]] == [[], [], []]
+    assert snap["output_keys"] == ["particle_count", "mean_diameter_nm"]
+    assert len(snap["latest"]["x"]) == 96 and 0.01 < snap["latest"]["x"][0] < 0.02     # the power spectrum
+    [overlay] = snap["maps"]
+    assert overlay["name"] == "analysis overlay" and overlay["path"].endswith("image_0000/visualization.png")
+    replay = SEEN[-1]
+    assert replay["strict_replay"] is True and replay["replay_reference"] == {"particle_count": 70.0,
+                                                                               "mean_diameter_nm": 5.0}
+    live_api._RUNS.clear()
+
+
 # ── replaying a folder of recorded measurements ──────────────────
 
 def _recording(tmp_path, n=5):
@@ -429,6 +475,6 @@ def test_routes(tmp_path):
     from scilink.server.app import create_app
     client = TestClient(create_app(session_root=tmp_path, serve_frontend=False))
     sims = client.get("/api/v1/live/simulators").json()["simulators"]
-    assert len(sims) == 5
+    assert len(sims) == 6
     assert client.get("/api/v1/sessions/nope/live").status_code == 404
     assert client.post("/api/v1/sessions/nope/live/start", json={}).status_code == 404

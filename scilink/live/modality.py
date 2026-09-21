@@ -43,6 +43,9 @@ class CurveModality:
     window_reanchor = True
     #: Result statuses whose numbers may be read (the verdict still judges them).
     usable_status = ("success",)
+    #: True where names are only ASKED for (not pinned, not fixed by construction):
+    #: a rebuilt recipe that does not report a tracked output is refused.
+    require_outputs_after_rebuild = False
 
     # ------------------------------------------------------------------ agent
     def make_agent(self, loop: Any, output_dir: str) -> Any:
@@ -166,6 +169,12 @@ class CurveModality:
     def read_signals(self, data_path: str, system_info: Any = None) -> Dict[str, Tuple[Any, Any]]:
         """The named curves the change signal watches for this frame. One, for a curve."""
         return {"signal": self.read_signal(data_path, system_info)}
+
+    def annotate_where(self, where: List[Dict[str, Any]], data_path: str,
+                       system_info: Any = None) -> List[Dict[str, Any]]:
+        """Say a located change in the terms a person uses for this kind of data.
+        A spectrum's axis already is that; an image's is a spatial frequency."""
+        return where
 
 
 class HyperspectralModality(CurveModality):
@@ -495,7 +504,265 @@ def load_cube(data_path: Any) -> np.ndarray:
     return cube
 
 
-_MODALITIES = {"curve": CurveModality, "hyperspectral": HyperspectralModality}
+class ImageModality(CurveModality):
+    """2D images through ``ImageAnalysisAgent``.
+
+    The reference image is analysed in full once; every later image is answered by
+    a STRICT replay of its approved script (``analyze(strict_replay=True)``: no
+    skill selection, planning, vision review, repair, tier 2, synthesis or report;
+    zero model calls) and judged on evidence alone (``_replay_feature_gate``: the
+    script still reports every quantity it reported on the reference, finite, and
+    still finds something). That gate sees method HEALTH, not correctness: an image
+    analysis has no R², so a segmentation that runs and is wrong is caught only by
+    an audit (``audit_every``) or by the change signal. Say so to whoever relies on it.
+
+    The change signal reads the image's radially averaged power spectrum, of the
+    whole field and of each quarter (a change confined to part of it is not
+    diluted), after a robust normalisation so gain and offset do not register. It
+    answers to feature size, periodicity, focus and noise, and it is
+    translation-invariant, so a field of view that drifts is not a change. The
+    representation was chosen by measurement (log power on linear bins from
+    k = 0.01): on tiles of a real HAADF image it raised no false novelty and found
+    a defocus blur, a 5 % lattice change, an amorphous patch and doubled noise,
+    where linear-power variants missed the blur and the noise and misfired on a
+    slow coarsening. An intensity histogram beside it changed nothing and is not
+    used."""
+
+    name = "image"
+    pinning = False            # names are asked for in the objective and checked after a rebuild
+    script_edits = True        # applied per frame by the agent, like a curve
+    portability = True         # by outputs, under a change of intensity level (.npy images)
+    series_reference = True
+    window_reanchor = False
+    require_outputs_after_rebuild = True
+
+    def make_agent(self, loop: Any, output_dir: str) -> Any:
+        from ..agents.exp_agents.image_analysis_agent import ImageAnalysisAgent
+        return ImageAnalysisAgent(api_key=loop.api_key, model_name=loop.model_name,
+                                  base_url=loop.base_url, output_dir=output_dir,
+                                  enable_human_feedback=loop._human_feedback)
+
+    @staticmethod
+    def _objective(loop: Any, names: Optional[List[str]] = None) -> Optional[str]:
+        parts = []
+        if loop.targets:
+            parts.append("Quantities of interest: " + "; ".join(str(t) for t in loop.targets) + ".")
+        if names:
+            parts.append("Report these quantities in extracted_features under EXACTLY these names "
+                         "(they are tracked across images by name): " + ", ".join(names) + ".")
+        elif loop.outputs:
+            parts.append("Report each of these in extracted_features under exactly this name: "
+                         + "; ".join(f"{k} ({v})" for k, v in loop.outputs.items()) + ".")
+        if parts:
+            parts.append("The same script will be run unchanged on later images of the same "
+                         "experiment, so it must not depend on values read off this one "
+                         "(thresholds and sizes relative to the image's own statistics).")
+        return " ".join(parts) or None
+
+    def reference_kwargs(self, loop: Any, refs: List[str], profile: Optional[str]) -> Dict[str, Any]:
+        kwargs: Dict[str, Any] = {"system_info": loop._with_sidecar(refs[-1])}
+        if profile:
+            kwargs["profile"] = profile
+        if loop.targets:
+            kwargs["targets"] = loop.targets
+        objective = self._objective(loop)
+        if objective:
+            kwargs["objective"] = objective
+        if len(refs) > 1:
+            kwargs["series_metadata"] = {"variable": "frame", "values": list(range(len(refs)))}
+            kwargs["profile"] = {"base": profile or "thorough", "trend": False,
+                                 "synthesis": "none", "adaptive_refit": False}
+        return kwargs
+
+    def replay_kwargs(self, loop: Any, data_path: str) -> Dict[str, Any]:
+        kwargs: Dict[str, Any] = dict(
+            system_info=loop._with_sidecar(data_path),
+            prior_analysis_paths=[str(loop.anchor_dir)],
+            reuse_locked_script=True, strict_replay=True,
+            replay_reference=(loop._modality_state or {}).get("replay_reference") or None)
+        if loop._edits:
+            kwargs["script_edits"] = list(loop._edits)
+        return kwargs
+
+    def escalation_kwargs(self, loop: Any, data_path: str, profile: str) -> Dict[str, Any]:
+        kwargs: Dict[str, Any] = {"system_info": loop._with_sidecar(data_path), "profile": profile}
+        if loop.targets:
+            kwargs["targets"] = loop.targets
+        # What is tracked keeps its names: asked for here, checked at adoption.
+        objective = self._objective(loop, names=list(loop.outputs) or None)
+        if objective:
+            kwargs["objective"] = objective
+        return kwargs
+
+    def features(self, result: Dict[str, Any]) -> Dict[str, float]:
+        import math
+        feats = result.get("extracted_features") or {}
+        return {str(k): float(v) for k, v in feats.items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)}
+
+    def validity(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        return result.get("reuse_validity") or {}
+
+    def anchor_script(self, anchor: str) -> Tuple[Optional[str], Optional[Path]]:
+        from ..agents.exp_agents.controllers.image_analysis_controllers import (
+            _first_prior_image_script, _load_prior_state)
+        script, _label = _first_prior_image_script({"prior_analysis_paths": [str(anchor)]})
+        anchor_dir, _data = _load_prior_state(str(anchor))
+        return (script, anchor_dir) if script and anchor_dir is not None else (None, None)
+
+    no_anchor_message = ("holds no reusable image-analysis run (expected analysis_results.json "
+                         "and a saved script under scripts/).")
+
+    def anchor_state(self, anchor_dir: Path, result: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        reference = self.features(result) if result else self.features_from_anchor(anchor_dir)
+        return {"replay_reference": reference}
+
+    def series_anchor(self, series_dir: Path, dest: Path, files: List[str]):
+        """A series keeps one script per image; the stream continues from the LAST
+        one analysed successfully, so that is laid out as a single-image run."""
+        data = json.loads((Path(series_dir) / "series_analysis_results.json").read_text())
+        ok = [r for r in (data.get("results") or []) if isinstance(r, dict) and r.get("success")]
+        scripts = sorted((Path(series_dir) / "scripts").glob("*.py"))
+        if not ok or not scripts:
+            raise RuntimeError("setup(): no image of the reference series was analysed successfully")
+        last = ok[-1]
+        idx = int(last.get("index", len(files) - 1))
+        stem = Path(str(last.get("name") or files[min(idx, len(files) - 1)])).stem
+        script = next((p for p in scripts if p.stem == stem), scripts[-1])
+        dest = Path(dest)
+        (dest / "scripts").mkdir(parents=True, exist_ok=True)
+        (dest / "scripts" / "analysis_script.py").write_text(script.read_text(), encoding="utf-8")
+        (dest / "analysis_results.json").write_text(json.dumps({
+            "status": "success", "analysis_type": last.get("analysis_type"),
+            "extracted_features": last.get("extracted_features") or {},
+            "derived_from": {"series_dir": str(series_dir), "index": idx}}, indent=1, default=str))
+        info = {"n": len(files), "fitted": len(ok), "anchored_on": idx,
+                "regimes": len(((data.get("series_analysis_plan") or {}).get("regimes") or [])) or 1,
+                "model": str(last.get("analysis_type") or "")[:200],
+                "data": files[min(idx, len(files) - 1)]}
+        return str(dest), info
+
+    def check_portability(self, loop: Any, reference_data: str) -> Dict[str, Any]:
+        from .portability import check_cube_portability, describe_cube
+        if Path(str(reference_data)).suffix.lower() != ".npy":
+            return {}                    # an 8-bit image cannot be rescaled without clipping
+        work = loop.output_dir / "portability"
+
+        def replay(path: str, tag: str) -> Optional[Dict[str, float]]:
+            agent = loop._agent_factory(str(work / tag))
+            res = agent.analyze(path, **self.replay_kwargs(loop, path)) or {}
+            good = res.get("status") == "success" and self.validity(res).get("verdict") == "good"
+            return self.features(res) if good else None
+        report = check_cube_portability(replay, str(reference_data), str(work),
+                                        tracked=list(loop.outputs) or None, load=load_image)
+        if report:
+            report["kind"] = "image"
+            report["summary"] = describe_cube(report)
+            report["positions_summary"] = ""
+        return report
+
+    def calibrate(self, anchor_dir: Path) -> Dict[str, Any]:
+        return {}
+
+    def residual_excess(self, frame_dir: str) -> Optional[float]:
+        return None
+
+    def annotate_where(self, where: List[Dict[str, Any]], data_path: str,
+                       system_info: Any = None) -> List[Dict[str, Any]]:
+        """The change is located on a spatial-frequency axis (cycles per pixel).
+        What a person reads is the LENGTH SCALE: one period, in nm when the pixel
+        size is known. Added beside the frequencies, never instead of them."""
+        nm_per_px = None
+        try:
+            from ..skills._shared.image_analysis_tools import resolve_pixel_size_nm
+            info = system_info if isinstance(system_info, dict) else {}
+            try:
+                side = json.loads(Path(str(data_path)).with_suffix(".json").read_text())
+                meta = side.get("meta") if isinstance(side.get("meta"), dict) else side
+                info = {**(meta if isinstance(meta, dict) else {}), **info}
+            except Exception:  # noqa: BLE001 - no sidecar
+                pass
+            px = resolve_pixel_size_nm(info, load_image(data_path).shape)
+            nm_per_px = float(px["x"]) if px else None
+        except Exception:  # noqa: BLE001 - pixels are a fine unit
+            nm_per_px = None
+        unit, k = ("nm", nm_per_px) if nm_per_px else ("px", 1.0)
+        out = []
+        for w in where:
+            w = dict(w)
+            if w.get("kind") != "window" and all(isinstance(w.get(f), (int, float)) and w[f] > 0
+                                                 for f in ("x_from", "x_to", "x_peak")):
+                w["length_from"], w["length_to"] = round(k / w["x_to"], 4), round(k / w["x_from"], 4)
+                w["length_peak"], w["length_units"] = round(k / w["x_peak"], 4), unit
+            out.append(w)
+        return out
+
+    # ---------------------------------------------------------------- signal
+    N_K = 96
+
+    def read_signal(self, data_path: str, system_info: Any = None) -> Tuple[np.ndarray, np.ndarray]:
+        return radial_power_spectrum(normalised(load_image(data_path)), self.N_K)
+
+    def read_signals(self, data_path: str, system_info: Any = None) -> Dict[str, Tuple[Any, Any]]:
+        z = normalised(load_image(data_path))
+        out = {"whole field": radial_power_spectrum(z, self.N_K)}
+        h, w = z.shape
+        if min(h, w) >= 64:
+            for i, row in enumerate(("upper", "lower")):
+                for j, col in enumerate(("left", "right")):
+                    block = z[i * h // 2:(i + 1) * h // 2, j * w // 2:(j + 1) * w // 2]
+                    out[f"{row} {col} quarter"] = radial_power_spectrum(block, self.N_K)
+        return out
+
+
+IMAGE_SUFFIXES = (".npy", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
+
+
+def load_image(data_path: Any) -> np.ndarray:
+    """A 2D greyscale image as floats (``.npy`` or a common image file)."""
+    path = Path(str(data_path))
+    if path.suffix.lower() == ".npy":
+        a = np.load(path)
+    else:
+        from ..skills._shared.image_analysis_tools import load_image_data
+        a = np.asarray(load_image_data(str(path)))
+    a = np.asarray(a, dtype=float)
+    if a.ndim == 3:
+        a = a[..., :3].mean(axis=2)
+    if a.ndim != 2:
+        raise ValueError(f"{path.name}: expected a 2D image, got shape {a.shape}")
+    return a
+
+
+def normalised(image: np.ndarray) -> np.ndarray:
+    """Robust z-scores: detector gain and offset do not register as a change."""
+    med = float(np.median(image))
+    mad = 1.4826 * float(np.median(np.abs(image - med))) or float(image.std()) or 1.0
+    return (image - med) / mad
+
+
+def radial_power_spectrum(z: np.ndarray, n_bins: int = 96,
+                          k_min: float = 0.01) -> Tuple[np.ndarray, np.ndarray]:
+    """log10 of the radially averaged power against spatial frequency (cycles per
+    pixel, ``k_min`` to 0.5). Translation-invariant, so a field of view that
+    drifts is not a change; what moves it is feature size, periodicity, focus,
+    noise. The lowest frequencies are left out: a few samples each, and they
+    carry the uneven background and whatever drifted into the field."""
+    h, w = z.shape
+    window = np.outer(np.hanning(h), np.hanning(w))
+    power = np.abs(np.fft.fftshift(np.fft.fft2((z - z.mean()) * window))) ** 2 / (h * w)
+    ky, kx = np.indices(power.shape)
+    radius = np.hypot((ky - h // 2) / h, (kx - w // 2) / w)
+    edges = np.linspace(k_min, 0.5, n_bins + 1)
+    idx = np.digitize(radius.ravel(), edges) - 1
+    ok = (idx >= 0) & (idx < n_bins)
+    total = np.bincount(idx[ok], weights=power.ravel()[ok], minlength=n_bins)
+    count = np.maximum(np.bincount(idx[ok], minlength=n_bins), 1)
+    return 0.5 * (edges[1:] + edges[:-1]), np.log10(total / count + 1e-12)
+
+
+_MODALITIES = {"curve": CurveModality, "hyperspectral": HyperspectralModality,
+               "image": ImageModality}
 CUBE_SUFFIXES = (".npy", ".h5", ".hdf5", ".nxs")
 
 

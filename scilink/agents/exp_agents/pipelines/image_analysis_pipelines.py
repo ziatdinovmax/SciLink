@@ -64,6 +64,7 @@ def create_unified_image_analysis_pipeline(
     num_plan_candidates: int = 1,
     profile: Any = None,
     explicit_verification_budget: bool = False,
+    write_reports: bool = True,
 ) -> List:
     """
     Factory function to create the unified image analysis pipeline.
@@ -271,10 +272,12 @@ def create_unified_image_analysis_pipeline(
         StoreAnalysisResultsController(logger, store_fn)
     )
 
-    # Step 11: Report generation (adapts to single vs series)
-    pipeline.append(
-        GenerateImageReportController(logger, output_dir)
-    )
+    # Step 11: Report generation (adapts to single vs series). A live frame
+    # (strict replay) keeps its overlay and numbers and writes no HTML report.
+    if write_reports:
+        pipeline.append(
+            GenerateImageReportController(logger, output_dir)
+        )
 
     logger.info(f"Unified image analysis pipeline created: {len(pipeline)} steps"
                 + (f" (profile: {qc_profile.name})" if qc_profile.name != "thorough" else ""))
