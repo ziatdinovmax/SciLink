@@ -1,0 +1,77 @@
+"""From "the data changed" to "is this new?": the slow half of a discovery
+(scilink/live/discovery.py), the chain of the first SciLink paper run on the
+frame a live loop flagged. No model, no network: everything is injected."""
+
+import json
+
+from scilink.live.discovery import assess_change, describe
+
+
+class Agent:
+    seen = []
+
+    def __init__(self, out):
+        self.out = out
+
+    def analyze(self, data, **kw):
+        Agent.seen.append(kw)
+        return {"status": "success", "output_directory": self.out, "detailed_analysis": "A second population.",
+                "stage_timings": {"llm_calls": 5},
+                "scientific_claims": [
+                    {"claim": "A second population of 2 nm particles nucleates at 450 C.",
+                     "has_anyone_question": "Has anyone seen secondary nucleation of 2 nm particles at 450 C?"},
+                    {"claim": "The large particles keep coarsening.", "has_anyone_question": "Has anyone ...?"},
+                    {"claim": "no question here"}]}
+
+
+class Lit:
+    def query_literature(self, q):
+        return {"status": "success", "formatted_answer": "two reports" if "coarsening" in q or "..." in q else "none found"}
+
+
+class Scorer:
+    def score_novelty(self, q, answer):
+        return {"novelty_score": 5 if answer == "none found" else 2, "explanation": answer}
+
+
+def test_claims_about_the_changed_frame_and_how_new_each_is(tmp_path):
+    Agent.seen = []
+    res = assess_change(str(tmp_path / "frame.npy"), modality="image", system_info={"technique": "TEM"},
+                        what_changed="new structure appeared at length scales of 3 to 5 nm",
+                        agent_kwargs={}, out_dir=str(tmp_path / "d"), agent_factory=Agent,
+                        literature=Lit(), scorer=Scorer())
+    assert res["status"] == "success" and res["highest_novelty"] == 5 and res["literature"] == "asked for 2 claim(s)"
+    assert [c.get("novelty_score") for c in res["claims"]] == [5, 2, None]
+    assert Agent.seen[0]["hints"].startswith("new structure appeared") and Agent.seen[0]["profile"] == "quick"
+    assert json.loads((tmp_path / "d" / "discovery.json").read_text())["claims"][0]["novelty_score"] == 5
+    assert describe(res)[0].startswith("[novelty 5/5] A second population")
+
+
+def test_without_a_literature_key_the_claims_stand_and_it_says_so(tmp_path):
+    res = assess_change(str(tmp_path / "f.npy"), modality="image", system_info={}, what_changed=None,
+                        agent_kwargs={}, out_dir=str(tmp_path / "d"), agent_factory=Agent)
+    assert res["status"] == "success" and len(res["claims"]) == 3
+    assert "no literature key" in res["literature"] and "highest_novelty" not in res
+
+
+def test_it_never_raises(tmp_path):
+    class Broken:
+        def __init__(self, out): pass
+        def analyze(self, *a, **k): raise RuntimeError("no model")
+    res = assess_change(str(tmp_path / "f.npy"), modality="curve", system_info={}, what_changed=None,
+                        agent_kwargs={}, out_dir=str(tmp_path / "d"), agent_factory=Broken)
+    assert res["status"] == "error" and "no model" in res["error"] and res["claims"] == []
+
+
+def test_the_loop_runs_it_for_the_latest_change_and_puts_it_on_the_log(tmp_path):
+    from tests.test_measurement_loop import FakeAgent, make_anchor
+    from scilink.live import MeasurementLoop
+    loop = MeasurementLoop(str(tmp_path / "loop"), agent_factory=FakeAgent)
+    loop.setup(anchor=str(make_anchor(tmp_path)))
+    loop._last_novelty = {"step": 7, "since_step": 6, "data": str(tmp_path / "f7.csv"),
+                          "where": [{"kind": "new", "x_from": 16.5, "x_to": 17.5, "x_peak": 17.0, "share": 1.0}]}
+    Agent.seen = []
+    out = loop.assess_change(agent_factory=Agent, literature=Lit(), scorer=Scorer())
+    assert out["highest_novelty"] == 5 and "new structure appeared from 16.5 to 17.5" in Agent.seen[0]["hints"]
+    event = next(e for e in loop.read_log() if e["event"] == "discovery")
+    assert event["about_step"] == 7 and event["claims"][0]["novelty_score"] == 5

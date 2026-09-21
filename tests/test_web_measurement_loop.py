@@ -65,6 +65,7 @@ def session(tmp_path, monkeypatch):
     for run in live_api._RUNS.values():
         run.stop()
     live_api._RUNS.clear()
+    live_api._DISMISSED.clear()
 
 
 def _wait(session, until, timeout=90.0):
@@ -425,6 +426,25 @@ def test_a_stream_of_images_runs_in_the_tab(tmp_path, monkeypatch):
     assert replay["strict_replay"] is True and replay["replay_reference"] == {"particle_count": 70.0,
                                                                                "mean_diameter_nm": 5.0}
     live_api._RUNS.clear()
+
+
+def test_a_finished_run_is_still_there_after_the_server_restarts(session):
+    live_api.start(session, {**CONFIG, "n_frames": 5})
+    before = _wait(session, lambda s: s["state"] == "done")
+    live_api._RUNS.clear()                                   # the server restarted: memory is gone
+    live_api._DISMISSED.clear()
+    after = live_api.snapshot(session)
+    assert after["restored"] is True and after["state"] == "done"
+    assert [f["step"] for f in after["frames"]] == [f["step"] for f in before["frames"]] == [1, 2, 3, 4, 5]
+    assert after["frames"][-1]["features"] == before["frames"][-1]["features"]
+    assert after["instrument"]["name"] == "afm_force_curve" and after["latest"]["step"] == 5
+    assert after["config"]["n_frames"] == 5 and after["status"]["frames"] == 5
+    with pytest.raises(live_api.LiveError):                  # nothing is running: there is nothing to steer
+        live_api.set_params(session, {"trigger_force_nN": 12.5})
+    assert live_api.clear(session)["state"] == "idle"        # "New run" puts it away ...
+    assert live_api.snapshot(session)["state"] == "idle"     # ... and it stays away
+    live_api.start(session, {**CONFIG, "n_frames": 2})       # a new run is a new run
+    assert _wait(session, lambda s: s["state"] == "done").get("restored") is None
 
 
 # ── replaying a folder of recorded measurements ──────────────────

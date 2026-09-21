@@ -294,6 +294,22 @@ class MeasurementLoop:
             normal for the stream. It reads the data only, never the recipe, so
             its verdict does not depend on which recipe was locked. LOWER
             either to catch weaker changes, RAISE if ordinary variation is flagged.
+        remember: keep what this INSTRUMENT learns across runs (``live/instrument_home.py``,
+            ``~/.scilink/instruments/<id>/``; a path puts the store elsewhere). At
+            ``setup`` the instrument's known recipes are tried on the reference by
+            strict replay first (no model call): one that fits and reports what is
+            tracked arms the loop in seconds; otherwise the reference is analysed
+            and the new recipe is kept. A rebuild tries them too, and ``close``
+            records the run. Needs ``instrument``. Off by default: a recipe
+            verified on one sample is a hypothesis about the next, so it is opt-in,
+            and a recalled recipe is judged like any other from then on.
+        warm_replay: answer frames in ONE long-lived interpreter instead of a fresh
+            process per frame (``executors.WarmScriptExecutor``). A fresh process
+            pays the recipe's imports on every frame (measured on a real
+            atomic-resolution image recipe: 5 of 8 seconds were importing torch).
+            Only the fast path uses it: the script is the verified one, replayed.
+            Each run keeps its own working directory and a hard timeout. Set
+            ``False`` if a recipe depends on starting in a clean interpreter.
         keep_frame_dirs: how many per-frame working folders to keep (the newest).
             A frame's numbers, flags and the path of its data are in the log for
             good; its folder holds what the replay wrote (the script, an overlay
@@ -317,11 +333,21 @@ class MeasurementLoop:
             ``novelty``: how much of the frames is new and where on the axis) —
             in discovery work that announcement is the result, and neither
             rebuilding around it nor accepting it may make it go away quietly.
-            ``"report"`` (default): then accept the new state for tracking once
+            ``None`` (default) takes the modality's own: ``"report"`` for curves
+            and datacubes, ``"audit"`` for images, whose replay verdict sees
+            only whether the method still runs (with no ``outputs`` to compare,
+            an audit cannot be made and the policy falls back to report).
+            ``"report"``: then accept the new state for tracking once
             the changed frames agree with each other; no model call.
             ``"audit"``: an independent analysis checks the recipe's named
             outputs first (agreement keeps the recipe, disagreement adopts the
-            audit's); needs ``outputs`` and ``auto_escalate``. ``"rebuild"``:
+            audit's; for images a SECOND, deeper audit is asked first, because
+            one quick image analysis can be the worse of the two: if it sides
+            with the recipe, the recipe is kept and NOT called verified; if it
+            also rejects the recipe, its own recipe is adopted, marked contested
+            when the two audits do not agree with each other); needs ``outputs``
+            and ``auto_escalate``. An
+            audit that fails is retried once at a deeper profile. ``"rebuild"``:
             re-anchor, as when the recipe fails. A recipe that FAILS on the new
             data is rebuilt under every setting.
         audit_every: every this many frames an independent analysis of the
@@ -385,7 +411,8 @@ class MeasurementLoop:
                  reanchor_frames: int = 5,
                  drift_fraction: float = 0.10, drift_score: float = 3.0,
                  gradual_bar: Optional[float] = 0.25, keep_frame_dirs: Optional[int] = 100,
-                 on_change: str = "report", instrument: Any = None, modality: Any = None,
+                 warm_replay: bool = True, remember: Any = False,
+                 on_change: Optional[str] = None, instrument: Any = None, modality: Any = None,
                  audit_every: Optional[int] = None, audit_profile: str = "quick",
                  audit_tolerance: float = 0.05,
                  escalation_profile: str = "extract",
@@ -425,11 +452,22 @@ class MeasurementLoop:
         self._modality_state: Dict[str, Any] = {}
         self.instrument = (instrument.describe() if hasattr(instrument, "describe")
                            else (dict(instrument) if isinstance(instrument, dict) else None))
-        if on_change not in ("report", "audit", "rebuild"):
+        if on_change not in (None, "report", "audit", "rebuild"):
             raise ValueError("on_change must be 'report', 'audit' or 'rebuild'")
-        self.on_change = on_change
+        self.on_change = on_change or self.modality.default_on_change
+        self._on_change_chosen = on_change is not None
         self._novelty_open = False          # the current run of changed frames has been announced
         self.keep_frame_dirs = int(keep_frame_dirs) if keep_frame_dirs else None
+        self.warm_replay = bool(warm_replay)
+        self._warm: Any = None
+        self._last_novelty: Optional[Dict[str, Any]] = None
+        self._home: Any = None
+        if remember:
+            if not self.instrument or not self.instrument.get("id"):
+                raise ValueError("remember=True keeps recipes per instrument: pass `instrument`")
+            from .instrument_home import InstrumentHome
+            self._home = InstrumentHome(self.instrument,
+                                        root=remember if isinstance(remember, (str, Path)) else None)
         self.gradual_bar = float(gradual_bar) if gradual_bar else None
         #: Recipes this run has used and left, newest last. A stream that returns
         #: to a state it has been in is served by recall (a strict replay, no
@@ -519,7 +557,11 @@ class MeasurementLoop:
         refs = ([str(reference)] if isinstance(reference, (str, Path))
                 else [str(r) for r in (reference or [])])
         series_info: Optional[Dict[str, Any]] = None
-        if refs:
+        recalled = self._recall_from_home(refs[-1]) if (refs and self._home is not None) else None
+        if recalled is not None:
+            anchor, reference = recalled["anchor_dir"], refs[-1]
+            source = f"instrument:{recalled.get('recipe_id')}"
+        elif refs:
             self._human_feedback = bool(enable_human_feedback)
             run_dir = self.output_dir / "reference"
             agent = self._agent_factory(str(run_dir))
@@ -585,7 +627,15 @@ class MeasurementLoop:
         else:
             self._reference_features = self.modality.features_from_anchor(anchor_dir)
         pinned = None
-        if self.outputs and not self.modality.pinning:
+        if recalled is not None:
+            # The recipe comes with its amendments (a curve's pinned outputs among
+            # them) and was just replayed on THIS reference: nothing to pin again.
+            self._edits = list(recalled["edits"])
+            self._reference_features = dict(recalled["features"])
+            self.recipe = self._recipe_record(script, source)
+            if not self.modality.pinning and self.outputs:
+                self._match_outputs()
+        elif self.outputs and not self.modality.pinning:
             self._match_outputs()
         elif self.outputs:
             ref_data = reference or reference_data
@@ -620,6 +670,13 @@ class MeasurementLoop:
             "targets": self.targets, "objective_key": self.objective_key,
             "frame_deadline_s": self.frame_deadline_s,
         }
+        if self._home is not None:
+            if recalled is not None:
+                self._home.used(str(recalled.get("recipe_id")))
+                record["recalled_from_instrument"] = recalled.get("recipe_id")
+                record["llm_calls"] = 0
+            else:
+                self._home.save_recipe(self, source=source)
         if pinned is not None:
             record["pinned_outputs"] = {"definitions": self.outputs,
                                         "rationale": pinned["rationale"],
@@ -657,6 +714,40 @@ class MeasurementLoop:
 
     def _anchor_script(self, anchor: str):
         return self.modality.anchor_script(anchor)
+
+    def _wanted(self, features: Dict[str, float]) -> bool:
+        """Does a recipe report what this loop tracks? Pinned names must be there as
+        they are; asked-for names (a cube's maps, an image's quantities) by match."""
+        if not self.outputs:
+            return True
+        if self.modality.pinning:
+            return all(k in features for k in self.outputs)
+        keys = [k.lower() for k in features]
+        return all(any(str(n).lower().replace(" ", "_") in k for k in keys) for n in self.outputs)
+
+    def _home_recipes(self) -> List[Dict[str, Any]]:
+        if self._home is None:
+            return []
+        info = self.system_info if isinstance(self.system_info, dict) else {}
+        return self._home.recipes(modality=self.modality.name, technique=info.get("technique"))
+
+    def _recall_from_home(self, data_path: str) -> Optional[Dict[str, Any]]:
+        """One of this instrument's known recipes, if it fits the reference."""
+        known = self._home_recipes()
+        if not known:
+            return None
+        from ._reanchor import recall_known
+        t0 = time.perf_counter()
+        hit = recall_known(self.modality, known, str(data_path), self.system_info,
+                           {"api_key": self.api_key, "model_name": self.model_name,
+                            "base_url": self.base_url},
+                           self.output_dir / "recall", agent_factory=self._agent_factory,
+                           accept=self._wanted)
+        self.logger.info(
+            (f"🏠 The instrument's recipe {hit.get('recipe_id')} fits the reference "
+             if hit else f"🏠 None of the instrument's {len(known)} known recipe(s) fits the reference ")
+            + f"({time.perf_counter() - t0:.1f}s, no model call).")
+        return hit
 
     def _match_outputs(self) -> None:
         """Where names are fixed by the analysis itself (a datacube's maps), the
@@ -747,6 +838,7 @@ class MeasurementLoop:
         error = None
         try:
             agent = self._agent_factory(str(frame_dir))
+            self._use_warm_executor(agent)
             # The fast clock never calls a model (strict replay): see the modality.
             result = agent.analyze(data_path, **self.modality.replay_kwargs(self, data_path)) or {}
         except Exception as e:  # noqa: BLE001 - one frame must not kill the loop
@@ -843,6 +935,23 @@ class MeasurementLoop:
         self._prune_frame_dirs(idx)
         return record
 
+    def _use_warm_executor(self, agent: Any) -> None:
+        """Hand the frame's agent the loop's long-lived interpreter. Only an agent
+        that runs scripts through a ``ScriptExecutor`` gets one (a datacube replay
+        runs in-process already; a test double has no executor)."""
+        if not self.warm_replay:
+            return
+        try:
+            from ..executors import ScriptExecutor, WarmScriptExecutor
+            current = getattr(agent, "executor", None)
+            if not isinstance(current, ScriptExecutor):
+                return
+            if self._warm is None:
+                self._warm = WarmScriptExecutor(timeout=current.timeout, mp_api_key=current.mp_api_key)
+            agent.executor = self._warm
+        except Exception as e:  # noqa: BLE001 - an optimisation, never a dependency
+            self.logger.debug(f"warm replay unavailable: {e}")
+
     def _prune_frame_dirs(self, idx: int) -> None:
         """Keep the newest ``keep_frame_dirs`` per-frame folders. Never the data."""
         if not self.keep_frame_dirs or idx <= self.keep_frame_dirs:
@@ -881,14 +990,19 @@ class MeasurementLoop:
                 self._announce(data_path, record)
             job = (self._escalation_meta or {}) if self._escalation is not None else None
             fit_breach = needs_escalation and "fit" in run
-            if needs_escalation and (fit_breach or self.on_change != "report"):
+            policy = self.on_change
+            if policy == "audit" and not self.outputs and not self._on_change_chosen:
+                # The modality's default, and nothing named to compare: an audit
+                # cannot be made. (Asked for explicitly, it becomes a rebuild.)
+                policy = "report"
+            if needs_escalation and (fit_breach or policy != "report"):
                 if not self.auto_escalate:
                     return
                 if job is not None and job.get("reason") == "periodic":
                     self._cancel_background("a breach run needs the background")
                     job = None
                 if job is None:
-                    if not fit_breach and self.on_change == "audit" and self.outputs:
+                    if not fit_breach and policy == "audit" and self.outputs:
                         self.audit(data_path, reason="change", locked=features)
                         record["escalation"] = "audit_started"
                     else:
@@ -927,6 +1041,7 @@ class MeasurementLoop:
             event["region"] = gate["drift_region"]      # which part of the field (a datacube)
         self._append(event)
         self._novelty_open = True
+        self._last_novelty = event
         if self._gradual_level is not None:
             # This change has been announced; the distance it puts between the
             # stream and its reference is not a second piece of news.
@@ -1040,6 +1155,85 @@ class MeasurementLoop:
                              background=background, frames=frames, _mode="audit",
                              _reason=reason, _locked=dict(locked))
 
+    def assess_change(self, data_path: Optional[str] = None, *, profile: str = "quick",
+                      futurehouse_api_key: Optional[str] = None, **kwargs: Any) -> Dict[str, Any]:
+        """The slow half of a discovery, for the latest announced change: an analysis
+        of that frame TOLD what changed, its scientific claims, and (with a literature
+        key) how new each claim is (``live/discovery.py``). Slow-clock work, meant for
+        a pause (``run_experiment(pause_on="novelty", on_pause=...)``) or a background
+        thread; it never runs on a frame's path. The outcome goes on the log as a
+        ``discovery`` event."""
+        from .discovery import assess_change
+        ev = self._last_novelty or {}
+        data = str(data_path or ev.get("data") or (self._recent_frames[-1] if self._recent_frames else ""))
+        if not data:
+            return {"status": "error", "error": "no frame to assess", "claims": []}
+        step = int(ev.get("step") or self._step)
+        kwargs.setdefault("agent_factory", self._agent_factory)     # the loop's own way of making an agent
+        result = assess_change(
+            data, modality=self.modality, system_info=self.system_info, what_changed=self._what_changed(),
+            agent_kwargs={"api_key": self.api_key, "model_name": self.model_name, "base_url": self.base_url},
+            out_dir=str(self.output_dir / "discovery" / f"step_{step:06d}"), profile=profile,
+            futurehouse_api_key=futurehouse_api_key, logger=self.logger, **kwargs)
+        self.record_event("discovery", about_step=step,
+                          **{k: result.get(k) for k in ("status", "claims", "literature", "highest_novelty",
+                                                        "summary", "seconds", "llm_calls", "error") if k in result})
+        return result
+
+    def _what_changed(self) -> Optional[str]:
+        """The latest announced change, in words an analysis can use."""
+        ev = self._last_novelty
+        if not ev or self._step - int(ev.get("step") or 0) > 6 * max(self.breach_patience, 1) + 40:
+            return None
+        parts = []
+        for w in ev.get("where") or []:
+            kind = w.get("kind")
+            if kind == "window":
+                parts.append(f"the data is no longer measured from {w['x_from']:.4g} to {w['x_to']:.4g}")
+                continue
+            if w.get("length_units"):
+                u = w["length_units"]
+                at = (f"at length scales of {w['length_from']:.3g} to {w['length_to']:.3g} {u} "
+                      f"(strongest near {w['length_peak']:.3g} {u})")
+            else:
+                at = f"from {w['x_from']:.4g} to {w['x_to']:.4g} on the measurement axis (strongest near {w['x_peak']:.4g})"
+            what = {"new": "new structure appeared", "missing": "structure that was there is gone",
+                    "shifted": "a feature moved", "broad": "the overall shape or background changed"}.get(kind, "the data changed")
+            region = w.get("region")
+            parts.append(f"{what} {at}" + (f", in the {region} of the field" if region and region != "whole field"
+                                          and not str(region).startswith("row ") else
+                                          (f", in {region}" if region and str(region).startswith("row ") else "")))
+        if not parts:
+            return None
+        onset = "gradually" if ev.get("onset") == "gradual" else f"from frame {ev.get('since_step')}"
+        return ("A model-free comparison with the earlier frames of this stream shows that the data changed "
+                f"{onset}: " + "; ".join(parts[:3]) + ". This analysis was requested because of that change. "
+                "Account for what is new (it may be a real feature the previous analysis had no reason to "
+                "look for), or say why it should not be counted.")
+
+    def _recall_list(self) -> List[Dict[str, Any]]:
+        """What a rebuild tries first: this run's own recipes, newest first, then
+        the instrument's. Never the recipe that just breached."""
+        current = str(self.anchor_dir)
+        seen, out = {current}, []
+        for r in list(reversed(self._known_recipes)) + [
+                {"anchor_dir": m["anchor_dir"], "edits": m.get("edits") or [], "recipe_id": m.get("recipe_id")}
+                for m in self._home_recipes()]:
+            if r["anchor_dir"] not in seen and r.get("recipe_id") != (self.recipe or {}).get("id"):
+                seen.add(r["anchor_dir"])
+                out.append(dict(r))
+        return out
+
+    _PROFILE_DEPTH = ("realtime", "extract", "quick", "thorough")
+
+    @classmethod
+    def _deeper_profile(cls, profile: Any) -> Optional[str]:
+        """The next profile up, or ``None`` at the top (or for a custom one)."""
+        name = profile if isinstance(profile, str) else (profile or {}).get("base") if isinstance(profile, dict) else None
+        if name not in cls._PROFILE_DEPTH or name == "thorough":
+            return None
+        return "thorough" if name in ("quick", "extract") else "quick"
+
     def _cancel_background(self, why: str) -> None:
         esc = self._escalation
         if esc is None:
@@ -1054,7 +1248,8 @@ class MeasurementLoop:
     def escalate(self, data_path: str, *, profile: Optional[str] = None,
                  background: bool = True, frames: Optional[List[str]] = None,
                  _mode: str = "reanchor", _reason: str = "fit",
-                 _locked: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+                 _locked: Optional[Dict[str, float]] = None,
+                 _extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Re-anchor on ``data_path`` (normally the frame that breached). The
         slow clock: this may call a model, which is why ``step()`` never calls
         it unless ``auto_escalate`` was asked for.
@@ -1077,6 +1272,14 @@ class MeasurementLoop:
         out_dir = self.output_dir / "escalations" / f"escalation_{self._n_escalations:03d}"
         analyze_kwargs = self.modality.escalation_kwargs(
             self, data_path, profile or self.escalation_profile)
+        # An analysis made BECAUSE the data changed is told what changed and where.
+        # It comes from the data alone, and it is context, not a constraint. Without
+        # it, live on an image stream: a second population of small particles
+        # nucleated, the change signal located it, and the deeper of two audits,
+        # not knowing, left it out exactly as the recipe did and "agreed" with it.
+        told = self._what_changed() if _reason in ("change", "fit") else None
+        if told:
+            analyze_kwargs["hints"] = "\n".join(x for x in (analyze_kwargs.get("hints"), told) if x)
         # Never audition the recipe that just breached: that is circular.
         try:
             from ..skills._shared._script_bank import script_hash
@@ -1099,8 +1302,7 @@ class MeasurementLoop:
             "modality": self.modality.name,
             # A rebuild first tries the recipes this run has already used (an
             # audit never does: it must be independent of them).
-            "recall": ([dict(r) for r in reversed(self._known_recipes)]
-                       if _mode == "reanchor" else []),
+            "recall": (self._recall_list() if _mode == "reanchor" else []),
             "out_dir": str(out_dir),
             "data_path": window if len(window) > 1 else str(data_path),
             # In memory only — a spec is never written to disk (it may carry
@@ -1120,19 +1322,21 @@ class MeasurementLoop:
                                  "window": len(window), "mode": _mode, "reason": _reason,
                                  "locked": _locked, "frames": list(window),
                                  "profile": analyze_kwargs["profile"],
-                                 "from_recipe": self.recipe["id"],
-                                 "started_step": self._step, "t0": time.perf_counter()}
+                                 "from_recipe": self.recipe["id"], "background": bool(background),
+                                 "started_step": self._step, "t0": time.perf_counter(),
+                                 **{k: v for k, v in (_extra or {}).items() if v is not None}}
         self._append({"event": "audit_started" if _mode == "audit" else "escalation_started",
                       "step": self._step,
                       **{k: v for k, v in self._escalation_meta.items()
-                         if k not in ("t0", "locked", "frames")}})
+                         if k not in ("t0", "locked", "frames", "first_audit", "background")}})
         runner = self._escalation_runner or (
             _ProcessEscalation if background else _InlineEscalation)
         self._escalation = runner(spec)
         if not background:
             return self._poll_escalation() or {"event": "escalation_started"}
         return {"event": "audit_started" if _mode == "audit" else "escalation_started", **{
-            k: v for k, v in self._escalation_meta.items() if k not in ("t0", "locked", "frames")}}
+            k: v for k, v in self._escalation_meta.items()
+            if k not in ("t0", "locked", "frames", "first_audit", "background")}}
 
     @staticmethod
     def _sandbox_approved() -> bool:
@@ -1160,6 +1364,18 @@ class MeasurementLoop:
         first. Pace a replay (``interval_s``) when a rebuild should land.
         Returns the adoption record when one happened. Also a context manager.
         """
+        if self._warm is not None:
+            try:
+                self._warm.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._warm = None
+        if self._home is not None and self.recipe is not None and not getattr(self, "_run_recorded", False):
+            try:
+                self._home.record_run(self)
+                self._run_recorded = True
+            except Exception as e:  # noqa: BLE001
+                self.logger.warning(f"could not record the run for the instrument: {e}")
         esc, adopted = self._escalation, None
         if esc is None:
             return None
@@ -1223,6 +1439,17 @@ class MeasurementLoop:
             record = {"event": "audit_failed" if is_audit else "escalation_failed", **base,
                       "error": failure[:300]}
             self._append(record)
+            deeper = self._deeper_profile(meta.get("profile"))
+            if is_audit and deeper and not meta.get("retry_of"):
+                # A second opinion that could not be formed says nothing about the
+                # recipe. One retry at a deeper profile (live, a real HAADF tile: the
+                # quick audit found no atomic columns and had no value to compare).
+                self._save_state()
+                return self.escalate(meta["data"], profile=deeper, frames=meta.get("frames"),
+                                     background=meta.get("background", True), _mode="audit",
+                                     _reason=meta.get("reason") or "manual", _locked=meta.get("locked"),
+                                     _extra={"retry_of": meta.get("index"),
+                                             "first_audit": meta.get("first_audit")})
             if is_audit and meta.get("reason") == "change":
                 # The fit is good and no second opinion could be had. Accept the
                 # new state rather than ask again on every breach run.
@@ -1238,6 +1465,25 @@ class MeasurementLoop:
             self._last_audit = {k: audit[k] for k in ("step", "reason", "agrees", "outputs",
                                                       "audited_step")}
             if meta.get("reason") != "change" or agrees:
+                first = meta.get("first_audit")
+                if agrees and first is not None:
+                    # The first audit disagreed and this one sides with the recipe. A
+                    # vote is not the truth: analyses can share a blind spot (live: the
+                    # dissenting quick audit was the one that was right). The recipe is
+                    # kept, the state is NOT called verified, and the dissent stays on
+                    # the record and in front of the person.
+                    dissent = self._compare(meta.get("locked") or {}, first)
+                    audit = {**audit, "event": "audit_split", "agrees": False, "dissent": dissent}
+                    self._last_audit = {"step": audit["step"], "reason": "change", "agrees": False,
+                                        "outputs": dissent, "audited_step": audit.get("audited_step"),
+                                        "split": True}
+                    self._append(audit)
+                    self._accept_state(verified=False)
+                    self._notify({"event": "audit_split", "step": self._step, "outputs": dissent})
+                    self._save_state()
+                    self.logger.warning("🔎 Two audits split on the recipe: kept, NOT verified: "
+                                        + json.dumps(dissent)[:300])
+                    return audit
                 self._append(audit)
                 if meta.get("reason") == "change":
                     self._accept_state(verified=True)
@@ -1247,9 +1493,35 @@ class MeasurementLoop:
                                  + ("agrees with the locked recipe." if agrees else
                                     "DISAGREES with the locked recipe: " + json.dumps(comparison)[:300]))
                 return audit
-            # A changed stream AND a second opinion that disagrees: the analysis
-            # made on the new data is the better informed one. Adopt it below.
             self._append(audit)
+            if self.modality.audit_needs_second_opinion:
+                first = meta.get("first_audit")
+                if first is None:
+                    # One disagreeing audit does not win: it may be the worse of the
+                    # two (live, a simulated image series: the quick audit gave an
+                    # 18 nm diameter against the recipe's 6.6). Ask once more, deeper.
+                    deeper = self._deeper_profile(meta.get("profile")) or meta.get("profile")
+                    self._save_state()
+                    return self.escalate(meta["data"], profile=deeper, frames=meta.get("frames"),
+                                         background=meta.get("background", True), _mode="audit",
+                                         _reason="change", _locked=meta.get("locked"),
+                                         _extra={"first_audit": dict(result.get("pin_features") or {})})
+                between = self._compare(first, result.get("pin_features") or {})
+                if between and all(c["agrees"] for c in between.values()):
+                    base = {**base, "two_audits_agree": True}
+                else:
+                    # Three analyses, three answers. Two independent analyses have
+                    # rejected the recipe, so keeping it is the worst of the three
+                    # choices (live: it went on counting 40 of 105 particles while the
+                    # audits said 56 and 89). The DEEPER one, which was told what
+                    # changed, is adopted, and it is said that this is contested.
+                    self._append({"event": "audit_unresolved", **base, "recipe": comparison,
+                                  "between_audits": between})
+                    self._notify({"event": "audit_unresolved", "step": self._step})
+                    base = {**base, "contested": True}
+            # A changed stream AND a second opinion that disagrees (for images: two
+            # that agree with each other): the analysis made on the new data is the
+            # better informed one. Adopt it below.
             base = {**base, "after_audit": True}
         # Adopt. Amendments were written against the OLD script and do not
         # carry; the plausible ranges belong to the old regime and re-learn.
@@ -1281,6 +1553,11 @@ class MeasurementLoop:
                   "objective_key_present": (self.objective_key in self._reference_features
                                             if self.objective_key else None)}
         self._append(record)
+        if self._home is not None and not result.get("recalled"):
+            try:
+                self._home.save_recipe(self, source=source)
+            except Exception as e:  # noqa: BLE001 - the store never fails a run
+                self.logger.warning(f"could not keep the recipe for the instrument: {e}")
         self._novelty_open = False
         self._notify({k: record[k] for k in ("event", "step", "source", "frames_answered_meanwhile")})
         self._save_state()

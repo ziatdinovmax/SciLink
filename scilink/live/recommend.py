@@ -293,11 +293,19 @@ class GPRecommender(Recommender):
     way a series locks a recipe. Reuses ``bo_tools.SingleObjectiveOptimizer``
     (BoTorch, no LLM); the first ``n_init`` suggestions are a deterministic
     space-filling design. Numeric parameters only.
+
+    ``objective_key`` may name SEVERAL tracked quantities — a list (all in
+    ``direction``) or ``{key: "maximize" | "minimize"}`` — which is the usual
+    situation at an instrument: precision against time, signal against dose.
+    Then ``bo_tools.MultiObjectiveOptimizer`` proposes the point with the largest
+    expected hypervolume improvement, and the rationale says how many of the
+    measurements so far are non-dominated. No weights to invent: the trade-off
+    front is what is explored, and choosing a point on it stays with the person.
     """
 
     name = "gp"
 
-    def __init__(self, schema: InstrumentSchema, objective_key: str, *,
+    def __init__(self, schema: InstrumentSchema, objective_key: Any, *,
                  direction: str = "maximize", n_init: int = 4,
                  acquisition: str = "log_ei",
                  model_config: Optional[Dict[str, str]] = None, seed: int = 0) -> None:
@@ -306,6 +314,15 @@ class GPRecommender(Recommender):
             raise ValueError("direction must be 'maximize' or 'minimize'")
         if not schema.numeric or len(schema.numeric) != len(schema.parameters):
             raise ValueError("GPRecommender optimizes numeric parameters only")
+        if isinstance(objective_key, dict):
+            self.objectives = {str(k): str(v) for k, v in objective_key.items()}
+        elif isinstance(objective_key, (list, tuple)):
+            self.objectives = {str(k): direction for k in objective_key}
+        else:
+            self.objectives = {str(objective_key): direction}
+        if not self.objectives or any(v not in ("maximize", "minimize") for v in self.objectives.values()):
+            raise ValueError("each objective needs a direction: 'maximize' or 'minimize'")
+        objective_key = next(iter(self.objectives))          # the first one, for single-objective use
         self.schema, self.objective_key = schema, objective_key
         self.direction, self.n_init, self.acquisition = direction, max(2, n_init), acquisition
         self.model_config = dict(model_config or {"surrogate": "single_task",
@@ -328,21 +345,41 @@ class GPRecommender(Recommender):
         return int(round(value)) if spec.kind == "int" else value
 
     def _xy(self):
+        """Parameters, and the objectives SIGNED so that larger is better; one
+        column per objective (a vector when there is one)."""
         import numpy as np
         names = [s.name for s in self.schema.numeric]
-        rows = [(h["params"], h["features"].get(self.objective_key)) for h in self.history]
-        rows = [(p, y) for p, y in rows if y is not None and all(n in p for n in names)]
+        keys = list(self.objectives)
+        sign = np.array([1.0 if self.objectives[k] == "maximize" else -1.0 for k in keys])
+        rows = [(h["params"], [h["features"].get(k) for k in keys]) for h in self.history]
+        rows = [(p, y) for p, y in rows if all(v is not None for v in y) and all(n in p for n in names)]
         if not rows:
-            return names, np.empty((0, len(names))), np.empty((0,))
+            return names, np.empty((0, len(names))), np.empty((0,) if len(keys) == 1 else (0, len(keys)))
         X = np.array([[float(p[n]) for n in names] for p, _ in rows], dtype=float)
-        y = np.array([float(v) for _, v in rows], dtype=float)
-        return names, X, (y if self.direction == "maximize" else -y)
+        Y = np.array([[float(v) for v in y] for _, y in rows], dtype=float) * sign
+        return names, X, (Y[:, 0] if len(keys) == 1 else Y)
+
+    @staticmethod
+    def _non_dominated(Y) -> int:
+        import numpy as np
+        return int(sum(not np.any(np.all(Y >= y, axis=1) & np.any(Y > y, axis=1)) for y in Y))
 
     def suggest(self) -> Dict[str, Any]:
         names, X, y = self._xy()
         if len(y) < self.n_init:
             return {"params": self._design[len(y)],
                     "rationale": f"space-filling design point {len(y) + 1}/{self.n_init}"}
+        if len(self.objectives) > 1:
+            from ..agents.planning_agents.bo_tools import MultiObjectiveOptimizer
+            opt = MultiObjectiveOptimizer()
+            opt.fit(X, y, [(s.low, s.high) for s in self.schema.numeric],
+                    self.model_config, feature_names=names)
+            x = opt.recommend(1, strategy="pareto")[0]
+            wanted = ", ".join(f"{k} ({v[:3]})" for k, v in self.objectives.items())
+            return {"params": {s.name: self._cast(s, v) for s, v in zip(self.schema.numeric, x)},
+                    "rationale": (f"expected hypervolume improvement for {wanted} over {len(y)} "
+                                  f"observations; {self._non_dominated(y)} of them are non-dominated "
+                                  "(the trade-off front so far)")}
         from ..agents.planning_agents.bo_tools import SingleObjectiveOptimizer
         opt = SingleObjectiveOptimizer()
         opt.fit(X, y, [(s.low, s.high) for s in self.schema.numeric],

@@ -437,6 +437,14 @@ export interface LiveSnapshot {
   paused?: (Partial<LiveNovelty> & { why: "novelty" | "breach"; experiment_held: boolean;
                                      timeout_s?: number | null; flags?: string[] }) | null;
   pause_on?: ("novelty" | "breach")[];
+  /** Read back from disk after a server restart. Finished, read-only. */
+  restored?: boolean;
+  /** A closer look at the changed frame is running (claims, then the literature). */
+  assessing?: boolean;
+  /** What the changed frames turned out to be: claims, and how new each is (1 to 5). */
+  discoveries?: { about_step: number; status: string; literature?: string; highest_novelty?: number;
+                  claims: { claim: string; question?: string; novelty_score?: number;
+                            novelty_explanation?: string }[] }[];
   error?: string | null;
   note?: string | null;
   simulators?: LiveInstrumentInfo[];
@@ -477,6 +485,8 @@ export interface LiveSnapshot {
     audited_step?: number;
     reason: string;
     agrees: boolean;
+    /** Two audits split: one sides with the recipe, one does not. Kept, not verified. */
+    split?: boolean;
     outputs: Record<string, { locked: number | null; audit: number | null; agrees: boolean;
                               relative_difference?: number }>;
   } | null;
@@ -501,14 +511,20 @@ export interface LiveConfig {
   pause_on?: ("novelty" | "breach")[];
   /** Seconds a pause may last before the run goes on unchanged. Omit to wait. */
   pause_timeout_s?: number;
+  /** While paused on a change: analyse the frame and ask the literature. Default on. */
+  assess_on_pause?: boolean;
   /** Anything the analysis should know. Context, not a constraint. */
   notes?: string;
+  /** Keep recipes per instrument across runs, and try the known ones first. */
+  remember?: boolean;
   reference_analysis?: string;
   interval_s: number;
   apply: "never" | "approved" | "valid";
   recommender: "none" | "gp" | "llm";
   objective_key?: string;
   direction?: "maximize" | "minimize";
+  /** More objectives for the GP recommender: a trade-off front is explored. */
+  more_objectives?: { key: string; direction: "maximize" | "minimize" }[];
   objective?: string;
   every?: number;
   auto_escalate: boolean;

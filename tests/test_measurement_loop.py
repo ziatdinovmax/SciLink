@@ -1007,12 +1007,19 @@ class TestChangeSignalAndAudit:
         frames = self._changed(tmp_path)
         loop.step(frames[0]); loop.step(frames[1])
         FakeEscalation.last.result = {"status": "error", "error": "no model", "seconds": 3}
+        first = FakeEscalation.last
         loop.step(frames[2])
+        # one retry at a deeper profile, then it gives up
+        assert FakeEscalation.last is not first
+        assert FakeEscalation.last.spec["analyze_kwargs"]["profile"] == "thorough"
+        FakeEscalation.last.result = {"status": "error", "error": "no model", "seconds": 3}
+        loop.step(frames[3])
         events = [e["event"] for e in loop.read_log()]
-        assert "audit_failed" in events
+        assert events.count("audit_failed") == 2
         accepted = next(e for e in loop.read_log() if e["event"] == "state_accepted")
         assert accepted["verified"] is False
-        assert loop.step(frames[3])["flags"] == []                   # and does not ask again
+        more = self._curve(tmp_path, "c_more.csv", [5, 9, 14, 17], seed=77)
+        assert loop.step(more)["flags"] == []                        # and does not ask again
 
     def test_periodic_audits_report_and_never_act(self, tmp_path):
         loop = self._armed(tmp_path, audit_every=3)

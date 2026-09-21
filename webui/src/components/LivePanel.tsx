@@ -198,6 +198,8 @@ export function LivePanel({
   const [apply, setApply] = useState<LiveConfig["apply"]>("never");
   const [recommender, setRecommender] = useState<LiveConfig["recommender"]>("none");
   const [objectiveKey, setObjectiveKey] = useState("");
+  const [secondKey, setSecondKey] = useState("");
+  const [secondDirection, setSecondDirection] = useState<"maximize" | "minimize">("minimize");
   const [direction, setDirection] = useState<"maximize" | "minimize">("maximize");
   const [objective, setObjective] = useState("");
   const [every, setEvery] = useState(8);
@@ -210,6 +212,7 @@ export function LivePanel({
   const [notes, setNotes] = useState("");
   const [pauseOn, setPauseOn] = useState<"" | "novelty" | "breach" | "both">("");
   const [mapName, setMapName] = useState("");
+  const [remember, setRemember] = useState(false);
   const [replayDir, setReplayDir] = useState("");
   const [technique, setTechnique] = useState("");
   const [sample, setSample] = useState("");
@@ -291,6 +294,7 @@ export function LivePanel({
       audit_every: parseInt(auditEvery, 10) > 0 ? parseInt(auditEvery, 10) : undefined,
       on_change: onChange, notes: notes.trim() || undefined,
       pause_on: pauseOn === "both" ? ["novelty", "breach"] : pauseOn ? [pauseOn] : undefined,
+      remember: remember || undefined,
       ...(instrument === REPLAY || instrument === MCP ? {
         replay_dir: instrument === REPLAY ? replayDir.trim() : undefined,
         mcp_server: instrument === MCP ? mcpServer : undefined,
@@ -299,6 +303,8 @@ export function LivePanel({
         outputs: parseOutputs(outputsText),
       } : {}),
       objective_key: recommender === "gp" ? objectiveKey : undefined,
+      more_objectives: recommender === "gp" && secondKey.trim() && secondKey !== objectiveKey
+        ? [{ key: secondKey.trim(), direction: secondDirection }] : undefined,
       direction, objective: recommender === "llm" ? objective : undefined, every,
       auto_escalate: autoEscalate, reference_profile: profile,
     }));
@@ -506,6 +512,32 @@ export function LivePanel({
                       <option>maximize</option><option>minimize</option>
                     </select>
                   </label>
+                  <label><span>Against
+                      <Info>
+                        A second quantity makes it a trade-off, such as precision against time. The
+                        optimizer explores the front between the two. It does not weigh one against
+                        the other, so which point to settle on stays your choice. Leave empty for one
+                        objective.
+                      </Info>
+                    </span>
+                    {formOutputs.length > 0 ? (
+                      <select value={secondKey} onChange={(e) => setSecondKey(e.target.value)}>
+                        <option value="">nothing</option>
+                        {formOutputs.filter((k) => k !== objectiveKey).map((k) => <option key={k}>{k}</option>)}
+                      </select>
+                    ) : (
+                      <input type="text" placeholder="optional" value={secondKey}
+                        onChange={(e) => setSecondKey(e.target.value)} />
+                    )}
+                  </label>
+                  {secondKey && (
+                    <label><span>Direction</span>
+                      <select value={secondDirection}
+                        onChange={(e) => setSecondDirection(e.target.value as "maximize" | "minimize")}>
+                        <option>maximize</option><option>minimize</option>
+                      </select>
+                    </label>
+                  )}
                 </>
               )}
               {recommender === "llm" && (
@@ -564,6 +596,18 @@ export function LivePanel({
                   <option value="audit">audit</option>
                   <option value="rebuild">rebuild</option>
                 </select>
+              </label>
+              <label className="live-check">
+                <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+                <span>Remember this instrument
+                  <Info>
+                    Recipes are kept per instrument, outside this session. With this on, the instrument's
+                    known recipes are tried on the reference first, with no model call. One that fits and
+                    reports what you track arms the run in seconds. Otherwise the reference is analysed as
+                    usual and the new recipe is kept for next time. A recalled recipe is watched like any
+                    other: the change signal and audits still apply.
+                  </Info>
+                </span>
               </label>
               <label><span>Pause
                   <Info>
@@ -722,8 +766,9 @@ export function LivePanel({
           Locking the recipe.
           <Info>
             The reference is analysed in full, its verified script becomes the recipe, and the tracked
-            quantities are fixed to their names. With a first-frame reference this takes a few minutes. A
-            past analysis is adopted in seconds.
+            quantities are fixed to their names. This is the slow step and it is paid once. Expect a few
+            minutes for a spectrum and up to tens of minutes for a complex image. A past analysis, or a
+            recipe this instrument already knows, is adopted in seconds.
           </Info>
         </p>
       )}
@@ -737,7 +782,9 @@ export function LivePanel({
       )}
       {snap?.last_audit && !snap.last_audit.agrees && (
         <div className="live-flags">
-          ▲ The audit of frame {snap.last_audit.audited_step} disagrees with the recipe.{" "}
+          ▲ {snap.last_audit.split
+            ? `Two independent analyses of frame ${snap.last_audit.audited_step} split on the recipe. One sides with it, one does not. The recipe is kept and not verified.`
+            : `The audit of frame ${snap.last_audit.audited_step} disagrees with the recipe.`}{" "}
           {Object.entries(snap.last_audit.outputs).filter(([, c]) => !c.agrees)
             .map(([k, c]) => `${k}: ${fmt(c.locked)} from the recipe, ${fmt(c.audit)} from the audit`).join(". ")}.
           <Info>
@@ -770,6 +817,32 @@ export function LivePanel({
             {Object.keys(pending).length ? "Resume with changes" : "Resume"}
           </button>
           <button disabled={busy} onClick={() => act(() => api.liveResume(sessionId, "stop"))}>Stop</button>
+        </div>
+      )}
+
+      {(snap?.assessing || (snap?.discoveries ?? []).length > 0) && (
+        <div className="live-discovery">
+          <div className="live-card-head">
+            <h4>What changed</h4>
+            <Info>
+              A closer analysis of the changed frame, told where the data is new, made while the run
+              waits. With a literature key each claim is searched and scored from 1 (well known) to 5
+              (not found). Without one the claims are shown as they are.
+            </Info>
+          </div>
+          {snap?.assessing && <p className="caption">Analysing the changed frame…</p>}
+          {(snap?.discoveries ?? []).slice(-1).map((d) => (
+            <ul key={d.about_step}>
+              {d.claims.map((c, i) => (
+                <li key={i}>
+                  {typeof c.novelty_score === "number" && <b>novelty {c.novelty_score} of 5. </b>}
+                  {c.claim}
+                </li>
+              ))}
+              {d.claims.length === 0 && <li className="caption">No claim could be made about this frame.</li>}
+              {d.literature && <li className="caption">Literature: {d.literature}.</li>}
+            </ul>
+          ))}
         </div>
       )}
 

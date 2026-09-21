@@ -303,10 +303,20 @@ class LiveRun:
         root.mkdir(parents=True, exist_ok=True)
         n = len([p for p in root.glob("run_*") if p.is_dir()]) + 1
         self.run_dir = root / f"run_{n:03d}"
+        # What the page needs to show this run again after a server restart: the
+        # loop's own log is the record, this is who made it and how it was set up.
+        try:
+            self.run_dir.mkdir(parents=True, exist_ok=True)
+            (self.run_dir / "run.json").write_text(json.dumps(
+                {"config": config, "instrument": _instrument_info(self.instrument),
+                 "started_at": self.started_at}, indent=1, default=str), encoding="utf-8")
+        except Exception:  # noqa: BLE001 - a convenience, never a dependency
+            pass
         self._stop = threading.Event()
         # A decision point: the run waits here until the person answers.
         self.pause_on = [w for w in (config.get("pause_on") or []) if w in ("novelty", "breach")]
         self.paused: Optional[Dict[str, Any]] = None
+        self.assessing = False
         self._decision: Any = None
         self._decided = threading.Event()
         self._operator_params: Optional[Dict[str, Any]] = None
@@ -337,7 +347,13 @@ class LiveRun:
             key = self.config.get("objective_key")
             if not key:
                 raise LiveError(400, "The GP recommender needs an objective output to optimize.")
-            return GPRecommender(inst.schema, key,
+            objectives = {str(key): str(self.config.get("direction") or "maximize")}
+            # A second objective makes it a trade-off (precision against time, signal
+            # against dose): the front is explored, no weights are invented.
+            for extra in self.config.get("more_objectives") or []:
+                if isinstance(extra, dict) and extra.get("key"):
+                    objectives[str(extra["key"])] = str(extra.get("direction") or "maximize")
+            return GPRecommender(inst.schema, objectives if len(objectives) > 1 else key,
                                  direction=self.config.get("direction") or "maximize")
         if kind == "llm":
             objective = str(self.config.get("objective") or "").strip()
@@ -363,6 +379,9 @@ class LiveRun:
                 info["notes_from_the_user"] = str(cfg["notes"]).strip()[:2000]
             self.loop = MeasurementLoop(
                 str(self.run_dir / "loop"), system_info=info, instrument=inst,
+                # What this INSTRUMENT learned in earlier runs (its own store, not
+                # the session's): known recipes are tried before anything is analysed.
+                remember=bool(cfg.get("remember")),
                 on_change=str(cfg.get("on_change") or "report"),
                 targets=list(inst.targets or []), outputs=outputs, schema=inst.schema,
                 objective_key=(cfg.get("objective_key") or None) if outputs else None,
@@ -450,6 +469,11 @@ class LiveRun:
         # to collect its answer, fetch it here so the person deciding sees it.
         threading.Thread(target=self._recommend_while_paused, daemon=True,
                          name=f"scilink-live-pause-{self.session_id}").start()
+        if event.get("why") == "novelty" and self.config.get("assess_on_pause", True):
+            # The pause is what buys time for the slow half of a discovery: what the
+            # change IS (claims), and whether it is new (the literature, with a key).
+            threading.Thread(target=self._assess_while_paused, daemon=True,
+                             name=f"scilink-live-discovery-{self.session_id}").start()
         try:
             while not self._decided.wait(0.25):
                 if self._stop.is_set():
@@ -461,6 +485,15 @@ class LiveRun:
         finally:
             self.paused = None
             self.state = "running"
+
+    def _assess_while_paused(self) -> None:
+        self.assessing = True
+        try:
+            self.loop.assess_change(futurehouse_api_key=getattr(self._agent, "futurehouse_api_key", None))
+        except Exception:  # noqa: BLE001 - never fails a run
+            pass
+        finally:
+            self.assessing = False
 
     def _recommend_while_paused(self) -> None:
         try:
@@ -525,8 +558,11 @@ class LiveRun:
         return {
             "state": self.state, "error": self.error, "note": self.note,
             "paused": self.paused, "pause_on": self.pause_on,
+            "assessing": self.assessing,
+            "discoveries": [e for e in other if e.get("event") == "discovery"][-3:],
             "run_dir": str(self.run_dir), "elapsed_s": round(time.time() - self.started_at, 1),
-            "config": self.config, "instrument": _instrument_info(self.instrument),
+            "config": self.config,
+            "instrument": getattr(self, "_instrument_view", None) or _instrument_info(self.instrument),
             "status": status, "current_params": self.current_params,
             "n_frames_total": self.n_frames,
             "output_keys": self._output_keys(latest),
@@ -638,6 +674,55 @@ class LiveRun:
 # module API used by app.py
 # ──────────────────────────────────────────────────────────────
 
+class RestoredRun(LiveRun):
+    """A finished run read back from disk: the loop's log is the record, so a run
+    survives the server that made it. Read-only: nothing is running."""
+
+    def __init__(self, session_id: str, session_dir: str, run_dir: Path) -> None:  # noqa: D401
+        from types import SimpleNamespace
+        try:
+            saved = json.loads((run_dir / "run.json").read_text())
+        except Exception:  # noqa: BLE001 - a run from before run.json existed
+            saved = {}
+        self.session_id, self.config = session_id, dict(saved.get("config") or {})
+        self.run_dir, self._session_dir = run_dir, Path(session_dir).resolve()
+        self._instrument_view = saved.get("instrument") or {"name": "instrument", "schema": {}, "outputs": {}}
+        self.instrument = SimpleNamespace(modality=self._instrument_view.get("modality", "curve"),
+                                          system_info={k: self._instrument_view.get(k) for k in
+                                                       ("technique", "sample", "x_axis", "y_axis")},
+                                          schema=None)
+        self.state, self.error, self.note = "done", None, "Restored from disk. This run is finished."
+        self.started_at = float(saved.get("started_at") or time.time())
+        self.n_frames, self.loop, self._agent = None, None, None
+        self._tail, self._truth = _LogTail(), {}
+        self.paused, self.pause_on, self.assessing = None, [], False
+        self.current_params: Dict[str, Any] = {}
+        self._stop = threading.Event()
+        self._log_path = run_dir / "loop" / "loop_log.jsonl"
+
+    def snapshot(self, tail: int = 400) -> Dict[str, Any]:
+        self._tail.read(self._log_path)
+        self.loop = None
+        snap = super().snapshot(tail)
+        frames = snap.get("frames") or []
+        snap["restored"] = True
+        snap["current_params"] = dict((frames[-1].get("params") if frames else {}) or {})
+        snap["elapsed_s"] = 0
+        if not snap.get("output_keys"):
+            snap["output_keys"] = list(self._instrument_view.get("outputs") or {})[:6]
+        return snap
+
+    def stop(self) -> None:
+        return None
+
+
+def _restore_latest(session: Any) -> Optional["RestoredRun"]:
+    root = Path(session.session_dir) / "live"
+    runs = sorted((p for p in root.glob("run_*") if (p / "loop" / "loop_log.jsonl").is_file()),
+                  key=lambda p: p.name)
+    return RestoredRun(session.id, session.session_dir, runs[-1]) if runs else None
+
+
 def start(session: Any, config: Dict[str, Any], allow_custom: bool = True) -> Dict[str, Any]:
     with _LOCK:
         run = _RUNS.get(session.id)
@@ -646,6 +731,7 @@ def start(session: Any, config: Dict[str, Any], allow_custom: bool = True) -> Di
         run = LiveRun(session.id, session.session_dir, session.agent, dict(config or {}),
                       allow_custom=allow_custom)
         _RUNS[session.id] = run
+        _DISMISSED.discard(session.id)
     return run.snapshot()
 
 
@@ -655,10 +741,23 @@ def _idle(session: Any) -> Dict[str, Any]:
             "analyses": list_reference_analyses(session.session_dir)}
 
 
+#: Sessions whose finished run was put away ("New run"): not restored again.
+_DISMISSED: set = set()
+
+
 def snapshot(session: Any) -> Dict[str, Any]:
     run = _RUNS.get(session.id)
-    if run is None:
+    if run is None and session.id in _DISMISSED:
         return _idle(session)
+    if run is None:
+        # A server restart forgets its runs; the disk does not.
+        try:
+            run = _restore_latest(session)
+        except Exception:  # noqa: BLE001
+            run = None
+        if run is None:
+            return _idle(session)
+        _RUNS[session.id] = run
     return run.snapshot()
 
 
@@ -690,4 +789,5 @@ def clear(session: Any) -> Dict[str, Any]:
         if run is not None and run.state in ("arming", "running", "paused"):
             raise LiveError(409, "Stop the run before starting a new one.")
         _RUNS.pop(session.id, None)
+        _DISMISSED.add(session.id)
     return _idle(session)

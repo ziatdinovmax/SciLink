@@ -29,6 +29,13 @@ apply to spectra: an image analysis has no fit quality, so a replayed frame is
 checked only for whether the method still runs and still finds something. Whether
 it is still RIGHT is what the change signal and ``audit_every`` are for.
 
+Two things worth knowing before a first run on rich data. The first ``setup`` is
+the slow part (a full analysis; minutes for a spectrum, tens of minutes for a
+complex image) and is not a hang: every frame after it takes about a second. And
+``MeasurementLoop(..., instrument=inst, remember=True)`` keeps the recipe for the
+INSTRUMENT, so the next run on it tries what it already knows first and usually
+arms in seconds with no model call.
+
 To move to a real instrument there are two routes. If the instrument has (or
 can get) an MCP server in front of its controller, in any language, use
 

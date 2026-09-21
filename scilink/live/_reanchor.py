@@ -119,42 +119,57 @@ class _Done(Exception):
 
 
 def _recall(spec: Dict[str, Any], out_dir: Path) -> Any:
-    """A recipe this run has already used, if one fits the new data.
+    """A recipe this run (or this instrument) has already used, if one fits the
+    new data: see :func:`recall_known`."""
+    data = spec["data_path"]
+    data = str(data[-1] if isinstance(data, (list, tuple)) else data)
+    hit = recall_known(spec.get("modality") or "curve", spec.get("recall") or [], data,
+                       spec.get("system_info"), spec["agent_kwargs"], out_dir)
+    if hit is None:
+        return None
+    return {"status": "success", "output_directory": hit["anchor_dir"], "recalled": True,
+            "recalled_recipe": hit.get("recipe_id"), "llm_calls": 0, "window": None,
+            "pin_edits": hit["edits"], "pin_features": hit["features"]}
 
-    Each known recipe is replayed strictly on the newest frame (no model call,
-    seconds) and the first the modality's own verdict calls good is the answer —
-    the analogue, inside one run, of asking the script bank first. A stream that
-    goes back and forth between states (a mosaic crossing the same kind of
-    region, a cycled sample) then pays for each state once. ``None`` when nothing
-    is known or nothing fits; the normal rebuild follows."""
-    known = [r for r in (spec.get("recall") or []) if isinstance(r, dict) and r.get("anchor_dir")]
+
+def recall_known(modality: Any, known: Any, data: str, system_info: Any, agent_kwargs: Dict[str, Any],
+                 out_dir: Path, agent_factory: Any = None, accept: Any = None) -> Any:
+    """The first known recipe that fits ``data``, or ``None``.
+
+    Each known recipe (``{"anchor_dir", "edits", "recipe_id"}``) is replayed
+    strictly on the data (no model call, seconds) and the first the modality's own
+    verdict calls good is the answer — the analogue of asking the script bank
+    first, within one run or across the runs of one instrument. A stream that goes
+    back and forth between states (a mosaic crossing the same kind of region, a
+    cycled sample) then pays for each state once. ``accept(features)`` may refuse
+    a recipe that fits but does not report what is wanted."""
+    known = [r for r in (known or []) if isinstance(r, dict) and r.get("anchor_dir")]
     if not known:
         return None
     from types import SimpleNamespace
     from .measurement_loop import with_sidecar
     from .modality import resolve_modality
-    modality = resolve_modality(spec.get("modality") or "curve")
-    data = spec["data_path"]
-    data = str(data[-1] if isinstance(data, (list, tuple)) else data)
+    modality = resolve_modality(modality)
     log = logging.getLogger("scilink.live.recall")
     for i, entry in enumerate(known):
         try:
             anchor_dir = Path(entry["anchor_dir"])
             shim = SimpleNamespace(
-                api_key=spec["agent_kwargs"].get("api_key"), model_name=spec["agent_kwargs"].get("model_name"),
-                base_url=spec["agent_kwargs"].get("base_url"), _human_feedback=False,
+                api_key=agent_kwargs.get("api_key"), model_name=agent_kwargs.get("model_name"),
+                base_url=agent_kwargs.get("base_url"), _human_feedback=False,
                 anchor_dir=anchor_dir, _edits=list(entry.get("edits") or []),
                 _modality_state=modality.anchor_state(anchor_dir, None),
-                _with_sidecar=lambda p: with_sidecar(spec.get("system_info"), p))
-            agent = modality.make_agent(shim, str(out_dir / f"recall_{i:02d}"))
+                _with_sidecar=lambda p: with_sidecar(system_info, p))
+            work = str(Path(out_dir) / f"recall_{i:02d}")
+            agent = agent_factory(work) if agent_factory is not None else modality.make_agent(shim, work)
             res = agent.analyze(data, **modality.replay_kwargs(shim, data)) or {}
             verdict = modality.validity(res).get("verdict")
             features = modality.features(res) if res.get("status") in modality.usable_status else {}
             log.info(f"recall of recipe {entry.get('recipe_id')}: {res.get('status')}, verdict {verdict}")
-            if res.get("status") == "success" and verdict in (None, "good") and features:
-                return {"status": "success", "output_directory": str(anchor_dir), "recalled": True,
-                        "recalled_recipe": entry.get("recipe_id"), "llm_calls": 0, "window": None,
-                        "pin_edits": list(entry.get("edits") or []), "pin_features": features}
+            if (res.get("status") == "success" and verdict in (None, "good") and features
+                    and (accept is None or accept(features))):
+                return {"anchor_dir": str(anchor_dir), "recipe_id": entry.get("recipe_id"),
+                        "edits": list(entry.get("edits") or []), "features": features}
         except Exception as e:  # noqa: BLE001 - a recall that cannot run is simply not the answer
             log.info(f"recall of recipe {entry.get('recipe_id')} could not run: {e}")
     return None

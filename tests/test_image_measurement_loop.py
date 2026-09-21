@@ -189,3 +189,121 @@ def test_a_rebuild_that_has_no_value_for_a_tracked_output_is_refused(armed):
     out = loop.escalate(sim.acquire({}).save(str(loop.output_dir / "in"), 5), background=False)
     assert out["event"] == "escalation_failed" and loop.recipe["id"] == before
     assert "no value for the tracked output(s) ['mean_diameter_nm']" in out["error"]
+
+
+# ── an image's replay verdict cannot see a wrong answer: changes are audited ──
+
+class _Scripted:
+    """An escalation runner that returns queued worker results, one per audit."""
+    queue, specs = [], []
+
+    def __init__(self, spec):
+        _Scripted.specs.append(spec)
+        self.result = _Scripted.queue.pop(0)
+
+    def poll(self):
+        return self.result
+
+
+def _audit(features, tmp_path, name):
+    d = tmp_path / name
+    (d / "scripts").mkdir(parents=True)
+    (d / "scripts" / "analysis_script.py").write_text(SCRIPT.replace("4.0 * mad", "3.0 * mad") + f"# {name}\n")
+    (d / "analysis_results.json").write_text(json.dumps({"status": "success", "extracted_features": features}))
+    return {"status": "success", "output_directory": str(d), "llm_calls": 6, "seconds": 120,
+            "pin_features": {k: float(v) for k, v in features.items()}, "reported": sorted(features)}
+
+
+def test_images_audit_a_change_by_default_and_curves_do_not(armed):
+    sim, loop, _ = armed
+    assert loop.on_change == "audit" and loop.modality.audit_needs_second_opinion
+    assert MeasurementLoop(str(loop.output_dir) + "_c").on_change == "report"
+    assert MeasurementLoop(str(loop.output_dir) + "_r", modality="image", on_change="report").on_change == "report"
+
+
+def test_one_disagreeing_audit_does_not_win_but_two_that_agree_do(armed, tmp_path):
+    sim, loop, _ = armed
+    frame = sim.acquire({}).save(str(loop.output_dir / "in"), 1)
+    locked = {"particle_count": 60.0, "mean_diameter_nm": 5.7}
+    _Scripted.queue = [_audit({"particle_count": 117, "mean_diameter_nm": 4.2}, tmp_path, "a1"),
+                       _audit({"particle_count": 115, "mean_diameter_nm": 4.25}, tmp_path, "a2")]
+    _Scripted.specs = []
+    loop._escalation_runner = _Scripted
+    before = loop.recipe["id"]
+    out = loop.audit(frame, reason="change", locked=locked, background=False)
+    assert [s["analyze_kwargs"]["profile"] for s in _Scripted.specs] == ["quick", "thorough"]   # asked again, deeper
+    assert out["event"] == "reanchor" and out["two_audits_agree"] and loop.recipe["id"] != before
+    events = [e["event"] for e in loop.read_log()]
+    assert events.count("audit") == 2 and "audit_unresolved" not in events
+
+
+def test_a_recipe_two_audits_reject_is_replaced_by_the_deeper_one_and_called_contested(armed, tmp_path):
+    sim, loop, _ = armed
+    frame = sim.acquire({}).save(str(loop.output_dir / "in"), 1)
+    _Scripted.queue = [_audit({"particle_count": 44, "mean_diameter_nm": 18.4}, tmp_path, "b1"),   # live: a poor quick audit
+                       _audit({"particle_count": 117, "mean_diameter_nm": 4.2}, tmp_path, "b2")]
+    loop._escalation_runner = _Scripted
+    before = loop.recipe["id"]
+    out = loop.audit(frame, reason="change", locked={"particle_count": 60.0, "mean_diameter_nm": 5.7},
+                     background=False)
+    # Live: the recipe counted 40 of 105 particles, the audits said 56 and 89. Keeping a recipe
+    # two independent analyses rejected is the worst of the three choices.
+    assert out["event"] == "reanchor" and out["contested"] is True and loop.recipe["id"] != before
+    assert "b2" in str(loop.anchor_dir)                          # the deeper one, told what changed
+    unresolved = next(e for e in loop.read_log() if e["event"] == "audit_unresolved")
+    assert unresolved["between_audits"]["particle_count"]["agrees"] is False
+
+
+def test_a_second_audit_that_sides_with_the_recipe_keeps_it(armed, tmp_path):
+    sim, loop, _ = armed
+    frame = sim.acquire({}).save(str(loop.output_dir / "in"), 1)
+    locked = {"particle_count": 60.0, "mean_diameter_nm": 5.7}
+    _Scripted.queue = [_audit({"particle_count": 44, "mean_diameter_nm": 18.4}, tmp_path, "c1"),
+                       _audit({"particle_count": 60, "mean_diameter_nm": 5.72}, tmp_path, "c2")]
+    loop._escalation_runner = _Scripted
+    before = loop.recipe["id"]
+    out = loop.audit(frame, reason="change", locked=locked, background=False)
+    # The recipe is kept, and it is NOT called verified: a vote is not the truth. Live, the
+    # dissenting quick audit (101 particles) was right and the recipe and the deeper audit (57,
+    # 56) shared a blind spot. The dissent stays on the record and in front of the person.
+    assert out["event"] == "audit_split" and out["agrees"] is False and loop.recipe["id"] == before
+    assert out["dissent"]["particle_count"]["audit"] == 44.0
+    assert loop.status()["last_audit"]["split"] is True and loop.status()["last_audit"]["agrees"] is False
+    assert any(e["event"] == "state_accepted" and e["verified"] is False for e in loop.read_log())
+
+
+def test_an_analysis_made_because_of_a_change_is_told_what_changed(armed, tmp_path):
+    sim, loop, _ = armed
+    loop._last_novelty = {"step": loop._step, "since_step": 16, "where": [
+        {"kind": "new", "x_from": 0.089, "x_to": 0.13, "x_peak": 0.104, "share": 0.5, "region": "lower left quarter",
+         "length_from": 3.1, "length_to": 4.5, "length_peak": 3.8, "length_units": "nm"}]}
+    _Scripted.queue = [_audit({"particle_count": 60, "mean_diameter_nm": 5.7}, tmp_path, "h1")]
+    _Scripted.specs = []
+    loop._escalation_runner = _Scripted
+    loop.audit(sim.acquire({}).save(str(loop.output_dir / "in"), 1), reason="change",
+               locked={"particle_count": 60.0, "mean_diameter_nm": 5.7}, background=False)
+    hints = _Scripted.specs[0]["analyze_kwargs"]["hints"]
+    assert "new structure appeared at length scales of 3.1 to 4.5 nm" in hints
+    assert "lower left quarter of the field" in hints and "from frame 16" in hints
+    assert "or say why it should not be counted" in hints
+    # a periodic audit is a routine check: it is told nothing
+    _Scripted.queue = [_audit({"particle_count": 60, "mean_diameter_nm": 5.7}, tmp_path, "h2")]
+    _Scripted.specs = []
+    loop.audit(sim.acquire({}).save(str(loop.output_dir / "in"), 2), reason="periodic",
+               locked={"particle_count": 60.0, "mean_diameter_nm": 5.7}, background=False)
+    assert "hints" not in _Scripted.specs[0]["analyze_kwargs"]
+
+
+def test_an_audit_that_could_not_be_formed_is_retried_once_deeper(armed, tmp_path):
+    sim, loop, _ = armed
+    frame = sim.acquire({}).save(str(loop.output_dir / "in"), 1)
+    nothing = {"status": "success", "output_directory": str(loop.anchor_dir), "llm_calls": 9, "seconds": 280,
+               "pin_features": {"particle_count": 0.0}, "reported": ["mean_diameter_nm", "particle_count"]}
+    _Scripted.queue = [dict(nothing), dict(nothing)]
+    _Scripted.specs = []
+    loop._escalation_runner = _Scripted
+    out = loop.audit(frame, reason="periodic", locked={"particle_count": 60.0, "mean_diameter_nm": 5.7},
+                     background=False)
+    assert [s["analyze_kwargs"]["profile"] for s in _Scripted.specs] == ["quick", "thorough"]
+    assert out["event"] == "audit_failed"                 # once, not forever
+    assert [e["event"] for e in loop.read_log()].count("audit_failed") == 2

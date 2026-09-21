@@ -197,6 +197,32 @@ class TestGPRecommender:
         with pytest.raises(ValueError, match="numeric parameters only"):
             GPRecommender(SCHEMA, "signal")
 
+    def test_several_objectives_explore_the_trade_off_front(self):
+        """The usual situation at an instrument: precision against time. A longer dwell
+        lowers the error and costs seconds; no weights are invented, the front is explored."""
+        one = InstrumentSchema.from_dict({"dwell": {"low": 1.0, "high": 100.0}})
+        r = GPRecommender(one, {"error": "minimize", "seconds": "minimize"}, n_init=4, seed=3)
+        assert list(r.objectives) == ["error", "seconds"] and r.objective_key == "error"
+        for _ in range(9):
+            out = r.suggest()
+            p = out["params"]
+            assert one.validate(p) == []
+            r.observe(p, {"error": 1.0 / p["dwell"] ** 0.5, "seconds": p["dwell"]})
+        assert "hypervolume" in out["rationale"] and "non-dominated" in out["rationale"]
+        dwells = [h["params"]["dwell"] for h in r.history]
+        assert max(dwells) - min(dwells) > 30                     # it did not collapse onto one end
+        # every point of this problem is on the front: error falls exactly as seconds rise
+        import numpy as np
+        _, _, Y = r._xy()
+        assert Y.shape == (9, 2) and r._non_dominated(Y) == 9
+        assert GPRecommender._non_dominated(np.array([[1.0, 1.0], [2.0, 2.0], [0.0, 3.0]])) == 2
+
+    def test_a_list_of_objectives_shares_one_direction_and_a_bad_direction_is_refused(self):
+        one = InstrumentSchema.from_dict({"x": {"low": 0.0, "high": 1.0}})
+        assert GPRecommender(one, ["a", "b"], direction="minimize").objectives == {"a": "minimize", "b": "minimize"}
+        with pytest.raises(ValueError, match="direction"):
+            GPRecommender(one, {"a": "up"})
+
 
 def test_change_nothing_is_an_answer_not_a_failure():
     # Observed live: an AFM recommender that judged precision already met

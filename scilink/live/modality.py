@@ -46,6 +46,11 @@ class CurveModality:
     #: True where names are only ASKED for (not pinned, not fixed by construction):
     #: a rebuilt recipe that does not report a tracked output is refused.
     require_outputs_after_rebuild = False
+    #: What the slow clock does by default when the data changed and the recipe
+    #: still fits (the loop's ``on_change``).
+    default_on_change = "report"
+    #: True where one disagreeing audit must not win by itself.
+    audit_needs_second_opinion = False
 
     # ------------------------------------------------------------------ agent
     def make_agent(self, loop: Any, output_dir: str) -> Any:
@@ -535,6 +540,12 @@ class ImageModality(CurveModality):
     series_reference = True
     window_reanchor = False
     require_outputs_after_rebuild = True
+    # The replay verdict of an image sees whether the method still runs, not whether
+    # it is still right (live: a recipe went on counting 60 of 117 particles with a
+    # "good" gate). So a change that "still fits" is checked by default, and a single
+    # quick image analysis is not trusted over the recipe without a second one.
+    default_on_change = "audit"
+    audit_needs_second_opinion = True
 
     def make_agent(self, loop: Any, output_dir: str) -> Any:
         from ..agents.exp_agents.image_analysis_agent import ImageAnalysisAgent

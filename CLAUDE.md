@@ -901,6 +901,59 @@ defocus blur and doubled noise and misfired on slow coarsening, and an intensity
 histogram added nothing. A located change is reported as a LENGTH SCALE
 (`annotate_where`), not a spatial frequency.
 
+**For images, a change that "still fits" is audited, and an audit is not a vote.**
+`ImageModality.default_on_change` is `"audit"` (curves and cubes report). What
+the live runs taught, in order: (1) one quick image audit can be the worse of the
+two analyses (an 18 nm diameter against the recipe's 6.6), so a disagreeing audit
+asks for a second, deeper one (`audit_needs_second_opinion`); (2) a deeper audit
+that is NOT told what changed shares the recipe's blind spot (it left the newly
+nucleated particles out exactly as the recipe did, and "agreed"), so **every
+analysis made because of a change is told what changed and where**
+(`_what_changed` → `hints`: model-free, context and not a constraint; told, the
+same audit went from 56 particles to 89 of 105); (3) a vote is not the truth: when
+the second audit sides with the recipe the result is an `audit_split`, the recipe
+is kept and the state is NOT called verified, and the dissent stays on the record
+and on the page; (4) a recipe that two independent analyses both reject is
+replaced by the deeper one even when the two do not agree with each other, marked
+`contested`, because keeping it is the worst of the three choices. An audit that
+could not be formed (no value for a tracked output) is retried once at a deeper
+profile. Do not collapse these into a majority rule.
+
+**A pause is when the slow half of a discovery runs.** `loop.assess_change()`
+(`live/discovery.py`) is the chain of the first SciLink paper for one frame: an
+analysis of the changed frame told what changed, its scientific claims, and with a
+literature key a novelty score per claim; the outcome goes on the log as a
+`discovery` event and the Live tab shows it on a paused run. Without a key the
+claims stand and the result says the literature was not asked.
+
+**What an instrument learns outlives the run** (`live/instrument_home.py`,
+`~/.scilink/instruments/<id>/`, opt-in with `remember=True`). Recipes are kept per
+instrument identity, not per chat session. At `setup` the instrument's known
+recipes are tried on the reference by strict replay before anything is analysed;
+one that fits AND reports what is tracked arms the loop with no model call, and a
+rebuild tries them too (`recall_known` is shared by setup and the worker). A
+recalled recipe is a hypothesis about the new sample: it is replayed and judged
+before use, and watched like any other after. Opt-in for that reason.
+
+**The fast path runs in one long-lived interpreter** (`executors.WarmScriptExecutor`,
+`warm_replay=True`): a fresh process paid the recipe's imports on every frame (a
+real atomic-resolution recipe: 7.5 s cold, 1.5 s warm, identical numbers). It is
+for REPLAYING a verified script only: module state survives between runs, which
+is the point and also why generated, unverified code never runs there. Each run
+keeps its own working directory, the timeout is hard (the worker is killed and
+replaced), Stop reaches it, and any failure of the worker falls back to a cold run.
+
+Measured and declined, so nobody redoes it blind: finer region grids for IMAGES
+(3x3, 4x4) add false novelties on a coarsening series (7 against 0), halve the
+detection of a nucleation and gain nothing on real HAADF patches, because small
+image regions hold too few objects for a stable power spectrum; quarters stay.
+Pinning for images: the names asked for were honoured in every live run, and the
+failures were missing VALUES, which the refusal check already catches.
+
+A first `setup` on rich image data is slow-clock work and can take tens of
+minutes (a multi-pass analysis, segmentation, the portability replays): it is
+paid once per recipe, and with `remember=True` once per instrument.
+
 **What a frame leaves on disk is bounded, and heavy assets are per machine.** A
 live run is open-ended, so the loop keeps the newest `keep_frame_dirs` per-frame
 folders (the log and the measured data are never pruned). Model weights a skill
