@@ -43,12 +43,15 @@ class TestEverySimulator:
         with pytest.raises(ValueError, match="not a parameter"):
             sim.acquire({"warp_factor": 9})
 
-    def test_a_frame_saves_as_csv_plus_sidecar(self, name, tmp_path):
+    def test_a_frame_saves_as_data_plus_sidecar(self, name, tmp_path):
         f = get_simulator(name).acquire({})
         path = Path(f.save(str(tmp_path), 7))
-        assert path.name == "frame_000007.csv"
-        data = np.loadtxt(path, delimiter=",", skiprows=1)
-        assert data.shape == (len(f.x), 2)
+        if f.cube is not None:                            # a datacube frame
+            assert path.name == "frame_000007.npy" and np.load(path).shape == f.cube.shape
+        else:
+            assert path.name == "frame_000007.csv"
+            data = np.loadtxt(path, delimiter=",", skiprows=1)
+            assert data.shape == (len(f.x), 2)
         side = json.loads(path.with_suffix(".json").read_text())
         assert side["params"] == f.params and side["truth"] == f.truth
 

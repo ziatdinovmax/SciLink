@@ -222,3 +222,52 @@ class TestLocate:
 
     def test_nothing_held_nothing_located(self):
         assert armed().locate() == []
+
+
+# ── several curves per frame: a datacube watched by region ──────────────────
+
+def _regions(extra_in=None, seed=0):
+    from scilink.live.drift import DriftBank  # noqa: F401
+    out = {}
+    for k, name in enumerate(["whole field", "upper left", "lower right"]):
+        peaks = list(TWO)
+        if extra_in and name in extra_in:
+            peaks = peaks + [(16.5, extra_in[name], 0.5)]
+        out[name] = curve(peaks, seed=seed * 10 + k)
+    return out
+
+
+def test_a_frame_is_as_changed_as_its_most_changed_region():
+    from scilink.live.drift import DriftBank
+    bank = DriftBank()
+    bank.seed([_regions(seed=1)])
+    for i in range(6):
+        v = bank.judge(_regions(seed=2 + i))
+        assert not v["suspected"]
+        bank.learn(_regions(seed=2 + i), v)
+    # new intensity in one region, diluted in the whole field
+    changed = [_regions({"lower right": 1.2, "whole field": 0.06}, seed=20 + i) for i in range(3)]
+    verdicts = [bank.judge(f) for f in changed]
+    assert all(v["suspected"] and v["region"] == "lower right" for v in verdicts)
+    assert not verdicts[0]["_all"]["upper left"]["suspected"]
+    assert bank.n_held == 3 and bank.held_agree()
+    [where] = bank.locate()
+    assert where["region"] == "lower right" and where["kind"] == "new" and abs(where["x_peak"] - 16.5) < 0.4
+    assert bank.adopt() == 3 and bank.n_held == 0
+    assert not bank.judge(_regions({"lower right": 1.2, "whole field": 0.06}, seed=30))["suspected"]
+
+
+def test_one_curve_behaves_like_one_monitor_and_old_state_loads():
+    from scilink.live.drift import DriftBank
+    mon, bank = armed(), DriftBank()
+    bank.seed([curve(TWO, seed=1)])
+    for i in range(6):
+        f = curve(TWO, seed=10 + i)
+        bank.learn(f, bank.judge(f))
+    new = curve(TWO + [(16.5, 3.0, 0.5)], seed=40)
+    a, b = mon.judge(*new), bank.judge(new)
+    assert (a["suspected"], a["fraction"], a["score"]) == (b["suspected"], b["fraction"], b["score"])
+    assert "region" not in b
+    restored = DriftBank()
+    restored.load_state(mon.to_state())                      # a loop saved before regions existed
+    assert restored.judge(new)["suspected"] and restored.to_state()["monitors"].keys() == {"signal"}

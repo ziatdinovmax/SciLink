@@ -54,6 +54,7 @@ def _instrument_info(inst: Any) -> Dict[str, Any]:
         "y_axis": (inst.system_info or {}).get("y_axis"),
         "about": _plain(inst.__class__.__doc__),
         "simulated": inst.__class__.__module__.endswith(".simulators"),
+        "modality": getattr(inst, "modality", "curve"),
         "schema": schema,
         "defaults": dict(inst.defaults or {}),
         "outputs": {k: _plain(v) for k, v in (inst.outputs or {}).items()},
@@ -555,7 +556,7 @@ class LiveRun:
         except Exception:  # noqa: BLE001
             rel = str(e.get("data") or "")
         return {k: e.get(k) for k in ("step", "since_step", "fraction", "from_reference", "where",
-                                      "recipe_fits", "window_share")} | {
+                                      "recipe_fits", "window_share", "region")} | {
             # Shown relative; handed to Chat absolute — observed: the chat agent
             # could not resolve a session-relative path and asked for the full one.
             "frame_path": rel, "frame_abs_path": str(e.get("data") or "")}
@@ -570,16 +571,23 @@ class LiveRun:
                 and not k.endswith(("_err", "_error", "_stderr", "_std"))][:cap]
 
     def _reference_curve(self) -> Optional[Dict[str, Any]]:
-        refs = sorted((self.run_dir / "reference").glob("reference_*.csv"))
+        refs = sorted(p for p in (self.run_dir / "reference").glob("reference_*")
+                      if p.suffix.lower() != ".json")
         return self._curve({"step": 0, "data": str(refs[-1])}) if refs else None
 
-    @staticmethod
-    def _curve(frame: Dict[str, Any], max_points: int = 600) -> Optional[Dict[str, Any]]:
+    def _curve(self, frame: Dict[str, Any], max_points: int = 600) -> Optional[Dict[str, Any]]:
         """The frame's data and, when the analysis left one, the fitted model on
-        the same x — the live analysis result, not just its input."""
+        the same x — the live analysis result, not just its input. A datacube
+        is shown as its mean spectrum (what the change signal reads)."""
         try:
             import numpy as np
-            data = np.loadtxt(frame["data"], delimiter=",", skiprows=1)
+            if getattr(self.instrument, "modality", "curve") == "hyperspectral":
+                from scilink.live.modality import HyperspectralModality
+                x, y = HyperspectralModality().read_signal(
+                    str(frame["data"]), getattr(self.instrument, "system_info", None))
+                data = np.column_stack([x, y])
+            else:
+                data = np.loadtxt(frame["data"], delimiter=",", skiprows=1)
             step = max(1, len(data) // max_points)
             out = {"step": frame["step"], "x": [round(float(v), 5) for v in data[::step, 0]],
                    "y": [round(float(v), 5) for v in data[::step, 1]]}

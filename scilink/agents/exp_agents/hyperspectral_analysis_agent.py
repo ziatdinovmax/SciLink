@@ -253,10 +253,14 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Locked replay: the anchor's per-map stats ({name: {min,max,mean}})
         # for the deterministic replay gate.
         replay_reference: dict | None = None,
-        # Operating profile (#346): plumbed for parity with the curve agent;
-        # realtime toggles are wired for curve only in v1 (hyperspectral
-        # per-frame cost is numerics-dominated). Thorough is unaffected.
+        # Operating profile (#346). 'realtime' exists for a locked replay only
+        # (a live frame): no synthesis, no refits. Thorough is unaffected.
         profile: Any = None,
+        # A live frame: the locked replay runs with ZERO model calls — no skill
+        # selection, no execution repair, no salvage / not-measurable judge, no
+        # synthesis. A script that raises fails the frame. Needs
+        # reuse_locked_script.
+        strict_replay: bool = False,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -397,24 +401,40 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "used by the hyperspectral agent yet — ignoring. Pass "
                 "reuse_locked_script=True for a locked replay.")
 
+        if strict_replay and not reuse_records:
+            return {
+                "status": "error",
+                "error": {"error": "strict_replay requires reuse_locked_script",
+                          "details": ("A strict replay executes a prior run's approved "
+                                      "script with no model call; there is nothing to "
+                                      "execute without prior_analysis_paths and "
+                                      "reuse_locked_script=True.")},
+                "output_directory": str(self.output_dir),
+            }
+
         # Operating profile. The fit-for-purpose presets (quick / extract)
         # are honoured: a smaller codegen retry budget, a lighter (or no)
         # synthesis, and for a series no refits / no trend script. 'realtime'
-        # is not wired for cubes (per-frame cost is numerics-dominated) and
-        # falls back to thorough.
-        from ._qc_profile import THOROUGH, resolve_profile
+        # is the per-frame mode of a live loop and means something only for a
+        # locked replay (no synthesis, no refits); without one it falls back
+        # to thorough, since a fresh analysis of a cube is numerics- and
+        # codegen-dominated whatever the profile says.
+        from ._qc_profile import REALTIME, THOROUGH, resolve_profile
         qc_profile = resolve_profile(profile)
-        if qc_profile.name == "realtime":
+        if strict_replay:
+            qc_profile = REALTIME
+        elif qc_profile.name == "realtime" and not reuse_records:
             self.logger.warning(
-                "profile='realtime' is not wired for hyperspectral analysis "
-                "yet (per-frame cost is numerics-dominated); running under "
-                "the thorough profile."
+                "profile='realtime' applies to a locked replay only for "
+                "hyperspectral analysis; running under the thorough profile."
             )
             qc_profile = THOROUGH
+        self._strict_replay = bool(strict_replay)
         # Per-call, never sticky: the agent instance may be reused.
         self._qc_profile = qc_profile
         if qc_profile.name != "thorough":
-            if max_verification_iterations is None:
+            if max_verification_iterations is None and not reuse_records:
+                # (a locked replay keeps its forced single attempt)
                 effective_max_verification = qc_profile.max_verification_iterations
             if max_series_refits is None and not qc_profile.adaptive_refit:
                 max_series_refits = 0
@@ -501,7 +521,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Auto-select skill(s) when none were explicitly provided, mirroring
         # the image/curve agents. Conservative, technique-aware (issue #251);
         # may pick zero, one, or several skills from the metadata.
-        if not skill_state.get("skills_loaded") and getattr(self, "_skill_autoselect", True):
+        if (not skill_state.get("skills_loaded") and getattr(self, "_skill_autoselect", True)
+                and not strict_replay):
             selected = self._auto_select_skills(
                 system_info, hint=skill_hint, custom_skills=custom_skills
             )
@@ -560,6 +581,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             reuse_records=reuse_records,
             locked_targets=locked_targets,
             replay_reference=replay_reference,
+            strict_replay=strict_replay,
         )
         
         # Handle Errors
@@ -723,6 +745,31 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     _NO_SYNTHESIS_SKIP = _LIGHT_SYNTHESIS_SKIP + (
         "BuildHolisticSynthesisPromptController", "RunFinalInterpretationController")
 
+    @staticmethod
+    def _deterministic_result(iteration_state: dict) -> dict | None:
+        """The result of a run with NO interpretation stage at all.
+
+        A locked replay skips the iteration's interpretation (the synthesis is
+        meant to interpret instead); with ``synthesis="none"`` nothing did, and
+        the run ended with "Pipeline returned no results" although its maps were
+        computed and gated. The consumer of such a run reads numbers, so the
+        summary is one deterministic line per output and there are no claims."""
+        feats = iteration_state.get("custom_analysis_metadata_list") or []
+        if not feats and not iteration_state.get("dynamic_analysis_records"):
+            return None
+        lines = []
+        for f in feats:
+            st = f.get("stats") or {}
+            if all(isinstance(st.get(k), (int, float)) for k in ("mean", "min", "max")):
+                lines.append(f"{f.get('name')}: mean {st['mean']:.6g} "
+                             f"(range {st['min']:.6g} to {st['max']:.6g})"
+                             + (f" {f['units']}" if f.get("units") else ""))
+            else:
+                lines.append(str(f.get("name")))
+        return {"detailed_analysis": ("Locked-script replay, no interpretation stage. "
+                                      + ("; ".join(lines) if lines else "No output passed the replay gate.")),
+                "scientific_claims": []}
+
     def _synthesis_level(self) -> str:
         """``full`` | ``light`` | ``none`` for this run: the active profile's
         level, with a series replay child never above ``light``."""
@@ -743,6 +790,10 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         level = level or self._synthesis_level()
         skip = {"light": self._LIGHT_SYNTHESIS_SKIP,
                 "none": self._NO_SYNTHESIS_SKIP}.get(level, ())
+        if getattr(self, "_strict_replay", False):
+            # A live frame: the maps' dashboards are kept (they are the result a
+            # person looks at), a per-frame HTML report is not written.
+            skip = tuple(skip) + ("GenerateHTMLReportController",)
         return [c for c in self.synthesis_pipeline
                 if c.__class__.__name__ not in skip]
 
@@ -771,6 +822,12 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "agent_type": "hyperspectral",
                 "status": response.get("status"),
                 "extracted_features": feats,
+                # The per-map records behind the flat columns (names, units,
+                # stats, coverage — no arrays): what a later locked replay of
+                # this run is gated against (its replay_reference).
+                "feature_records": [
+                    {k: m[k] for k in ("name", "units", "stats", "coverage", "scalar") if k in m}
+                    for m in (response.get("extracted_features") or []) if isinstance(m, dict)],
             }
             if response.get("stage_timings"):
                 payload["stage_timings"] = response["stage_timings"]
@@ -2131,6 +2188,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         reuse_records: list | None = None,
         locked_targets: list | None = None,
         replay_reference: dict | None = None,
+        strict_replay: bool = False,
     ) -> tuple[Dict[str, Any] | None, Dict[str, Any] | None]:
         """
         Main execution engine using Queue-Based Branching architecture.
@@ -2211,6 +2269,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 # skipped — the replayed per-pixel scripts use the raw cube.
                 **({"reuse_records": reuse_records,
                     "skip_decomposition": True,
+                    "_strict_replay": bool(strict_replay),
                     "replay_reference": replay_reference or {}} if reuse_records else {}),
                 # Locked targets, fresh code: plan fixed, decomposition skipped,
                 # codegen ladder intact (see SelectRefinementTargetController).
@@ -2271,7 +2330,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 # synthesis="none" (or a spent time budget): the iteration's
                 # interpretation IS the result; otherwise the holistic
                 # interpretation fills this.
-                "result_json": (iteration_state.get("result_json")
+                "result_json": ((iteration_state.get("result_json")
+                                 or self._deterministic_result(iteration_state))
                                 if _synth_level == "none" else None),
                 # Carry the iteration pipeline's failure forward so the caller
                 # sees the ORIGINAL error (e.g. the decomposition exception),

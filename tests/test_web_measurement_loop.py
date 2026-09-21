@@ -81,16 +81,17 @@ CONFIG = {"instrument": "afm_force_curve", "n_frames": 4, "interval_s": 0.0,
           "pin_outputs": False, "recommender": "none", "auto_escalate": False}
 
 
-def test_the_four_simulated_experiments_are_offered():
+def test_the_simulated_experiments_are_offered():
     names = {s["name"] for s in live_api.list_simulators()}
-    assert names == {"beamline_xrd", "insitu_raman", "afm_force_curve", "stm_didv"}
+    assert names == {"beamline_xrd", "insitu_raman", "afm_force_curve", "stm_didv",
+                     "spectrum_image_series"}
     for s in live_api.list_simulators():
         assert s["schema"] and s["outputs"] and s["events"] and s["about"]
 
 
 def test_idle_session_lists_simulators(session):
     snap = live_api.snapshot(session)
-    assert snap["state"] == "idle" and len(snap["simulators"]) == 4
+    assert snap["state"] == "idle" and len(snap["simulators"]) == 5
 
 
 def test_a_run_arms_streams_and_finishes(session):
@@ -329,6 +330,49 @@ def test_stop_ends_a_pause_and_a_time_limit_resumes_unchanged(session):
     assert len(snap["frames"]) == 31 and "went on unchanged" in snap["note"]
 
 
+def test_a_stream_of_datacubes_runs_in_the_tab(tmp_path, monkeypatch):
+    """The instrument says its frames are datacubes; the run follows them with the
+    hyperspectral modality and the page shows each cube as its mean spectrum."""
+    import json as _json
+    anchor = tmp_path / "hs_anchor"
+    anchor.mkdir()
+    (anchor / "dynamic_analysis_records.json").write_text(_json.dumps([{
+        "target": "plasmon energy", "task_success": True, "required_outputs": ["Plasmon_Energy"],
+        "script": "def analyze_feature(data, axis):\n    return {}\n"}]))
+    feature = [{"name": "Plasmon_Energy", "units": "eV", "coverage": 1.0,
+                "stats": {"min": 0.6, "max": 0.64, "mean": 0.62}}]
+
+    class Agent:
+        def __init__(self, output_dir):
+            self.output_dir = output_dir
+
+        def analyze(self, data, **kw):
+            SEEN.append(kw)
+            return {"status": "success", "extracted_features": feature,
+                    "output_directory": str(anchor) if "reference" in Path(str(data)).name else self.output_dir,
+                    "script_reuse": {"verbatim": True}, "stage_timings": {"llm_calls": 0}}
+
+    live_api._RUNS.clear()
+    SEEN.clear()
+    monkeypatch.setattr(live_pkg, "MeasurementLoop", functools.partial(MeasurementLoop, agent_factory=Agent))
+    sdir = tmp_path / "session"
+    sdir.mkdir()
+    session = SimpleNamespace(id="hs", session_dir=str(sdir),
+                              agent=SimpleNamespace(model_name="m", api_key=None, base_url=None))
+    live_api.start(session, {**CONFIG, "instrument": "spectrum_image_series", "n_frames": 3})
+    snap = _wait(session, lambda s: s["state"] in ("done", "error"))
+    assert snap["state"] == "done", snap.get("error")
+    assert snap["instrument"]["modality"] == "hyperspectral"
+    assert [f["flags"] for f in snap["frames"]] == [[], [], []]
+    assert snap["frames"][-1]["features"] == {"Plasmon_Energy_mean_eV": 0.62}
+    assert len(snap["latest"]["x"]) == 160 and abs(snap["latest"]["x"][0] - 0.30) < 1e-6   # mean spectrum, in eV
+    assert "fit" not in snap["latest"]
+    replay = SEEN[-1]                                    # the fast path asked for a strict replay
+    assert replay["strict_replay"] is True and replay["replay_reference"]["Plasmon_Energy"]["mean"] == 0.62
+    assert replay["system_info"]["energy_range"]["start"] == 0.30
+    live_api._RUNS.clear()
+
+
 # ── replaying a folder of recorded measurements ──────────────────
 
 def _recording(tmp_path, n=5):
@@ -377,6 +421,6 @@ def test_routes(tmp_path):
     from scilink.server.app import create_app
     client = TestClient(create_app(session_root=tmp_path, serve_frontend=False))
     sims = client.get("/api/v1/live/simulators").json()["simulators"]
-    assert len(sims) == 4
+    assert len(sims) == 5
     assert client.get("/api/v1/sessions/nope/live").status_code == 404
     assert client.post("/api/v1/sessions/nope/live/start", json={}).status_code == 404

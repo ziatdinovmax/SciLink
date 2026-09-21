@@ -7,10 +7,12 @@ typed methods. See :mod:`scilink.live.measurement_loop`.
 from .instruments import EndOfData, Frame, Instrument, ReplayInstrument, run_experiment
 from .mcp_instrument import MCPInstrument
 from .measurement_loop import LOOP_LOG_NAME, LoopNotReady, MeasurementLoop
+from .modality import CurveModality, HyperspectralModality
 from .recommend import (GPRecommender, InstrumentSchema, LLMRecommender,
                         ParameterSpec, Recommender, RuleTableRecommender)
 
 __all__ = ["MeasurementLoop", "LoopNotReady", "LOOP_LOG_NAME",
            "Instrument", "Frame", "run_experiment", "ReplayInstrument", "EndOfData", "MCPInstrument",
+           "CurveModality", "HyperspectralModality",
            "InstrumentSchema", "ParameterSpec", "Recommender",
            "RuleTableRecommender", "GPRecommender", "LLMRecommender"]

@@ -68,9 +68,11 @@ function parseOutputs(text: string): Record<string, string> {
 }
 
 /** Where the data is new, then whether the measured window changed with it. */
-function describeChange(where: LiveNovelty["where"]): string {
+function describeChange(where: LiveNovelty["where"], region?: string | null): string {
   const data = where.find((w) => w.kind !== "window");
-  return [describeWhere(data), ...where.filter((w) => w.kind === "window").map(describeWhere)]
+  // A datacube is watched by region: say which part of the field changed.
+  const place = region && region !== "whole field" ? `In the ${region} of the field.` : "";
+  return [describeWhere(data), place, ...where.filter((w) => w.kind === "window").map(describeWhere)]
     .filter(Boolean).join(" ");
 }
 
@@ -107,7 +109,7 @@ function describeEvent(e: LiveEvent): string {
     case "escalation_started":
       return "Rebuilding the recipe in the background.";
     case "novelty": {
-      return `The data changed from frame ${g("since_step")}. ${describeChange((e.where ?? []) as LiveNovelty["where"])}`;
+      return `The data changed from frame ${g("since_step")}. ${describeChange((e.where ?? []) as LiveNovelty["where"], e.region as string | undefined)}`;
     }
     case "paused":
       return g("why") === "novelty" ? "Paused. The data changed and the run is waiting for a decision."
@@ -648,6 +650,7 @@ export function LivePanel({
   const flagged = frames.filter((f) => f.flags.length).map((f) => ({
     x: f.step, label: f.flags.map((x) => FLAG_WORDS[x] ?? x).join(", "),
   }));
+  const isCube = inst?.modality === "hyperspectral";
   const hasTruth = keys.some((k) => frames.some((f) => f.truth && k in f.truth));
   const params = snap?.current_params ?? {};
   const schema = Object.entries(inst?.schema ?? {});
@@ -758,7 +761,7 @@ export function LivePanel({
           <div>
             <b>New from frame {n.since_step}.</b>{" "}
             {typeof n.fraction === "number" ? `${Math.round(100 * n.fraction)} % of a frame is unlike the frames before it. ` : ""}
-            {describeChange(n.where)}
+            {describeChange(n.where, n.region)}
             {n.where.length === 0 && n.window_share ? " The measured window changed." : ""}
             {n.recipe_fits ? "" : " The recipe no longer fits and is being rebuilt."}
             <Info>
@@ -772,7 +775,7 @@ export function LivePanel({
                 `Analyze ${n.frame_abs_path || n.frame_path} thoroughly. Context: it is frame ${n.step} of a live ` +
                 `${inst?.technique ?? "measurement"} run. From frame ${n.since_step} the data changed` +
                 (typeof n.fraction === "number" ? ` (${Math.round(100 * n.fraction)} % of a frame is unlike the earlier frames)` : "") +
-                `. ${describeChange(n.where)} Say what changed as specific, testable claims, ` +
+                `. ${describeChange(n.where, n.region)} Say what changed as specific, testable claims, ` +
                 `then assess how novel each claim is against the literature.`)}
             >
               Analyse in Chat
@@ -855,10 +858,15 @@ export function LivePanel({
           <section className="live-card">
             <div className="live-card-head">
               <h4>{curve.step === 0 ? "Reference" : `Frame ${curve.step}`}</h4>
+              {isCube && <span className="caption">mean spectrum</span>}
               {typeof r2 === "number" && curve.step > 0 && <span className="caption">R² {r2.toFixed(3)}</span>}
               <Info>
-                The latest measurement with the recipe's fitted model drawn over it. This is the analysis
-                result for the frame, produced without a model call.
+                {isCube
+                  ? "Each frame is a datacube. This is its mean spectrum, which is also what the change "
+                    + "signal reads, for the whole field and for each quarter of it. The tracked quantities "
+                    + "are the means of the maps the recipe computes, produced without a model call."
+                  : "The latest measurement with the recipe's fitted model drawn over it. This is the analysis "
+                    + "result for the frame, produced without a model call."}
               </Info>
             </div>
             <LiveChart

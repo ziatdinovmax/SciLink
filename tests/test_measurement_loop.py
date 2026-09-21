@@ -1057,8 +1057,13 @@ def test_sidecar_metadata_reaches_the_analysis_and_truth_never_does(tmp_path):
         "params": {"power": 2}, "truth": {"g_factor": 2.0023}}))
     native = tmp_path / "frame.csv"
     native.write_text("x,y\n0,1\n")
-    native.with_suffix(".json").write_text(json.dumps({"temperature_K": 120, "truth": {"x": 1},
-                                                       "nested": {"ignored": True}}))
+    native.with_suffix(".json").write_text(json.dumps({
+        "temperature_K": 120, "truth": {"x": 1},
+        # a small description of scalars travels (a datacube's spectral axis does this) ...
+        "energy_range": {"start": 0.2, "end": 1.13, "units": "eV"},
+        # ... arrays and bulk do not
+        "spectrum": [1, 2, 3], "table": {"rows": [[1, 2], [3, 4]]},
+        "big": {f"k{i}": i for i in range(40)}}))
     anchor = make_anchor(tmp_path)
 
     class RefAgent(FakeAgent):
@@ -1071,7 +1076,8 @@ def test_sidecar_metadata_reaches_the_analysis_and_truth_never_does(tmp_path):
     loop.step(str(native))
     setup_info, frame_info = FakeAgent.calls[0]["system_info"], FakeAgent.calls[-1]["system_info"]
     assert setup_info == {"microwave_frequency_GHz": 9.41, "technique": "EPR"}     # the caller's word wins
-    assert frame_info == {"temperature_K": 120, "technique": "EPR"}
+    assert frame_info == {"temperature_K": 120, "technique": "EPR",
+                          "energy_range": {"start": 0.2, "end": 1.13, "units": "eV"}}
     assert "truth" not in json.dumps([setup_info, frame_info])
 
 

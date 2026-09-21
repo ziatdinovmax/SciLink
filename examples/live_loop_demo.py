@@ -14,6 +14,15 @@ To try it on data you have already recorded, swap the simulator for
 ``ReplayInstrument("path/to/folder", system_info={...}, outputs={...})``: every
 two-column file in the folder is served as one frame, in file order.
 
+A stream of DATACUBES (spectrum images) works the same way: swap in
+``get_simulator("spectrum_image_series")``, or a ``ReplayInstrument`` over a
+folder of ``.npy`` / HDF5 cubes. The instrument says its frames are cubes and
+the loop follows them with the hyperspectral agent: the reference cube is
+analysed once, its per-pixel script is replayed on every later cube with no
+model call, the tracked quantities are the means of the maps it computes, and a
+change is reported with where on the spectral axis and in which part of the
+field it is.
+
 To move to a real instrument there are two routes. If the instrument has (or
 can get) an MCP server in front of its controller, in any language, use
 

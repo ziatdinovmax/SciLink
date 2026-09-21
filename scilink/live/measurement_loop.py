@@ -331,7 +331,7 @@ class MeasurementLoop:
                  auto_escalate: bool = False,
                  reanchor_frames: int = 5,
                  drift_fraction: float = 0.10, drift_score: float = 3.0,
-                 on_change: str = "report", instrument: Any = None,
+                 on_change: str = "report", instrument: Any = None, modality: Any = None,
                  audit_every: Optional[int] = None, audit_profile: str = "quick",
                  audit_tolerance: float = 0.05,
                  escalation_profile: str = "extract",
@@ -362,9 +362,13 @@ class MeasurementLoop:
         self.auto_escalate = bool(auto_escalate)
         self.reanchor_frames = max(1, int(reanchor_frames or 1))
         self._recent_frames: List[str] = []
-        from .drift import DriftMonitor
+        from .drift import DriftBank
         self.drift_fraction, self.drift_score = float(drift_fraction), float(drift_score)
-        self._drift = DriftMonitor(fraction_bar=self.drift_fraction, score_bar=self.drift_score)
+        self._drift = DriftBank(fraction_bar=self.drift_fraction, score_bar=self.drift_score)
+        from .modality import resolve_modality
+        self.modality = resolve_modality(
+            modality if modality is not None else getattr(instrument, "modality", None))
+        self._modality_state: Dict[str, Any] = {}
         self.instrument = (instrument.describe() if hasattr(instrument, "describe")
                            else (dict(instrument) if isinstance(instrument, dict) else None))
         if on_change not in ("report", "audit", "rebuild"):
@@ -402,10 +406,7 @@ class MeasurementLoop:
 
     # ------------------------------------------------------------------ setup
     def _default_agent(self, output_dir: str):
-        from ..agents.exp_agents.curve_fitting_agent import CurveFittingAgent
-        return CurveFittingAgent(api_key=self.api_key, model_name=self.model_name,
-                                 base_url=self.base_url, output_dir=output_dir,
-                                 enable_human_feedback=self._human_feedback)
+        return self.modality.make_agent(self, output_dir)
 
     _human_feedback = False
 
@@ -461,30 +462,22 @@ class MeasurementLoop:
             agent = self._agent_factory(str(run_dir))
             # The plan is told the recipe will be replayed on frames it has not
             # seen; the structural half of that rule is the portability check.
-            kwargs: Dict[str, Any] = {"system_info": self._with_sidecar(refs),
-                                      "stream_reference": True}
-            if profile:
-                kwargs["profile"] = profile
-            if self.targets:
-                kwargs["targets"] = self.targets
-            if len(refs) > 1:
-                kwargs["series_metadata"] = {"variable": "frame", "values": list(range(len(refs)))}
-                # The series is a means here: its plan, made with every frame
-                # in view, is what is wanted. No trend, no synthesis, and no
-                # per-frame re-analysis — observed on real EELS frames, the R²
-                # bar flagged 7 of 8 noise-limited frames and each was
-                # re-analysed by a model for about two minutes.
-                kwargs["profile"] = {"base": profile or "thorough", "trend": False,
-                                     "synthesis": "none", "adaptive_refit": False}
+            all_refs = list(refs)
+            if not self.modality.series_reference:
+                refs = refs[-1:]          # the state the stream continues from; all of them seed the monitor
+            kwargs = self.modality.reference_kwargs(self, refs, profile)
             ref_result = agent.analyze(refs if len(refs) > 1 else refs[0], **kwargs)
             self._human_feedback = False
-            if (ref_result or {}).get("status") != "success":
+            if (ref_result or {}).get("status") not in self.modality.usable_status:
                 raise RuntimeError(
                     "setup(): the reference analysis did not succeed — "
                     f"{(ref_result or {}).get('error')}")
             anchor = (ref_result.get("output_directory") or str(run_dir))
             source = ("bank" if ref_result.get("cold_start")
                       else f"reference:{profile or 'thorough'}")
+            if ref_result.get("status") != "success":
+                self.logger.warning("the reference analysis is only partial: some of its outputs "
+                                    "were withheld, and the loop tracks the ones that passed.")
             if len(refs) > 1:
                 anchor, series_info = self._single_frame_anchor(
                     Path(anchor), self.output_dir / "reference_anchor", refs)
@@ -493,14 +486,25 @@ class MeasurementLoop:
                 source += f":{len(refs)} frames"
             else:
                 reference = refs[0]
+            refs = all_refs
 
         script, anchor_dir = self._anchor_script(anchor)
+        if script is None and ref_result is not None:
+            # The analysis ran and left nothing to lock: say that, not "no run here".
+            raise RuntimeError(
+                "setup(): the reference analysis finished "
+                f"({ref_result.get('status')}) without an approved script to lock"
+                + self.modality.why_nothing_to_lock(ref_result)
+                + " A recipe that was never verified on the reference cannot answer later "
+                  "frames. Use a more thorough profile, a reference with more signal, or "
+                  "say in `targets` / `system_info` what the data can support.")
         if script is None:
-            raise ValueError(
-                f"setup(): {anchor} holds no reusable curve-fit run (expected "
-                "series_fit_results.json and a saved script under scripts/).")
+            raise ValueError(f"setup(): {anchor} {self.modality.no_anchor_message}")
         self.anchor_dir = anchor_dir
+        self._modality_state = self.modality.anchor_state(anchor_dir, ref_result)
         self._edits = []
+        if script_edits and not self.modality.script_edits:
+            raise ValueError(f"script_edits are not supported for {self.modality.name} recipes")
         if script_edits:
             self._validate_edits(script, list(script_edits))
             self._edits = list(script_edits)
@@ -508,11 +512,13 @@ class MeasurementLoop:
         self._calibrate()
 
         if ref_result is not None:
-            self._reference_features = _numeric_features(ref_result)
+            self._reference_features = self.modality.features(ref_result)
         else:
-            self._reference_features = self._features_from_anchor(anchor_dir)
+            self._reference_features = self.modality.features_from_anchor(anchor_dir)
         pinned = None
-        if self.outputs:
+        if self.outputs and not self.modality.pinning:
+            self._match_outputs()
+        elif self.outputs:
             ref_data = reference or reference_data
             if not ref_data:
                 raise ValueError(
@@ -580,12 +586,25 @@ class MeasurementLoop:
         self._reference_features = result["features"]
         return result
 
-    @staticmethod
-    def _anchor_script(anchor: str):
-        from ..agents.exp_agents.controllers.curve_fitting_controllers import (
-            _load_prior_curve_fit_state)
-        anchor_dir, _summary, script, _label = _load_prior_curve_fit_state(anchor)
-        return (script, anchor_dir) if anchor_dir is not None and script else (None, None)
+    def _anchor_script(self, anchor: str):
+        return self.modality.anchor_script(anchor)
+
+    def _match_outputs(self) -> None:
+        """Where names are fixed by the analysis itself (a datacube's maps), the
+        outputs the caller named are matched to what the recipe reports, and the
+        loop tracks those. A name nothing matches is dropped with a warning: the
+        loop never reports a quantity it does not have."""
+        matched: Dict[str, str] = {}
+        for name, definition in self.outputs.items():
+            want = str(name).lower().replace(" ", "_")
+            hit = next((k for k in self._reference_features if k.lower() == want), None) \
+                or next((k for k in self._reference_features if want in k.lower()), None)
+            if hit is None:
+                self.logger.warning(f"output {name!r} is not among what the recipe reports "
+                                    f"({sorted(self._reference_features)}); not tracked.")
+            else:
+                matched[hit] = definition
+        self.outputs = matched
 
     @staticmethod
     def _single_frame_anchor(series_dir: Path, dest: Path, files: List[str]):
@@ -626,14 +645,6 @@ class MeasurementLoop:
         return str(dest), info
 
     @staticmethod
-    def _features_from_anchor(anchor_dir: Path) -> Dict[str, float]:
-        try:
-            rj = json.loads((anchor_dir / "analysis_results.json").read_text())
-            return _numeric_features(rj)
-        except Exception:  # noqa: BLE001 - an adopted run may predate the file
-            return {}
-
-    @staticmethod
     def _validate_edits(script: str, edits: List[Dict[str, Any]]) -> str:
         from ..utils.file_edit import apply_snippet_edits
         res = apply_snippet_edits(script, edits)
@@ -667,28 +678,18 @@ class MeasurementLoop:
         error = None
         try:
             agent = self._agent_factory(str(frame_dir))
-            kwargs: Dict[str, Any] = dict(
-                system_info=self._with_sidecar(data_path),
-                prior_analysis_paths=[str(self.anchor_dir)],
-                reuse_locked_script=True, profile="realtime",
-                # The fast clock never calls a model: a recipe that cannot run
-                # on this frame fails the frame (flagged, escalated off-path)
-                # instead of being repaired or re-derived in-frame. Observed
-                # live: without this, a three-peak recipe meeting two-peak
-                # data cost three frames ~40 s and an LLM call each.
-                strict_replay=True)
-            if self._edits:
-                kwargs["script_edits"] = list(self._edits)
-            result = agent.analyze(data_path, **kwargs) or {}
+            # The fast clock never calls a model (strict replay): see the modality.
+            result = agent.analyze(data_path, **self.modality.replay_kwargs(self, data_path)) or {}
         except Exception as e:  # noqa: BLE001 - one frame must not kill the loop
             error = f"{type(e).__name__}: {e}"
             self.logger.exception(f"frame {idx} raised")
         latency = time.perf_counter() - t0
 
-        features = _numeric_features(result) if result.get("status") == "success" else {}
-        validity = result.get("reuse_validity") or {}
+        features = (self.modality.features(result)
+                    if result.get("status") in self.modality.usable_status else {})
+        validity = self.modality.validity(result)
         gate_extra: Dict[str, Any] = {}
-        if error or result.get("status") != "success" or not features:
+        if error or result.get("status") not in self.modality.usable_status or not features:
             flags.append(FLAG_FIT_FAILED)
             if not error and result.get("error"):
                 error = json.dumps(result.get("error"), default=str)[:300]
@@ -840,12 +841,14 @@ class MeasurementLoop:
                  "frames": [f for f in self._recent_frames[-self._consecutive_breaches:]]}
         if gate.get("drift_window_share") is not None:
             event["window_share"] = gate["drift_window_share"]
+        if gate.get("drift_region"):
+            event["region"] = gate["drift_region"]      # which part of the field (a datacube)
         self._append(event)
         self._novelty_open = True
         # The frame that made it a lasting change carries it, so a driver can
         # make this a decision point (run_experiment(pause_on="novelty")).
         record["novelty"] = {k: event[k] for k in ("since_step", "step", "fraction", "where",
-                                                   "recipe_fits", "data") if k in event}
+                                                   "recipe_fits", "data", "region") if k in event}
         self._notify(event)
         self.logger.info(f"✨ Novelty at frame {first}: {event['fraction']} of the frame is unlike the "
                          f"stream so far" + (f"; {where[0]['kind']} near {where[0]['x_peak']}" if where else "."))
@@ -936,11 +939,8 @@ class MeasurementLoop:
             raise RuntimeError("an escalation is already running")
         self._n_escalations += 1
         out_dir = self.output_dir / "escalations" / f"escalation_{self._n_escalations:03d}"
-        analyze_kwargs: Dict[str, Any] = {"system_info": self._with_sidecar(data_path),
-                                          "profile": profile or self.escalation_profile,
-                                          "stream_reference": True}
-        if self.targets:
-            analyze_kwargs["targets"] = self.targets
+        analyze_kwargs = self.modality.escalation_kwargs(
+            self, data_path, profile or self.escalation_profile)
         # Never audition the recipe that just breached: that is circular.
         try:
             from ..skills._shared._script_bank import script_hash
@@ -957,7 +957,10 @@ class MeasurementLoop:
         window = window + [str(data_path)]
         if frames is None:
             window = window[-self.reanchor_frames:]
+        if not self.modality.window_reanchor:
+            window = [str(data_path)]
         spec = {
+            "modality": self.modality.name,
             "out_dir": str(out_dir),
             "data_path": window if len(window) > 1 else str(data_path),
             # In memory only — a spec is never written to disk (it may carry
@@ -968,7 +971,7 @@ class MeasurementLoop:
             "sandbox_approved": self._sandbox_approved(),
             # A new recipe must report the SAME pinned names; the worker pins
             # it (a model call — slow clock) on the frame it re-anchored on.
-            "pin_outputs": dict(self.outputs) or None,
+            "pin_outputs": (dict(self.outputs) or None) if self.modality.pinning else None,
             "system_info": self.system_info,
         }
         if _mode == "audit":
@@ -1060,7 +1063,7 @@ class MeasurementLoop:
         failure = None
         if script is None:
             failure = str(result.get("error") or "the analysis produced no reusable run")
-        elif self.outputs and not result.get("pin_edits"):
+        elif self.outputs and self.modality.pinning and not result.get("pin_edits"):
             failure = ("the new recipe could not be extended to report the pinned "
                        f"outputs: {result.get('pin_error')}")
         if failure:
@@ -1099,13 +1102,14 @@ class MeasurementLoop:
         # carry; the plausible ranges belong to the old regime and re-learn.
         # The pin edits were produced for THIS script by the worker.
         self.anchor_dir, self._edits = anchor_dir, list(result.get("pin_edits") or [])
+        self._modality_state = self.modality.anchor_state(anchor_dir, None)
         source = "bank" if result.get("cold_start") else f"reanchor:{meta.get('profile')}"
         self.recipe = self._recipe_record(script, source)
         self._calibrate()
         self._seed_drift(meta.get("frames") or [meta.get("data")], keep=True)
         self._breach_kinds = []
         self._reference_features = (result.get("pin_features")
-                                    or self._features_from_anchor(anchor_dir))
+                                    or self.modality.features_from_anchor(anchor_dir))
         self._ranges = {k: [v, v] for k, v in self._reference_features.items()}
         self._n_learned, self._out_of_range_streak = 0, []
         self._consecutive_breaches = 0
@@ -1128,7 +1132,8 @@ class MeasurementLoop:
     def _check_portability(self, reference_data: Optional[str]) -> Dict[str, Any]:
         """Replay the recipe on the reference with its signal scaled up and
         down (zero-LLM). Advisory: the verdict is recorded and logged."""
-        if not self.check_portability or not reference_data or self.anchor_dir is None:
+        if (not self.check_portability or not reference_data or self.anchor_dir is None
+                or not self.modality.portability):
             return {}
         try:
             from .portability import (agent_replay_r2, check_portability, describe,
@@ -1182,11 +1187,10 @@ class MeasurementLoop:
     def _seed_drift(self, files: Any, keep: bool = False) -> None:
         """(Re)start the change signal from reference frames. ``keep``: a new
         recipe for the same stream keeps what the monitor has already seen."""
-        from .instruments import read_curve
         curves = []
         for f in ([files] if isinstance(files, (str, Path)) else list(files or [])):
             try:
-                curves.append(read_curve(str(f))[:2])
+                curves.append(self.modality.read_signals(str(f), self.system_info))
             except Exception:  # noqa: BLE001 - an unreadable reference seeds nothing
                 pass
         self._drift.seed(curves, keep=keep)
@@ -1197,8 +1201,7 @@ class MeasurementLoop:
         if self.noise_gate_tolerance is None or self.anchor_dir is None:
             return
         try:
-            from .gates import calibrate
-            self._calibration = calibrate(str(self.anchor_dir))
+            self._calibration = self.modality.calibrate(self.anchor_dir)
         except Exception as e:  # noqa: BLE001 - calibration is an improvement, never a dependency
             self.logger.warning(f"gate calibration skipped: {e}")
         if self._calibration:
@@ -1224,8 +1227,14 @@ class MeasurementLoop:
         if not isinstance(side, dict):
             return base
         meta = side["meta"] if isinstance(side.get("meta"), dict) else side
-        extra = {k: v for k, v in meta.items()
-                 if k not in self._SIDECAR_SKIP and isinstance(v, (str, int, float, bool))}
+        def plain(v: Any, depth: int = 0) -> bool:
+            # Scalars, and small nested descriptions of scalars: a datacube's
+            # spectral axis travels as {"energy_range": {"start", "end", "units"}}.
+            if isinstance(v, (str, int, float, bool)):
+                return True
+            return (isinstance(v, dict) and depth < 3 and len(v) <= 16
+                    and all(plain(x, depth + 1) for x in v.values()))
+        extra = {k: v for k, v in meta.items() if k not in self._SIDECAR_SKIP and plain(v)}
         if not extra:
             return base
         if isinstance(base, dict) or base is None:
@@ -1245,8 +1254,7 @@ class MeasurementLoop:
         out: Dict[str, Any] = {}
         cal = self._calibration
         if cal and poor and cal.get("residual_excess"):
-            from .gates import residual_excess
-            excess = residual_excess(frame_dir)
+            excess = self.modality.residual_excess(frame_dir)
             if excess is not None:
                 out["residual_excess"] = round(excess, 3)
                 out["reference_excess"] = cal["residual_excess"]
@@ -1255,16 +1263,15 @@ class MeasurementLoop:
         self._verdict = None
         if data_path:
             try:
-                from .instruments import read_curve
-                x, y, _, _ = read_curve(str(data_path))
-                verdict = self._drift.judge(x, y)
+                signals = self.modality.read_signals(str(data_path), self.system_info)
+                verdict = self._drift.judge(signals)
             except Exception:  # noqa: BLE001 - no opinion, the agent's verdict stands
                 verdict = {"available": False}
             if verdict.get("available"):
                 drift = bool(verdict["suspected"])
-                self._verdict = (x, y, verdict)
+                self._verdict = (signals, verdict)
                 out["drift_fraction"], out["drift_score"] = verdict["fraction"], verdict["score"]
-                for k in ("from_reference", "window_share"):
+                for k in ("from_reference", "window_share", "region"):
                     if k in verdict:
                         out[f"drift_{k}"] = verdict[k]
         return {"poor": poor, "drift": drift, **out}
@@ -1458,6 +1465,7 @@ class MeasurementLoop:
         state = {
             "v": SCHEMA_VERSION, "anchor_dir": str(self.anchor_dir) if self.anchor_dir else None,
             "recipe": self.recipe, "edits": self._edits, "step": self._step,
+            "modality": self.modality.name, "modality_state": self._modality_state,
             "consecutive_breaches": self._consecutive_breaches,
             "ranges": self._ranges, "reference_features": self._reference_features,
             "n_learned": self._n_learned, "range_warmup": self.range_warmup,
@@ -1490,7 +1498,7 @@ class MeasurementLoop:
                   "system_info"):
             kwargs.setdefault(k, state.get(k))
         for k in ("reanchor_frames", "drift_fraction", "drift_score", "audit_every", "on_change",
-                  "instrument",
+                  "instrument", "modality",
                   "audit_profile", "audit_tolerance"):
             if state.get(k) is not None:
                 kwargs.setdefault(k, state[k])
@@ -1500,6 +1508,7 @@ class MeasurementLoop:
         loop.anchor_dir = Path(state["anchor_dir"]) if state.get("anchor_dir") else None
         loop.recipe = state.get("recipe")
         loop._edits = state.get("edits") or []
+        loop._modality_state = state.get("modality_state") or {}
         loop._step = int(state.get("step") or 0)
         loop._consecutive_breaches = int(state.get("consecutive_breaches") or 0)
         loop._ranges = {k: list(v) for k, v in (state.get("ranges") or {}).items()}

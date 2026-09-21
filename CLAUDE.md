@@ -837,7 +837,31 @@ with itself (the output's own frame-to-frame scatter), and a state accepted once
 is remembered so the same kind of region is not asked about twice. The frame that
 announces a change never also accepts it: a driver may pause there, and what is
 decided at the pause comes before the state is taken as normal. The monitor
-works on any 1D curve, which is how it will watch a datacube (its mean spectrum).
+works on any 1D curve, which is how it watches a datacube (its mean spectrum,
+whole and by region).
+
+**The loop is modality-neutral; what a frame IS lives in `live/modality.py`.**
+Two clocks, flags, patience, the change signal, novelty, audits, pausing, the
+recommender and the log do not care whether a frame is a spectrum or a datacube.
+What differs is a small adapter: which agent locks and replays the recipe, how a
+result becomes flat features, what "still fits" means, and which curves the
+change signal reads. An instrument declares it (`Instrument.modality`), the loop
+follows. `HyperspectralModality` is the datacube instantiation, built from the
+series machinery rather than beside it: the fast path is the existing locked
+replay made strict (`analyze(strict_replay=True)`: the whole run with ZERO model
+calls — no skill selection, no execution repair, no salvage or not-measurable
+judge, no synthesis; a script that raises fails the frame) and judged by
+`_replay_map_gate` against the reference's own map statistics; a rebuild or an
+audit is a `locked_targets` run, so tracked quantities keep their names by
+construction and nothing is pinned. Tracked features are per-map MEANS and
+scalars (a map's min and max are the extremes of a noisy field). Curve-only
+mechanisms (pinning, snippet edits, the portability check, a multi-frame
+reference, window re-anchors) are capability flags on the modality, not
+branches in the loop. A cube is watched by REGION as well as whole (`DriftBank`:
+one monitor per curve, the frame is as changed as its most changed region),
+because a change confined to part of the field is diluted in the mean spectrum
+by the area it covers; the novelty says which region. Images come next through
+the same seam and need a deterministic per-item gate first.
 
 **Onboarding an instrument has two halves, and neither is a SciLink class.**
 The *driver* — how to talk to the controller, its file formats, its real limits —

@@ -41,6 +41,9 @@ def reanchor(spec: Dict[str, Any]) -> None:
         # cannot answer an interactive prompt, so the approval travels.
         if spec.get("sandbox_approved"):
             os.environ.setdefault("UNSAFE_EXECUTION_OK", "true")
+        if spec.get("modality") == "hyperspectral":
+            payload = _hyperspectral(spec, out_dir)
+            raise _Done()
         from ..agents.exp_agents.curve_fitting_agent import CurveFittingAgent
         agent = CurveFittingAgent(output_dir=str(out_dir / "run"),
                                   enable_human_feedback=False, **spec["agent_kwargs"])
@@ -84,7 +87,8 @@ def reanchor(spec: Dict[str, Any]) -> None:
                 def factory(d):
                     return CurveFittingAgent(output_dir=d, enable_human_feedback=False,
                                              **spec["agent_kwargs"])
-                script, anchor_dir = MeasurementLoop._anchor_script(payload["output_directory"])
+                from .modality import CurveModality
+                script, anchor_dir = CurveModality().anchor_script(payload["output_directory"])
                 pinned = pin_outputs(
                     script=script, outputs=spec["pin_outputs"], model=agent.model,
                     replay=agent_replay(factory, str(anchor_dir), pin_data,
@@ -96,12 +100,43 @@ def reanchor(spec: Dict[str, Any]) -> None:
                     pinned.get("llm_calls") or pinned["attempts"])
             except Exception as e:  # noqa: BLE001 - reported to the parent
                 payload["pin_error"] = f"{type(e).__name__}: {e}"
+    except _Done:
+        pass
     except BaseException as e:  # noqa: BLE001 - reported, never raised
         payload = {"status": "error", "error": f"{type(e).__name__}: {e}"}
     payload["seconds"] = round(time.perf_counter() - t0, 2)
     tmp = out_dir / "result.json.tmp"
     tmp.write_text(json.dumps(payload, default=str), encoding="utf-8")
     tmp.replace(out_dir / "result.json")
+
+
+class _Done(Exception):
+    """The payload is complete (a modality that needs none of the curve steps)."""
+
+
+def _hyperspectral(spec: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
+    """A datacube's rebuild or audit: fresh code for the SAME targets and output
+    names (``locked_targets`` in the spec's analyze kwargs), so nothing is pinned.
+    ``pin_features`` carries what the new run reports, which is what an audit
+    compares and what a rebuilt recipe starts its plausible ranges from."""
+    from ..agents.exp_agents.hyperspectral_analysis_agent import HyperspectralAnalysisAgent
+    from .modality import HyperspectralModality
+    agent = HyperspectralAnalysisAgent(output_dir=str(out_dir / "run"),
+                                       enable_human_feedback=False, **spec["agent_kwargs"])
+    data = spec["data_path"]
+    data = data[-1] if isinstance(data, (list, tuple)) else data
+    res = agent.analyze(str(data), **dict(spec["analyze_kwargs"])) or {}
+    modality = HyperspectralModality()
+    usable = res.get("status") in modality.usable_status
+    return {
+        "status": "success" if usable else (res.get("status") or "error"),
+        "output_directory": res.get("output_directory") or str(out_dir / "run"),
+        "llm_calls": (res.get("stage_timings") or {}).get("llm_calls"),
+        "error": res.get("error"),
+        "window": None,
+        "pin_features": modality.features(res) if usable else {},
+        "partial": res.get("status") == "partial",
+    }
 
 
 def main() -> int:

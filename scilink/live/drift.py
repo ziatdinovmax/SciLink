@@ -445,3 +445,121 @@ class DriftMonitor:
         self._states = [np.asarray(b, dtype=float).T for b in state.get("states") or []]
         self._basis = self._make_basis(self._rows)
         self._seed_basis = self._make_basis(self._seed)
+
+
+class DriftBank:
+    """Several curves per frame, one :class:`DriftMonitor` each.
+
+    A spectrum is one curve. A datacube is more than its mean spectrum: a change
+    confined to part of the field is diluted in the mean by the area it covers
+    (observed on a simulated spectrum-image series: a new mode over one corner
+    was 3 % of the mean spectrum and went unseen). So a frame may be given as
+    named curves — the whole field and its regions — and is as changed as its
+    MOST changed curve. The verdict and ``locate()`` say which region that was.
+
+    The interface is the monitor's, with ``signals`` (``{name: (x, y)}``) where
+    the monitor takes ``x, y``. A single unnamed curve behaves exactly like one
+    monitor, and a single monitor's saved state loads as the curve ``"signal"``.
+    """
+
+    SINGLE = "signal"
+
+    def __init__(self, **monitor_kwargs: Any) -> None:
+        self._kw = monitor_kwargs
+        self.monitors: Dict[str, DriftMonitor] = {}
+        self._leading: Optional[str] = None       # the region the current run of changed frames is in
+
+    @classmethod
+    def as_signals(cls, curve: Any) -> Dict[str, Tuple[Any, Any]]:
+        if isinstance(curve, dict):
+            return curve
+        return {cls.SINGLE: (curve[0], curve[1])}
+
+    def _monitor(self, name: str) -> DriftMonitor:
+        if name not in self.monitors:
+            self.monitors[name] = DriftMonitor(**self._kw)
+        return self.monitors[name]
+
+    def seed(self, frames: Sequence[Any], keep: bool = False) -> int:
+        frames = [self.as_signals(f) for f in frames]
+        names = list(dict.fromkeys(n for f in frames for n in f))
+        if not keep:
+            self.monitors = {}
+        self._leading = None
+        return max([self._monitor(n).seed([f[n] for f in frames if n in f], keep=keep)
+                    for n in names] or [0])
+
+    def judge(self, signals: Any) -> Dict[str, Any]:
+        signals = self.as_signals(signals)
+        verdicts = {n: self._monitor(n).judge(x, y) for n, (x, y) in signals.items()}
+        usable = {n: v for n, v in verdicts.items() if v.get("available")}
+        if not usable:
+            return {"available": False}
+        # The whole field speaks first when it sees the change; a region is
+        # named only when the change is confined to it.
+        order = sorted(usable, key=lambda n: (not usable[n]["suspected"], n != next(iter(signals)),
+                                              -usable[n]["fraction"]))
+        worst = order[0]
+        out = dict(usable[worst])
+        out["_all"] = verdicts
+        if len(signals) > 1:
+            out["region"] = worst
+            if out["suspected"]:
+                self._leading = worst
+        return out
+
+    def learn(self, signals: Any, verdict: Optional[Dict[str, Any]] = None) -> None:
+        signals = self.as_signals(signals)
+        per = (verdict or {}).get("_all") or {}
+        for n, (x, y) in signals.items():
+            self._monitor(n).learn(x, y, per.get(n))
+        self._leading = None
+
+    def _held(self) -> List[DriftMonitor]:
+        return [m for m in self.monitors.values() if m.n_held]
+
+    @property
+    def n_held(self) -> int:
+        return max([m.n_held for m in self.monitors.values()] or [0])
+
+    def held_agree(self) -> bool:
+        held = self._held()
+        return bool(held) and all(m.held_agree() for m in held)
+
+    def locate(self, max_regions: int = 3) -> List[Dict[str, Any]]:
+        name = self._leading if self._leading in self.monitors else None
+        if name is None:
+            held = sorted(self.monitors, key=lambda n: -self.monitors[n].n_held)
+            name = held[0] if held else None
+        if name is None:
+            return []
+        where = self.monitors[name].locate(max_regions)
+        if len(self.monitors) > 1:
+            where = [{**w, "region": name} for w in where]
+        return where
+
+    def adopt(self) -> int:
+        """The held frames are the new normal, in every region. ``0`` when a
+        region held frames it could not adopt (a different window): the caller
+        restarts the bank on the new window, as with one monitor."""
+        held = [bool(m.n_held) for m in self.monitors.values()]
+        n = [m.adopt() for m in self.monitors.values()]
+        self._leading = None
+        if any(h and v == 0 for h, v in zip(held, n)):
+            return 0
+        return max(n or [0])
+
+    @property
+    def n_learned(self) -> int:
+        return max([m.n_learned for m in self.monitors.values()] or [0])
+
+    def to_state(self) -> Dict[str, Any]:
+        return {"monitors": {n: m.to_state() for n, m in self.monitors.items()}}
+
+    def load_state(self, state: Optional[Dict[str, Any]]) -> None:
+        if not state:
+            return
+        if "monitors" not in state:                  # a single monitor's state, from before
+            state = {"monitors": {self.SINGLE: state}}
+        for n, st in (state.get("monitors") or {}).items():
+            self._monitor(n).load_state(st)

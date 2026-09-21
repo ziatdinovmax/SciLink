@@ -48,7 +48,9 @@ APPLY_POLICIES = ("never", "approved", "valid")
 
 @dataclass
 class Frame:
-    """One acquisition: a 1D curve plus what produced it."""
+    """One acquisition plus what produced it: a 1D curve, or — with ``cube`` — a
+    datacube (H, W, channels), where ``x`` / ``y`` are its spectral axis and mean
+    spectrum (what a person looks at, and what the change signal reads)."""
     x: Any
     y: Any
     params: Dict[str, Any] = field(default_factory=dict)
@@ -58,15 +60,22 @@ class Frame:
     truth: Dict[str, Any] = field(default_factory=dict)
     x_label: str = "x"
     y_label: str = "y"
+    #: A datacube frame (H, W, channels). ``None`` for a curve.
+    cube: Any = None
 
     def save(self, directory: str, index: int, stem: str = "frame") -> str:
-        """Write ``<stem>_<index>.csv`` and a same-stem ``.json`` sidecar (the
-        acquisition parameters and metadata); return the CSV path."""
+        """Write ``<stem>_<index>.csv`` (a curve) or ``.npy`` (a datacube) and a
+        same-stem ``.json`` sidecar (the acquisition parameters and metadata);
+        return the data file's path."""
         d = Path(directory)
         d.mkdir(parents=True, exist_ok=True)
-        path = d / f"{stem}_{index:06d}.csv"
-        np.savetxt(path, np.column_stack([np.asarray(self.x, float), np.asarray(self.y, float)]),
-                   delimiter=",", header=f"{self.x_label},{self.y_label}", comments="")
+        if self.cube is not None:
+            path = d / f"{stem}_{index:06d}.npy"
+            np.save(path, np.asarray(self.cube, dtype=np.float32))
+        else:
+            path = d / f"{stem}_{index:06d}.csv"
+            np.savetxt(path, np.column_stack([np.asarray(self.x, float), np.asarray(self.y, float)]),
+                       delimiter=",", header=f"{self.x_label},{self.y_label}", comments="")
         sidecar = {"params": self.params, "meta": self.meta}
         if self.truth:
             sidecar["truth"] = self.truth
@@ -90,6 +99,9 @@ class Instrument:
     outputs: Dict[str, str] = {}
     #: Suggested targets, in plain words.
     targets: List[str] = []
+    #: What a frame IS: ``"curve"`` (a 1D spectrum) or ``"hyperspectral"`` (a
+    #: datacube). A loop given this instrument follows it accordingly.
+    modality: str = "curve"
 
     def acquire(self, params: Dict[str, Any]) -> Frame:  # pragma: no cover - interface
         raise NotImplementedError
@@ -105,7 +117,8 @@ class Instrument:
     def describe(self) -> Dict[str, Any]:
         info = self.system_info if isinstance(self.system_info, dict) else {}
         return {"id": self.id, "name": self.name, "technique": info.get("technique"),
-                "kind": type(self).__name__, "can_pause": self.can_pause}
+                "kind": type(self).__name__, "can_pause": self.can_pause,
+                "modality": self.modality}
 
     #: True when ``pause()`` really holds the experiment (not just the acquisition).
     can_pause: bool = False
@@ -197,18 +210,24 @@ class ReplayInstrument(Instrument):
 
     def __init__(self, source: Any, *, system_info: Optional[Dict[str, Any]] = None,
                  outputs: Optional[Dict[str, str]] = None, targets: Optional[List[str]] = None,
-                 name: str = "replay") -> None:
+                 name: str = "replay", modality: Optional[str] = None) -> None:
+        from .modality import CUBE_SUFFIXES
+        suffixes = tuple(dict.fromkeys(_CURVE_SUFFIXES + CUBE_SUFFIXES))
         if isinstance(source, (str, Path)):
             root = Path(source).expanduser()
             if not root.is_dir():
                 raise ValueError(f"replay source {str(root)!r} is not a directory")
-            files = [p for p in root.iterdir()
-                     if p.is_file() and p.suffix.lower() in _CURVE_SUFFIXES]
+            files = [p for p in root.iterdir() if p.is_file() and p.suffix.lower() in suffixes]
         else:
             files = [Path(p).expanduser() for p in source]
         self.files: List[Path] = sorted(files, key=_natural_key)
         if not self.files:
-            raise ValueError(f"replay source has no measurement files ({', '.join(_CURVE_SUFFIXES)})")
+            raise ValueError(f"replay source has no measurement files ({', '.join(suffixes)})")
+        # Recorded datacubes (a folder of .npy / HDF5 spectrum images) replay as
+        # cubes. Told, or read off the first file: 3D is a datacube.
+        self.modality = modality or self._sniff(self.files[0])
+        if self.modality == "hyperspectral":
+            self.files = [p for p in self.files if p.suffix.lower() in CUBE_SUFFIXES]
         self.name = name
         self.system_info = dict(system_info or {})
         self.outputs = dict(outputs or {})
@@ -229,7 +248,14 @@ class ReplayInstrument(Instrument):
             raise EndOfData(f"all {len(self.files)} recorded measurements have been replayed")
         path = self.files[self._next]
         self._next += 1
-        x, y, x_label, y_label = read_curve(str(path))
+        cube = None
+        if self.modality == "hyperspectral":
+            from .modality import HyperspectralModality, load_cube
+            cube = load_cube(path)
+            x, y = HyperspectralModality().read_signal(str(path), self.system_info)
+            x_label, y_label = "channel", "mean_intensity"
+        else:
+            x, y, x_label, y_label = read_curve(str(path))
         recorded: Dict[str, Any] = {}
         sidecar = path.with_suffix(".json")
         if sidecar.exists():
@@ -244,7 +270,18 @@ class ReplayInstrument(Instrument):
             k: v for k, v in recorded.items() if k not in ("params", "truth")}
         return Frame(x=x, y=y, params={**rec_params, **(params or {})},
                      meta={**meta, "source_file": path.name, "index": self._next},
-                     x_label=x_label, y_label=y_label)
+                     x_label=x_label, y_label=y_label, cube=cube)
+
+    @staticmethod
+    def _sniff(path: Path) -> str:
+        if path.suffix.lower() in (".h5", ".hdf5", ".nxs"):
+            return "hyperspectral"
+        if path.suffix.lower() == ".npy":
+            try:
+                return "hyperspectral" if np.load(path, mmap_mode="r").ndim == 3 else "curve"
+            except Exception:  # noqa: BLE001
+                return "curve"
+        return "curve"
 
 
 def run_experiment(instrument: Instrument, loop: Any, n_frames: int, *,

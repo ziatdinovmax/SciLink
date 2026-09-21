@@ -358,6 +358,8 @@ export interface LiveInstrumentInfo {
   name: string;
   /** True when a pause really holds the experiment, not only the acquisition. */
   can_pause?: boolean;
+  /** What a frame is: a 1D curve, or a datacube (spectrum image). */
+  modality?: "curve" | "hyperspectral";
   technique?: string;
   sample?: string;
   x_axis?: string;
@@ -417,7 +419,9 @@ export interface LiveNovelty {
   fraction: number | null;
   from_reference?: number | null;
   where: { kind: "new" | "missing" | "shifted" | "broad" | "window"; x_from: number; x_to: number;
-           x_peak: number; share: number }[];
+           x_peak: number; share: number; region?: string }[];
+  /** A datacube is watched by region: where in the field the change is. */
+  region?: string | null;
   recipe_fits: boolean;
   window_share?: number | null;
   frame_path: string;

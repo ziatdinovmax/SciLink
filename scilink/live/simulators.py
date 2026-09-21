@@ -280,7 +280,64 @@ class STMdIdV(_Simulator):
                      truth={"gap_mev": delta, "tip": "changed" if self.frame >= 31 else "original"})
 
 
-SIMULATORS = {cls.name: cls for cls in (BeamlineXRD, InSituRaman, AFMForceCurve, STMdIdV)}
+class SpectrumImageSeries(_Simulator):
+    """Spectrum images (datacubes) of plasmonic particles during in-situ heating.
+
+    Each frame is a 14 × 14 pixel spectrum image with 160 energy channels: a
+    plasmon resonance on a decaying background whose energy varies smoothly
+    across the field (a continuous field, as real maps are) and red-shifts as
+    the sample heats, 1.5 meV per frame. At frame 13 a second, weaker mode
+    near 0.95 eV appears over one corner of the field (the lower right). ``dwell_ms`` sets the
+    noise (it falls as 1/sqrt(dwell)) and the dose; ``binning`` trades spatial
+    detail for signal.
+    """
+
+    name = "spectrum_image_series"
+    modality = "hyperspectral"
+    system_info = {"technique": "STEM-EELS spectrum imaging (low-loss), in-situ heating",
+                   "experiment_type": "electron energy loss spectroscopy",
+                   "sample": ("plasmonic nanocrystal array on a heating chip; one spectrum image "
+                              "per temperature step, so the resonance may move from frame to frame"),
+                   "energy_range": {"start": 0.30, "end": 1.20, "units": "eV"},
+                   "x_axis": "energy loss (eV)", "y_axis": "counts"}
+    schema = InstrumentSchema.from_dict({
+        "dwell_ms": {"low": 1.0, "high": 50.0, "units": "ms",
+                     "description": "pixel dwell time; noise falls as 1/sqrt(dwell), dose rises with it"},
+        "binning": {"kind": "int", "low": 1, "high": 2,
+                    "description": "spatial binning; 2 halves the map size and the noise"}})
+    defaults = {"dwell_ms": 10.0, "binning": 1}
+    outputs = {"plasmon_energy": "energy of the main plasmon resonance maximum, per pixel (eV)"}
+    targets = ["plasmon resonance energy map"]
+    events = [{"frame": 1, "what": "plasmon near 0.62 eV, red-shifting 1.5 meV per frame"},
+              {"frame": 13, "what": "a second mode near 0.95 eV appears over the lower right corner"},
+              {"frame": 24, "what": "end of the ramp"}]
+    N = 24
+
+    def energy(self, frame: int) -> float:
+        return float(0.62 - 0.0015 * (frame - 1))
+
+    def _acquire(self, params, rng) -> Frame:
+        n, side = 160, 14 // int(params["binning"])
+        e = np.linspace(0.30, 1.20, n)
+        u, v = np.meshgrid(np.linspace(-1, 1, side), np.linspace(-1, 1, side), indexing="ij")
+        centre = self.energy(self.frame) + 0.020 * u + 0.012 * v * v        # a continuous field
+        amp = 100.0 * (1.0 + 0.25 * np.cos(2.0 * u) * np.cos(1.5 * v))
+        cube = amp[..., None] * np.exp(-0.5 * ((e - centre[..., None]) / 0.055) ** 2)
+        cube = cube + 60.0 * np.exp(-(e - 0.30) / 0.22)                       # zero-loss tail
+        if self.frame >= 13:
+            corner = np.clip(0.5 * (u + v), 0.0, None) ** 1.5
+            cube = cube + (45.0 * corner)[..., None] * np.exp(-0.5 * ((e - 0.95) / 0.04) ** 2)
+        noise = 9.0 / np.sqrt(params["dwell_ms"] / 10.0) / int(params["binning"])
+        cube = cube + rng.normal(0.0, noise, cube.shape)
+        return Frame(x=e, y=cube.reshape(-1, n).mean(axis=0), cube=cube, params=params,
+                     x_label="energy_eV", y_label="mean_counts",
+                     meta={"temperature_step": self.frame},
+                     truth={"plasmon_energy": float(centre.mean()),
+                            "second_mode": bool(self.frame >= 13)})
+
+
+SIMULATORS = {cls.name: cls for cls in (BeamlineXRD, InSituRaman, AFMForceCurve, STMdIdV,
+                                        SpectrumImageSeries)}
 
 
 def get_simulator(name: str, seed: int = 0) -> Instrument:
