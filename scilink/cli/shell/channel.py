@@ -21,7 +21,7 @@ from prompt_toolkit.application import Application, run_in_terminal
 from prompt_toolkit.layout import Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.formatted_text import HTML
-from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from rich.console import Group
 from rich.rule import Rule
 from rich.text import Text
@@ -47,11 +47,12 @@ def enter_hint(labels: Dict[str, str], key: str = "accept") -> str:
 
 
 def choose(options, default: int, *, prompt_session, console_width: int = 120,
-           esc_label: str = "stop"):
+           esc_label: str = "stop", key_bindings=None):
     """An arrow-key picker in place of typing a number: ``options`` is a list
     of (value, label, note); up/down move the highlight (starting on
     ``default``), Enter chooses, a digit or the option's key letter jumps,
-    Esc / Ctrl+C raise KeyboardInterrupt (stop the turn). Returns the value."""
+    Esc / Ctrl+C raise KeyboardInterrupt (stop the turn). ``key_bindings``
+    adds bindings (a question's Ctrl+O). Returns the value."""
     state = {"i": max(0, min(default, len(options) - 1))}
     keys = {}
     for n, (value, label, note) in enumerate(options):
@@ -103,6 +104,8 @@ def choose(options, default: int, *, prompt_session, console_width: int = 120,
         kb.add(key)(_jump)
 
     from prompt_toolkit.styles import Style
+    if key_bindings is not None:
+        kb = merge_key_bindings([key_bindings, kb])
     app = Application(
         layout=Layout(Window(FormattedTextControl(render, focusable=True),
                              wrap_lines=False)),
@@ -132,9 +135,11 @@ class Widgets:
     # ── helpers ────────────────────────────────────────────────
 
     def _bindings(self) -> KeyBindings:
-        """Ctrl+O at a question prompt shows the lines the panel cut, above the
-        prompt, and leaves the prompt open (prompt_toolkit's default for the key
-        accepted the line — observed live as an unintended plan approval)."""
+        """Ctrl+O at a question prompt (or a picker) shows the lines the panel
+        cut, above the prompt, and leaves the prompt open (prompt_toolkit's
+        default for the key accepted the line — observed live as an
+        unintended plan approval; the picker had no binding at all, so the
+        panel's "Ctrl+O shows them" pointer did nothing there)."""
         kb = KeyBindings()
         overflow = self._overflow
         console = self.console
@@ -198,7 +203,8 @@ class Widgets:
 
     def _choose(self, options, default: int) -> str:
         return choose(options, default, prompt_session=self.session,
-                      console_width=self.console.size.width)
+                      console_width=self.console.size.width,
+                      key_bindings=self._bindings())
 
     # ── widgets ────────────────────────────────────────────────
 

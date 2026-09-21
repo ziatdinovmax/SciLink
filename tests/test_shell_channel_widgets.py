@@ -167,3 +167,17 @@ def test_ctrl_o_at_a_question_shows_earlier_lines_and_keeps_the_prompt():
         assert w.ask(q) == ""                     # accepted by Enter, not by Ctrl+O
     out = buf.getvalue()
     assert "80 earlier lines" in out and "line 0" in out and "line 79" in out
+
+
+def test_ctrl_o_at_a_picker_shows_earlier_lines_and_keeps_the_picker():
+    q = {"widget": "bestofn", "prompt": "",
+         "labels": {"select": "Select the candidate to lock:", "use": "Use selected",
+                    "accept": "Accept judge's pick (Candidate 2)"},
+         "candidates": [{"idx": 1, "label": "Candidate 1"}, {"idx": 2, "label": "Candidate 2"}],
+         "judge_pick": 2, "preview_images": [], "code_files": [], "candidate_captions": {},
+         "context_display": "\n".join(f"line {i}" for i in range(150))}
+    w, buf, stack = _widgets("\x0f\x1b[A\r")     # Ctrl+O, up, Enter
+    with stack:
+        assert w.ask(q) == "1"                    # the picker survived Ctrl+O
+    out = buf.getvalue()
+    assert "30 earlier lines" in out and "line 0" in out and "line 29" in out
