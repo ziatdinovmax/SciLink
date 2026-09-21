@@ -1,4 +1,4 @@
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 import json
 import re
 import textwrap
@@ -166,8 +166,9 @@ def display_files_produced(paths: List[str], base_dir: Any = None) -> None:
 def format_caveats(findings: Optional[List[Dict[str, Any]]]) -> List[str]:
     """Concise, advisory caveat lines from critic findings.
 
-    Assumes ``findings`` is already ordered critical-first (the agent sorts it).
-    Minor findings get a ``Minor:`` prefix; each line is ``[dimension] issue``.
+    Assumes ``findings`` is already ordered most-material-first (the agent
+    sorts it). Blocking findings get a ``BLOCKING:`` prefix and minor ones a
+    ``Minor:`` prefix; each line is ``[dimension] issue``.
     Returns ``[]`` when there are no findings — the single source rendered by
     both the console summary and ``run_task`` warnings.
     """
@@ -181,9 +182,34 @@ def format_caveats(findings: Optional[List[Dict[str, Any]]]) -> List[str]:
         issue = (f.get("issue") or "").strip()
         if not issue:
             continue
-        prefix = "Minor: " if f.get("severity") == "minor" else ""
+        prefix = {"minor": "Minor: ",
+                  "blocking": "BLOCKING: "}.get(f.get("severity"), "")
         lines.append(f"{prefix}[{dim}] {issue}")
     return lines
+
+
+def format_auto_repair(record: Optional[Dict[str, Any]]) -> List[str]:
+    """Lines describing what the automatic defect repair did to this plan.
+
+    One source for the console summary, the HTML report and ``run_task``
+    warnings, like ``format_caveats``. An applied repair lists each change as
+    ``was -> now (why)``; a discarded one says why the original plan was kept.
+    """
+    if not isinstance(record, dict):
+        return []
+    if record.get("status") == "applied":
+        lines = []
+        for n in record.get("notes") or []:
+            if not isinstance(n, dict):
+                continue
+            why = str(n.get("why") or "").strip()
+            lines.append(f"{n.get('was')} -> {n.get('now')}"
+                         + (f" ({why})" if why else ""))
+        return lines or ["The plan was corrected; no change notes were returned."]
+    if record.get("status") == "discarded":
+        return [f"A repair was attempted and discarded: {record.get('reason')}. "
+                "The plan is as authored and the blocking caveat stands."]
+    return []
 
 
 def _print_program(steps: List[Any], numbered: bool) -> None:
@@ -460,6 +486,19 @@ def display_plan_summary(result: Dict[str, Any],
             print("\n--- 💻 Implementation Code ---")
             print("  ℹ️  Plan includes implementation script.")
 
+    # --- Automatic defect repair: the reviewer must see what was changed ---
+    repair = result.get("auto_repair") or {}
+    repair_lines = format_auto_repair(repair)
+    if repair_lines:
+        print("\n" + "-"*80)
+        if repair.get("status") == "applied":
+            print("🔧 Auto-corrected before review (type 'revert' to restore "
+                  "the plan as authored)")
+        else:
+            print("🔧 Automatic defect repair")
+        for c in repair_lines:
+            print(f"  • {c}")
+
     # --- Plan-level caveats (advisory; from the critic — the plan is unchanged) ---
     caveats = format_caveats(result.get("critic_findings"))
     if caveats:
@@ -590,11 +629,20 @@ def get_candidate_selection(n_candidates: int, judge_pick: int) -> int:
     return judge_pick
 
 
-def get_user_feedback() -> Optional[str]:
+def get_user_feedback(auto_repair: Optional[Dict[str, Any]] = None
+                      ) -> Optional[str]:
     """
     Pauses execution to get user input via the CLI. 
     Returns None if the user just presses ENTER (indicating approval).
+
+    ``auto_repair`` is the plan's repair record when the plan on screen was
+    auto-corrected. Its change lines ride the question's ``origin`` so a
+    front-end can say WHAT would be reverted right beside a one-click revert.
+    (The printed notice is no use for that: a real plan puts pages of caveats
+    between it and the prompt.)
     """
+    changes = (format_auto_repair(auto_repair)
+               if (auto_repair or {}).get("status") == "applied" else [])
     print("\n" + "-"*60)
     
     print("📝 REQUESTING FEEDBACK")
@@ -607,13 +655,48 @@ def get_user_feedback() -> Optional[str]:
     feedback = request_human_feedback(
         "\n> Instruction: ",
         kind="approve_or_revise",
-        origin={"stage": "plan_review"},
+        origin={"stage": "plan_review", "auto_repair": changes},
     ).strip()
     
     if not feedback:
         return None # User accepted the plan
         
     return feedback
+
+
+# Replies that adopt a revision at the reopen gate. "keep" is what the web
+# keep/revert widget sends for its primary button.
+_ADOPT_REPLIES = {"accept", "adopt", "keep", "y", "yes"}
+
+
+def get_reopen_decision(reason: str) -> Tuple[str, Optional[str]]:
+    """Gate for a revision of a plan the human ALREADY approved.
+
+    The default is the opposite of ``get_user_feedback``: ENTER keeps the
+    approved plan, because the human settled it and the revision is the
+    agent's own initiative. Returns ``("keep", None)``, ``("adopt", None)`` or
+    ``("adopt", <instructions>)`` — adopt the revision and revise it further.
+    """
+    print("\n" + "-"*60)
+    print("⚠️  REOPENING A PLAN YOU APPROVED")
+    print("-" * 60)
+    print(f"Reason given: {reason}")
+    print("• To KEEP your approved plan: Press [ENTER] directly.")
+    print("• To ADOPT the revision above: Type 'accept' and press [ENTER].")
+    print("• To adopt it WITH changes: Type instructions and press [ENTER].")
+
+    reply = request_human_feedback(
+        "\n> Decision (ENTER keeps the approved plan): ",
+        kind="keep_or_revert",
+        options=["keep", "revert"],
+        origin={"stage": "plan_reopen", "reason": reason},
+    ).strip()
+
+    if not reply:
+        return "keep", None
+    if reply.lower() in _ADOPT_REPLIES:
+        return "adopt", None
+    return "adopt", reply
 
 
 def get_dataset_description(filename: str) -> str:

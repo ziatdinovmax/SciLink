@@ -56,11 +56,23 @@ export function FeedbackPanel({
     <div className="context-box">{question.context_display}</div>
   ) : null;
 
+  const notice = question.notice ? (
+    <div className="feedback-notice">
+      <strong>{question.notice.title}</strong>
+      <ul>
+        {question.notice.lines.map((l) => (
+          <li key={l}>{l}</li>
+        ))}
+      </ul>
+    </div>
+  ) : null;
+
   if (question.widget === "keep_revert") {
     return (
       <div className="feedback-panel">
         {previews}
         {contextBox}
+        {notice}
         <div className="feedback-actions">
           <button className="primary" onClick={() => respond("keep")} disabled={sent}>
             {question.labels.keep}
@@ -69,6 +81,26 @@ export function FeedbackPanel({
             {question.labels.revert}
           </button>
         </div>
+        {question.labels.submit && (
+          <div className="feedback-followup">
+            <label className="field">
+              <span>{question.labels.input}</span>
+              <textarea
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                rows={2}
+              />
+            </label>
+            <div className="feedback-actions">
+              <button
+                disabled={sent || !text.trim()}
+                onClick={() => respond(text.trim())}
+              >
+                {question.labels.submit}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -154,6 +186,7 @@ export function FeedbackPanel({
       {previews}
       {codeFiles}
       {contextBox}
+      {notice}
       <label className="field">
         <span>{question.labels.input}</span>
         <textarea
@@ -173,6 +206,11 @@ export function FeedbackPanel({
         <button className="primary" disabled={sent} onClick={() => respond("")}>
           {question.labels.accept}
         </button>
+        {question.labels.revert_repair && (
+          <button disabled={sent} onClick={() => respond("revert")}>
+            {question.labels.revert_repair}
+          </button>
+        )}
       </div>
     </div>
   );

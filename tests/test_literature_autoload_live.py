@@ -194,7 +194,7 @@ def part1_single_file_refine():
     buf = Tee()
     with contextlib.redirect_stdout(buf):
         out = json.loads(orch.tools.functions_map["refine_plan_with_results"](
-            RESULTS_TXT))
+            RESULTS_TXT, trigger="new_results"))
     log = buf.getvalue()
     check("p1 refine succeeded", out.get("status") == "success")
     check("p1 log names 1 file", "1 file(s)" in log)
@@ -213,7 +213,7 @@ def part2_two_file_refine():
     buf = Tee()
     with contextlib.redirect_stdout(buf):
         out = json.loads(orch.tools.functions_map["refine_plan_with_results"](
-            RESULTS_TXT))
+            RESULTS_TXT, trigger="new_results"))
     log = buf.getvalue()
     check("p2 refine succeeded", out.get("status") == "success")
     check("p2 log names 2 files", "2 file(s)" in log)
@@ -258,7 +258,7 @@ def part4_budget_drop_refine():
         with contextlib.redirect_stdout(buf):
             out = json.loads(
                 orch.tools.functions_map["refine_plan_with_results"](
-                    RESULTS_TXT))
+                    RESULTS_TXT, trigger="new_results"))
     finally:
         ot._LIT_AUTOLOAD_MAX_CHARS = keep
     log = buf.getvalue()
@@ -387,7 +387,7 @@ def part7_real_search_end_to_end():
     snip2 = text2[len(text2) // 2: len(text2) // 2 + 40]
     buf = Tee()
     with contextlib.redirect_stdout(buf):
-        out3 = json.loads(fns["refine_plan_with_results"](RESULTS_TXT))
+        out3 = json.loads(fns["refine_plan_with_results"](RESULTS_TXT, trigger="new_results"))
     log = buf.getvalue()
     check("p7 refine succeeded on real union",
           out3.get("status") == "success")

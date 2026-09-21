@@ -85,6 +85,9 @@ export interface PresentedQuestion {
     rationale: string | null;
     branches: string[];
   };
+  /** What the decision is about: the auto-correction a revert would undo,
+   * or why an approved plan is being reopened. */
+  notice?: { title: string; lines: string[] };
   default: string;
 }
 

@@ -70,9 +70,17 @@ def test_critic_summary_clips_long_details_with_marker():
     assert len(s) < pr._CRITIC_DIRECTION_CLIP + 1500
 
 
-def test_critic_summary_for_lab_plan_equals_conformance_summary():
+def test_critic_summary_for_lab_plan_is_conformance_summary_plus_protocol():
+    # A lab plan's design lives in its steps, as a portfolio's lives in
+    # directions[*].details: the critic reads both, the conformance pass
+    # neither. (Was pinned EQUAL to the conformance summary; live 2026-09-19
+    # the critic then called controls "never defined" that the steps defined.)
     p = _lab_plan()
-    assert pr.summarize_plan_for_critic(p) == pr.summarize_experiment(p["proposed_experiments"][0], 1)
+    s = pr.summarize_plan_for_critic(p)
+    conformance = pr.summarize_experiment(p["proposed_experiments"][0], 1)
+    assert s.startswith(conformance)
+    assert "PROTOCOL of Experiment 1" in s and "- s1" in s and "- s2" in s
+    assert "s1" not in conformance
 
 
 def test_conformance_summary_unchanged_for_portfolios():

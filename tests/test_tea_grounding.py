@@ -343,7 +343,7 @@ def test_refine_plan_threads_tea_as_its_own_block_not_literature(tmp_path, monke
     monkeypatch.setattr(t, "_collect_scalarizer_context", lambda *a, **k: [])
 
     out = json.loads(t.functions_map["refine_plan_with_results"](
-        result_data="Yield was 12%."))
+        result_data="Yield was 12%.", trigger="new_results"))
     assert out["status"] == "success", out
     assert "Data gaps for a quantitative TEA" in seen["external_context"]
     assert seen["literature_text"] is None          # provenance stays honest
@@ -660,6 +660,28 @@ def test_context_block_with_empty_assessment_still_yields_provenance(tmp_path):
     block = t._tea_context_block()
     assert "GENERAL BENCHMARKS" in block
     assert "Data gaps" not in block and "Key cost drivers" not in block
+
+
+def test_tea_runs_without_a_knowledge_base(tmp_path):
+    """Live (2026-09-19): a session with a feedstock table and a finished
+    economic-data literature search got "KB Init Failed" from every TEA call,
+    because no document KB existed. generate_plan already treats that as
+    non-fatal; retrieval is grounding, not a dependency. (Every other test
+    here stubs _ensure_kb_is_ready to True, which is how this hid.)"""
+    comp, price = _two_tables(tmp_path)
+    model = ScriptedModel([tea_json(), critic_json(FINDINGS)])
+    agent = make_agent(tmp_path, model)
+    agent._ensure_kb_is_ready = lambda *a, **k: False        # no KB, none built
+    res = agent.perform_technoeconomic_analysis(
+        objective="Recover Nd from NdFeB magnets",
+        primary_data_set=[str(comp), str(price)],
+        external_context="Nd spot price ~$120/kg (2023 range 100-140).")
+    assert not res.get("error")
+    assert res["grounding"]["has_primary_data"]
+    assert res["grounding"]["has_external_literature"]
+    assert [f["severity"] for f in res["critic_findings"]] == sorted(
+        [f["severity"] for f in res["critic_findings"]],
+        key=lambda v: {"blocking": 0, "critical": 1, "minor": 2}[v])
 
 
 def test_run_economic_analysis_planner_error_and_exception(tmp_path):
