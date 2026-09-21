@@ -422,6 +422,8 @@ export interface LiveNovelty {
            x_peak: number; share: number; region?: string }[];
   /** A datacube is watched by region: where in the field the change is. */
   region?: string | null;
+  /** "gradual": the stream moved from its reference without any frame looking new. */
+  onset?: "gradual" | null;
   recipe_fits: boolean;
   window_share?: number | null;
   frame_path: string;
@@ -477,6 +479,8 @@ export interface LiveSnapshot {
                               relative_difference?: number }>;
   } | null;
   latest?: { step: number; x: number[]; y: number[]; fit?: (number | null)[] } | null;
+  /** A datacube frame's maps, as session files (the tracked outputs' first). */
+  maps?: { name: string; path: string; step: number; tracked: boolean }[];
 }
 export interface LiveConfig {
   instrument: string;

@@ -113,7 +113,7 @@ def test_frames_are_answered_by_a_strict_replay_and_the_red_shift_is_tracked(arm
 def test_a_new_mode_is_announced_and_located_on_the_energy_axis(armed):
     sim, loop, _ = armed
     records = run_experiment(sim, loop, 20, apply="never")
-    [novelty] = [e for e in loop.read_log() if e["event"] == "novelty"]
+    [novelty] = [e for e in loop.read_log() if e["event"] == "novelty" and not e.get("onset")]
     assert 13 <= novelty["since_step"] + 1 <= 16          # frame 13 of the run (the reference was frame 1)
     where = novelty["where"][0]
     assert where["kind"] == "new" and abs(where["x_peak"] - 0.95) < 0.04    # in eV, not in channels
@@ -193,3 +193,126 @@ def test_a_reference_whose_required_map_never_passed_does_not_arm_the_loop(tmp_p
     loop = MeasurementLoop(str(tmp_path / "loop"), modality="hyperspectral", agent_factory=Agent)
     with pytest.raises(RuntimeError, match=r"without an approved script.*plasmon_energy.*never passed"):
         loop.setup(reference=str(tmp_path / "reference_000000.npy"))
+
+
+def test_a_slow_red_shift_is_announced_as_the_whole_field_moving(tmp_path):
+    """No frame of the ramp ever looks new. The slow alarm says the stream has
+    moved from its reference, what moved, and that no one region did it."""
+    sim = get_simulator("spectrum_image_series", seed=3)
+    first = sim.acquire({})
+    ref = first.save(str(tmp_path / "reference"), 0, stem="reference")
+    loop = MeasurementLoop(str(tmp_path / "loop"), system_info=sim.system_info, instrument=sim,
+                           agent_factory=_factory, breach_patience=2, gradual_bar=0.15)
+    loop.setup(anchor=str(_anchor(tmp_path, first.cube)), reference_data=ref)
+    records = run_experiment(sim, loop, 11, apply="never")           # ends before the second mode
+    assert all(r["flags"] == [] for r in records)
+    [slow] = [e for e in loop.read_log() if e["event"] == "novelty"]
+    assert slow["onset"] == "gradual" and slow["fraction"] > 0.15 and "region" not in slow
+    where = slow["where"][0]
+    assert where["kind"] == "shifted" and abs(where["x_peak"] - 0.61) < 0.03
+    assert where["region"] == "whole field"
+
+
+# ── a rebuild first tries the recipes this run has already used ─────────────
+
+def _window_script(lo, hi):
+    return f'''
+def analyze_feature(data, axis):
+    import numpy as np
+    mean = data.reshape(-1, data.shape[-1]).mean(axis=0)
+    if not ({lo} < axis[int(np.argmax(mean))] < {hi}):
+        raise ValueError("the resonance is outside this recipe's window")
+    win = (axis > {lo}) & (axis < {hi})
+    sub = data[:, :, win] - data[:, :, win].min(axis=2, keepdims=True)
+    pos = (sub * axis[win]).sum(axis=2) / np.maximum(sub.sum(axis=2), 1e-12)
+    return {{"maps": {{"Resonance": pos}}, "units": "eV", "description": "resonance"}}
+'''
+
+
+def _state_cube(path, centre, seed):
+    rng = np.random.default_rng(seed)
+    e = np.linspace(0.30, 1.20, 120)
+    u = np.linspace(-1, 1, 8)[:, None] * np.ones((1, 8))
+    cube = 100.0 * np.exp(-0.5 * ((e - (centre + 0.01 * u)[..., None]) / 0.05) ** 2) + rng.normal(0, 1.0, (8, 8, 120))
+    np.save(path, cube.astype(np.float32))
+    path.with_suffix(".json").write_text(json.dumps({"meta": {"energy_range": {"start": 0.30, "end": 1.20, "units": "eV"}}}))
+    return str(path)
+
+
+def _recipe_dir(root, name, lo, hi, mean):
+    d = root / name
+    d.mkdir()
+    (d / "dynamic_analysis_records.json").write_text(json.dumps([{
+        "target": "resonance energy map", "task_success": True, "required_outputs": ["Resonance"],
+        "script": _window_script(lo, hi), "quality_history": {"approved": True}}]))
+    (d / "analysis_results.json").write_text(json.dumps({"agent_type": "hyperspectral", "status": "success",
+        "extracted_features": {"Resonance_mean_eV": mean},
+        "feature_records": [{"name": "Resonance", "units": "eV", "coverage": 1.0,
+                             "stats": {"min": mean - 0.01, "max": mean + 0.01, "mean": mean}}]}))
+    return d
+
+
+def test_a_state_seen_before_is_served_by_recall_with_no_model_call(tmp_path):
+    from scilink.live.measurement_loop import _InlineEscalation
+    low, high = _recipe_dir(tmp_path, "low", 0.45, 0.80, 0.60), _recipe_dir(tmp_path, "high", 0.85, 1.15, 1.00)
+    loop = MeasurementLoop(str(tmp_path / "loop"), modality="hyperspectral", agent_factory=_factory,
+                           system_info={"technique": "EELS"}, breach_patience=2, auto_escalate=True,
+                           escalation_runner=_InlineEscalation, gradual_bar=None)
+    loop.setup(anchor=str(low), reference_data=_state_cube(tmp_path / "ref.npy", 0.60, 0))
+    loop._known_recipes = [{"anchor_dir": str(high), "edits": [], "recipe_id": "the-high-state"}]
+    assert loop.step(_state_cube(tmp_path / "a.npy", 0.60, 1))["flags"] == []
+    failing = [loop.step(_state_cube(tmp_path / f"b{i}.npy", 1.00, 10 + i)) for i in range(2)]
+    assert all("fit_failed" in r["flags"] for r in failing)          # the low-state recipe cannot run here
+    served = loop.step(_state_cube(tmp_path / "b2.npy", 1.00, 12))   # the rebuild landed before this frame
+    rebuilt = next(e for e in loop.read_log() if e["event"] == "reanchor")
+    assert rebuilt["source"] == "recalled" and rebuilt["llm_calls"] == 0
+    assert "fit_failed" not in served["flags"] and abs(served["features"]["Resonance_mean_eV"] - 1.00) < 0.02
+    # and the recipe it left is now known: going back is a recall too
+    assert [r["anchor_dir"] for r in loop._known_recipes] == [str(low)]
+    for i in range(2):
+        loop.step(_state_cube(tmp_path / f"c{i}.npy", 0.60, 20 + i))
+    back = loop.step(_state_cube(tmp_path / "c2.npy", 0.60, 22))
+    assert [e["source"] for e in loop.read_log() if e["event"] == "reanchor"] == ["recalled", "recalled"]
+    assert abs(back["features"]["Resonance_mean_eV"] - 0.60) < 0.02
+
+
+def test_several_first_cubes_are_planned_as_a_series_and_the_last_ones_regime_is_locked(tmp_path):
+    """One noisy or unrepresentative cube should not decide the method (live, a
+    real EELS tile under a reduced profile never got its map approved). A list of
+    reference cubes goes to the hyperspectral series driver; the loop locks the
+    recipe of the regime the LAST cube belongs to and seeds its monitor from all."""
+    early, late = _recipe_dir(tmp_path, "early", 0.45, 0.80, 0.60), _recipe_dir(tmp_path, "late", 0.85, 1.15, 1.00)
+    seen = []
+
+    class SeriesAgent:
+        def __init__(self, out):
+            self.out = out
+
+        def analyze(self, data, **kw):
+            seen.append((data, kw))
+            os.makedirs(self.out, exist_ok=True)
+            with open(os.path.join(self.out, "series_analysis_results.json"), "w") as fh:
+                json.dump({"results": [{"index": 0, "success": True, "regime": "a"},
+                                       {"index": 1, "success": True, "regime": "a"},
+                                       {"index": 2, "success": True, "regime": "b"},
+                                       {"index": 3, "success": False, "regime": "b"}],
+                           "locked_config": {"regimes": {
+                               "a": {"anchor_index": 0, "anchor_output_dir": str(early), "targets": [{"target": "low"}]},
+                               "b": {"anchor_index": 2, "anchor_output_dir": str(late), "targets": [{"target": "high"}]}}}}, fh)
+            return {"status": "success", "output_directory": self.out, "stage_timings": {"llm_calls": 11}}
+
+    cubes = [_state_cube(tmp_path / f"r{i}.npy", c, i) for i, c in enumerate([0.60, 0.61, 1.00, 1.00])]
+    loop = MeasurementLoop(str(tmp_path / "loop"), modality="hyperspectral", agent_factory=SeriesAgent,
+                           system_info={"technique": "EELS"}, targets=["resonance energy map"])
+    setup = loop.setup(reference=cubes, profile="quick")
+    [(data, kw)] = seen
+    assert data == cubes and kw["series_metadata"]["values"] == [0, 1, 2, 3]
+    assert kw["profile"] == {"base": "quick", "trend": False, "synthesis": "none", "adaptive_refit": False}
+    assert "resonance energy map" in kw["objective"]
+    assert str(loop.anchor_dir) == str(late)                     # the regime the stream continues from
+    assert setup["reference_frames"] == {"n": 4, "fitted": 3, "anchored_on": 2, "regimes": 2,
+                                         "model": "high", "llm_calls": 11}
+    assert setup["source"] == "reference:quick:4 frames"
+    assert setup["reference_features"] == {"Resonance_mean_eV": 1.0}
+    assert loop._modality_state["locked_targets"][0]["required_outputs"] == ["Resonance"]
+    assert loop._drift.n_learned == 4                           # every reference cube seeds the change signal

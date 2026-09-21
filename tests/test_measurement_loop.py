@@ -852,6 +852,45 @@ class TestChangeSignalAndAudit:
         assert loop.step(frames[3])["flags"] == []
         assert [e["event"] for e in loop.read_log()].count("novelty") == 1     # once per change
 
+    # ── a change that arrives slowly never makes one frame look new ─────────
+    def _growing(self, tmp_path, i, per_frame=0.12):
+        import numpy as np
+        x = np.linspace(0, 20, 600)
+        y = 0.2 + sum(5.0 * np.exp(-0.5 * ((x - c) / 0.25) ** 2) for c in (5, 9, 14))
+        y = y + per_frame * i * np.exp(-0.5 * ((x - 17.0) / 0.3) ** 2)      # a peak growing in at x = 17
+        y = y + np.random.default_rng(100 + i).normal(0, 0.02, x.size)
+        p = tmp_path / f"g{i}.csv"
+        np.savetxt(p, np.column_stack([x, y]), delimiter=",", header="x,y", comments="")
+        return str(p)
+
+    def test_a_gradual_onset_is_announced_from_the_distance_to_the_reference(self, tmp_path):
+        loop = self._armed(tmp_path)
+        records = [loop.step(self._growing(tmp_path, i)) for i in range(1, 41)]
+        assert all(r["flags"] == [] for r in records)                # no frame ever looked new
+        events = [e for e in loop.read_log() if e["event"] == "novelty"]
+        assert events and all(e["onset"] == "gradual" for e in events)
+        first = events[0]
+        assert first["fraction"] > 0.25 and first["recipe_fits"] is True
+        assert first["where"][0]["kind"] == "new" and abs(first["where"][0]["x_peak"] - 17.0) < 0.3
+        assert [r for r in records if r.get("novelty")][0]["novelty"]["onset"] == "gradual"
+        # the same distance is not news twice: each announcement is at least double the last
+        levels = [e["fraction"] for e in events]
+        assert len(events) <= 3 and all(b >= 2 * a for a, b in zip(levels, levels[1:]))
+        assert not [e for e in loop.read_log() if e["event"] in ("escalation_started", "state_accepted")]
+
+    def test_the_slow_alarm_can_be_turned_off_and_does_not_repeat_an_abrupt_change(self, tmp_path):
+        (tmp_path / "quiet").mkdir()
+        (tmp_path / "abrupt").mkdir()
+        quiet = self._armed(tmp_path / "quiet", gradual_bar=None)
+        for i in range(1, 41):
+            quiet.step(self._growing(tmp_path / "quiet", i))
+        assert not [e for e in quiet.read_log() if e["event"] == "novelty"]
+        loop = self._armed(tmp_path / "abrupt")
+        for f in self._changed(tmp_path / "abrupt", n=8):            # a new peak, all at once
+            loop.step(f)
+        events = [e for e in loop.read_log() if e["event"] == "novelty"]
+        assert len(events) == 1 and "onset" not in events[0]         # announced once, as what it was
+
     def test_one_odd_frame_is_a_flag_not_a_discovery(self, tmp_path):
         loop = self._armed(tmp_path)
         assert loop.step(self._changed(tmp_path)[0])["flags"] == ["drift_suspected"]

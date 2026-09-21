@@ -271,3 +271,13 @@ def test_one_curve_behaves_like_one_monitor_and_old_state_loads():
     restored = DriftBank()
     restored.load_state(mon.to_state())                      # a loop saved before regions existed
     assert restored.judge(new)["suspected"] and restored.to_state()["monitors"].keys() == {"signal"}
+
+
+def test_where_the_stream_has_moved_since_its_reference():
+    mon = armed()
+    verdicts = stream(mon, [curve(TWO + [(16.5, 0.06 * i, 0.5)], seed=200 + i) for i in range(1, 31)])
+    assert not any(v["suspected"] for v in verdicts)                 # each frame is explained by the last
+    assert verdicts[-1]["from_reference"] > 0.3 > verdicts[2]["from_reference"]
+    [where] = mon.locate_from_reference()
+    assert where["kind"] == "new" and abs(where["x_peak"] - 16.5) < 0.4
+    assert armed().locate_from_reference() == []                     # nothing has moved

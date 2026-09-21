@@ -41,6 +41,10 @@ def reanchor(spec: Dict[str, Any]) -> None:
         # cannot answer an interactive prompt, so the approval travels.
         if spec.get("sandbox_approved"):
             os.environ.setdefault("UNSAFE_EXECUTION_OK", "true")
+        recalled = _recall(spec, out_dir)
+        if recalled is not None:
+            payload = recalled
+            raise _Done()
         if spec.get("modality") == "hyperspectral":
             payload = _hyperspectral(spec, out_dir)
             raise _Done()
@@ -112,6 +116,48 @@ def reanchor(spec: Dict[str, Any]) -> None:
 
 class _Done(Exception):
     """The payload is complete (a modality that needs none of the curve steps)."""
+
+
+def _recall(spec: Dict[str, Any], out_dir: Path) -> Any:
+    """A recipe this run has already used, if one fits the new data.
+
+    Each known recipe is replayed strictly on the newest frame (no model call,
+    seconds) and the first the modality's own verdict calls good is the answer —
+    the analogue, inside one run, of asking the script bank first. A stream that
+    goes back and forth between states (a mosaic crossing the same kind of
+    region, a cycled sample) then pays for each state once. ``None`` when nothing
+    is known or nothing fits; the normal rebuild follows."""
+    known = [r for r in (spec.get("recall") or []) if isinstance(r, dict) and r.get("anchor_dir")]
+    if not known:
+        return None
+    from types import SimpleNamespace
+    from .measurement_loop import with_sidecar
+    from .modality import resolve_modality
+    modality = resolve_modality(spec.get("modality") or "curve")
+    data = spec["data_path"]
+    data = str(data[-1] if isinstance(data, (list, tuple)) else data)
+    log = logging.getLogger("scilink.live.recall")
+    for i, entry in enumerate(known):
+        try:
+            anchor_dir = Path(entry["anchor_dir"])
+            shim = SimpleNamespace(
+                api_key=spec["agent_kwargs"].get("api_key"), model_name=spec["agent_kwargs"].get("model_name"),
+                base_url=spec["agent_kwargs"].get("base_url"), _human_feedback=False,
+                anchor_dir=anchor_dir, _edits=list(entry.get("edits") or []),
+                _modality_state=modality.anchor_state(anchor_dir, None),
+                _with_sidecar=lambda p: with_sidecar(spec.get("system_info"), p))
+            agent = modality.make_agent(shim, str(out_dir / f"recall_{i:02d}"))
+            res = agent.analyze(data, **modality.replay_kwargs(shim, data)) or {}
+            verdict = modality.validity(res).get("verdict")
+            features = modality.features(res) if res.get("status") in modality.usable_status else {}
+            log.info(f"recall of recipe {entry.get('recipe_id')}: {res.get('status')}, verdict {verdict}")
+            if res.get("status") == "success" and verdict in (None, "good") and features:
+                return {"status": "success", "output_directory": str(anchor_dir), "recalled": True,
+                        "recalled_recipe": entry.get("recipe_id"), "llm_calls": 0, "window": None,
+                        "pin_edits": list(entry.get("edits") or []), "pin_features": features}
+        except Exception as e:  # noqa: BLE001 - a recall that cannot run is simply not the answer
+            log.info(f"recall of recipe {entry.get('recipe_id')} could not run: {e}")
+    return None
 
 
 def _hyperspectral(spec: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:

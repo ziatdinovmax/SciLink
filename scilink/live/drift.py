@@ -343,6 +343,19 @@ class DriftMonitor:
                                  "share": round(float(b - a + 1) / common.size, 6)})
         return self._locate_in(grids, xs_all[common], self._basis[common], max_regions) + lost
 
+    def locate_from_reference(self, n_recent: int = 3, max_regions: int = 3) -> List[Dict[str, Any]]:
+        """WHERE the stream now differs from its REFERENCE frames — for a change
+        that arrived too slowly to be suspected on any one frame. Every frame of
+        a gradual onset is explained by the frames just before it, so nothing is
+        ever held and ``locate()`` has nothing to read; what it has become is
+        read here, from the most recent accepted frames against the shapes the
+        reference frames span. Same kinds and units as ``locate()``."""
+        xs = self._bin_x()
+        recent = self._rows[len(self._seed):][-n_recent:]
+        if xs is None or self._seed_basis is None or not recent or xs.size != recent[0].size:
+            return []
+        return self._locate_in(recent, xs, self._seed_basis, max_regions)
+
     def _locate_in(self, grids: Sequence[np.ndarray], xs: np.ndarray, basis: np.ndarray,
                    max_regions: int) -> List[Dict[str, Any]]:
         if basis.shape[0] != self._basis.shape[0]:
@@ -468,6 +481,7 @@ class DriftBank:
         self._kw = monitor_kwargs
         self.monitors: Dict[str, DriftMonitor] = {}
         self._leading: Optional[str] = None       # the region the current run of changed frames is in
+        self._furthest: Optional[str] = None      # the curve furthest from its reference, last frame
 
     @classmethod
     def as_signals(cls, curve: Any) -> Dict[str, Tuple[Any, Any]]:
@@ -502,6 +516,18 @@ class DriftBank:
         worst = order[0]
         out = dict(usable[worst])
         out["_all"] = verdicts
+        # How far the stream is from its reference is its own question (a slow
+        # change never makes a frame suspected): the furthest curve answers it.
+        far = max(usable, key=lambda n: usable[n].get("from_reference") or 0.0)
+        first = next(iter(signals))
+        if first in usable and (usable[first].get("from_reference") or 0.0) >= 0.8 * (
+                usable[far].get("from_reference") or 0.0):
+            far = first                   # the whole field moved: no region is singled out
+        if usable[far].get("from_reference") is not None:
+            out["from_reference"] = usable[far]["from_reference"]
+            self._furthest = far
+            if len(signals) > 1 and far != first:
+                out["from_reference_region"] = far
         if len(signals) > 1:
             out["region"] = worst
             if out["suspected"]:
@@ -534,6 +560,15 @@ class DriftBank:
         if name is None:
             return []
         where = self.monitors[name].locate(max_regions)
+        if len(self.monitors) > 1:
+            where = [{**w, "region": name} for w in where]
+        return where
+
+    def locate_from_reference(self, max_regions: int = 3) -> List[Dict[str, Any]]:
+        name = self._furthest if self._furthest in self.monitors else next(iter(self.monitors), None)
+        if name is None:
+            return []
+        where = self.monitors[name].locate_from_reference(max_regions=max_regions)
         if len(self.monitors) > 1:
             where = [{**w, "region": name} for w in where]
         return where

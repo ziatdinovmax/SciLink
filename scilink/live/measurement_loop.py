@@ -169,6 +169,44 @@ def _numeric_features(result: Dict[str, Any], lift: bool = True) -> Dict[str, fl
     return out
 
 
+_SIDECAR_SKIP = ("truth", "params", "source_file", "index")
+
+
+def with_sidecar(system_info: Any, data_path: Any) -> Any:
+    """``system_info`` with the measurement's own sidecar metadata merged in.
+
+    A same-stem ``.json`` next to a data file is how per-measurement facts
+    travel in SciLink (an instrument constant, the temperature of that
+    frame). Observed in review: a technique that needs such a constant
+    aborted at setup because the loop passed only ``system_info`` — the
+    value was sitting in the file's sidecar. The caller's ``system_info``
+    wins on a conflict; a simulator's ``truth`` never travels. A function, so
+    the re-anchor worker gives a replayed recipe the same metadata a frame gets."""
+    base = system_info
+    try:
+        path = Path(str(data_path[-1] if isinstance(data_path, (list, tuple)) else data_path))
+        side = json.loads(path.with_suffix(".json").read_text())
+    except Exception:  # noqa: BLE001 - no sidecar, nothing to add
+        return base
+    if not isinstance(side, dict):
+        return base
+    meta = side["meta"] if isinstance(side.get("meta"), dict) else side
+
+    def plain(v: Any, depth: int = 0) -> bool:
+        # Scalars, and small nested descriptions of scalars: a datacube's
+        # spectral axis travels as {"energy_range": {"start", "end", "units"}}.
+        if isinstance(v, (str, int, float, bool)):
+            return True
+        return (isinstance(v, dict) and depth < 3 and len(v) <= 16
+                and all(plain(x, depth + 1) for x in v.values()))
+    extra = {k: v for k, v in meta.items() if k not in _SIDECAR_SKIP and plain(v)}
+    if not extra:
+        return base
+    if isinstance(base, dict) or base is None:
+        return {**extra, **(base or {})}
+    return base                      # free-text system_info: left as the caller wrote it
+
+
 class MeasurementLoop:
     """A live analysis loop over 1D spectra.
 
@@ -256,6 +294,14 @@ class MeasurementLoop:
             normal for the stream. It reads the data only, never the recipe, so
             its verdict does not depend on which recipe was locked. LOWER
             either to catch weaker changes, RAISE if ordinary variation is flagged.
+        gradual_bar: the slow alarm. A change that arrives gradually never makes
+            one frame suspected (each is explained by the frames just before
+            it), so the loop also watches how far the stream has moved FROM ITS
+            REFERENCE, and announces it as a ``novelty`` with ``onset="gradual"``
+            once that share of a frame stays above this bar, then again only at
+            double the distance. LOWER to hear of a slow drift sooner, RAISE (or
+            ``None`` to turn it off) when the run is expected to travel far from
+            its reference and that is not news.
         instrument: the instrument this loop serves — an ``Instrument`` or its
             ``describe()`` dict. Stamped on the run, so that what is learned can
             later be collected per instrument rather than per session.
@@ -331,6 +377,7 @@ class MeasurementLoop:
                  auto_escalate: bool = False,
                  reanchor_frames: int = 5,
                  drift_fraction: float = 0.10, drift_score: float = 3.0,
+                 gradual_bar: Optional[float] = 0.25,
                  on_change: str = "report", instrument: Any = None, modality: Any = None,
                  audit_every: Optional[int] = None, audit_profile: str = "quick",
                  audit_tolerance: float = 0.05,
@@ -375,6 +422,13 @@ class MeasurementLoop:
             raise ValueError("on_change must be 'report', 'audit' or 'rebuild'")
         self.on_change = on_change
         self._novelty_open = False          # the current run of changed frames has been announced
+        self.gradual_bar = float(gradual_bar) if gradual_bar else None
+        #: Recipes this run has used and left, newest last. A stream that returns
+        #: to a state it has been in is served by recall (a strict replay, no
+        #: model call) instead of a new analysis.
+        self._known_recipes: List[Dict[str, Any]] = []
+        self._gradual_level = self.gradual_bar      # the distance that is news next
+        self._gradual_streak = 0
         self.audit_every = int(audit_every) if audit_every else None
         self.audit_profile, self.audit_tolerance = audit_profile, float(audit_tolerance)
         self._last_audit_step = 0
@@ -479,7 +533,7 @@ class MeasurementLoop:
                 self.logger.warning("the reference analysis is only partial: some of its outputs "
                                     "were withheld, and the loop tracks the ones that passed.")
             if len(refs) > 1:
-                anchor, series_info = self._single_frame_anchor(
+                anchor, series_info = self.modality.series_anchor(
                     Path(anchor), self.output_dir / "reference_anchor", refs)
                 series_info["llm_calls"] = (ref_result.get("stage_timings") or {}).get("llm_calls")
                 reference, ref_result = series_info["data"], None
@@ -792,6 +846,7 @@ class MeasurementLoop:
         try:
             if clean:
                 self._novelty_open = False
+                self._watch_gradual(data_path, record)
             run = self._breach_kinds[-self.breach_patience:]
             changed = needs_escalation and FLAG_DRIFT in (record.get("flags") or [])
             announced = changed and not self._novelty_open
@@ -845,6 +900,12 @@ class MeasurementLoop:
             event["region"] = gate["drift_region"]      # which part of the field (a datacube)
         self._append(event)
         self._novelty_open = True
+        if self._gradual_level is not None:
+            # This change has been announced; the distance it puts between the
+            # stream and its reference is not a second piece of news.
+            seen = max([v for v in (gate.get("drift_from_reference"), gate.get("drift_fraction"))
+                        if isinstance(v, (int, float))] or [0.0])
+            self._gradual_level = max(self._gradual_level, 2.0 * seen)
         # The frame that made it a lasting change carries it, so a driver can
         # make this a decision point (run_experiment(pause_on="novelty")).
         record["novelty"] = {k: event[k] for k in ("since_step", "step", "fraction", "where",
@@ -853,6 +914,34 @@ class MeasurementLoop:
         self.logger.info(f"✨ Novelty at frame {first}: {event['fraction']} of the frame is unlike the "
                          f"stream so far" + (f"; {where[0]['kind']} near {where[0]['x_peak']}" if where else "."))
         return event
+
+    def _watch_gradual(self, data_path: str, record: Dict[str, Any]) -> None:
+        """The slow alarm: the stream has moved far from its reference without any
+        frame ever looking new. Announced like any lasting change (so a recommender
+        is told and a driver may pause), once per level of distance."""
+        far = (record.get("gate") or {}).get("drift_from_reference")
+        if self._gradual_level is None or not isinstance(far, (int, float)):
+            return
+        self._gradual_streak = self._gradual_streak + 1 if far > self._gradual_level else 0
+        if self._gradual_streak < self.breach_patience:
+            return
+        gate = record.get("gate") or {}
+        where = self._drift.locate_from_reference()
+        event = {"event": "novelty", "onset": "gradual", "step": self._step,
+                 "since_step": self._step - self._gradual_streak + 1,
+                 "fraction": far, "from_reference": far, "score": gate.get("drift_score"),
+                 "where": where, "recipe_fits": True, "data": str(data_path),
+                 "frames": list(self._recent_frames[-self._gradual_streak:])}
+        if gate.get("drift_from_reference_region"):
+            event["region"] = gate["drift_from_reference_region"]
+        self._append(event)
+        record["novelty"] = {k: event[k] for k in ("since_step", "step", "fraction", "where",
+                                                   "recipe_fits", "data", "region", "onset") if k in event}
+        self._notify(event)
+        self.logger.info(f"✨ The stream has moved from its reference: {far:.0%} of a frame is unlike it"
+                         + (f"; {where[0]['kind']} near {where[0]['x_peak']}" if where else "."))
+        # The same distance is not news twice: next at double (past 1 it never fires).
+        self._gradual_level, self._gradual_streak = max(2.0 * far, 2.0 * self._gradual_level), 0
 
     def _accept_state(self, verified: bool, settled: bool = True) -> None:
         """The changed frames become the stream's new normal (for TRACKING — the
@@ -961,6 +1050,10 @@ class MeasurementLoop:
             window = [str(data_path)]
         spec = {
             "modality": self.modality.name,
+            # A rebuild first tries the recipes this run has already used (an
+            # audit never does: it must be independent of them).
+            "recall": ([dict(r) for r in reversed(self._known_recipes)]
+                       if _mode == "reanchor" else []),
             "out_dir": str(out_dir),
             "data_path": window if len(window) > 1 else str(data_path),
             # In memory only — a spec is never written to disk (it may carry
@@ -1101,9 +1194,15 @@ class MeasurementLoop:
         # Adopt. Amendments were written against the OLD script and do not
         # carry; the plausible ranges belong to the old regime and re-learn.
         # The pin edits were produced for THIS script by the worker.
+        leaving = {"anchor_dir": str(self.anchor_dir), "edits": list(self._edits),
+                   "recipe_id": self.recipe["id"]}
+        self._known_recipes = ([r for r in self._known_recipes
+                                if r["anchor_dir"] not in (leaving["anchor_dir"], str(anchor_dir))]
+                               + [leaving])[-6:]
         self.anchor_dir, self._edits = anchor_dir, list(result.get("pin_edits") or [])
         self._modality_state = self.modality.anchor_state(anchor_dir, None)
-        source = "bank" if result.get("cold_start") else f"reanchor:{meta.get('profile')}"
+        source = ("recalled" if result.get("recalled") else
+                  "bank" if result.get("cold_start") else f"reanchor:{meta.get('profile')}")
         self.recipe = self._recipe_record(script, source)
         self._calibrate()
         self._seed_drift(meta.get("frames") or [meta.get("data")], keep=True)
@@ -1194,6 +1293,7 @@ class MeasurementLoop:
             except Exception:  # noqa: BLE001 - an unreadable reference seeds nothing
                 pass
         self._drift.seed(curves, keep=keep)
+        self._gradual_level, self._gradual_streak = self.gradual_bar, 0
 
     def _calibrate(self) -> None:
         """Ask the current anchor run what its noise does to the gates."""
@@ -1207,39 +1307,10 @@ class MeasurementLoop:
         if self._calibration:
             self.logger.info(f"   gates calibrated on the reference: {self._calibration}")
 
-    _SIDECAR_SKIP = ("truth", "params", "source_file", "index")
-
     def _with_sidecar(self, data_path: Any) -> Any:
-        """``system_info`` with the measurement's own sidecar metadata merged in.
-
-        A same-stem ``.json`` next to a data file is how per-measurement facts
-        travel in SciLink (an instrument constant, the temperature of that
-        frame). Observed in review: a technique that needs such a constant
-        aborted at setup because the loop passed only ``system_info`` — the
-        value was sitting in the file's sidecar. The caller's ``system_info``
-        wins on a conflict; a simulator's ``truth`` never travels."""
-        base = self.system_info
-        try:
-            path = Path(str(data_path[-1] if isinstance(data_path, (list, tuple)) else data_path))
-            side = json.loads(path.with_suffix(".json").read_text())
-        except Exception:  # noqa: BLE001 - no sidecar, nothing to add
-            return base
-        if not isinstance(side, dict):
-            return base
-        meta = side["meta"] if isinstance(side.get("meta"), dict) else side
-        def plain(v: Any, depth: int = 0) -> bool:
-            # Scalars, and small nested descriptions of scalars: a datacube's
-            # spectral axis travels as {"energy_range": {"start", "end", "units"}}.
-            if isinstance(v, (str, int, float, bool)):
-                return True
-            return (isinstance(v, dict) and depth < 3 and len(v) <= 16
-                    and all(plain(x, depth + 1) for x in v.values()))
-        extra = {k: v for k, v in meta.items() if k not in self._SIDECAR_SKIP and plain(v)}
-        if not extra:
-            return base
-        if isinstance(base, dict) or base is None:
-            return {**extra, **(base or {})}
-        return base                      # free-text system_info: left as the caller wrote it
+        """``system_info`` with the measurement's own sidecar metadata merged in
+        (:func:`with_sidecar`)."""
+        return with_sidecar(self.system_info, data_path)
 
     def _judge(self, validity: Dict[str, Any], frame_dir: str,
                data_path: Optional[str] = None) -> Dict[str, Any]:
@@ -1271,7 +1342,7 @@ class MeasurementLoop:
                 drift = bool(verdict["suspected"])
                 self._verdict = (signals, verdict)
                 out["drift_fraction"], out["drift_score"] = verdict["fraction"], verdict["score"]
-                for k in ("from_reference", "window_share", "region"):
+                for k in ("from_reference", "window_share", "region", "from_reference_region"):
                     if k in verdict:
                         out[f"drift_{k}"] = verdict[k]
         return {"poor": poor, "drift": drift, **out}
@@ -1479,6 +1550,8 @@ class MeasurementLoop:
             "noise_gate_tolerance": self.noise_gate_tolerance,
             "reanchor_frames": self.reanchor_frames, "recent_frames": self._recent_frames,
             "drift": self._drift.to_state(), "drift_fraction": self.drift_fraction,
+            "gradual_bar": self.gradual_bar, "gradual_level": self._gradual_level,
+            "known_recipes": self._known_recipes,
             "drift_score": self.drift_score, "audit_every": self.audit_every,
             "on_change": self.on_change, "instrument": self.instrument,
             "audit_profile": self.audit_profile, "audit_tolerance": self.audit_tolerance,
@@ -1497,7 +1570,7 @@ class MeasurementLoop:
                   "range_widen", "range_warmup", "range_adopt_after", "gate_keys",
                   "system_info"):
             kwargs.setdefault(k, state.get(k))
-        for k in ("reanchor_frames", "drift_fraction", "drift_score", "audit_every", "on_change",
+        for k in ("reanchor_frames", "drift_fraction", "drift_score", "gradual_bar", "audit_every", "on_change",
                   "instrument", "modality",
                   "audit_profile", "audit_tolerance"):
             if state.get(k) is not None:
@@ -1509,6 +1582,9 @@ class MeasurementLoop:
         loop.recipe = state.get("recipe")
         loop._edits = state.get("edits") or []
         loop._modality_state = state.get("modality_state") or {}
+        loop._known_recipes = [r for r in (state.get("known_recipes") or []) if isinstance(r, dict)]
+        if state.get("gradual_level") is not None and loop.gradual_bar is not None:
+            loop._gradual_level = float(state["gradual_level"])
         loop._step = int(state.get("step") or 0)
         loop._consecutive_breaches = int(state.get("consecutive_breaches") or 0)
         loop._ranges = {k: list(v) for k, v in (state.get("ranges") or {}).items()}

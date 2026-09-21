@@ -85,11 +85,13 @@ function clock(seconds: number): string {
 
 function describeWhere(w?: LiveNovelty["where"][number]): string {
   if (!w) return "";
-  const at = `${fmt(w.x_from)} to ${fmt(w.x_to)}`;
+  // A located stretch is known to a few bins, not to five figures.
+  const at = `${fmtShort(w.x_from, 3)} to ${fmtShort(w.x_to, 3)}`;
+  const peak = fmtShort(w.x_peak, 3);
   return w.kind === "window" ? `No longer measured from ${at}.`
-    : w.kind === "new" ? `New intensity from ${at}, strongest near ${fmt(w.x_peak)}.`
-    : w.kind === "missing" ? `Intensity is gone from ${at}, most near ${fmt(w.x_peak)}.`
-    : w.kind === "shifted" ? `A feature moved, around ${fmt(w.x_peak)}.`
+    : w.kind === "new" ? `New intensity from ${at}, strongest near ${peak}.`
+    : w.kind === "missing" ? `Intensity is gone from ${at}, most near ${peak}.`
+    : w.kind === "shifted" ? `A feature moved, around ${peak}.`
     : "The overall shape or background changed.";
 }
 
@@ -109,7 +111,8 @@ function describeEvent(e: LiveEvent): string {
     case "escalation_started":
       return "Rebuilding the recipe in the background.";
     case "novelty": {
-      return `The data changed from frame ${g("since_step")}. ${describeChange((e.where ?? []) as LiveNovelty["where"], e.region as string | undefined)}`;
+      return `${e.onset === "gradual" ? `The data has moved from the reference by frame ${g("step")}.`
+        : `The data changed from frame ${g("since_step")}.`} ${describeChange((e.where ?? []) as LiveNovelty["where"], e.region as string | undefined)}`;
     }
     case "paused":
       return g("why") === "novelty" ? "Paused. The data changed and the run is waiting for a decision."
@@ -196,6 +199,7 @@ export function LivePanel({
   const [onChange, setOnChange] = useState<NonNullable<LiveConfig["on_change"]>>("report");
   const [notes, setNotes] = useState("");
   const [pauseOn, setPauseOn] = useState<"" | "novelty" | "breach" | "both">("");
+  const [mapName, setMapName] = useState("");
   const [replayDir, setReplayDir] = useState("");
   const [technique, setTechnique] = useState("");
   const [sample, setSample] = useState("");
@@ -651,6 +655,8 @@ export function LivePanel({
     x: f.step, label: f.flags.map((x) => FLAG_WORDS[x] ?? x).join(", "),
   }));
   const isCube = inst?.modality === "hyperspectral";
+  const maps = snap?.maps ?? [];
+  const shownMap = maps.find((m) => m.name === mapName) ?? maps[0];
   const hasTruth = keys.some((k) => frames.some((f) => f.truth && k in f.truth));
   const params = snap?.current_params ?? {};
   const schema = Object.entries(inst?.schema ?? {});
@@ -759,12 +765,18 @@ export function LivePanel({
       {(snap?.novelties ?? []).slice(-2).reverse().map((n) => (
         <div key={n.since_step} className="live-novelty">
           <div>
-            <b>New from frame {n.since_step}.</b>{" "}
-            {typeof n.fraction === "number" ? `${Math.round(100 * n.fraction)} % of a frame is unlike the frames before it. ` : ""}
+            <b>{n.onset === "gradual" ? `Moved from the reference by frame ${n.step}.` : `New from frame ${n.since_step}.`}</b>{" "}
+            {typeof n.fraction === "number"
+              ? `${Math.round(100 * n.fraction)} % of a frame is unlike ${n.onset === "gradual" ? "the reference" : "the frames before it"}. `
+              : ""}
             {describeChange(n.where, n.region)}
             {n.where.length === 0 && n.window_share ? " The measured window changed." : ""}
             {n.recipe_fits ? "" : " The recipe no longer fits and is being rebuilt."}
             <Info>
+              {n.onset === "gradual"
+                ? "No single frame looked new. The change arrived slowly, so it shows as distance from the "
+                  + "reference frames. It is reported once, and again only at double the distance. "
+                : ""}
               This is read from the data alone, with no model. The recipe reports the quantities you asked
               for. It cannot tell you what this is. A thorough analysis of the frame in Chat can.
             </Info>
@@ -773,8 +785,11 @@ export function LivePanel({
             <button
               onClick={() => onAskChat(
                 `Analyze ${n.frame_abs_path || n.frame_path} thoroughly. Context: it is frame ${n.step} of a live ` +
-                `${inst?.technique ?? "measurement"} run. From frame ${n.since_step} the data changed` +
-                (typeof n.fraction === "number" ? ` (${Math.round(100 * n.fraction)} % of a frame is unlike the earlier frames)` : "") +
+                `${inst?.technique ?? "measurement"} run. ` +
+                (n.onset === "gradual" ? "The data has moved gradually away from the reference frames"
+                  : `From frame ${n.since_step} the data changed`) +
+                (typeof n.fraction === "number"
+                  ? ` (${Math.round(100 * n.fraction)} % of a frame is unlike ${n.onset === "gradual" ? "the reference" : "the earlier frames"})` : "") +
                 `. ${describeChange(n.where, n.region)} Say what changed as specific, testable claims, ` +
                 `then assess how novel each claim is against the literature.`)}
             >
@@ -876,6 +891,23 @@ export function LivePanel({
               overlayLabel="fit"
               xLabel={inst?.x_axis} yLabel={inst?.y_axis} height={keys.length > 2 ? 300 : 240}
             />
+            {maps.length > 0 && (
+              <div className="live-maps">
+                <div className="live-card-head">
+                  <h4>Map</h4>
+                  <select value={shownMap?.name} onChange={(e) => setMapName(e.target.value)}>
+                    {maps.map((m) => <option key={m.name} value={m.name}>{m.name}</option>)}
+                  </select>
+                  <Info>
+                    What the recipe computed for this frame, per pixel. The tracked number is the mean of
+                    the map. Produced without a model call.
+                  </Info>
+                </div>
+                {shownMap && (
+                  <img src={api.fileUrl(sessionId, shownMap.path, shownMap.step)} alt={`${shownMap.name} map, frame ${shownMap.step}`} />
+                )}
+              </div>
+            )}
 
             {schema.length > 0 && frames.length > 0 && (
               <div className="live-controls">

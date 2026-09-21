@@ -546,6 +546,8 @@ class LiveRun:
             # Before the first frame, the reference itself: something real to
             # look at during the minutes the loop is being armed.
             "latest": self._curve(latest) if latest else self._reference_curve(),
+            # A datacube frame's result is its maps: the dashboards the replay wrote.
+            "maps": self._maps(latest) if latest else [],
         }
 
     def _novelty_view(self, e: Dict[str, Any]) -> Dict[str, Any]:
@@ -556,7 +558,7 @@ class LiveRun:
         except Exception:  # noqa: BLE001
             rel = str(e.get("data") or "")
         return {k: e.get(k) for k in ("step", "since_step", "fraction", "from_reference", "where",
-                                      "recipe_fits", "window_share", "region")} | {
+                                      "recipe_fits", "window_share", "region", "onset")} | {
             # Shown relative; handed to Chat absolute — observed: the chat agent
             # could not resolve a session-relative path and asked for the full one.
             "frame_path": rel, "frame_abs_path": str(e.get("data") or "")}
@@ -569,6 +571,28 @@ class LiveRun:
         feats = (latest or {}).get("features") or {}
         return [k for k in feats if not k.startswith("fit_")
                 and not k.endswith(("_err", "_error", "_stderr", "_std"))][:cap]
+
+    def _maps(self, frame: Dict[str, Any], cap: int = 8) -> List[Dict[str, Any]]:
+        """The latest frame's map images (session-relative paths, served by the
+        session file route), the tracked outputs' first."""
+        import re
+        try:
+            found = sorted(Path(str(frame.get("frame_dir"))).glob("*_Dashboard_*.jp*g"))
+        except Exception:  # noqa: BLE001
+            return []
+        tracked = [k.lower() for k in (self.loop.outputs if self.loop is not None else {})]
+        out = []
+        for p in found:
+            m = re.search(r"_T\d+_(.+)_Dashboard_", p.name)
+            name = m.group(1) if m else p.stem
+            try:
+                rel = str(p.resolve().relative_to(self._session_dir))
+            except Exception:  # noqa: BLE001 - outside the session: not served
+                continue
+            out.append({"name": name, "path": rel, "step": frame.get("step"),
+                        "tracked": any(t.startswith(name.lower()) for t in tracked)})
+        out.sort(key=lambda d: (not d["tracked"], d["name"]))
+        return out[:cap]
 
     def _reference_curve(self) -> Optional[Dict[str, Any]]:
         refs = sorted(p for p in (self.run_dir / "reference").glob("reference_*")

@@ -860,8 +860,28 @@ reference, window re-anchors) are capability flags on the modality, not
 branches in the loop. A cube is watched by REGION as well as whole (`DriftBank`:
 one monitor per curve, the frame is as changed as its most changed region),
 because a change confined to part of the field is diluted in the mean spectrum
-by the area it covers; the novelty says which region. Images come next through
-the same seam and need a deterministic per-item gate first.
+by the area it covers; the novelty says which region. Several first cubes are a
+reference too: they go to the hyperspectral series driver (scout, regime plan,
+anchor, replays) and the loop locks the recipe of the regime the LAST cube
+belongs to. Images come next through the same seam and need a deterministic
+per-item gate first.
+
+**A change that arrives slowly has its own alarm.** Every frame of a gradual
+onset is explained by the frames just before it, so no frame is ever suspected
+and nothing is held. The loop therefore also watches how far the stream has
+moved from its REFERENCE frames and announces that as a `novelty` with
+`onset="gradual"` and a location read against the reference
+(`locate_from_reference`), once the distance stays above `gradual_bar`, then
+again only at double the distance; an abrupt change that was announced raises
+the level past itself, so the same change is never news twice.
+
+**A rebuild first tries what this run already knows.** The loop remembers the
+recipes it has used and left (`_known_recipes`); the worker replays each strictly
+on the new frame (no model call) and adopts the first the modality's own verdict
+calls good (`source="recalled"`), before any new analysis. It is the in-run
+analogue of asking the script bank first, and it is what makes a stream that
+returns to a state (a mosaic crossing the same kind of region, a cycled sample)
+pay for each state once. An audit never recalls: it must be independent.
 
 **Onboarding an instrument has two halves, and neither is a SciLink class.**
 The *driver* — how to talk to the controller, its file formats, its real limits —

@@ -348,6 +348,9 @@ def test_a_stream_of_datacubes_runs_in_the_tab(tmp_path, monkeypatch):
 
         def analyze(self, data, **kw):
             SEEN.append(kw)
+            Path(self.output_dir).mkdir(parents=True, exist_ok=True)
+            for name in ("fit_R2", "Plasmon_Energy"):            # what a replay leaves: one dashboard per map
+                (Path(self.output_dir) / f"Global_Analysis_T1_{name}_Dashboard_20260101_000000.jpeg").write_bytes(b"jpeg")
             return {"status": "success", "extracted_features": feature,
                     "output_directory": str(anchor) if "reference" in Path(str(data)).name else self.output_dir,
                     "script_reuse": {"verbatim": True}, "stage_timings": {"llm_calls": 0}}
@@ -359,7 +362,8 @@ def test_a_stream_of_datacubes_runs_in_the_tab(tmp_path, monkeypatch):
     sdir.mkdir()
     session = SimpleNamespace(id="hs", session_dir=str(sdir),
                               agent=SimpleNamespace(model_name="m", api_key=None, base_url=None))
-    live_api.start(session, {**CONFIG, "instrument": "spectrum_image_series", "n_frames": 3})
+    live_api.start(session, {**CONFIG, "instrument": "spectrum_image_series", "n_frames": 3,
+                             "pin_outputs": True})          # named outputs: matched to the recipe's, not pinned
     snap = _wait(session, lambda s: s["state"] in ("done", "error"))
     assert snap["state"] == "done", snap.get("error")
     assert snap["instrument"]["modality"] == "hyperspectral"
@@ -367,6 +371,10 @@ def test_a_stream_of_datacubes_runs_in_the_tab(tmp_path, monkeypatch):
     assert snap["frames"][-1]["features"] == {"Plasmon_Energy_mean_eV": 0.62}
     assert len(snap["latest"]["x"]) == 160 and abs(snap["latest"]["x"][0] - 0.30) < 1e-6   # mean spectrum, in eV
     assert "fit" not in snap["latest"]
+    # the frame's result is its maps: served as session files, the tracked output's first
+    assert [m["name"] for m in snap["maps"]] == ["Plasmon_Energy", "fit_R2"] and snap["maps"][0]["tracked"]
+    assert snap["maps"][0]["path"].startswith("live/run_001/loop/frames/frame_000003/")
+    assert (sdir / snap["maps"][0]["path"]).is_file()
     replay = SEEN[-1]                                    # the fast path asked for a strict replay
     assert replay["strict_replay"] is True and replay["replay_reference"]["Plasmon_Energy"]["mean"] == 0.62
     assert replay["system_info"]["energy_range"]["start"] == 0.30

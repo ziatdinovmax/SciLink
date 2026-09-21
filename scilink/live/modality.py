@@ -111,6 +111,13 @@ class CurveModality:
     def why_nothing_to_lock(self, result: Dict[str, Any]) -> str:
         return "."
 
+    def series_anchor(self, series_dir: Path, dest: Path, files: List[str]):
+        """From a reference analysed as a SERIES (several first frames), the run to
+        lock: ``(anchor_dir, info)``. A curve series keeps one script per
+        spectrum, so its last fitted frame is laid out as a single-spectrum run."""
+        from .measurement_loop import MeasurementLoop
+        return MeasurementLoop._single_frame_anchor(series_dir, dest, files)
+
     def features_from_anchor(self, anchor_dir: Path) -> Dict[str, float]:
         try:
             return self.features(json.loads((Path(anchor_dir) / "analysis_results.json").read_text()))
@@ -148,7 +155,7 @@ class HyperspectralModality(CurveModality):
     pinning = False            # names are fixed by locked_targets, by construction
     script_edits = False
     portability = False
-    series_reference = False   # a list of reference cubes: the last is analysed, all seed the monitor
+    series_reference = True    # several first cubes: planned as a series, locked on the last one's regime
     window_reanchor = False
     usable_status = ("success", "partial")     # some maps passed the gate: tracked, and flagged poor
 
@@ -180,7 +187,35 @@ class HyperspectralModality(CurveModality):
         objective = self._objective(loop)
         if objective:
             kwargs["objective"] = objective
+        if len(refs) > 1:
+            # Several first cubes are analysed as a series: every cube's mean
+            # spectrum is scouted and the plan is made with the variation in
+            # view (one noisy or unrepresentative cube does not decide the
+            # method), the first cube of each regime is analysed in full and the
+            # rest replay it. The series is a means: no trend, no synthesis, no
+            # per-cube refits.
+            kwargs["series_metadata"] = {"variable": "frame", "values": list(range(len(refs)))}
+            kwargs["profile"] = {"base": profile or "thorough", "trend": False,
+                                 "synthesis": "none", "adaptive_refit": False}
         return kwargs
+
+    def series_anchor(self, series_dir: Path, dest: Path, files: List[str]):
+        """The recipe of the regime the LAST reference cube belongs to: the state
+        the stream continues from. The series already keeps each regime's anchor
+        as a complete single-cube run, so nothing is laid out again."""
+        data = json.loads((Path(series_dir) / "series_analysis_results.json").read_text())
+        rows = [r for r in (data.get("results") or []) if isinstance(r, dict) and r.get("success")]
+        regimes = ((data.get("locked_config") or {}).get("regimes") or {})
+        if not rows or not regimes:
+            raise RuntimeError("setup(): the reference series locked no recipe "
+                               "(no cube of it was analysed successfully)")
+        last = rows[-1]
+        lock = regimes.get(last.get("regime")) or list(regimes.values())[-1]
+        info = {"n": len(files), "fitted": len(rows), "anchored_on": lock.get("anchor_index"),
+                "regimes": len(regimes), "model": "; ".join(
+                    str(t.get("target") or "")[:120] for t in (lock.get("targets") or []))[:200],
+                "data": files[min(int(last.get("index", len(files) - 1)), len(files) - 1)]}
+        return str(lock["anchor_output_dir"]), info
 
     def replay_kwargs(self, loop: Any, data_path: str) -> Dict[str, Any]:
         state = loop._modality_state or {}
