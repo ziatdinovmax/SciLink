@@ -92,6 +92,7 @@ class Shell:
         self.extras: Dict[str, Any] = {}
         self.totals = {"calls": 0, "seconds": 0.0, "prompt_tokens": 0, "completion_tokens": 0}
         self._quit = False
+        self._prefill = ""      # text for the next prompt (a draft typed mid-turn)
         # A plain session for bootstrap questions and the HITL widgets; the
         # chat session (history, completion, bindings) is built in run().
         self._plain_session = PromptSession(**self._pt_kwargs)
@@ -191,6 +192,32 @@ class Shell:
             self._auto_title(text, res.result)
         if res.error and not self.renderer.verbose:
             self.console.print("[dim]Ctrl+O or /verbose shows the full narration.[/]")
+        # What was typed while the turn ran: queued messages run next, in
+        # order (each shown as if typed at the prompt); an unfinished draft
+        # waits in the prompt. After Ctrl+C nothing runs on its own — the
+        # queue goes back into the prompt for the user to decide.
+        # (Only set when there is something: a queued turn that ran from
+        # here must not wipe the draft the outer turn left for the prompt.)
+        if res.stopped:
+            held = "\n".join(res.queued + ([res.draft] if res.draft else []))
+            if held:
+                self._prefill = held
+            return
+        if res.draft:
+            self._prefill = res.draft
+        for queued in res.queued:
+            if self._quit:
+                break
+            self.console.print(f"[bold cyan]❯[/] {queued}")
+            self.submit(queued)
+
+    def submit(self, text: str) -> None:
+        """A line from the prompt (or the queue): a slash command or a turn."""
+        if text.startswith("/"):
+            if not self.commands.dispatch(self, text):
+                self.console.print(f"[red]Unknown command[/] {text.split()[0]} — /help lists them")
+            return
+        self.turn(text)
 
     def _auto_title(self, first_user: str, first_reply: str) -> None:
         """Name the session from the first exchange, as the web UI does (one
@@ -308,9 +335,10 @@ class Shell:
             **self._pt_kwargs)
         while not self._quit:
             self._rule()
+            prefill, self._prefill = self._prefill, ""
             try:
                 text = self.prompt_session.prompt(
-                    HTML("<b><ansicyan>❯</ansicyan></b> "),
+                    HTML("<b><ansicyan>❯</ansicyan></b> "), default=prefill,
                     placeholder=HTML(f"<i><ansibrightblack>{placeholder}</ansibrightblack></i>"))
             except KeyboardInterrupt:
                 continue
@@ -320,11 +348,7 @@ class Shell:
             text = text.strip()
             if not text:
                 continue
-            if text.startswith("/"):
-                if not self.commands.dispatch(self, text):
-                    self.console.print(f"[red]Unknown command[/] {text.split()[0]} — /help lists them")
-                continue
-            self.turn(text)
+            self.submit(text)
 
     def resume_command(self) -> str:
         """The command that resumes this session from anywhere: the session

@@ -336,3 +336,38 @@ def test_live_region_never_exceeds_the_screen_height():
     frame = [l for l in cap.get().split("\n") if l != ""]
     assert len(frame) <= console.size.height - 2, len(frame)
     assert any("earlier lines" in l for l in frame)
+
+
+def test_typing_mid_turn_drafts_and_queues_the_next_message(tmp_path):
+    """Keys typed while the turn runs build a draft; Enter queues it; the
+    unfinished draft and the queue come back on the result. Arrow keys
+    (escape sequences) and Ctrl+O are not text."""
+    import time as _time
+
+    class Slow(FakeOrchestrator):
+        def chat(self, text):
+            _time.sleep(0.6)
+            return "done"
+
+    chunks = iter(["fit ", "\x1b[A", "the\x7f\x7fe", " peaks\r", "\x0f", "then plot\r", "and "])
+
+    def read_key():
+        return next(chunks, None)
+
+    console, buf = _console()
+    renderer = Renderer(console)
+    renderer.stop_message = "x"
+    res = run_turn(Slow(str(tmp_path), ask=False), "go", session_dir=str(tmp_path),
+                   renderer=renderer, ask_question=lambda q: "", read_key=read_key)
+    assert res.queued == ["fit te peaks", "then plot"]
+    assert res.draft == "and "
+    assert renderer.verbose is True          # the Ctrl+O in the stream still toggled
+
+
+def test_draft_editing_keys():
+    from scilink.cli.shell.turn import Draft
+    d = Draft()
+    d.feed("hello wor\x17world\x15again\x7f\r\r")   # ctrl+w, ctrl+u, backspace, enter, empty enter
+    assert d.queued == ["agai"] and d.text == ""
+    d.feed("\x1bOA\x1b[1;5Cx")                          # SS3 and CSI sequences dropped
+    assert d.text == "x"

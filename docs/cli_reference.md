@@ -119,8 +119,10 @@ row while the agent works (spinner, what it is doing, elapsed time), the
 agents' narration filtered to tool calls, reasoning and handoffs (Ctrl+O or
 `/verbose` shows everything), the answer rendered as markdown, and one line of
 accounting per turn (LLM calls, tokens, seconds). Ctrl+C stops a running turn
-the way the web UI's ■ button does; at the prompt it clears the line. Ctrl+D
-or `/quit` saves a checkpoint and exits.
+the way the web UI's ■ button does; at the prompt it clears the line. Typing
+while a turn runs drafts the next message under the status row; Enter queues
+it, and queued messages run in order once the turn ends (after Ctrl+C they go
+back into the prompt instead). Ctrl+D or `/quit` saves a checkpoint and exits.
 
 Human-in-the-loop questions use the same widgets and labels as the web UI:
 free-text feedback with `Enter = Approve plan` (the empty answer accepts),

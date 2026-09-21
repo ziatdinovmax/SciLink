@@ -12,6 +12,7 @@ capture's stop event, which lands on the agent's next print as
 from __future__ import annotations
 
 import builtins
+import codecs
 import contextlib
 import io
 import logging
@@ -40,13 +41,15 @@ _CTRL_O = "\x0f"
 
 
 class KeyWatcher:
-    """Reads single keys from the terminal while a turn runs (cbreak mode:
-    no line buffering, no echo, Ctrl+C still a signal). Other keys are
-    discarded — the prompt is not active during a turn."""
+    """Reads keys from the terminal while a turn runs (cbreak mode: no line
+    buffering, no echo, Ctrl+C still a signal). Ctrl+O toggles verbose;
+    everything else goes to the ``Draft`` — the next message, queued with
+    Enter and run when the turn ends, as Claude Code does."""
 
     def __init__(self) -> None:
         self._fd = None
         self._saved = None
+        self._decoder = codecs.getincrementaldecoder("utf-8")("ignore")
 
     def __enter__(self):
         try:
@@ -72,14 +75,20 @@ class KeyWatcher:
                 pass
 
     def _cbreak(self) -> None:
-        """cbreak, minus IEXTEN: with it on, the line discipline eats ^O as
-        its 'discard output' key (and toggles output flushing) before we
-        can read it — prompt_toolkit's raw mode clears the flag the same way."""
+        """cbreak by hand, applied at once and WITHOUT flushing pending
+        input (``tty.setcbreak`` uses TCSAFLUSH, which threw away whatever
+        was typed between Enter and the watcher's start — observed as a
+        message typed right after submitting never arriving). ICANON off:
+        keys are readable as typed. ECHO off: Python 3.12's setcbreak no
+        longer clears it, and typed text would be echoed over the status
+        row. IEXTEN off: with it on, the line discipline eats ^O as its
+        'discard output' key before we can read it (prompt_toolkit's raw
+        mode clears the flag the same way). Ctrl+C stays a signal."""
         import termios
-        import tty
-        tty.setcbreak(self._fd)
         attrs = termios.tcgetattr(self._fd)
-        attrs[3] &= ~termios.IEXTEN
+        attrs[3] &= ~(termios.ICANON | termios.ECHO | termios.IEXTEN)
+        attrs[6][termios.VMIN] = 1
+        attrs[6][termios.VTIME] = 0
         termios.tcsetattr(self._fd, termios.TCSANOW, attrs)
 
     def reenter(self) -> None:
@@ -90,16 +99,55 @@ class KeyWatcher:
                 pass
 
     def read_key(self):
-        """The next pending key, or None (never blocks)."""
+        """The pending keys (a string; a paste arrives whole), or None
+        (never blocks)."""
         if self._fd is None:
             return None
         try:
             ready, _, _ = select.select([self._fd], [], [], 0)
             if not ready:
                 return None
-            return os.read(self._fd, 1).decode("utf-8", "ignore")
+            return self._decoder.decode(os.read(self._fd, 4096)) or None
         except Exception:  # noqa: BLE001
             return None
+
+
+class Draft:
+    """The message typed while a turn runs. Printable keys extend it,
+    Backspace / Ctrl+U / Ctrl+W edit it, Enter queues it (``queued``);
+    escape sequences (arrow keys) are dropped."""
+
+    def __init__(self) -> None:
+        self.text = ""
+        self.queued: List[str] = []
+        self._escape = ""   # an escape sequence in progress
+
+    def feed(self, keys: str) -> None:
+        for ch in keys:
+            if self._escape:
+                self._escape += ch
+                # CSI (ESC [ ...) ends on 0x40-0x7E; a lone ESC + letter is
+                # an alt-key; anything else is a one-character sequence.
+                if (self._escape[1:2] == "[" and len(self._escape) > 2 and "@" <= ch <= "~") \
+                        or (self._escape[1:2] not in ("[", "O") and len(self._escape) == 2) \
+                        or (self._escape[1:2] == "O" and len(self._escape) == 3):
+                    self._escape = ""
+                continue
+            if ch == "\x1b":
+                self._escape = ch
+            elif ch in ("\r", "\n"):
+                if self.text.strip():
+                    self.queued.append(self.text.strip())
+                self.text = ""
+            elif ch in ("\x7f", "\x08"):
+                self.text = self.text[:-1]
+            elif ch == "\x15":                       # Ctrl+U: clear the line
+                self.text = ""
+            elif ch == "\x17":                       # Ctrl+W: delete the last word
+                self.text = self.text.rstrip()
+                self.text = self.text[:self.text.rfind(" ") + 1] if " " in self.text else ""
+            elif ch >= " " and ch != "\x7f":
+                self.text += ch
 
 
 @contextlib.contextmanager
@@ -139,6 +187,8 @@ class TurnResult:
     log: str
     elapsed_s: float
     tokens: dict
+    queued: List[str] = field(default_factory=list)   # messages typed + Enter mid-turn
+    draft: str = ""                                    # typed, not yet entered
 
 
 def run_turn(agent: Any, user_input: str, *, session_dir: str, renderer,
@@ -152,8 +202,9 @@ def run_turn(agent: Any, user_input: str, *, session_dir: str, renderer,
     ``ask_question(presented)`` answers a parked question (the widgets);
     raising ``KeyboardInterrupt`` from it stops the turn. ``on_tick`` runs
     on every poll — tests use it to inject an interrupt. ``read_key``
-    supplies pending keys (Ctrl+O toggles verbose mid-turn); by default a
-    ``KeyWatcher`` on the terminal.
+    supplies pending keys (Ctrl+O toggles verbose mid-turn; anything else
+    drafts the next message, queued with Enter); by default a ``KeyWatcher``
+    on the terminal.
     """
     turn = TurnState()
     cap = RoutedCapture(echo_console=False)
@@ -228,6 +279,7 @@ def run_turn(agent: Any, user_input: str, *, session_dir: str, renderer,
     if watcher is not None:
         watcher.__enter__()
         read_key = watcher.read_key
+    draft = Draft()
     try:
         while True:
             finished = turn.done.wait(_POLL_S)
@@ -236,11 +288,14 @@ def run_turn(agent: Any, user_input: str, *, session_dir: str, renderer,
             if turn.interrupted:
                 _stop()
                 break
-            key = read_key()
-            while key is not None:
-                if key == _CTRL_O:
+            keys = read_key()
+            while keys:
+                if _CTRL_O in keys:
                     renderer.set_verbose(not renderer.verbose)
-                key = read_key()
+                    keys = keys.replace(_CTRL_O, "")
+                draft.feed(keys)
+                renderer.set_draft(draft.text, draft.queued)
+                keys = read_key()
             buf = cap.getvalue()
             if len(buf) > sent:
                 renderer.feed(buf[sent:])
@@ -290,7 +345,8 @@ def run_turn(agent: Any, user_input: str, *, session_dir: str, renderer,
         save_checkpoint_quietly(agent)
 
     return TurnResult(result=turn.result, error=turn.error, stopped=turn.stopped,
-                      log=log, elapsed_s=time.monotonic() - t0, tokens=tokens)
+                      log=log, elapsed_s=time.monotonic() - t0, tokens=tokens,
+                      queued=draft.queued, draft=draft.text)
 
 
 def save_checkpoint_quietly(agent: Any) -> Optional[str]:

@@ -85,6 +85,8 @@ class Renderer:
         self._paused = False
         self._entries: List[_Entry] = []   # the current turn's narration
         self._committed = 0                # entries already in scrollback
+        self._draft = ""                   # the next message, typed mid-turn
+        self._queued: List[str] = []
 
     # ── the live region ────────────────────────────────────────
 
@@ -102,6 +104,21 @@ class Renderer:
                           overflow="ellipsis"))
         return grid
 
+    def set_draft(self, draft: str, queued: List[str]) -> None:
+        self._draft, self._queued = draft, list(queued)
+
+    def _footer(self) -> List[Text]:
+        """Under the status row: the messages queued for after this turn and
+        the one being typed, so typing mid-turn is visible (Claude Code's
+        queued messages)."""
+        out = [Text(f"  ❯ {m}  (queued)", style="dim", no_wrap=True, overflow="ellipsis")
+               for m in self._queued]
+        if self._draft or self._queued:
+            out.append(Text.assemble(("❯ ", "bold cyan"), self._draft, ("▌", "dim"),
+                                     ("  enter queues", "dim")) if self._draft
+                       else Text("❯ ", style="bold cyan"))
+        return out
+
     def _visible(self, entries) -> List[Text]:
         return [e.text for e in entries if not e.verbose or self.verbose]
 
@@ -116,7 +133,8 @@ class Renderer:
         redrawn in place: rich re-prints it below itself on every refresh
         (observed live as the same lines repeating and the screen scrolling)."""
         lines = self._visible(self._entries[self._committed:])
-        room = max(2, self.console.size.height - 4)   # status row + margin
+        footer = self._footer()
+        room = max(2, self.console.size.height - 4 - len(footer))   # status row + margin
         tail: List[Text] = []
         used = 0
         for t in reversed(lines):
@@ -128,13 +146,14 @@ class Renderer:
         if len(tail) < len(lines):
             tail.insert(0, Text(f"  … {len(lines) - len(tail)} earlier lines "
                                 "(shown when the turn ends)", style="dim"))
-        return Group(*tail, self._row())
+        return Group(*tail, self._row(), *footer)
 
     def begin_turn(self) -> None:
         self.console.print()   # a gap under the submitted line
         self._t0 = time.monotonic()
         self._activity = None
         self._partial = ""
+        self._draft, self._queued = "", []
         self._classifier = LineClassifier()
         self._entries = []
         self._committed = 0

@@ -163,3 +163,42 @@ def test_name_command_sets_the_session_name_and_the_picker_shows_it(tmp_path, mo
     assert _re.search(r"Name\s+Grain sizes in 304 steel", out)               # /status shows it
     listed = S.list_sessions("meta", root=tmp_path)
     assert listed[0]["label"].startswith("Grain sizes in 304 steel")       # the picker label
+
+
+def test_queued_messages_run_after_the_turn(tmp_path, monkeypatch):
+    """A message queued mid-turn runs next, echoed at the prompt; a slash
+    command in the queue is dispatched; a draft waits in the prompt."""
+    from scilink.cli.shell import shell as shell_mod
+    from scilink.cli.shell.turn import TurnResult
+    real = shell_mod.run_turn
+    calls = []
+
+    def fake_run_turn(agent, text, **kw):
+        calls.append(text)
+        res = real(agent, text, **kw)
+        if text == "first":
+            res.queued, res.draft = ["second", "/status"], "third"
+        return res
+
+    monkeypatch.setattr(shell_mod, "run_turn", fake_run_turn)
+    code, out, shell = _run_shell(tmp_path, monkeypatch, "first\r\r/quit\r", ask=False)
+    assert code == 0
+    assert calls == ["first", "second", "third"]      # the draft was prefilled, sent by the next Enter
+    assert "❯ second" in out and "Fake field" in out  # echoed; /status ran from the queue
+
+
+def test_after_ctrl_c_the_queue_goes_back_to_the_prompt(tmp_path, monkeypatch):
+    from scilink.cli.shell import shell as shell_mod
+    real = shell_mod.run_turn
+    calls = []
+
+    def fake_run_turn(agent, text, **kw):
+        calls.append(text)
+        res = real(agent, text, **kw)
+        if text == "first":
+            res.stopped, res.queued, res.draft = True, ["second"], "more"
+        return res
+
+    monkeypatch.setattr(shell_mod, "run_turn", fake_run_turn)
+    code, out, shell = _run_shell(tmp_path, monkeypatch, "first\r\r/quit\r", ask=False)
+    assert calls == ["first", "second\nmore"]         # nothing ran on its own; the prompt held it

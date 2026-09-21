@@ -76,6 +76,7 @@ def _help(shell, arg: str) -> None:
     shell.console.print(
         "\n[dim]Keys: Enter sends · Alt+Enter newline · Ctrl+C stops a running turn "
         "(clears the line at the prompt) · Ctrl+O toggles verbose output, also mid-turn · "
+        "typing while a turn runs drafts the next message, Enter queues it for after the turn · "
         "Ctrl+D quits[/]")
 
 

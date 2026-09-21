@@ -380,7 +380,8 @@ Add `/objective` to the shared commands below to print the campaign objective.
 The chat runs in SciLink's terminal shell, shared by every mode: line editing
 and history, Tab completion of slash commands and paths, a status row while
 the agent works (Ctrl+O shows the full narration), Ctrl+C to stop a running
-turn, and every question rendered with the same labels the web UI uses
+turn, typing mid-turn to queue the next message, and every question rendered
+with the same labels the web UI uses
 (`Enter = Approve plan`, and so on).
 
 | Command | Description |
@@ -488,7 +489,8 @@ join the shared commands below.
 The chat runs in SciLink's terminal shell, shared by every mode: line editing
 and history, Tab completion of slash commands and paths, a status row while
 the agent works (Ctrl+O shows the full narration), Ctrl+C to stop a running
-turn, and every question rendered with the same labels the web UI uses
+turn, typing mid-turn to queue the next message, and every question rendered
+with the same labels the web UI uses
 (`Enter = Approve plan`, and so on).
 
 | Command | Description |
