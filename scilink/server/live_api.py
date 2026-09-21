@@ -70,6 +70,31 @@ def list_simulators() -> List[Dict[str, Any]]:
     return [_instrument_info(cls()) for cls in SIMULATORS.values()]
 
 
+def list_instruments() -> List[Dict[str, Any]]:
+    """Instruments this machine remembers (a read of the store, nothing else)."""
+    from scilink.live.instrument_home import known_instruments
+    return known_instruments()
+
+
+def instrument_memory(instrument: str) -> Dict[str, Any]:
+    from scilink.live.instrument_home import remembered
+    record = remembered(instrument)
+    if record is None:
+        raise LiveError(404, f"No instrument {instrument!r} is remembered on this machine.")
+    for recipe in record["recipes"]:
+        recipe["outputs"] = {k: _plain(v) for k, v in (recipe.get("outputs") or {}).items()}
+    return record
+
+
+def forget_recipe(instrument: str, recipe_id: str) -> Dict[str, Any]:
+    """Delete one remembered recipe. A run that recalled it replays its own copy
+    (``MeasurementLoop._own_anchor``), so this never breaks a run."""
+    from scilink.live.instrument_home import forget_recipe as forget
+    if not forget(instrument, recipe_id):
+        raise LiveError(404, f"No recipe {recipe_id!r} is remembered for {instrument!r}.")
+    return instrument_memory(instrument)
+
+
 def _replay_instrument(config: Dict[str, Any]) -> Any:
     """Recorded measurements from a folder on this machine, as an instrument."""
     from scilink.live.instruments import ReplayInstrument

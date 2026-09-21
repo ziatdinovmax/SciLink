@@ -559,7 +559,7 @@ class MeasurementLoop:
         series_info: Optional[Dict[str, Any]] = None
         recalled = self._recall_from_home(refs[-1]) if (refs and self._home is not None) else None
         if recalled is not None:
-            anchor, reference = recalled["anchor_dir"], refs[-1]
+            anchor, reference = self._own_anchor(recalled["anchor_dir"], recalled.get("recipe_id")), refs[-1]
             source = f"instrument:{recalled.get('recipe_id')}"
         elif refs:
             self._human_feedback = bool(enable_human_feedback)
@@ -748,6 +748,20 @@ class MeasurementLoop:
              if hit else f"🏠 None of the instrument's {len(known)} known recipe(s) fits the reference ")
             + f"({time.perf_counter() - t0:.1f}s, no model call).")
         return hit
+
+    def _own_anchor(self, anchor_dir: Any, recipe_id: Any = None) -> str:
+        """A recipe taken from the instrument's store is COPIED into this run
+        before it is replayed. The store is trimmed, and a person can forget a
+        recipe; neither may break a run that is using it, and a run folder stays
+        complete on its own (resume, a later look at what was replayed)."""
+        src = Path(str(anchor_dir))
+        if self._home is None or self._home.dir.resolve() not in src.resolve().parents:
+            return str(anchor_dir)
+        dest = self.output_dir / "recalled" / str(recipe_id or src.parent.name)
+        if not dest.is_dir():
+            import shutil
+            shutil.copytree(src, dest)
+        return str(dest)
 
     def _match_outputs(self) -> None:
         """Where names are fixed by the analysis itself (a datacube's maps), the
@@ -1215,12 +1229,13 @@ class MeasurementLoop:
         """What a rebuild tries first: this run's own recipes, newest first, then
         the instrument's. Never the recipe that just breached."""
         current = str(self.anchor_dir)
-        seen, out = {current}, []
+        seen, out = {k for k in (current, (self.recipe or {}).get("id")) if k}, []
         for r in list(reversed(self._known_recipes)) + [
                 {"anchor_dir": m["anchor_dir"], "edits": m.get("edits") or [], "recipe_id": m.get("recipe_id")}
                 for m in self._home_recipes()]:
-            if r["anchor_dir"] not in seen and r.get("recipe_id") != (self.recipe or {}).get("id"):
-                seen.add(r["anchor_dir"])
+            # By folder AND by id: a recipe recalled from the store runs from a copy.
+            if r["anchor_dir"] not in seen and (r.get("recipe_id") or "") not in seen:
+                seen.update(k for k in (r["anchor_dir"], r.get("recipe_id")) if k)
                 out.append(dict(r))
         return out
 
@@ -1531,6 +1546,8 @@ class MeasurementLoop:
         self._known_recipes = ([r for r in self._known_recipes
                                 if r["anchor_dir"] not in (leaving["anchor_dir"], str(anchor_dir))]
                                + [leaving])[-6:]
+        if result.get("recalled"):
+            anchor_dir = Path(self._own_anchor(anchor_dir, result.get("recalled_recipe")))
         self.anchor_dir, self._edits = anchor_dir, list(result.get("pin_edits") or [])
         self._modality_state = self.modality.anchor_state(anchor_dir, None)
         source = ("recalled" if result.get("recalled") else

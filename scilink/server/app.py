@@ -621,6 +621,28 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         from .live_api import list_simulators
         return {"simulators": list_simulators()}
 
+    # What the instruments on this machine remember (scilink.live.instrument_home).
+    # The store belongs to the machine, not to a session, so it has no session
+    # in its path. On a shared multi-user server it is read-only: one user must
+    # not delete what another user's runs rely on.
+    @app.get("/api/v1/live/instruments")
+    def live_instruments():
+        from .live_api import list_instruments
+        return {"instruments": list_instruments(),
+                "can_forget": not (auth is not None and auth.multi_user)}
+
+    @app.get("/api/v1/live/instruments/{instrument}")
+    def live_instrument(instrument: str):
+        from .live_api import instrument_memory
+        return _live(instrument_memory, instrument)
+
+    @app.delete("/api/v1/live/instruments/{instrument}/recipes/{recipe_id}")
+    def live_forget_recipe(instrument: str, recipe_id: str):
+        if auth is not None and auth.multi_user:
+            raise HTTPException(403, "Forgetting a recipe is disabled on a shared server.")
+        from .live_api import forget_recipe
+        return _live(forget_recipe, instrument, recipe_id)
+
     @app.get("/api/v1/sessions/{session_id}/live")
     def live_snapshot(request: Request, session_id: str):
         from .live_api import snapshot

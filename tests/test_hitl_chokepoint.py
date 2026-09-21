@@ -160,7 +160,7 @@ def test_get_dataset_description_routes_and_keeps_eof_fallback():
 # destructive-op confirms, and the TTY-gated sandbox consent.
 _ALLOWED_RAW_INPUT = {
     "cli/plan.py", "cli/analyze.py", "cli/simulate.py", "cli/meta.py",
-    "cli/memory.py", "cli/kb.py", "executors.py", "hitl.py",
+    "cli/memory.py", "cli/kb.py", "cli/instrument.py", "executors.py", "hitl.py",
 }
 
 _INPUT_CALL = re.compile(r"(?<![\w.])input\s*\(")

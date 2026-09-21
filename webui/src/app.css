@@ -832,6 +832,19 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .live-options { font-size: 13px; }
 .live-options > summary { cursor: pointer; color: var(--text-muted); font-size: 12px; padding: 4px 0; }
 .live-options > .live-row { margin-top: 8px; }
+.live-memory-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.live-memory-list > button { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; text-align: left; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text); font-size: 13px; }
+.live-memory-list > button.on { border-color: var(--accent); background: var(--bg-panel); }
+.live-memory-tag { font-size: 11px; padding: 1px 6px; border-radius: 8px; border: 1px solid var(--accent); color: var(--text); }
+.live-memory-detail h4 { margin: 12px 0 4px; font-size: 12px; font-weight: 600; color: var(--text-muted); }
+.live-memory-scroll { overflow-x: auto; }
+.live-memory-detail table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.live-memory-detail th { text-align: left; font-weight: 500; color: var(--text-muted); padding: 3px 10px 3px 0; white-space: nowrap; }
+.live-memory-detail td { padding: 4px 10px 4px 0; border-top: 1px solid var(--border); vertical-align: top; }
+.live-memory-act { white-space: nowrap; text-align: right; }
+.live-memory-act button { font-size: 12px; padding: 2px 8px; margin-left: 4px; }
+.live-memory-act button.danger { color: var(--danger); border-color: var(--danger); }
+.live-memory-error { color: var(--danger); }
 .live-multiple + .live-multiple { margin-top: 4px; }
 .live-multiple-head { display: flex; align-items: baseline; gap: 8px; font-size: 12px; }
 .live-multiple-head b { font-size: 14px; font-variant-numeric: tabular-nums; }

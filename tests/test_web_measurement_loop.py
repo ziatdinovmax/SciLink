@@ -534,3 +534,33 @@ def test_routes(tmp_path):
     assert len(sims) == 6
     assert client.get("/api/v1/sessions/nope/live").status_code == 404
     assert client.post("/api/v1/sessions/nope/live/start", json={}).status_code == 404
+
+
+def test_the_instrument_memory_routes_read_and_forget(tmp_path, monkeypatch):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from scilink.live.instrument_home import InstrumentHome
+    from scilink.server.app import create_app
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path / "home"))
+    client = TestClient(create_app(session_root=tmp_path / "sessions", serve_frontend=False))
+    assert client.get("/api/v1/live/instruments").json() == {"instruments": [], "can_forget": True}
+    assert client.get("/api/v1/live/instruments/nobody").status_code == 404
+
+    home = InstrumentHome({"id": "tem-2", "technique": "TEM imaging", "modality": "image"})
+    recipe = home.dir / "recipes" / "abc123"
+    (recipe / "anchor").mkdir(parents=True)
+    (recipe / "anchor" / "analysis_results.json").write_text("{}")
+    (recipe / "recipe.json").write_text(json.dumps({
+        "recipe_id": "abc123", "modality": "image", "technique": "TEM imaging", "uses": 2,
+        "outputs": {"particle_count": "number of particles — in the field"}, "reports": ["particle_count"]}))
+    (home.dir / "runs.jsonl").write_text(json.dumps({"when": "2026-09-21T10:00:00", "frames": 12,
+                                                      "clean_frames": 11, "novelties": []}) + "\n")
+
+    [info] = client.get("/api/v1/live/instruments").json()["instruments"]
+    assert (info["id"], info["recipes"], info["runs"]) == ("tem-2", 1, 1)
+    record = client.get("/api/v1/live/instruments/tem-2").json()
+    assert record["recipes"][0]["outputs"] == {"particle_count": "number of particles, in the field"}
+    assert record["runs"][0]["frames"] == 12
+    assert client.delete("/api/v1/live/instruments/tem-2/recipes/nope").status_code == 404
+    after = client.delete("/api/v1/live/instruments/tem-2/recipes/abc123").json()
+    assert after["recipes"] == [] and len(after["runs"]) == 1 and not recipe.exists()

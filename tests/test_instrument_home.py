@@ -95,3 +95,89 @@ def test_remember_needs_an_instrument_and_keeps_heavy_artifacts_out(tmp_path):
     [kept] = InstrumentHome(sim, root=str(tmp_path / "instruments")).recipes()
     assert not list((tmp_path / "instruments").rglob("weights.tar"))
     assert (os.path.isfile(os.path.join(kept["anchor_dir"], "scripts", "analysis_script.py")))
+
+
+def _remembered_run(tmp_path, seed=2):
+    sim = get_simulator("particle_coarsening_images", seed=seed)
+    ref = sim.acquire({}).save(str(tmp_path / f"ref{seed}"), 0, stem="reference")
+    with _loop(tmp_path, f"run{seed}", sim) as loop:
+        setup = loop.setup(anchor=str(_anchor(tmp_path, {"particle_count": 70, "mean_diameter_nm": 5.0})),
+                           reference_data=ref)
+        run_experiment(sim, loop, 3, apply="never")
+    return sim, setup
+
+
+def test_what_an_instrument_remembers_can_be_read_without_touching_it(tmp_path):
+    from scilink.live.instrument_home import known_instruments, remembered
+    root = str(tmp_path / "instruments")
+    assert known_instruments(root) == [] and remembered("nobody", root) is None
+    assert not (tmp_path / "instruments").exists()            # looking creates nothing
+    sim, setup = _remembered_run(tmp_path)
+    [info] = known_instruments(root)
+    assert info["id"] == sim.id and info["modality"] == "image" and (info["recipes"], info["runs"]) == (1, 1)
+    seen_before = info["last_seen"]
+    record = remembered(sim.id, root)
+    assert record == remembered(info["key"], root)            # by id or by folder name
+    [recipe] = record["recipes"]
+    assert recipe["recipe_id"] == setup["recipe"]["id"] and "anchor_dir" not in recipe
+    assert set(recipe["outputs"]) == {"particle_count", "mean_diameter_nm"} and recipe["size_mb"] >= 0
+    [run] = record["runs"]
+    assert run["frames"] == 3
+    assert known_instruments(root)[0]["last_seen"] == seen_before
+
+
+def test_a_recipe_can_be_forgotten_and_the_runs_stay_on_the_record(tmp_path):
+    from scilink.live.instrument_home import forget_instrument, forget_recipe, known_instruments, remembered
+    root = str(tmp_path / "instruments")
+    sim, setup = _remembered_run(tmp_path)
+    rid = setup["recipe"]["id"]
+    assert not forget_recipe(sim.id, "../" + rid, root)       # only a plain id names a recipe
+    assert not forget_recipe(sim.id, "0" * 12, root) and not forget_recipe("nobody", rid, root)
+    assert forget_recipe(sim.id, rid, root)
+    record = remembered(sim.id, root)
+    assert record["recipes"] == [] and len(record["runs"]) == 1
+    assert forget_instrument(sim.id, root) and known_instruments(root) == []
+
+
+def test_a_recalled_recipe_is_replayed_from_the_runs_own_copy(tmp_path):
+    """The store is trimmed and a person can forget a recipe: neither may break
+    a run that is using it."""
+    from scilink.live.instrument_home import forget_recipe
+    root = tmp_path / "instruments"
+    sim, setup = _remembered_run(tmp_path)
+    sim2 = get_simulator("particle_coarsening_images", seed=9)
+    ref2 = sim2.acquire({}).save(str(tmp_path / "ref9"), 0, stem="reference")
+    with _loop(tmp_path, "second", sim2) as loop:
+        s2 = loop.setup(reference=ref2)
+        assert s2["recalled_from_instrument"] == setup["recipe"]["id"]
+        assert root.resolve() not in loop.anchor_dir.resolve().parents
+        assert (tmp_path / "second").resolve() in loop.anchor_dir.resolve().parents
+        assert forget_recipe(sim.id, setup["recipe"]["id"], str(root))      # mid-run
+        recs = run_experiment(sim2, loop, 3, apply="never")
+        assert all("fit_failed" not in r["flags"] for r in recs)
+
+
+def test_the_cli_lists_shows_and_forgets(tmp_path, monkeypatch, capsys):
+    import sys
+    from scilink.cli import instrument as cli
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path / "home"))
+    home = InstrumentHome({"id": "raman-1", "technique": "Raman spectroscopy", "modality": "curve"})
+    recipe = home.dir / "recipes" / "abc123"
+    (recipe / "anchor").mkdir(parents=True)
+    (recipe / "recipe.json").write_text(json.dumps({"recipe_id": "abc123", "modality": "curve", "uses": 3,
+                                                    "outputs": {"g_position": "position of the G band"}}))
+
+    def run(*argv):
+        monkeypatch.setattr(sys, "argv", ["scilink instrument", *argv])
+        code = cli.main()
+        return code, capsys.readouterr().out
+
+    code, out = run("list")
+    assert code == 0 and "raman-1" in out and "recipes 1, runs 0" in out
+    code, out = run("show", "raman-1")
+    assert code == 0 and "abc123" in out and "recalled 3x" in out and "g_position" in out
+    assert run("show", "nobody")[0] == 1
+    assert run("forget", "raman-1")[0] == 1                       # neither a recipe nor --all
+    code, out = run("forget", "raman-1", "abc123", "--yes")
+    assert code == 0 and not recipe.exists() and home.dir.is_dir()
+    assert run("forget", "raman-1", "--all", "-y")[0] == 0 and not home.dir.exists()

@@ -933,7 +933,14 @@ recipes are tried on the reference by strict replay before anything is analysed;
 one that fits AND reports what is tracked arms the loop with no model call, and a
 rebuild tries them too (`recall_known` is shared by setup and the worker). A
 recalled recipe is a hypothesis about the new sample: it is replayed and judged
-before use, and watched like any other after. Opt-in for that reason.
+before use, and watched like any other after. Opt-in for that reason. A recipe
+taken from the store is COPIED into the run before it is replayed
+(`_own_anchor`): the store is trimmed and a person can forget a recipe, and
+neither may break a run that is using it. The store is readable without a
+session (`known_instruments`, `remembered`, `forget_recipe` in the same module):
+`scilink instrument list/show/forget` and the Live tab's Instrument memory card
+are two views of those functions, and on a shared multi-user server the card is
+read-only.
 
 **The fast path runs in one long-lived interpreter** (`executors.WarmScriptExecutor`,
 `warm_replay=True`): a fresh process paid the recipe's imports on every frame (a

@@ -178,6 +178,77 @@ class InstrumentHome:
         return out
 
 
+def known_instruments(root: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Every instrument this machine remembers, most recently seen first. Reads
+    only: looking at the store never creates a home or touches ``last_seen``."""
+    base = instruments_root(root)
+    found = []
+    if not base.is_dir():
+        return found
+    for d in base.iterdir():
+        if not (d / "instrument.json").is_file():
+            continue
+        try:
+            info = json.loads((d / "instrument.json").read_text())
+        except Exception:  # noqa: BLE001 - a torn record is skipped
+            continue
+        recipes = [p for p in (d / "recipes").glob("*/recipe.json") if (p.parent / "anchor").is_dir()]
+        try:
+            n_runs = sum(1 for line in (d / "runs.jsonl").read_text().splitlines() if line.strip())
+        except OSError:
+            n_runs = 0
+        found.append({**info, "key": d.name, "recipes": len(recipes), "runs": n_runs})
+    found.sort(key=lambda m: str(m.get("last_seen") or ""), reverse=True)
+    return found
+
+
+def remembered(instrument: str, root: Optional[str] = None, runs: int = 20) -> Optional[Dict[str, Any]]:
+    """What one instrument remembers: who it is, its recipes (most recently
+    used first) and its last runs. ``instrument`` is its id or its folder name.
+    ``None`` when the machine does not know it. Reads only."""
+    match = _find(instrument, root)
+    if match is None:
+        return None
+    home = InstrumentHome.__new__(InstrumentHome)  # opened without creating or touching it
+    home.info, home.dir = match, instruments_root(root) / match["key"]
+    recipes = []
+    for meta in home.recipes():
+        size = sum(f.stat().st_size for f in Path(meta["anchor_dir"]).rglob("*") if f.is_file())
+        recipes.append({**{k: v for k, v in meta.items() if k != "anchor_dir"},
+                        "size_mb": round(size / 1e6, 2)})
+    return {"instrument": match, "recipes": recipes, "runs": list(reversed(home.runs(limit=runs)))}
+
+
+def forget_recipe(instrument: str, recipe_id: str, root: Optional[str] = None) -> bool:
+    """Delete one remembered recipe. The runs that used it stay on the record.
+    True when something was deleted."""
+    match = _find(instrument, root)
+    if match is None or _safe(recipe_id) != str(recipe_id):
+        return False
+    target = instruments_root(root) / match["key"] / "recipes" / str(recipe_id)
+    if not (target / "recipe.json").is_file():
+        return False
+    shutil.rmtree(target, ignore_errors=True)
+    return not target.exists()
+
+
+def forget_instrument(instrument: str, root: Optional[str] = None) -> bool:
+    """Delete everything remembered about one instrument."""
+    match = _find(instrument, root)
+    if match is None:
+        return False
+    target = instruments_root(root) / match["key"]
+    shutil.rmtree(target, ignore_errors=True)
+    return not target.exists()
+
+
+def _find(instrument: str, root: Optional[str]) -> Optional[Dict[str, Any]]:
+    for info in known_instruments(root):
+        if instrument in (info.get("id"), info.get("key")):
+            return info
+    return None
+
+
 def _copy_run(src: Path, dest: Path) -> None:
     """The run directory a recipe was locked from, without what a replay never
     reads (model weights, candidate attempts, anything very large)."""

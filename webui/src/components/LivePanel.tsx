@@ -7,6 +7,7 @@ import {
   type LiveNovelty,
   type LiveSnapshot,
 } from "../api";
+import { InstrumentMemory } from "./InstrumentMemory";
 import { fmt, fmtShort, LiveChart } from "./LiveChart";
 
 /** Live tab. A measurement loop runs in the session as a background job and
@@ -794,6 +795,14 @@ export function LivePanel({
             </div>
           </details>
 
+          <InstrumentMemory currentId={chosen?.id} refreshKey={state}
+            info={<Info>
+                What the instruments on this machine have learned in runs started with Remember this
+                instrument. A kept recipe arms the next run on that instrument with no model call, after it is
+                replayed and judged on the new reference. Forgetting a recipe never affects a run that is
+                using it.
+              </Info>} />
+
           <div>
             <button className="primary" onClick={start} disabled={!ready}>Start</button>
           </div>
@@ -1198,6 +1207,13 @@ export function LivePanel({
           </ul>
         </details>
       )}
+      <InstrumentMemory currentId={inst?.id} refreshKey={state}
+        info={<Info>
+                What the instruments on this machine have learned in runs started with Remember this
+                instrument. A kept recipe arms the next run on that instrument with no model call, after it is
+                replayed and judged on the new reference. Forgetting a recipe never affects a run that is
+                using it.
+              </Info>} />
     </div>
   );
 }

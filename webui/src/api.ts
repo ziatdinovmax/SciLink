@@ -374,6 +374,48 @@ export interface LiveInstrumentInfo {
   /** Parameters the instrument takes but the loop will not steer, with the reason. */
   held?: string[];
 }
+/** An instrument this machine remembers from live runs (kept outside any session). */
+export interface RememberedInstrument {
+  id: string;
+  key: string;
+  name?: string | null;
+  technique?: string | null;
+  modality?: string | null;
+  first_seen?: string | null;
+  last_seen?: string | null;
+  recipes: number;
+  runs: number;
+}
+
+export interface RememberedRecipe {
+  recipe_id: string;
+  modality?: string | null;
+  technique?: string | null;
+  sample?: string | null;
+  outputs: Record<string, string>;
+  reports: string[];
+  source?: string | null;
+  created?: string | null;
+  last_used?: string | null;
+  uses: number;
+  size_mb: number;
+}
+
+export interface RememberedRun {
+  when: string;
+  frames: number;
+  clean_frames: number;
+  reanchors?: number | null;
+  audits?: number | null;
+  novelties: { step?: number; onset?: string | null; region?: string | null }[];
+}
+
+export interface InstrumentMemory {
+  instrument: RememberedInstrument;
+  recipes: RememberedRecipe[];
+  runs: RememberedRun[];
+}
+
 /** A curve analysis already in the session that a live loop can adopt as its reference. */
 export interface LiveReferenceAnalysis {
   path: string;
@@ -739,6 +781,15 @@ export const api = {
       { method: "DELETE" },
     ),
 
+  liveInstruments: () =>
+    req<{ instruments: RememberedInstrument[]; can_forget: boolean }>("/live/instruments"),
+  liveInstrument: (instrument: string) =>
+    req<InstrumentMemory>(`/live/instruments/${encodeURIComponent(instrument)}`),
+  liveForgetRecipe: (instrument: string, recipeId: string) =>
+    req<InstrumentMemory>(
+      `/live/instruments/${encodeURIComponent(instrument)}/recipes/${encodeURIComponent(recipeId)}`,
+      { method: "DELETE" },
+    ),
   live: (id: string) => req<LiveSnapshot>(`/sessions/${id}/live`),
   liveStart: (id: string, config: LiveConfig) =>
     req<LiveSnapshot>(`/sessions/${id}/live/start`, json(config)),

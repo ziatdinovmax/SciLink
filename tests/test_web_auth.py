@@ -130,6 +130,9 @@ def test_multi_user_isolation(tmp_path):
     assert alice.get("/api/v1/sessions?mode=analyze").json()["resumable"] == []
     # shared server: quit is refused; config names the user
     assert alice.post("/api/v1/quit").status_code == 403
+    # what the instruments remember belongs to the machine: read by all, deleted by none
+    assert alice.get("/api/v1/live/instruments").json()["can_forget"] is False
+    assert alice.delete("/api/v1/live/instruments/tem/recipes/abc").status_code == 403
     assert alice.get("/api/v1/config").json()["auth"] == {
         "required": True, "user": "alice", "multi_user": True}
 

@@ -238,6 +238,11 @@ def main():
         sys.argv = [sys.argv[0] + ' kb'] + sys.argv[2:]
         return kb_main()
 
+    elif command == 'instrument':
+        from scilink.cli.instrument import main as instrument_main
+        sys.argv = [sys.argv[0] + ' instrument'] + sys.argv[2:]
+        return instrument_main()
+
     elif command == 'fetch-xrd-library':
         from scilink.cli.fetch_data import main as fetch_main
         sys.argv = [sys.argv[0] + ' fetch-xrd-library'] + sys.argv[2:]
@@ -302,6 +307,9 @@ Available Commands:
   kb            Manage named, reusable knowledge bases — build once from
                 your documents, ground planning in them from any directory
                 (scilink kb create/add/list/show/import/rebuild/delete)
+
+  instrument    What the instruments on this machine remember from live runs
+                (recipes, past runs): scilink instrument list/show/forget
 
   fetch-xrd-library
                 One-time download of the prebuilt XRD fingerprint reference
