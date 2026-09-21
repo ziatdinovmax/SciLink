@@ -191,6 +191,14 @@ class Widgets:
         if parts:
             self.console.print(Panel(Group(*parts), title="[bold yellow]Question[/]",
                                      border_style="yellow"))
+        # What the decision is about, beside the answer (the web panel's
+        # callout): an auto-correction a revert would undo, or why an
+        # approved plan is being reopened.
+        notice = q.get("notice") or {}
+        if notice.get("title"):
+            body = Group(*(Text(f"• {line}") for line in notice.get("lines") or []))
+            self.console.print(Panel(body, title=f"[bold magenta]{notice['title']}[/]",
+                                     border_style="magenta"))
         for rel in q.get("preview_images") or []:
             cap = (q.get("candidate_captions") or {}).get(Path(rel).name)
             label = f" ({cap})" if cap else ""
@@ -213,8 +221,17 @@ class Widgets:
         labels = q.get("labels") or {}
         self._show_context(q)
         if widget == "keep_revert":
-            return self._choose([("keep", labels.get("keep", "Keep"), ""),
-                                 ("", labels.get("revert", "Revert"), "")], default=1)
+            options = [("keep", labels.get("keep", "Keep"), ""),
+                       ("", labels.get("revert", "Revert"), "")]
+            if labels.get("submit"):
+                # The reopen gate's third reply: adopt the revision with
+                # changes — any free text (the web panel's follow-up box).
+                options.append(("__text__", labels["submit"], ""))
+            chosen = self._choose(options, default=1)
+            if chosen == "__text__":
+                self.console.print(f"[bold]{labels.get('input', 'Your changes:')}[/]")
+                return self._read("").strip() or "keep"
+            return chosen
         if widget == "fanout_confirm":
             f = q.get("fanout") or {}
             self.console.print("[bold]🔀 Launch parallel multi-dataset analysis?[/]")
@@ -244,6 +261,9 @@ class Widgets:
             return "" if chosen == str(pick) else chosen
         # generic / dataset_description / code_review
         hint = enter_hint(labels)
+        if labels.get("revert_repair"):
+            hint = f"{hint} · revert = {labels['revert_repair']}" if hint \
+                else f"revert = {labels['revert_repair']}"
         self.console.print(f"[bold]{labels.get('input', 'Your feedback (optional):')}[/]"
                            + (f"  [dim]{hint}[/]" if hint else ""))
         return self._read("").strip()

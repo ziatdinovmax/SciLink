@@ -181,3 +181,39 @@ def test_ctrl_o_at_a_picker_shows_earlier_lines_and_keeps_the_picker():
         assert w.ask(q) == "1"                    # the picker survived Ctrl+O
     out = buf.getvalue()
     assert "30 earlier lines" in out and "line 0" in out and "line 29" in out
+
+
+def test_notice_callout_and_revert_repair_hint():
+    """The plan gate after an auto-correction: the notice beside the answer
+    and the one-word reply that restores the plan as authored (the web
+    panel's callout and "Revert auto-correction" button)."""
+    q = dict(GENERIC, notice={"title": "Auto-corrected before review (2 changes)",
+                              "lines": ["Step 3: 950 C -> 850 C", "Step 5: added a control"]},
+             labels=dict(GENERIC["labels"], revert_repair="Revert auto-correction"))
+    w, buf, stack = _widgets("revert\r")
+    with stack:
+        assert w.ask(q) == "revert"
+    out = buf.getvalue()
+    assert "Auto-corrected before review (2 changes)" in out and "950 C -> 850 C" in out
+    assert "revert = Revert auto-correction" in out
+
+
+def test_reopen_gate_offers_adopt_with_changes():
+    """The reopen gate is the keep/revert widget with a third reply: adopt
+    the agent's revision with changes (free text)."""
+    q = {"widget": "keep_revert", "prompt": "",
+         "labels": {"keep": "Adopt the revision", "revert": "Keep my approved plan",
+                    "input": "Adopt it with changes (optional):", "submit": "Adopt with changes"},
+         "notice": {"title": "The agent proposes to revise a plan you approved",
+                    "lines": ["Reason given: the anneal step exceeds the furnace limit"]},
+         "preview_images": [], "code_files": [], "candidate_captions": {}}
+    w, buf, stack = _widgets("\r")                       # Enter on the default: keep the approved plan
+    with stack:
+        assert w.ask(q) == ""
+    assert "proposes to revise" in buf.getvalue()
+    w, _, stack = _widgets("3use a 900 C anneal\r")     # the third option, then the changes
+    with stack:
+        assert w.ask(q) == "use a 900 C anneal"
+    w, _, stack = _widgets("3\r")                        # chose it, typed nothing: adopt as-is
+    with stack:
+        assert w.ask(q) == "keep"
