@@ -112,7 +112,8 @@ function describeEvent(e: LiveEvent): string {
       const port = e.portability as
         { portable?: boolean; summary?: string; positions_summary?: string } | undefined;
       const refs = e.reference_frames as { n?: number; regimes?: number } | undefined;
-      const how = g("source") === "anchor" ? "Armed from a past analysis."
+      const how = e.recalled_from_instrument ? "Armed from a recipe this instrument already knew, with no model call."
+        : g("source") === "anchor" ? "Armed from a past analysis."
         : refs?.n ? `Armed from the first ${refs.n} frames${(refs.regimes ?? 1) > 1 ? `, ${refs.regimes} regimes seen` : ""}.`
         : "Armed from the reference.";
       return [how, port && port.portable === false ? port.summary : "", port?.positions_summary ?? ""]
@@ -155,8 +156,23 @@ function describeEvent(e: LiveEvent): string {
         (String(g("why") ?? "").includes("closed") ? "The run ended first." : "A failing recipe needed the background.");
     case "reanchor": {
       const win = e.window as { n?: number } | undefined;
+      if (g("source") === "recalled")
+        return `A recipe used earlier fits again and was brought back, with no model call. ` +
+          `${g("frames_answered_meanwhile")} frames were answered meanwhile.`;
+      const why = e.contested ? " Two audits rejected the old recipe and did not agree with each other. The deeper one's recipe is used and is contested."
+        : e.two_audits_agree ? " Two independent audits agreed against the old recipe." : "";
       return `New recipe adopted after ${g("seconds")} s${win?.n ? `, planned from the last ${win.n} frames` : ""}. ` +
-        `${g("frames_answered_meanwhile")} frames were answered meanwhile.`;
+        `${g("frames_answered_meanwhile")} frames were answered meanwhile.${why}`;
+    }
+    case "audit_split":
+      return "Two independent analyses split on the recipe. It is kept and not verified.";
+    case "audit_unresolved":
+      return "Two audits rejected the recipe and gave different answers.";
+    case "discovery": {
+      const claims = (e.claims ?? []) as { claim: string; novelty_score?: number }[];
+      const best = typeof e.highest_novelty === "number" ? ` Highest novelty ${e.highest_novelty} of 5.` : "";
+      return claims.length ? `The changed frame was analysed. ${claims.length} claim${claims.length > 1 ? "s" : ""}.${best}`
+        : "The changed frame was analysed. No claim could be made.";
     }
     case "drift_rebased":
       return "The stream settled under the new recipe. Change detection now compares with these frames.";
@@ -208,7 +224,15 @@ export function LivePanel({
   const [refFrames, setRefFrames] = useState("1");
   const [deadline, setDeadline] = useState("10");
   const [auditEvery, setAuditEvery] = useState("");
-  const [onChange, setOnChange] = useState<NonNullable<LiveConfig["on_change"]>>("report");
+  // "" leaves it to the kind of data: report for spectra and datacubes, audit for images.
+  const [onChange, setOnChange] = useState<"" | NonNullable<LiveConfig["on_change"]>>("");
+  const [framesAre, setFramesAre] = useState<"" | "curve" | "image" | "hyperspectral">("");
+  const [axisStart, setAxisStart] = useState("");
+  const [axisEnd, setAxisEnd] = useState("");
+  const [axisUnits, setAxisUnits] = useState("");
+  const [fov, setFov] = useState("");
+  const [fovUnits, setFovUnits] = useState("nm");
+  const [assessOnPause, setAssessOnPause] = useState(true);
   const [notes, setNotes] = useState("");
   const [pauseOn, setPauseOn] = useState<"" | "novelty" | "breach" | "both">("");
   const [mapName, setMapName] = useState("");
@@ -249,6 +273,17 @@ export function LivePanel({
     if (!instrument && simulators.length) setInstrument(simulators[0].name);
   }, [simulators, instrument]);
 
+  // What kind of frame the chosen source produces, to offer references of the same kind.
+  const hints = ({
+    curve: { technique: "Raman spectroscopy", sample: "carbon film, annealed in situ",
+      track: "g_position: position of the G band\nd_over_g: ratio of the D band height to the G band height" },
+    hyperspectral: { technique: "STEM-EELS spectrum imaging", sample: "silver nanoparticles on a nitride membrane",
+      track: "plasmon_energy_ev: energy of the dipole plasmon mode\nplasmon_intensity: intensity of the dipole plasmon mode" },
+    image: { technique: "TEM bright-field imaging", sample: "gold nanoparticles on carbon, heated in situ",
+      track: "particle_count: number of particles in the field\nmean_diameter_nm: mean particle diameter" },
+  } as Record<string, { technique: string; sample: string; track: string }>);
+  const wantedModality: string = framesAre || (simulators.find((x) => x.name === instrument)?.modality ?? "curve");
+  const hint = hints[wantedModality] ?? hints.curve;
   const chosen: LiveInstrumentInfo | undefined =
     state === "idle" ? simulators.find((s) => s.name === instrument) : snap?.instrument;
   const mcpServers = snap?.mcp_servers ?? [];
@@ -292,7 +327,8 @@ export function LivePanel({
       reference_frames: Math.max(1, Math.min(25, parseInt(refFrames, 10) || 1)),
       frame_deadline_s: parseFloat(deadline) > 0 ? parseFloat(deadline) : null,
       audit_every: parseInt(auditEvery, 10) > 0 ? parseInt(auditEvery, 10) : undefined,
-      on_change: onChange, notes: notes.trim() || undefined,
+      on_change: onChange || undefined, notes: notes.trim() || undefined,
+      assess_on_pause: pauseOn && pauseOn !== "breach" ? assessOnPause : undefined,
       pause_on: pauseOn === "both" ? ["novelty", "breach"] : pauseOn ? [pauseOn] : undefined,
       remember: remember || undefined,
       ...(instrument === REPLAY || instrument === MCP ? {
@@ -300,6 +336,10 @@ export function LivePanel({
         mcp_server: instrument === MCP ? mcpServer : undefined,
         mcp_tool: instrument === MCP ? mcpTool : undefined,
         system_info: { technique, sample, x_axis: xAxis, y_axis: yAxis },
+        frames_are: framesAre || undefined,
+        frame_metadata: framesAre === "hyperspectral"
+          ? { axis_start: axisStart, axis_end: axisEnd, axis_units: axisUnits }
+          : framesAre === "image" ? { field_of_view: fov, field_of_view_units: fovUnits } : undefined,
         outputs: parseOutputs(outputsText),
       } : {}),
       objective_key: recommender === "gp" ? objectiveKey : undefined,
@@ -353,13 +393,13 @@ export function LivePanel({
               <span>Reference
                 <Info>
                   The loop needs one analysed measurement to lock its recipe. Use the first frame, which is
-                  analysed now and takes a few minutes, or a curve analysis already done in this session,
-                  which is adopted in seconds without being redone.
+                  analysed now and takes a few minutes, or an analysis of the same kind of data already
+                  done in this session, which is adopted in seconds without being redone.
                 </Info>
               </span>
               <select value={reference} onChange={(e) => setReference(e.target.value)}>
                 <option value={FIRST_FRAME}>{(parseInt(refFrames, 10) || 1) > 1 ? `First ${refFrames} frames` : "First frame"}</option>
-                {analyses.map((a) => (
+                {analyses.filter((a) => (a.modality ?? "curve") === wantedModality).map((a) => (
                   <option key={a.path} value={a.path} title={a.model}>
                     {a.from_live_run ? "Earlier live run" : "Analysis"}: {a.name}
                   </option>
@@ -413,8 +453,10 @@ export function LivePanel({
             <label>
               <span>Folder
                 <Info>
-                  Every two-column file in the folder (.csv .txt .xy .dat .tsv .npy) is one frame, in file
-                  order. Recorded data cannot be steered, so there is no recommender.
+                  Every file in the folder is one frame, in file order. Spectra are two-column files
+                  (.csv .txt .xy .dat .tsv .npy). Images are .npy, .tif or .png. Datacubes are .npy or HDF5
+                  with the spectral axis last. A same-name .json next to a file carries its metadata.
+                  Recorded data cannot be steered, so there is no recommender.
                 </Info>
               </span>
               <input type="text" placeholder="/path/to/recorded/series" value={replayDir}
@@ -435,21 +477,74 @@ export function LivePanel({
               )}
               <div className="live-row">
                 <label className="grow"><span>Technique</span>
-                  <input type="text" placeholder="Raman spectroscopy" value={technique}
+                  <input type="text" placeholder={hint.technique} value={technique}
                     onChange={(e) => setTechnique(e.target.value)} />
                 </label>
                 <label className="grow"><span>Sample</span>
-                  <input type="text" placeholder="carbon film, annealed in situ" value={sample}
+                  <input type="text" placeholder={hint.sample} value={sample}
                     onChange={(e) => setSample(e.target.value)} />
                 </label>
-                <label><span>x axis</span>
-                  <input type="text" placeholder="Raman shift (cm^-1)" value={xAxis}
-                    onChange={(e) => setXAxis(e.target.value)} />
+                <label><span>A frame is
+                    <Info>
+                      A spectrum, an image or a datacube. Each is followed with its own analysis. Leave it
+                      on automatic for a folder (read off the first file) and for a server that says what
+                      it measures.
+                    </Info>
+                  </span>
+                  <select value={framesAre} onChange={(e) => setFramesAre(e.target.value as typeof framesAre)}>
+                    <option value="">automatic</option>
+                    <option value="curve">a spectrum</option>
+                    <option value="image">an image</option>
+                    <option value="hyperspectral">a datacube</option>
+                  </select>
                 </label>
-                <label><span>y axis</span>
-                  <input type="text" placeholder="intensity (counts)" value={yAxis}
-                    onChange={(e) => setYAxis(e.target.value)} />
-                </label>
+              </div>
+              <div className="live-row">
+                {(framesAre === "" || framesAre === "curve") && (
+                  <>
+                    <label className="grow"><span>x axis</span>
+                      <input type="text" placeholder="Raman shift (cm^-1)" value={xAxis}
+                        onChange={(e) => setXAxis(e.target.value)} />
+                    </label>
+                    <label className="grow"><span>y axis</span>
+                      <input type="text" placeholder="intensity (counts)" value={yAxis}
+                        onChange={(e) => setYAxis(e.target.value)} />
+                    </label>
+                  </>
+                )}
+                {framesAre === "hyperspectral" && (
+                  <>
+                    <label><span>Spectral axis from
+                        <Info>
+                          The range the channels cover. Without it a change is located in channels. Not
+                          needed when each file has a .json with its own range.
+                        </Info>
+                      </span>
+                      <input type="number" value={axisStart} onChange={(e) => setAxisStart(e.target.value)} />
+                    </label>
+                    <label><span>to</span>
+                      <input type="number" value={axisEnd} onChange={(e) => setAxisEnd(e.target.value)} />
+                    </label>
+                    <label><span>units</span>
+                      <input type="text" placeholder="eV" value={axisUnits} onChange={(e) => setAxisUnits(e.target.value)} />
+                    </label>
+                  </>
+                )}
+                {framesAre === "image" && (
+                  <>
+                    <label><span>Field of view
+                        <Info>
+                          The width of the image. It gives sizes in real units, and a change is then located
+                          as a length scale and not in pixels. Not needed when each file has a .json with it.
+                        </Info>
+                      </span>
+                      <input type="number" value={fov} onChange={(e) => setFov(e.target.value)} />
+                    </label>
+                    <label><span>units</span>
+                      <input type="text" placeholder="nm" value={fovUnits} onChange={(e) => setFovUnits(e.target.value)} />
+                    </label>
+                  </>
+                )}
               </div>
               <label>
                 <span>Track
@@ -462,7 +557,7 @@ export function LivePanel({
                   </Info>
                 </span>
                 <textarea rows={2} value={outputsText} onChange={(e) => setOutputsText(e.target.value)}
-                  placeholder={"g_position: position of the G band\nd_over_g: ratio of the D band height to the G band height"} />
+                  placeholder={hint.track} />
               </label>
             </>
           )}
@@ -588,10 +683,14 @@ export function LivePanel({
                     where. This sets what happens next when the recipe still fits. Report accepts the new
                     state for tracking once the changed frames agree with each other, with no model call.
                     Audit has an independent analysis check the tracked quantities first. Rebuild makes a
-                    new recipe. A recipe that fails on the new data is always rebuilt.
+                    new recipe. A recipe that fails on the new data is always rebuilt. Automatic reports
+                    for spectra and datacubes and audits for images, because a replayed image analysis
+                    is checked only for whether it still runs, not for whether it is still right. For
+                    images one disagreeing audit is followed by a second, deeper one.
                   </Info>
                 </span>
                 <select value={onChange} onChange={(e) => setOnChange(e.target.value as typeof onChange)}>
+                  <option value="">automatic</option>
                   <option value="report">report</option>
                   <option value="audit">audit</option>
                   <option value="rebuild">rebuild</option>
@@ -624,6 +723,18 @@ export function LivePanel({
                   <option value="both">on either</option>
                 </select>
               </label>
+              {(pauseOn === "novelty" || pauseOn === "both") && (
+                <label className="live-check">
+                  <input type="checkbox" checked={assessOnPause} onChange={(e) => setAssessOnPause(e.target.checked)} />
+                  <span>Analyse the change while paused
+                    <Info>
+                      While the run waits, the changed frame is analysed more closely, told where the data
+                      is new, and the claims it supports are shown. With a literature key each claim is
+                      also searched and scored for novelty. This costs model calls on each pause.
+                    </Info>
+                  </span>
+                </label>
+              )}
               <label><span>Audit every N frames
                   <Info>
                     An independent analysis of the current frame runs in the background and its tracked

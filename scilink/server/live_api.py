@@ -83,10 +83,12 @@ def _replay_instrument(config: Dict[str, Any]) -> Any:
                              "good as what it is told about the data.")
     outputs = {str(k).strip(): str(v).strip() for k, v in (config.get("outputs") or {}).items()
                if str(k).strip() and str(v or "").strip()}
+    info.update(_frame_metadata(config))
     try:
         return ReplayInstrument(folder, system_info=info, outputs=outputs,
                                 targets=[str(t).strip() for t in (config.get("targets") or [])
-                                         if str(t).strip()])
+                                         if str(t).strip()],
+                                modality=(str(config.get("frames_are")) if config.get("frames_are") else None))
     except ValueError as e:
         raise LiveError(400, str(e))
 
@@ -108,7 +110,30 @@ def _described(config: Dict[str, Any]):
     outputs = {str(k).strip(): str(v).strip() for k, v in (config.get("outputs") or {}).items()
                if str(k).strip() and str(v or "").strip()}
     targets = [str(t).strip() for t in (config.get("targets") or []) if str(t).strip()]
+    info.update(_frame_metadata(config))
     return info, outputs, targets
+
+
+def _frame_metadata(config: Dict[str, Any]) -> Dict[str, Any]:
+    """What an image or a datacube needs that a spectrum does not: the physical
+    size of a pixel (an image's field of view) and the spectral axis (a cube's
+    range). Entered in the form when the files carry no sidecar of their own."""
+    meta = config.get("frame_metadata") or {}
+    out: Dict[str, Any] = {}
+
+    def num(key):
+        try:
+            return float(meta.get(key))
+        except (TypeError, ValueError):
+            return None
+    if num("axis_start") is not None and num("axis_end") is not None:
+        out["energy_range"] = {"start": num("axis_start"), "end": num("axis_end"),
+                               "units": str(meta.get("axis_units") or "").strip() or "a.u."}
+    if num("field_of_view") is not None:
+        out["experimental_details"] = {"spatial_info": {
+            "field_of_view_x": num("field_of_view"), "field_of_view_y": num("field_of_view"),
+            "field_of_view_units": str(meta.get("field_of_view_units") or "").strip() or "nm"}}
+    return out
 
 
 def _mcp_instrument(config: Dict[str, Any], agent: Any) -> Any:
@@ -124,7 +149,8 @@ def _mcp_instrument(config: Dict[str, Any], agent: Any) -> Any:
     try:
         inst = MCPInstrument(conn, tool=str(config.get("mcp_tool") or "acquire"),
                              system_info=info or None, outputs=outputs or None,
-                             targets=targets or None)
+                             targets=targets or None,
+                             modality=(str(config.get("frames_are")) if config.get("frames_are") else None))
     except ValueError as e:
         raise LiveError(400, str(e))
     if not (inst.system_info or {}).get("technique"):
@@ -172,17 +198,24 @@ def _make_instrument(spec: str, seed: int, allow_custom: bool = True,
 
 
 def list_reference_analyses(session_dir: str, limit: int = 40) -> List[Dict[str, Any]]:
-    """Curve-fit runs in this session that a live loop can adopt as its
-    reference (a saved script plus its results): chat analyses, and the
-    references of earlier live runs. Newest first, paths relative to the session."""
+    """Analyses in this session that a live loop can adopt as its reference (a saved
+    script plus its results): chat analyses, and the references of earlier live
+    runs. Curve fits, image analyses and datacube analyses, each marked with its
+    modality so the page offers the ones that match the instrument. Newest first,
+    paths relative to the session."""
     root = Path(session_dir)
-    found = []
+    skip = {"frames", "portability", "pinning", "escalations", "recall", "discovery", "amended"}
+    found: Dict[str, Dict[str, Any]] = {}
+
+    def add(d: Path, modality: str, model: str, has_data: bool, stamp: float) -> None:
+        rel = d.relative_to(root)
+        if len(rel.parts) > 8 or skip & set(rel.parts) or str(rel) in found:
+            return
+        found[str(rel)] = {"path": str(rel), "name": d.name if d.name != "reference" else str(rel),
+                           "model": model[:160], "modified": stamp, "modality": modality,
+                           "from_live_run": "live" in rel.parts, "has_data": has_data}
     for marker in root.rglob("series_fit_results.json"):
         d = marker.parent
-        rel = d.relative_to(root)
-        if len(rel.parts) > 8 or "frames" in rel.parts or "portability" in rel.parts \
-                or "pinning" in rel.parts or "escalations" in rel.parts:
-            continue
         if not any((d / "scripts").glob("*.py")):
             continue
         model = ""
@@ -192,12 +225,43 @@ def list_reference_analyses(session_dir: str, limit: int = 40) -> List[Dict[str,
                         or ((data.get("results") or [{}])[0]).get("model_type") or "")
         except (OSError, ValueError, AttributeError, IndexError):
             pass
-        found.append({"path": str(rel), "name": d.name if d.name != "reference" else str(rel),
-                      "model": model[:160], "modified": marker.stat().st_mtime,
-                      "from_live_run": "live" in rel.parts,
-                      "has_data": (d / "spectrum_0000" / "data.npy").exists()})
-    found.sort(key=lambda r: -r["modified"])
-    return found[:limit]
+        add(d, "curve", model, (d / "spectrum_0000" / "data.npy").exists(), marker.stat().st_mtime)
+    for marker in root.rglob("dynamic_analysis_records.json"):
+        try:
+            records = json.loads(marker.read_text())
+            ok = [r for r in records if isinstance(r, dict) and r.get("task_success") and r.get("script")]
+        except (OSError, ValueError):
+            ok = []
+        if ok:
+            add(marker.parent, "hyperspectral", "; ".join(str(r.get("target") or "")[:80] for r in ok),
+                False, marker.stat().st_mtime)
+    for marker in root.rglob("image_analysis_state.json"):
+        d = marker.parent
+        if (d / "analysis_results.json").is_file() and any((d / "scripts").glob("*.py")):
+            kind = ""
+            try:
+                kind = str(json.loads((d / "analysis_results.json").read_text()).get("analysis_type") or "")
+            except (OSError, ValueError):
+                pass
+            add(d, "image", kind, (d / "image_0000" / "data.npy").exists(), marker.stat().st_mtime)
+    return sorted(found.values(), key=lambda r: -r["modified"])[:limit]
+
+
+def _anchor_reference_data(anchor: Path, dest: Path, modality: str) -> Optional[str]:
+    """The data a past analysis was run on, where the run kept it: a curve as a CSV
+    (pinned outputs and portability are checked on it), an image as ``.npy``. A
+    datacube run keeps no copy: the loop then seeds its change signal from the
+    first frame."""
+    if modality == "curve":
+        return _anchor_reference_csv(anchor, dest)
+    if modality == "image":
+        src = anchor / "image_0000" / "data.npy"
+        if src.is_file():
+            import shutil
+            dest.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest / "reference_000000.npy")
+            return str(dest / "reference_000000.npy")
+    return None
 
 
 def _anchor_reference_csv(anchor: Path, dest: Path) -> Optional[str]:
@@ -382,7 +446,8 @@ class LiveRun:
                 # What this INSTRUMENT learned in earlier runs (its own store, not
                 # the session's): known recipes are tried before anything is analysed.
                 remember=bool(cfg.get("remember")),
-                on_change=str(cfg.get("on_change") or "report"),
+                # Unset leaves it to the kind of data (images audit, the rest report).
+                on_change=(str(cfg["on_change"]) if cfg.get("on_change") else None),
                 targets=list(inst.targets or []), outputs=outputs, schema=inst.schema,
                 objective_key=(cfg.get("objective_key") or None) if outputs else None,
                 auto_escalate=bool(cfg.get("auto_escalate", True)),
@@ -397,11 +462,13 @@ class LiveRun:
                                   if "frame_deadline_s" in cfg else 10.0), **creds)
             if self.from_analysis:
                 anchor = (self._session_dir / str(cfg.get("reference_analysis") or "")).resolve()
+                kind = getattr(inst, "modality", "curve")
                 if not (anchor.is_dir() and anchor.is_relative_to(self._session_dir)
-                        and (anchor / "series_fit_results.json").exists()):
-                    raise LiveError(400, "That analysis is not a curve-fit run in this session.")
-                ref_csv = _anchor_reference_csv(anchor, self.run_dir / "reference")
-                if outputs and ref_csv is None:
+                        and self.loop.modality.anchor_script(str(anchor))[0]):
+                    raise LiveError(400, f"That is not a reusable {kind} analysis in this session "
+                                         "(a saved script and its results are needed).")
+                ref_csv = _anchor_reference_data(anchor, self.run_dir / "reference", kind)
+                if outputs and ref_csv is None and self.loop.modality.pinning:
                     # Named outputs are checked on the data the analysis saw;
                     # without it the recipe's own names are reported instead.
                     self.loop.outputs, self.note = {}, (

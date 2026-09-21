@@ -381,6 +381,8 @@ export interface LiveReferenceAnalysis {
   model: string;
   modified: number;
   from_live_run: boolean;
+  /** What kind of data the analysis was of. Offered for instruments of the same kind. */
+  modality?: "curve" | "image" | "hyperspectral";
   has_data: boolean;
 }
 export interface LiveFrame {
@@ -517,6 +519,10 @@ export interface LiveConfig {
   notes?: string;
   /** Keep recipes per instrument across runs, and try the known ones first. */
   remember?: boolean;
+  /** Replay or MCP: what a frame is. Omit to read it off the first file or the server. */
+  frames_are?: "curve" | "image" | "hyperspectral";
+  /** A cube's spectral range or an image's field of view, when the files carry none. */
+  frame_metadata?: Record<string, string>;
   reference_analysis?: string;
   interval_s: number;
   apply: "never" | "approved" | "valid";

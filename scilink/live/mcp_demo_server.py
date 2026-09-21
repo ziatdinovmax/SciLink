@@ -66,6 +66,7 @@ def main(argv: List[str] | None = None) -> int:
     async def call_tool(name: str, arguments: Dict[str, Any]) -> List[types.TextContent]:
         if name == "describe_instrument":
             reply: Dict[str, Any] = {"id": f"demo-{sim.name}", "name": sim.name,
+                                     "modality": getattr(sim, "modality", "curve"),
                                      "system_info": sim.system_info,
                                      "outputs": sim.outputs, "targets": sim.targets}
         elif name in ("pause", "resume"):
@@ -76,8 +77,16 @@ def main(argv: List[str] | None = None) -> int:
         elif name == "acquire":
             try:
                 frame = sim.acquire(dict(arguments or {}))
-                reply = {"x": [float(v) for v in frame.x], "y": [float(v) for v in frame.y],
-                         "x_label": frame.x_label, "y_label": frame.y_label, "meta": frame.meta}
+                if frame.image is not None or frame.cube is not None:
+                    # An image or a datacube is handed over the way a controller
+                    # does it: written to a file, and the reply says where.
+                    import tempfile
+                    out = held.setdefault("dir", tempfile.mkdtemp(prefix="scilink_mcp_demo_"))
+                    path = frame.save(out, sim.frame, stem="acquired")
+                    reply = {"path": path, "meta": frame.meta}
+                else:
+                    reply = {"x": [float(v) for v in frame.x], "y": [float(v) for v in frame.y],
+                             "x_label": frame.x_label, "y_label": frame.y_label, "meta": frame.meta}
             except Exception as e:  # noqa: BLE001 - the instrument says no
                 reply = {"status": "error", "message": str(e)}
         else:

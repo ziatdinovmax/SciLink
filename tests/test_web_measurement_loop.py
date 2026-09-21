@@ -204,7 +204,7 @@ def test_a_past_analysis_in_the_session_can_be_the_reference(session, tmp_path):
 def test_the_reference_must_be_inside_the_session(session, tmp_path):
     live_api.start(session, {**CONFIG, "reference_source": "analysis", "reference_analysis": "../.."})
     snap = _wait(session, lambda s: s["state"] == "error")
-    assert "not a curve-fit run in this session" in snap["error"]
+    assert "not a reusable curve analysis in this session" in snap["error"]
 
 
 def test_open_ended_until_stopped_and_the_log_is_read_incrementally(session):
@@ -418,6 +418,8 @@ def test_a_stream_of_images_runs_in_the_tab(tmp_path, monkeypatch):
     snap = _wait(session, lambda s: s["state"] in ("done", "error"))
     assert snap["state"] == "done", snap.get("error")
     assert snap["instrument"]["modality"] == "image" and [f["flags"] for f in snap["frames"]] == [[], [], []]
+    # the page leaves the change policy to the kind of data: an image stream audits
+    assert live_api._RUNS[session.id].loop.on_change == "audit"
     assert snap["output_keys"] == ["particle_count", "mean_diameter_nm"]
     assert len(snap["latest"]["x"]) == 96 and 0.01 < snap["latest"]["x"][0] < 0.02     # the power spectrum
     [overlay] = snap["maps"]
@@ -426,6 +428,40 @@ def test_a_stream_of_images_runs_in_the_tab(tmp_path, monkeypatch):
     assert replay["strict_replay"] is True and replay["replay_reference"] == {"particle_count": 70.0,
                                                                                "mean_diameter_nm": 5.0}
     live_api._RUNS.clear()
+
+
+def test_past_analyses_of_every_kind_are_offered_as_references(tmp_path):
+    root = tmp_path / "session"
+    curve = root / "results" / "curve_run"
+    (curve / "scripts").mkdir(parents=True)
+    (curve / "scripts" / "fitting_script.py").write_text("x = 1")
+    (curve / "series_fit_results.json").write_text(json.dumps({"locked_config": {"physical_model": "two peaks"}}))
+    image = root / "results" / "image_run"
+    (image / "scripts").mkdir(parents=True)
+    (image / "scripts" / "analysis_script.py").write_text("x = 1")
+    (image / "analysis_results.json").write_text(json.dumps({"analysis_type": "particle segmentation"}))
+    (image / "image_analysis_state.json").write_text("{}")
+    cube = root / "results" / "cube_run"
+    cube.mkdir(parents=True)
+    (cube / "dynamic_analysis_records.json").write_text(json.dumps([
+        {"target": "plasmon energy map", "task_success": True, "script": "def analyze_feature(d, a): return {}"}]))
+    (root / "results" / "failed_cube").mkdir()
+    (root / "results" / "failed_cube" / "dynamic_analysis_records.json").write_text(json.dumps(
+        [{"target": "x", "task_success": False, "script": "y"}]))
+    found = {a["name"]: a for a in live_api.list_reference_analyses(str(root))}
+    assert {k: v["modality"] for k, v in found.items()} == {
+        "curve_run": "curve", "image_run": "image", "cube_run": "hyperspectral"}
+    assert found["image_run"]["model"] == "particle segmentation" and "plasmon" in found["cube_run"]["model"]
+
+
+def test_the_form_gives_a_cube_its_axis_and_an_image_its_field_of_view():
+    info, _, _ = live_api._described({"system_info": {"technique": "EELS"}, "frames_are": "hyperspectral",
+                                      "frame_metadata": {"axis_start": "0.2", "axis_end": "1.13", "axis_units": "eV"}})
+    assert info["energy_range"] == {"start": 0.2, "end": 1.13, "units": "eV"} and info["technique"] == "EELS"
+    info, _, _ = live_api._described({"system_info": {"technique": "TEM"},
+                                      "frame_metadata": {"field_of_view": "102.4", "field_of_view_units": "nm"}})
+    assert info["experimental_details"]["spatial_info"]["field_of_view_x"] == 102.4
+    assert live_api._frame_metadata({"frame_metadata": {"axis_start": "", "field_of_view": "abc"}}) == {}
 
 
 def test_a_finished_run_is_still_there_after_the_server_restarts(session):

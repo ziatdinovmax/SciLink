@@ -988,7 +988,11 @@ takes acquisition parameters and returns a measurement.
 reads the parameters and their limits from the tool's own `inputSchema` (a
 number with no declared limits is held at its default and never steered: the
 loop does not invent safe limits). `scilink/live/mcp_demo_server.py` is the
-reference server. The *knowledge* — how to steer this kind of measurement — is
+reference server. A measurement is a curve (`x` / `y` in the reply), an image or
+a datacube: the server says which in its description (`modality`), and an array
+too large for a JSON reply comes back as a `path` to a file the server wrote
+(`.npy`, an image file, HDF5), which is how a real microscope hands over a frame
+anyway. The *knowledge* — how to steer this kind of measurement — is
 an acquisition skill per technique, selected from `system_info["technique"]`,
 which the server can supply through a `describe_instrument` tool. A Python
 `Instrument` subclass remains the in-process alternative. Uploaded skills stay

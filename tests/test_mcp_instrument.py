@@ -142,3 +142,57 @@ def test_the_reference_server_end_to_end_over_stdio():
             inst.acquire({"trigger_force_nN": 5000})
     finally:
         inst.close()
+
+
+# ── an instrument behind MCP may deliver images and datacubes, not only spectra ──
+# The route for onboarding a real instrument must not be curve-only: a microscope
+# hands over an image, a spectrum-imaging detector a datacube.
+
+def test_a_server_that_says_it_measures_images_is_followed_as_images(tmp_path):
+    img = np.random.default_rng(0).random((64, 80)).astype(np.float32)
+    np.save(tmp_path / "frame.npy", img)
+
+    class Conn(FakeConnection):
+        def call_tool(self, name, args):
+            self.calls.append((name, args))
+            if name == "acquire_spectrum":
+                return json.dumps({"path": str(tmp_path / "frame.npy"), "meta": {"stage_x_um": 3.5}})
+            return json.dumps({"name": "Titan", "modality": "image", "id": "lab-2/titan",
+                               "system_info": {"technique": "HAADF-STEM"}})
+    describe = {"type": "function", "function": {"name": "describe_instrument", "parameters": {}}}
+    inst = MCPInstrument(Conn(tools=[TOOL, describe]), tool="acquire_spectrum")
+    assert inst.modality == "image" and inst.describe()["modality"] == "image"
+    frame = inst.acquire({})
+    assert frame.image.shape == (64, 80) and frame.cube is None and frame.meta == {"stage_x_um": 3.5}
+    assert len(frame.x) == len(frame.y) == 96                    # the radial power spectrum, to look at
+    assert frame.save(str(tmp_path / "out"), 0).endswith(".npy")
+
+
+def test_a_datacube_inline_or_by_path_and_the_caller_may_say_what_a_frame_is(tmp_path):
+    cube = np.random.default_rng(1).random((4, 5, 32))
+    conn = FakeConnection(reply={"cube": cube.tolist()})
+    inst = MCPInstrument(conn, tool="acquire_spectrum", modality="hyperspectral",
+                         system_info={"technique": "EELS", "energy_range": {"start": 0.2, "end": 1.2, "units": "eV"}})
+    frame = inst.acquire({})
+    assert frame.cube.shape == (4, 5, 32) and abs(frame.x[0] - 0.2) < 1e-9 and len(frame.y) == 32
+    with pytest.raises(ValueError, match="3D"):
+        MCPInstrument(FakeConnection(reply={"cube": [[1, 2], [3, 4]]}), tool="acquire_spectrum",
+                      modality="hyperspectral").acquire({})
+    with pytest.raises(ValueError, match="unknown modality"):
+        MCPInstrument(FakeConnection(), tool="acquire_spectrum", modality="movie")
+    with pytest.raises(ValueError, match="no image in the tool's reply"):
+        MCPInstrument(FakeConnection(reply={"x": [1, 2, 3], "y": [1, 2, 3]}), tool="acquire_spectrum",
+                      modality="image").acquire({})
+
+
+def test_the_reference_server_streams_images_over_stdio():
+    pytest.importorskip("mcp")
+    inst = MCPInstrument.connect(command=[sys.executable, "-m", "scilink.live.mcp_demo_server",
+                                          "particle_coarsening_images"])
+    try:
+        assert inst.modality == "image" and inst.system_info["technique"].startswith("TEM")
+        a, b = inst.acquire({}), inst.acquire({"dose": 5.0})
+        assert a.image.shape == (256, 256) and b.params["dose"] == 5.0
+        assert float(np.std(b.image)) < float(np.std(a.image))          # a higher dose is a quieter image
+    finally:
+        inst.close()

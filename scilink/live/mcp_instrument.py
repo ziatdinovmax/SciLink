@@ -15,6 +15,11 @@ loop's :class:`~scilink.live.instruments.Instrument`:
 - optional ``pause`` / ``resume`` tools (also ``hold``) let the experiment be HELD
   when the loop finds something worth a decision (``run_experiment(pause_on=...)``)
   — blank the beam, hold the ramp; without them a pause only stops acquiring;
+- the tool may return an IMAGE or a DATACUBE instead of a curve: a ``path`` to
+  the file the controller wrote (``.npy``, ``.tif``, ``.png``, HDF5), or a small
+  array inline. The server's description says which (``"modality": "image"`` or
+  ``"hyperspectral"``), or the caller does (``modality=``); the loop then follows
+  the instrument with the image or the hyperspectral agent;
 - an optional description tool (``describe_instrument`` by default) supplies
   ``system_info`` / ``outputs`` / ``targets`` so the server can say what it
   measures; anything the caller passes wins.
@@ -119,6 +124,59 @@ def parse_reply(payload: Any) -> Dict[str, Any]:
     return d
 
 
+def parse_array(payload: Any, modality: str):
+    """``(array, meta)`` from a tool reply that carries an IMAGE (H, W) or a
+    DATACUBE (H, W, channels). A controller hands these over as a file, so the
+    practical shape is ``{"path": "<.npy / .tif / .png / HDF5 file>"}`` (also
+    ``file``); ``{"image": [[...]]}`` / ``{"cube": [[[...]]]}`` / ``{"data": ...}``
+    work for small arrays. ``{"status": "error", ...}`` raises."""
+    from .modality import load_cube, load_image
+    d = _as_dict(payload)
+    if str(d.get("status") or "").lower() == "error":
+        raise RuntimeError(f"the instrument reported an error: {d.get('message') or d.get('error')}")
+    meta = d.get("meta") if isinstance(d.get("meta"), dict) else (
+        d.get("metadata") if isinstance(d.get("metadata"), dict) else {})
+    path = d.get("path") or d.get("file")
+    if isinstance(path, str) and path:
+        loader = load_image if modality == "image" else load_cube
+        return loader(str(Path(path).expanduser())), meta
+    raw = d.get("image" if modality == "image" else "cube")
+    if raw is None:
+        raw = d.get("data")
+    if raw is None:
+        raise ValueError(f"no {modality} in the tool's reply: expected a `path` to the file, or the "
+                         f"array under `{'image' if modality == 'image' else 'cube'}`")
+    a = np.asarray(raw, dtype=float)
+    want = 2 if modality == "image" else 3
+    if a.ndim != want:
+        raise ValueError(f"a {modality} frame is {want}D, got shape {a.shape}")
+    return a, meta
+
+
+def array_frame(array: Any, modality: str, params: Dict[str, Any], meta: Dict[str, Any],
+                system_info: Any = None) -> Frame:
+    """A frame that carries an image or a datacube, with the curve a person looks
+    at beside it (an image's radial power spectrum, a cube's mean spectrum)."""
+    from .modality import normalised, radial_power_spectrum
+    a = np.asarray(array, dtype=float)
+    if modality == "image":
+        x, y = radial_power_spectrum(normalised(a))
+        return Frame(x=x, y=y, image=a, params=params, meta=dict(meta),
+                     x_label="spatial_frequency_cycles_per_px", y_label="log10_power")
+    y = np.nanmean(a.reshape(-1, a.shape[-1]), axis=0)
+    x = np.arange(y.size, dtype=float)
+    try:
+        from ..skills.hyperspectral.eels.eels import create_axis
+        info = {**(meta or {}), **(system_info if isinstance(system_info, dict) else {})}
+        axis, _label, has = create_axis(y.size, info, axis_index=2)
+        if has and len(axis) == y.size:
+            x = np.asarray(axis, dtype=float)
+    except Exception:  # noqa: BLE001 - channels are a fine axis to look at
+        pass
+    return Frame(x=x, y=y, cube=a, params=params, meta=dict(meta),
+                 x_label="channel", y_label="mean_intensity")
+
+
 def parse_measurement(payload: Any):
     """``(x, y, x_label, y_label, meta)`` from a tool reply. Accepted shapes:
 
@@ -174,7 +232,8 @@ class MCPInstrument(Instrument):
                  outputs: Optional[Dict[str, str]] = None, targets: Optional[List[str]] = None,
                  limits: Optional[Dict[str, Tuple[float, float]]] = None,
                  fixed: Optional[Dict[str, Any]] = None, describe_tool: Optional[str] = None,
-                 name: Optional[str] = None, owns_connection: bool = False) -> None:
+                 name: Optional[str] = None, owns_connection: bool = False,
+                 modality: Optional[str] = None) -> None:
         self.connection, self.tool = connection, tool
         self._owns = owns_connection
         schemas = {(t.get("function") or {}).get("name"): t
@@ -201,6 +260,11 @@ class MCPInstrument(Instrument):
         self.can_pause = bool(self._pause_tool and self._resume_tool)
         if described.get("id"):
             self.instrument_id = str(described["id"])
+        # What a frame IS: told by the caller, else by the server's description
+        # ("modality": "curve" | "image" | "hyperspectral"), else a curve.
+        self.modality = str(modality or described.get("modality") or "curve")
+        if self.modality not in ("curve", "image", "hyperspectral"):
+            raise ValueError(f"unknown modality {self.modality!r}: curve, image or hyperspectral")
         self.name = name or str(described.get("name") or getattr(connection, "server_name", "mcp"))
         self.system_info = dict(system_info or described.get("system_info") or {})
         self.outputs = dict(outputs or described.get("outputs") or {})
@@ -223,7 +287,11 @@ class MCPInstrument(Instrument):
         steer = self.check(params) if self.schema is not None else dict(params or {})
         args = {**self._held_defaults, **self.fixed, **steer}
         args = {k: v for k, v in args.items() if k in self._properties}
-        x, y, x_label, y_label, meta = parse_measurement(self.connection.call_tool(self.tool, args))
+        reply = self.connection.call_tool(self.tool, args)
+        if self.modality != "curve":
+            array, meta = parse_array(reply, self.modality)
+            return array_frame(array, self.modality, steer, meta, self.system_info)
+        x, y, x_label, y_label, meta = parse_measurement(reply)
         return Frame(x=x, y=y, params=steer, meta=dict(meta), x_label=x_label, y_label=y_label)
 
     def pause(self) -> None:
