@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 _IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg")
+_NOTICE_LINE_CHARS = 320      # one change, as shown in the gate's callout
 
 
 # ── parsers (ported from scilink/ui/app.py) ──────────────────────
@@ -229,6 +230,12 @@ def present_question(hreq, context: str, session_dir: str) -> Dict[str, Any]:
         widget = "generic"
         labels = {"input": "Your plan feedback (optional):",
                   "submit": "Request changes", "accept": "Approve plan"}
+        if hreq.origin.get("auto_repair"):
+            # The plan on screen was repaired automatically; one click
+            # restores it as authored (the console reply is "revert"). Read
+            # from the question, not the printed text: a real plan's caveats
+            # push the repair notice far outside the context tail.
+            labels["revert_repair"] = "Revert auto-correction"
     elif hreq.kind == "review_metrics" or "SCALARIZER REVIEW" in ctx_tail:
         widget = "generic"
         labels = {"input": "Your extraction feedback (optional):",
@@ -253,10 +260,37 @@ def present_question(hreq, context: str, session_dir: str) -> Dict[str, Any]:
         "origin": dict(hreq.origin),
         "default": hreq.default,
     }
+    # What the decision is ABOUT, beside the buttons that make it: the change
+    # a revert would undo, or why an approved plan is being reopened.
+    if hreq.origin.get("stage") == "plan_review" and hreq.origin.get("auto_repair"):
+        changes = [str(c) for c in hreq.origin["auto_repair"]]
+        n = len(changes)
+        payload["notice"] = {
+            "title": ("Auto-corrected before review"
+                      + (f" ({n} changes)" if n > 1 else "")),
+            # A note can quote a whole step. The callout is a reminder beside
+            # the button; the full text is in the review above and the report.
+            "lines": [c if len(c) <= _NOTICE_LINE_CHARS
+                      else c[:_NOTICE_LINE_CHARS].rstrip() + " … (full text above)"
+                      for c in changes]}
+    elif hreq.origin.get("stage") == "plan_reopen":
+        payload["notice"] = {
+            "title": "The agent proposes to revise a plan you approved",
+            "lines": [f"Reason given: {hreq.origin.get('reason') or 'none'}"]}
     if is_keep_revert:
         payload["widget"] = "keep_revert"
         payload["labels"] = {"keep": "Keep user-guided fit",
                              "revert": "Revert to original fit"}
+        if hreq.origin.get("stage") == "plan_reopen":
+            # Same two-way widget, the plan gate's words: the primary reply
+            # ("keep") adopts the agent's revision, the empty one keeps the
+            # plan the human already approved.
+            # "input"/"submit" add the third reply the console offers: adopt
+            # the revision with changes (any free text).
+            payload["labels"] = {"keep": "Adopt the revision",
+                                 "revert": "Keep my approved plan",
+                                 "input": "Adopt it with changes (optional):",
+                                 "submit": "Adopt with changes"}
     elif is_fanout:
         payload["widget"] = "fanout_confirm"
         payload["fanout"] = parse_fanout_confirm(ctx)

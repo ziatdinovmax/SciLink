@@ -1199,16 +1199,22 @@ else:
     
                 # Keep/revert prompt: show two simple buttons, no text area
                 if _is_keep_revert:
+                    # The plan-reopen gate reuses this widget with its own words.
+                    _reopen = (req.origin or {}).get("stage") == "plan_reopen"
+                    _keep_label = ("Adopt the revision" if _reopen
+                                   else "Keep user-guided fit")
+                    _revert_label = ("Keep my approved plan" if _reopen
+                                     else "Revert to original fit")
                     col_keep, col_revert = st.columns(2)
                     with col_keep:
-                        if st.button("Keep user-guided fit", type="primary", width="stretch"):
+                        if st.button(_keep_label, type="primary", width="stretch"):
                             req.response = "keep"
                             req.event.set()
                             st.session_state.pop("_feedback_preview_images", None)
                             st.session_state.pop("_code_review_files", None)
                             st.rerun(scope="app")
                     with col_revert:
-                        if st.button("Revert to original fit", type="primary", width="stretch"):
+                        if st.button(_revert_label, type="primary", width="stretch"):
                             req.response = ""
                             req.event.set()
                             st.session_state.pop("_feedback_preview_images", None)
