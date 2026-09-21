@@ -415,6 +415,15 @@ class CodegenQCEngine:
             ctx.state["_annealing_level"] = ctx.start_level
 
         result = host.qc_run_initial(ctx)
+        if not result["success"]:
+            host.qc_record_initial_failure(ctx, result)
+            # A first fit that produced NOTHING leaves no best attempt for any
+            # later stage to return. A host may spend one bounded recovery here
+            # (curve: one re-plan told why the first plan could not be fitted).
+            recover = getattr(host, "qc_recover_initial_failure", None)
+            recovered = recover(ctx, result) if recover is not None else None
+            if recovered is not None and recovered.get("success"):
+                result = recovered
         ctx.initial_result = result
 
         if result["success"]:
@@ -437,8 +446,6 @@ class CodegenQCEngine:
             post = host.qc_post_verification(ctx)
             if post is not None:
                 return post
-        else:
-            host.qc_record_initial_failure(ctx, result)
 
         # --- Human feedback / judge / best-available fallback ---
         return host.qc_fallback(ctx)

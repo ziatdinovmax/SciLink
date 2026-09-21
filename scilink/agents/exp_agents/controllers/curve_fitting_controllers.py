@@ -2329,6 +2329,8 @@ class CurveFittingPlanningController:
 
         if state.get("analysis_hints"):
             prompt.append(f"\n## User Guidance\n{state['analysis_hints']}")
+        if state.get("_failed_plan"):
+            prompt.append(_failed_plan_block(state["_failed_plan"]))
         _ref_block = _reference_script_block(state, heading="##")
         if _ref_block:
             prompt.append(_ref_block)
@@ -3009,6 +3011,20 @@ class CurveFittingPlanningController:
         state = self._validate_plan(state)
         self._lock_config(state, state.get("column_mapping_locked"))
         return state
+
+
+def _failed_plan_block(failed: dict) -> str:
+    """What the planner is told when an earlier plan for THIS data could not be
+    fitted at all: the plan, and how its scripts failed. One principle, no recipe
+    — the new plan must be one the data can support, not the old one reworded."""
+    errors = "\n".join(f"- {e}" for e in (failed.get("errors") or [])[-3:]) or "- (no detail)"
+    return (
+        "\n## An earlier plan for this data could not be fitted\n"
+        f"**Model:** {failed.get('physical_model') or 'unknown'}\n"
+        f"**Strategy:** {failed.get('fitting_strategy') or 'unknown'}\n"
+        f"**How every attempt ended:**\n{errors}\n"
+        "Plan a model this data can actually support. A simpler or differently "
+        "parameterised model that converges is worth more than this one reworded.")
 
 
 def _write_series_fit_results(output_dir, state, series_results, quality_settings):
@@ -5650,6 +5666,63 @@ Return JSON with:
     def qc_record_initial_failure(self, ctx: QCItemContext, result: dict) -> None:
         self.logger.error(f"   Initial fit failed: {result.get('error', 'Unknown')[:50]}")
         ctx.all_attempts.append({"model": ctx.initial_label, "r2": 0, "result": result})
+
+    def qc_recover_initial_failure(self, ctx: QCItemContext, result: dict) -> Optional[dict]:
+        """One bounded recovery when the first fit produced NOTHING.
+
+        Every later stage — the verification loop, the judge, the iteration-cap
+        and time-budget exits — returns the best attempt so far, so a run that
+        has one never ends in ``error``. A first fit whose every script pass
+        failed has none, and nothing recovered it: adaptive refit is a series
+        stage, and a reduced-depth profile has no best-of-N whose other
+        candidates would plan differently. So the anchor is re-planned ONCE,
+        told which plan could not be fitted and how it failed, and fitted
+        again; success re-enters the normal flow under the same profile (the
+        verification cap still applies) and is stamped ``recovered_from``.
+
+        Not for a realtime frame or a strict replay (a frame the recipe cannot
+        fit must fail fast, with no model call), not inside a best-of-N
+        candidate (its siblings are the recovery), not after a timeout or a
+        pre-flight refusal (a new plan does not make the data or the machine
+        faster), and not once the run's time budget is spent."""
+        import time as _time
+        state = ctx.state
+        if (not ctx.is_anchor or self.replanner is None
+                or not state.get("_recover_failed_fit", False)
+                or state.get("_candidate_subdir") or state.get("_recovered_once")
+                or result.get("kind") == "timeout" or not result.get("script")):
+            return None
+        deadline = state.get("_run_deadline")
+        if deadline is not None and _time.monotonic() >= deadline:
+            return None
+        state["_recovered_once"] = True
+        errors = [str(e.get("error") or "").strip().splitlines()[-1][:300]
+                  for e in (result.get("script_errors") or []) if e.get("error")]
+        if result.get("error"):
+            errors.append(str(result["error"]).strip().splitlines()[-1][:300])
+        failed = {"physical_model": state.get("physical_model"),
+                  "fitting_strategy": state.get("fitting_strategy"), "errors": errors}
+        self.logger.warning(
+            "   🔁 The first fit produced nothing usable — re-planning once with the "
+            "failure as feedback (a run with a usable attempt never reaches this).")
+        state["_failed_plan"] = failed
+        try:
+            self.replanner.replan_headless(state)
+        except Exception as e:  # noqa: BLE001 - recovery never makes a failure worse
+            self.logger.warning(f"   Re-planning failed ({e}); keeping the original failure.")
+            return None
+        finally:
+            state.pop("_failed_plan", None)
+        ctx.initial_label = state.get("physical_model") or "Re-planned model"
+        recovered = self._fit_single_spectrum(
+            state=state, curve_data=ctx.data, data_path=ctx.data_path,
+            spectrum_name=ctx.item_name, spectrum_idx=ctx.item_idx, base_script=None)
+        if recovered.get("success"):
+            # On the STATE as well: a verification refit may replace this result.
+            state["_recovered_from"] = recovered["recovered_from"] = {
+                "failed_model": failed["physical_model"], "errors": errors[-3:]}
+            self.logger.info(f"   ✅ Recovered with a new plan: {str(ctx.initial_label)[:80]}")
+        return recovered
 
     def qc_fallback(self, ctx: QCItemContext) -> dict:
         # NOTE: the alternative-model loop was removed.  Hot annealing

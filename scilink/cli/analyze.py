@@ -220,7 +220,8 @@ Metadata Options:
               "interpretation. 'extract': numbers only, no narrative (for an "
               "optimizer or a feature table). Deterministic quality gates are "
               "kept under all three. Reduced depth is a trade: a difficult fit "
-              "can end flagged or in error where 'thorough' would converge.")
+              "can end flagged where 'thorough' would converge. A first fit "
+              "that produces nothing gets one re-plan before a run gives up.")
     )
     
     # Deprecated arguments (hidden but functional)

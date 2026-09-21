@@ -205,6 +205,10 @@ class QCProfile:
     voted_verification: bool = False
     plan_validation: bool = True
     adaptive_refit: bool = True
+    #: One re-plan when the first fit of an anchor produced nothing at all, so a
+    #: run does not end in ``error`` while a different model could still be
+    #: tried. Off for realtime: a frame the recipe cannot fit must fail fast.
+    recover_failed_fit: bool = True
     trend: bool = True
     synthesis: str = "full"
     tier2: bool = True
@@ -278,6 +282,7 @@ REALTIME = QCProfile(
     voted_verification=False,
     plan_validation=False,
     adaptive_refit=False,
+    recover_failed_fit=False,
     trend=False,
     synthesis="none",
     tier2=False,

@@ -242,3 +242,121 @@ class TestCappedLoopUnderAReducedProfile:
         CodegenQCEngine(host, SPEC).run_item(ctx)
         assert host.calls.count("refine") == 2 and host.calls.count("refit") == 2
         assert "final_verify" in host.calls and ctx.capped is False
+
+
+# ── a first fit that produced nothing gets one re-plan, not an `error` ──────
+# Review of #656: `extract` on a hard single spectrum exhausted its passes and
+# returned status=error where the default profile converges. Every later stage
+# returns the best attempt so far; a first fit whose every script pass failed
+# has none, and nothing recovered it (adaptive refit is a series stage, reduced
+# depth has no best-of-N).
+
+class _FailingHost(_Host):
+    def __init__(self, recovered=None):
+        super().__init__()
+        self.recovered = recovered
+
+    def qc_run_initial(self, ctx):
+        return {"success": False, "error": "Optimal parameters not found", "script": "s"}
+
+    def qc_record_initial_failure(self, ctx, result):
+        self.calls.append("failed")
+
+    def qc_recover_initial_failure(self, ctx, result):
+        self.calls.append("recover")
+        return self.recovered
+
+
+class TestAFirstFitThatProducedNothing:
+    def test_a_recovered_fit_re_enters_the_normal_flow(self):
+        host = _FailingHost({"success": True, "fit_quality": {"r_squared": 0.97}, "script": "s2"})
+        out = CodegenQCEngine(host, SPEC).run_item(_ctx({}))
+        assert host.calls == ["failed", "recover", "verify", "post"]
+        assert out["script"] == "s2" and out["approved"] is True
+
+    def test_a_failed_recovery_is_todays_failure(self):
+        for recovered in (None, {"success": False, "error": "still"}):
+            host = _FailingHost(recovered)
+            out = CodegenQCEngine(host, SPEC).run_item(_ctx({}))
+            assert host.calls == ["failed", "recover", "fallback"] and out == {"success": False}
+
+    def test_a_host_without_the_hook_is_unchanged(self):
+        class Plain(_Host):
+            def qc_run_initial(self, ctx): return {"success": False}
+            def qc_record_initial_failure(self, ctx, result): self.calls.append("failed")
+        host = Plain()
+        CodegenQCEngine(host, SPEC).run_item(_ctx({}))
+        assert host.calls == ["failed", "fallback"]
+
+
+class TestTheCurveHostsRecovery:
+    FAILED = {"success": False, "script": "s", "error": "Traceback...\nRuntimeError: Optimal parameters not found",
+              "script_errors": [{"error": "x\nValueError: `x0` is infeasible"}]}
+
+    def _host(self, fit_ok=True):
+        from scilink.agents.exp_agents.controllers.curve_fitting_controllers import (
+            UnifiedSeriesProcessingController)
+        host = object.__new__(UnifiedSeriesProcessingController)
+        host.logger = logging.getLogger("t")
+        host.seen = []
+
+        def replan(state):
+            host.seen.append(dict(state["_failed_plan"]))
+            state["physical_model"] = "a simpler model"
+        host.replanner = SimpleNamespace(replan_headless=replan)
+        host._fit_single_spectrum = lambda **kw: (
+            {"success": True, "fit_quality": {"r_squared": 0.98}, "script": "s2"} if fit_ok
+            else {"success": False, "error": "again", "script": "s2"})
+        return host
+
+    def _state(self, **kw):
+        return {"_recover_failed_fit": True, "physical_model": "edge + locked linear background",
+                "fitting_strategy": "power-law", **kw}
+
+    def test_one_replan_told_what_failed_and_how(self):
+        host, state = self._host(), self._state()
+        ctx = _ctx(state)
+        out = host.qc_recover_initial_failure(ctx, self.FAILED)
+        assert out["success"] and out["recovered_from"]["failed_model"].startswith("edge")
+        [told] = host.seen
+        assert told["physical_model"].startswith("edge")
+        assert told["errors"] == ["ValueError: `x0` is infeasible",
+                                  "RuntimeError: Optimal parameters not found"]
+        assert "_failed_plan" not in state and ctx.initial_label == "a simpler model"
+        assert state["_recovered_from"] == out["recovered_from"]            # survives a later refit
+        assert host.qc_recover_initial_failure(ctx, self.FAILED) is None        # once per run
+
+    def test_the_planner_reads_it_as_a_principle(self):
+        from scilink.agents.exp_agents.controllers.curve_fitting_controllers import _failed_plan_block
+        block = _failed_plan_block({"physical_model": "M", "fitting_strategy": "S", "errors": ["E1"]})
+        assert "M" in block and "- E1" in block and "this data can actually support" in block
+
+    def test_a_recovery_that_fails_too_is_returned_as_the_failure(self):
+        out = self._host(fit_ok=False).qc_recover_initial_failure(_ctx(self._state()), self.FAILED)
+        assert out["success"] is False and "recovered_from" not in out
+
+    @pytest.mark.parametrize("state, result", [
+        ({"_recover_failed_fit": False}, {}),                       # realtime frame / strict replay
+        ({"_candidate_subdir": "_candidates/cand_01"}, {}),         # its siblings are the recovery
+        ({}, {"kind": "timeout"}),                                  # a new plan is not a faster machine
+        ({}, {"script": None}),                                     # pre-flight refusal: nothing was tried
+        ({"_run_deadline": 0.0}, {}),                               # the run's budget is spent
+    ])
+    def test_where_it_does_not_apply(self, state, result):
+        host = self._host()
+        assert host.qc_recover_initial_failure(
+            _ctx(self._state(**state)), {**self.FAILED, **result}) is None
+        assert host.seen == []
+
+    def test_not_for_a_series_unit_or_without_a_planner(self):
+        host = self._host()
+        ctx = _ctx(self._state())
+        ctx.is_anchor = False
+        assert host.qc_recover_initial_failure(ctx, self.FAILED) is None
+        host.replanner = None
+        assert host.qc_recover_initial_failure(_ctx(self._state()), self.FAILED) is None
+
+    def test_it_is_a_profile_field_and_realtime_turns_it_off(self):
+        from scilink.agents.exp_agents._qc_profile import resolve_profile
+        assert [resolve_profile(p).recover_failed_fit for p in ("thorough", "quick", "extract", "realtime")] \
+            == [True, True, True, False]

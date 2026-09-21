@@ -918,6 +918,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "_synthesis_level": qc_profile.synthesis,
             "_verification_mode": qc_profile.verification,
             "_strict_replay": bool(strict_replay),
+            "_recover_failed_fit": bool(qc_profile.recover_failed_fit) and not strict_replay,
             "stream_reference": bool(stream_reference),
             "analysis_targets": [str(x) for x in (targets or []) if str(x).strip()],
             # Wall-clock budget for per-unit re-analysis of flagged spectra
@@ -1960,6 +1961,15 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "error": f"All {len(series_results)} spectrum fit(s) failed",
                 "details": item_errors[-1] if item_errors else "",
             }
+
+        # A first fit that produced nothing and was re-planned once: say so at
+        # the run level, where a later refit replacing the recovered result
+        # cannot drop it (observed live).
+        if state.get("_recovered_from"):
+            results["recovered_from"] = state["_recovered_from"]
+            for r in series_results[:1]:
+                if isinstance(r, dict):
+                    r.setdefault("quality_history", {})["recovered_from"] = state["_recovered_from"]
 
         # Realtime provenance (#346 / plan §7.3): stamp the profile on the
         # top-level result AND each per-item quality_history so a post-hoc
