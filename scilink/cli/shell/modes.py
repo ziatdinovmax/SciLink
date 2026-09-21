@@ -544,7 +544,13 @@ Recommended project layout (co-pilot):
 
     def initial_turns(self, args, agent):
         """The old ``_process_initial_inputs``: survey / run the workspace
-        according to the autonomy level (co-pilot starts empty)."""
+        according to the autonomy level (co-pilot starts empty). A restored
+        session continues where it left off — the survey / pipeline is not
+        re-run over the loaded campaign (seen live: a restored autopilot
+        session started by recommending next steps for the default
+        objective)."""
+        if getattr(args, "restore", False):
+            return []
         level = self.get_autonomy(agent)
         data, kb, code = args.data_dir, args.knowledge_dir, args.code_dir
         if level == "co-pilot" or not (data or kb):
