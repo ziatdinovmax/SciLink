@@ -95,7 +95,11 @@ def test_the_instrument_says_what_a_frame_is_and_the_loop_follows(armed):
     assert loop._modality_state["replay_reference"]["Plasmon_Energy"]["coverage"] == 1.0
     assert loop._modality_state["replay_reference"]["Plasmon_Energy"]["values_may_move"] is True
     assert loop._modality_state["locked_targets"][0]["required_outputs"] == ["Plasmon_Energy"]
-    assert "portability" not in setup                     # a curve mechanism
+    # the recipe was replayed on the reference at 3x and 0.35x the counts: this one
+    # weights by the data's own maximum, so the plasmon energy does not move
+    port = setup["portability"]
+    assert port["kind"] == "datacube" and port["portable"] is True
+    assert port["tracked"] == ["Plasmon_Energy_mean_eV"] and "does not depend" in port["summary"]
 
 
 def test_frames_are_answered_by_a_strict_replay_and_the_red_shift_is_tracked(armed, tmp_path):
@@ -119,7 +123,9 @@ def test_a_new_mode_is_announced_and_located_on_the_energy_axis(armed):
     assert where["kind"] == "new" and abs(where["x_peak"] - 0.95) < 0.04    # in eV, not in channels
     # The mode covers one corner: 3 % of the whole field's mean spectrum, which a
     # monitor of the mean alone did not see. The field is watched by region too.
-    assert novelty["region"] == "lower right" and where["region"] == "lower right"
+    # named by the smallest region that holds it, on a pyramid of grids
+    lower_right = {"lower right quarter", "lower right ninth", "row 4, column 4 of a 4 x 4 grid"}
+    assert novelty["region"] in lower_right and where["region"] == novelty["region"]
     assert novelty["recipe_fits"] is True                 # the plasmon map is still right
     assert any(e["event"] == "state_accepted" for e in loop.read_log())
     assert records[-1]["flags"] == []
@@ -303,7 +309,8 @@ def test_several_first_cubes_are_planned_as_a_series_and_the_last_ones_regime_is
 
     cubes = [_state_cube(tmp_path / f"r{i}.npy", c, i) for i, c in enumerate([0.60, 0.61, 1.00, 1.00])]
     loop = MeasurementLoop(str(tmp_path / "loop"), modality="hyperspectral", agent_factory=SeriesAgent,
-                           system_info={"technique": "EELS"}, targets=["resonance energy map"])
+                           system_info={"technique": "EELS"}, targets=["resonance energy map"],
+                           check_portability=False)             # its replays are not this test's subject
     setup = loop.setup(reference=cubes, profile="quick")
     [(data, kw)] = seen
     assert data == cubes and kw["series_metadata"]["values"] == [0, 1, 2, 3]
@@ -316,3 +323,108 @@ def test_several_first_cubes_are_planned_as_a_series_and_the_last_ones_regime_is
     assert setup["reference_features"] == {"Resonance_mean_eV": 1.0}
     assert loop._modality_state["locked_targets"][0]["required_outputs"] == ["Resonance"]
     assert loop._drift.n_learned == 4                           # every reference cube seeds the change signal
+
+
+def test_the_field_is_watched_on_a_pyramid_of_grids(tmp_path):
+    m = HyperspectralModality()
+    np.save(tmp_path / "c.npy", np.random.default_rng(0).random((14, 14, 40)))
+    names = list(m.read_signals(str(tmp_path / "c.npy")))
+    assert names[0] == "whole field" and len(names) == 1 + 4 + 9 + 16
+    assert {"lower right quarter", "lower right ninth", "upper centre ninth", "centre ninth",
+            "row 4, column 1 of a 4 x 4 grid"} <= set(names)
+    np.save(tmp_path / "small.npy", np.random.default_rng(0).random((6, 6, 40)))
+    assert len(m.read_signals(str(tmp_path / "small.npy"))) == 1 + 4      # 3 x 3 would leave 4 pixels a region
+    np.save(tmp_path / "line.npy", np.random.default_rng(0).random((1, 30, 40)))
+    assert list(m.read_signals(str(tmp_path / "line.npy"))) == ["whole field"]
+
+
+def test_a_small_feature_is_found_by_the_grid_it_fits_in(tmp_path):
+    """Measured: a 3 x 3-pixel feature (4.6 % of a 14 x 14 field) at random positions
+    was never seen by quadrants alone and 9 times of 12 by the pyramid, with no
+    false alarm in 132 quiet frames."""
+    from scilink.live.drift import DriftBank
+    sim, m, bank = SpectrumImageSeries(seed=2), HyperspectralModality(), DriftBank()
+    found = None
+    for k in range(1, 12):
+        f = sim.acquire({})
+        cube = f.cube.copy()
+        if k >= 9:
+            cube[5:9, 0:4] += 40.0 * np.exp(-0.5 * ((f.x - 0.95) / 0.04) ** 2)
+        np.save(tmp_path / "f.npy", cube)
+        sig = m.read_signals(str(tmp_path / "f.npy"), sim.system_info)
+        if k == 1:
+            bank.seed([sig])
+            continue
+        v = bank.judge(sig)
+        assert v["suspected"] == (k >= 9), (k, v.get("region"), v["fraction"])
+        if v["suspected"]:
+            found = found or v["region"]
+        else:
+            bank.learn(sig, v)
+    assert found == "middle left ninth"
+    [where] = bank.locate()
+    assert where["region"] == "middle left ninth" and abs(where["x_peak"] - 0.95) < 0.03
+
+
+def test_a_cube_recipe_can_be_amended_without_a_rebuild(armed, tmp_path):
+    """One knob of the locked script, changed by hand: the amendment is a copy of
+    the anchor run with the edited script, so the replay stays a plain replay."""
+    sim, loop, _ = armed
+    before, first_anchor = loop.recipe["id"], loop.anchor_dir
+    assert loop.step(sim.acquire({}).save(str(tmp_path / "in"), 1))["flags"] == []
+    with pytest.raises(ValueError, match="do not apply"):
+        loop.amend([{"old_text": "axis > 0.99", "new_text": "axis > 0.5"}])
+    assert loop.anchor_dir == first_anchor and loop.recipe["id"] == before      # nothing changed
+    rec = loop.amend([{"old_text": "(axis > 0.45)", "new_text": "(axis > 0.50)"}], note="tighter window")
+    assert rec["event"] == "amend" and loop.recipe["id"] != before
+    assert loop.anchor_dir != first_anchor and (loop.anchor_dir / "amended_from.json").is_file()
+    script = json.loads((loop.anchor_dir / "dynamic_analysis_records.json").read_text())[0]["script"]
+    assert "(axis > 0.50)" in script and "(axis > 0.45)" not in script
+    after = loop.step(sim.acquire({}).save(str(tmp_path / "in"), 2))
+    assert after["flags"] == [] and after["recipe_id"] == loop.recipe["id"]
+    assert abs(after["features"]["Plasmon_Energy_mean_eV"] - sim.energy(sim.frame)) < 0.012
+    # the gate's reference and the targets a rebuild must keep travel with the copy
+    assert loop._modality_state["locked_targets"][0]["required_outputs"] == ["Plasmon_Energy"]
+    again = MeasurementLoop.resume(str(tmp_path / "loop"), agent_factory=_factory)
+    assert again.anchor_dir == loop.anchor_dir
+
+
+def test_a_cube_recipe_with_a_constant_read_off_the_reference_is_caught_at_setup(tmp_path):
+    """The risk the curve check was built for (a bound of 600 counts read off a weak
+    reference pixel) is the same for a per-pixel cube script. Asked of the outputs:
+    under a change of signal level each must stay put or scale with the counts."""
+    sim = get_simulator("spectrum_image_series", seed=3)
+    first = sim.acquire({})
+    ref = first.save(str(tmp_path / "reference"), 0, stem="reference")
+    threshold = SCRIPT.replace("top = sub >= 0.6 * sub.max(axis=2, keepdims=True)",
+                               "top = sub >= 70.0")           # counts, read off this cube
+    anchor = _anchor(tmp_path, first.cube)
+    records = json.loads((anchor / "dynamic_analysis_records.json").read_text())
+    records[0]["script"] = threshold
+    (anchor / "dynamic_analysis_records.json").write_text(json.dumps(records))
+    loop = MeasurementLoop(str(tmp_path / "loop"), system_info=sim.system_info, instrument=sim,
+                           outputs={"plasmon_energy": "energy of the plasmon maximum"},
+                           agent_factory=_factory)
+    port = loop.setup(anchor=str(anchor), reference_data=ref)["portability"]
+    assert port["portable"] is False and "depends on the signal level" in port["summary"]
+    low = next(t for t in port["trials"] if t["scale"] == 0.35)
+    assert not low["ok"]                                  # at a third of the counts nothing clears 70
+    assert loop.recipe is not None                        # advisory: the loop is armed, and told
+
+
+def test_the_cube_check_tells_a_level_from_an_amplitude():
+    from scilink.live.portability import check_cube_portability, describe_cube
+    import tempfile
+    d = tempfile.mkdtemp()
+    np.save(os.path.join(d, "ref.npy"), np.ones((4, 4, 20)))
+    scale_of = lambda path: float(np.load(path).mean())   # noqa: E731
+    honest = lambda path, tag: {"energy": 0.6, "amplitude": 100.0 * scale_of(path), "n_pixels": 16.0}   # noqa: E731
+    good = check_cube_portability(honest, os.path.join(d, "ref.npy"), os.path.join(d, "w1"))
+    assert good["portable"] and all(not t["depends_on_level"] for t in good["trials"])
+    bound = lambda path, tag: {"energy": 0.6, "amplitude": min(100.0 * scale_of(path), 150.0)}          # noqa: E731
+    bad = check_cube_portability(bound, os.path.join(d, "ref.npy"), os.path.join(d, "w2"))
+    assert not bad["portable"] and "amplitude" in bad["trials"][0]["depends_on_level"]
+    only_energy = check_cube_portability(bound, os.path.join(d, "ref.npy"), os.path.join(d, "w3"),
+                                         tracked=["energy"])
+    assert only_energy["portable"] and "untracked amplitude does" in describe_cube(only_energy)
+    assert check_cube_portability(lambda p, t: None, os.path.join(d, "ref.npy"), os.path.join(d, "w4")) == {}

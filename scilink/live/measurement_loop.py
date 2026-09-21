@@ -560,8 +560,14 @@ class MeasurementLoop:
         if script_edits and not self.modality.script_edits:
             raise ValueError(f"script_edits are not supported for {self.modality.name} recipes")
         if script_edits:
-            self._validate_edits(script, list(script_edits))
-            self._edits = list(script_edits)
+            baked = self.modality.bake_edits(anchor_dir, list(script_edits),
+                                             self.output_dir / "amended" / "setup")
+            if baked is not None:                 # the edited recipe is a run directory of its own
+                self.anchor_dir = anchor_dir = baked
+                script, _ = self._anchor_script(str(baked))
+            else:
+                self._validate_edits(script, list(script_edits))
+                self._edits = list(script_edits)
         self.recipe = self._recipe_record(script, source)
         self._calibrate()
 
@@ -1235,21 +1241,13 @@ class MeasurementLoop:
                 or not self.modality.portability):
             return {}
         try:
-            from .portability import (agent_replay_r2, check_portability, describe,
-                                      describe_positions)
-            work = self.output_dir / "portability"
-            report = check_portability(
-                agent_replay_r2(self._agent_factory, str(self.anchor_dir), self.system_info,
-                                str(work), edits=self._edits),
-                str(reference_data), self._reference_features.get("fit_r_squared"), str(work))
+            report = self.modality.check_portability(self, str(reference_data))
         except Exception as e:  # noqa: BLE001 - a check, never a dependency
             self.logger.warning(f"portability check skipped: {e}")
             return {}
         if report:
-            report["summary"] = describe(report)
-            report["positions_summary"] = describe_positions(report)
             (self.logger.info if report["portable"] else self.logger.warning)(
-                f"   portability: {report['summary']} {report['positions_summary']}".rstrip())
+                f"   portability: {report['summary']} {report.get('positions_summary') or ''}".rstrip())
         return report
 
     def _scatter(self, name: str) -> float:
@@ -1469,11 +1467,19 @@ class MeasurementLoop:
         """
         if self.recipe is None or self.anchor_dir is None:
             raise LoopNotReady("call setup() before amend()")
-        script, _ = self._anchor_script(str(self.anchor_dir))
-        current = self._validate_edits(script, self._edits) if self._edits else script
-        self._validate_edits(current, list(edits))          # raises if they do not apply
         previous = self.recipe["id"]
-        self._edits = self._edits + list(edits)
+        self._n_amendments = getattr(self, "_n_amendments", 0) + 1
+        baked = self.modality.bake_edits(self.anchor_dir, list(edits),
+                                         self.output_dir / "amended" / f"amend_{self._n_amendments:03d}")
+        if baked is not None:                     # raises, writing nothing, if they do not apply
+            self.anchor_dir = baked
+            script, _ = self._anchor_script(str(baked))
+            self._modality_state = self.modality.anchor_state(baked, None)
+        else:
+            script, _ = self._anchor_script(str(self.anchor_dir))
+            current = self._validate_edits(script, self._edits) if self._edits else script
+            self._validate_edits(current, list(edits))          # raises if they do not apply
+            self._edits = self._edits + list(edits)
         self.recipe = self._recipe_record(script, self.recipe["source"])
         self._consecutive_breaches = 0
         record = {"event": "amend", "step": self._step, "previous_recipe_id": previous,

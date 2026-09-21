@@ -281,3 +281,42 @@ def test_where_the_stream_has_moved_since_its_reference():
     [where] = mon.locate_from_reference()
     assert where["kind"] == "new" and abs(where["x_peak"] - 16.5) < 0.4
     assert armed().locate_from_reference() == []                     # nothing has moved
+
+
+def test_a_noisy_region_borrows_what_the_whole_field_has_learned(tmp_path, monkeypatch):
+    """A region's mean spectrum is noisier than the field's, so a slow real change
+    sits below the noise of its own frames: alone, its monitor never learns that
+    direction and misfires once the change has accumulated. The field sees the
+    direction at full signal, and lends it. Measured here as it was found: the
+    simulated cube series at a fifth of the dwell, a slow red-shift and nothing
+    else, watched by quadrants."""
+    from scilink.live.drift import DriftBank
+    from scilink.live.modality import HyperspectralModality
+    import scilink.live.simulators as sims
+    real = sims.SpectrumImageSeries._acquire
+
+    def red_shift_only(self, params, rng):                 # no second mode: hold the series before frame 13
+        frame, self.frame = self.frame, min(self.frame, 12)
+        try:
+            return real(self, params, rng)
+        finally:
+            self.frame = frame
+    monkeypatch.setattr(sims.SpectrumImageSeries, "_acquire", red_shift_only)
+    modality = HyperspectralModality()
+    modality.GRIDS = (2,)
+    sim = sims.SpectrumImageSeries(seed=2)                 # it depends on the noise: 2 seeds of 4 misfire
+    lending, alone = DriftBank(), DriftBank()
+    alone._lend = lambda signals: None                     # every region on its own history
+    suspected = {"lending": 0, "alone": 0}
+    for k in range(1, 41):
+        np.save(tmp_path / "f.npy", sim.acquire({"dwell_ms": 2.0}).cube)
+        sig = modality.read_signals(str(tmp_path / "f.npy"), sim.system_info)
+        for name, bank in (("lending", lending), ("alone", alone)):
+            if k == 1:
+                bank.seed([sig])
+                continue
+            v = bank.judge(sig)
+            suspected[name] += v["suspected"]
+            if not v["suspected"]:
+                bank.learn(sig, v)
+    assert suspected["alone"] >= 10 and suspected["lending"] == 0

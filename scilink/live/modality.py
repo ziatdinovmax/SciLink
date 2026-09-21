@@ -128,6 +128,26 @@ class CurveModality:
         """What a replay needs from the anchor besides its script. Nothing, for curves."""
         return {}
 
+    def bake_edits(self, anchor_dir: Path, edits: List[Dict[str, Any]], dest: Path) -> Optional[Path]:
+        """Snippet edits to a locked recipe. A curve replay applies them on every
+        frame (``script_edits``), so nothing is written: ``None``."""
+        return None
+
+    def check_portability(self, loop: Any, reference_data: str) -> Dict[str, Any]:
+        """Does the locked recipe depend on the reference's signal level (and, for a
+        curve, on its positions)? Replays only, zero model calls."""
+        from .portability import (agent_replay_r2, check_portability, describe,
+                                  describe_positions)
+        work = loop.output_dir / "portability"
+        report = check_portability(
+            agent_replay_r2(loop._agent_factory, str(loop.anchor_dir), loop.system_info,
+                            str(work), edits=loop._edits),
+            str(reference_data), loop._reference_features.get("fit_r_squared"), str(work))
+        if report:
+            report["summary"] = describe(report)
+            report["positions_summary"] = describe_positions(report)
+        return report
+
     def calibrate(self, anchor_dir: Path) -> Dict[str, Any]:
         from .gates import calibrate
         return calibrate(str(anchor_dir))
@@ -153,8 +173,8 @@ class HyperspectralModality(CurveModality):
 
     name = "hyperspectral"
     pinning = False            # names are fixed by locked_targets, by construction
-    script_edits = False
-    portability = False
+    script_edits = True        # baked into a copy of the anchor (bake_edits), not applied per frame
+    portability = True         # by outputs: each stays put or scales with the counts
     series_reference = True    # several first cubes: planned as a series, locked on the last one's regime
     window_reanchor = False
     usable_status = ("success", "partial")     # some maps passed the gate: tracked, and flagged poor
@@ -336,6 +356,55 @@ class HyperspectralModality(CurveModality):
             targets[0]["extra_outputs"] = extra
         return {"replay_reference": reference, "locked_targets": targets}
 
+    def bake_edits(self, anchor_dir: Path, edits: List[Dict[str, Any]], dest: Path) -> Optional[Path]:
+        """A cube replay runs the approved script(s) of a run directory verbatim,
+        so an amendment is a COPY of that run with the edited script: the same
+        records, targets and map statistics, one knob changed. Each edit must
+        apply, exactly once, to exactly one of the approved scripts; a list that
+        does not apply writes nothing. The copy says what it was amended from."""
+        from ..utils.file_edit import apply_snippet_edits
+        path = self._records_file(str(anchor_dir))
+        if path is None:
+            raise ValueError(f"{anchor_dir} holds no dynamic_analysis_records.json to amend")
+        records = json.loads(path.read_text())
+        for edit in edits:
+            old = str(edit.get("old_text") or "")
+            hits = [r for r in records if isinstance(r, dict) and r.get("task_success")
+                    and old and str(r.get("script") or "").count(old) == 1]
+            if len(hits) != 1:
+                raise ValueError("script_edits do not apply to the locked recipe: "
+                                 f"{old[:80]!r} is found in {len(hits)} of its scripts (exactly one needed)")
+            res = apply_snippet_edits(hits[0]["script"], [edit])
+            if res["status"] != "success":
+                raise ValueError(f"script_edits do not apply to the locked recipe: {res['message']}")
+            hits[0]["script"] = res["text"]
+            hits[0]["amended"] = True
+        dest = Path(dest)
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "dynamic_analysis_records.json").write_text(json.dumps(records, indent=1, default=str))
+        results = path.parent / "analysis_results.json"
+        if results.is_file():
+            (dest / "analysis_results.json").write_text(results.read_text())
+        (dest / "amended_from.json").write_text(json.dumps(
+            {"anchor_dir": str(path.parent), "edits": edits}, indent=1, default=str))
+        return dest
+
+    def check_portability(self, loop: Any, reference_data: str) -> Dict[str, Any]:
+        from .portability import check_cube_portability, describe_cube
+        work = loop.output_dir / "portability"
+
+        def replay(path: str, tag: str) -> Optional[Dict[str, float]]:
+            agent = loop._agent_factory(str(work / tag))
+            res = agent.analyze(path, **self.replay_kwargs(loop, path)) or {}
+            good = res.get("status") == "success" and self.validity(res).get("verdict") == "good"
+            return self.features(res) if good else None
+        report = check_cube_portability(replay, str(reference_data), str(work),
+                                        tracked=list(loop.outputs) or None)
+        if report:
+            report["summary"] = describe_cube(report)
+            report["positions_summary"] = ""
+        return report
+
     def calibrate(self, anchor_dir: Path) -> Dict[str, Any]:
         return {}                # the replay gate is already relative to the anchor's own maps
 
@@ -343,22 +412,41 @@ class HyperspectralModality(CurveModality):
         return None
 
     # ---------------------------------------------------------------- signal
-    #: The field is also watched in REGIONS x REGIONS blocks: a change confined
-    #: to part of it is diluted in the mean spectrum by the area it covers.
-    REGIONS = 2
-    REGION_NAMES = {(0, 0): "upper left", (0, 1): "upper right",
-                    (1, 0): "lower left", (1, 1): "lower right"}
+    #: The field is also watched in regions, on a small pyramid of grids: a
+    #: change confined to part of the field is diluted in the mean spectrum by
+    #: the area it covers, and a feature that straddles the blocks of one grid
+    #: sits inside a block of another (measured: a 3 x 3-pixel patch on a 14 x 14
+    #: field was seen by the 3 x 3 grid 8 times of 8 and by the 4 x 4 grid 0 of
+    #: 8). LOWER ``MIN_REGION_PIXELS`` or add a level for smaller features on a
+    #: clean instrument, RAISE it (or use ``GRIDS = ()``) for very noisy cubes.
+    GRIDS = (2, 3, 4)
+    MIN_REGION_PIXELS = 9
+    _ROWS = {2: ("upper", "lower"), 3: ("upper", "middle", "lower")}
+    _COLS = {2: ("left", "right"), 3: ("left", "centre", "right")}
+
+    @classmethod
+    def region_name(cls, r: int, i: int, j: int) -> str:
+        # Unique across grids: the 3 x 3 corners are not the 2 x 2 quadrants.
+        if r in cls._ROWS:
+            row, col = cls._ROWS[r][i], cls._COLS[r][j]
+            where = "centre" if (row, col) == ("middle", "centre") else f"{row} {col}"
+            return f"{where} {'quarter' if r == 2 else 'ninth'}"
+        return f"row {i + 1}, column {j + 1} of a {r} x {r} grid"
 
     def read_signals(self, data_path: str, system_info: Any = None) -> Dict[str, Tuple[Any, Any]]:
         """The whole field's mean spectrum first, then each region's."""
         cube = load_cube(data_path)
         x = self._axis(data_path, cube.shape[-1], system_info)
         out = {"whole field": (x, np.nanmean(cube.reshape(-1, cube.shape[-1]), axis=0))}
-        h, w, r = cube.shape[0], cube.shape[1], self.REGIONS
-        if h >= 2 * r and w >= 2 * r:
-            for (i, j), name in self.REGION_NAMES.items():
-                block = cube[i * h // r:(i + 1) * h // r, j * w // r:(j + 1) * w // r]
-                out[name] = (x, np.nanmean(block.reshape(-1, cube.shape[-1]), axis=0))
+        h, w = cube.shape[0], cube.shape[1]
+        for r in self.GRIDS:
+            if (h // r) * (w // r) < self.MIN_REGION_PIXELS or h < r or w < r:
+                continue
+            for i in range(r):
+                for j in range(r):
+                    block = cube[i * h // r:(i + 1) * h // r, j * w // r:(j + 1) * w // r]
+                    out[self.region_name(r, i, j)] = (
+                        x, np.nanmean(block.reshape(-1, cube.shape[-1]), axis=0))
         return out
 
     def read_signal(self, data_path: str, system_info: Any = None) -> Tuple[np.ndarray, np.ndarray]:

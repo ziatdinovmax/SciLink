@@ -854,13 +854,26 @@ judge, no synthesis; a script that raises fails the frame) and judged by
 `_replay_map_gate` against the reference's own map statistics; a rebuild or an
 audit is a `locked_targets` run, so tracked quantities keep their names by
 construction and nothing is pinned. Tracked features are per-map MEANS and
-scalars (a map's min and max are the extremes of a noisy field). Curve-only
-mechanisms (pinning, snippet edits, the portability check, a multi-frame
-reference, window re-anchors) are capability flags on the modality, not
-branches in the loop. A cube is watched by REGION as well as whole (`DriftBank`:
-one monitor per curve, the frame is as changed as its most changed region),
-because a change confined to part of the field is diluted in the mean spectrum
-by the area it covers; the novelty says which region. Several first cubes are a
+scalars (a map's min and max are the extremes of a noisy field). What a modality
+does differently is a method or a capability flag on it, never a branch in the
+loop: a curve's snippet edits are applied per frame while a cube's are baked
+into a copy of the anchor run (`bake_edits`); a curve's portability is judged on
+R², a cube's on its OUTPUTS (under a change of signal level each must stay put or
+scale with the counts, else the script carries a constant read off the
+reference). Pinning and window re-anchors stay curve-only on purpose: a cube
+rebuild has fixed targets and no planning step, which is what a window serves,
+and it would multiply a rebuild that already takes minutes. A cube is watched by
+REGION as well as whole (`DriftBank`: one monitor per curve, the frame is as
+changed as its most changed region), on a small pyramid of grids (2x2, 3x3, 4x4
+while a region keeps 9 pixels), because a change confined to part of the field
+is diluted in the mean spectrum by the area it covers and a feature that
+straddles the blocks of one grid sits inside a block of another; the novelty
+names the smallest region that holds it. **A region borrows what the whole
+field has learned** (`DriftBank._lend`): its own frames are too noisy to learn a
+slow real change, which then accumulates until the region misfires (measured:
+half the quiet frames of a noisier simulated series, and false novelties in a
+region for a shift of the whole field), while the field sees that direction at
+full signal. Do not add a per-region monitor that stands on its own history. Several first cubes are a
 reference too: they go to the hyperspectral series driver (scout, regime plan,
 anchor, replays) and the loop locks the recipe of the regime the LAST cube
 belongs to. Images come next through the same seam and need a deterministic

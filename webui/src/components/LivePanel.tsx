@@ -71,7 +71,8 @@ function parseOutputs(text: string): Record<string, string> {
 function describeChange(where: LiveNovelty["where"], region?: string | null): string {
   const data = where.find((w) => w.kind !== "window");
   // A datacube is watched by region: say which part of the field changed.
-  const place = region && region !== "whole field" ? `In the ${region} of the field.` : "";
+  const place = !region || region === "whole field" ? ""
+    : region.startsWith("row ") ? `In ${region}.` : `In the ${region} of the field.`;
   return [describeWhere(data), place, ...where.filter((w) => w.kind === "window").map(describeWhere)]
     .filter(Boolean).join(" ");
 }

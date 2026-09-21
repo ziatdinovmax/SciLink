@@ -123,3 +123,80 @@ def agent_replay_r2(agent_factory: Callable[[str], Any], anchor_dir: str, system
         except Exception:  # noqa: BLE001 - a recipe that cannot run is the finding
             return None
     return replay
+
+
+# ── datacubes ────────────────────────────────────────────────────────────────
+
+#: A quantity that neither stays put nor follows the signal by more than this.
+CUBE_TOLERANCE = 0.05
+
+
+def check_cube_portability(replay: Callable[[str, str], Optional[Dict[str, float]]],
+                           reference_cube: str, work_dir: str, tracked: Optional[List[str]] = None,
+                           scales=SCALES, tolerance: float = CUBE_TOLERANCE) -> Dict[str, Any]:
+    """The same question for a locked CUBE recipe, asked of its outputs.
+
+    ``replay(cube_path, tag)`` runs the locked script on a cube and returns its
+    flat features, or ``None`` when the replay did not pass the agent's own gate.
+    The reference cube is replayed as it is and with every count multiplied by
+    each of ``scales`` (noise included, so nothing about the data changes but its
+    level). A per-pixel analysis that does not depend on the signal level then
+    returns each quantity either UNCHANGED (an energy, a width, a fit quality, a
+    pixel count) or SCALED with the counts (an amplitude, an area). A quantity
+    that does neither, or a replay that stops passing, points at a constant read
+    off the reference: an amplitude bound, a threshold in counts, a mask level.
+    ``tracked`` limits the verdict to those outputs (the others are reported).
+    Zero model calls. ``{}`` when the reference itself cannot be replayed."""
+    from .modality import load_cube
+    try:
+        cube = load_cube(reference_cube)
+    except (OSError, ValueError):
+        return {}
+    base = replay(str(reference_cube), "x1")
+    if not base:
+        return {}
+    d = Path(work_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    side = Path(str(reference_cube)).with_suffix(".json")
+    watched = [k for k in (tracked or list(base)) if k in base]
+    trials: List[Dict[str, Any]] = []
+    for scale in scales:
+        path = d / f"reference_x{scale:g}.npy"
+        np.save(path, (cube * scale).astype(np.float32))
+        if side.is_file():                        # the axis and the rest of the metadata travel
+            path.with_suffix(".json").write_text(side.read_text())
+        feats = replay(str(path), f"x{scale:g}")
+        trial: Dict[str, Any] = {"scale": scale, "passed": bool(feats), "depends_on_level": {}}
+        for key, ref in base.items():
+            if not feats or key not in feats:
+                if feats is not None and key in watched:
+                    trial["depends_on_level"][key] = None          # the output disappeared
+                continue
+            new = feats[key]
+            size = max(abs(ref), abs(new), 1e-12)
+            unchanged = abs(new - ref) <= tolerance * size
+            follows = abs(new - scale * ref) <= tolerance * max(abs(scale * ref), abs(new), 1e-12)
+            if not (unchanged or follows):
+                trial["depends_on_level"][key] = round(new / ref, 4) if ref else None
+        trial["ok"] = trial["passed"] and not any(k in watched for k in trial["depends_on_level"])
+        trials.append(trial)
+    return {"kind": "datacube", "portable": all(t["ok"] for t in trials), "trials": trials,
+            "tracked": watched}
+
+
+def describe_cube(report: Dict[str, Any]) -> str:
+    if not report:
+        return ""
+    if report["portable"]:
+        extra = sorted({k for t in report["trials"] for k in t["depends_on_level"]})
+        return ("The recipe does not depend on the signal level"
+                + (f" (untracked {', '.join(extra[:4])} does)." if extra else "."))
+    parts = []
+    for t in report["trials"]:
+        if not t["passed"]:
+            parts.append(f"at {t['scale']:g}x the counts the replay no longer passes its gate")
+        elif any(k in report["tracked"] for k in t["depends_on_level"]):
+            bad = [k for k in t["depends_on_level"] if k in report["tracked"]]
+            parts.append(f"at {t['scale']:g}x the counts {', '.join(bad[:3])} neither stays nor scales")
+    return ("The recipe depends on the signal level of the reference: " + "; ".join(parts)
+            + ". It probably carries a constant read off that cube (a bound, a threshold in counts).")

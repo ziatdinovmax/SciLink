@@ -90,6 +90,9 @@ class DriftMonitor:
         self._seed: List[np.ndarray] = []              # the reference frames (kept)
         self._ratios: List[float] = []                 # residual/noise of accepted frames, at judge time
         self._basis: Optional[np.ndarray] = None
+        #: Shapes learned ELSEWHERE that also explain this curve (see DriftBank:
+        #: a region of a datacube borrows what the whole field has learned).
+        self._borrowed: Optional[np.ndarray] = None
         self._seed_basis: Optional[np.ndarray] = None
         self._states: List[np.ndarray] = []            # bases of states already accepted (kept)
         self.max_states = 8
@@ -171,6 +174,17 @@ class DriftMonitor:
         ratio = e_res / e_noise if e_noise > 0 else float("inf")
         return min(fraction, 1.0), ratio, (resid if full else None)
 
+    def _known(self) -> Optional[np.ndarray]:
+        """Everything that explains a frame of this curve: its own basis plus
+        any borrowed shapes."""
+        if self._basis is None:
+            return None
+        b = self._borrowed
+        if b is None or b.shape[0] != self._basis.shape[0]:
+            return self._basis
+        q, _ = np.linalg.qr(np.hstack([self._basis, b]))
+        return q
+
     # ------------------------------------------------------------------- API
     def seed(self, curves: Sequence[Tuple[Any, Any]], keep: bool = False) -> int:
         """Start from reference frames (setup, or a re-anchor's window). They are
@@ -205,7 +219,8 @@ class DriftMonitor:
         g, covered = self._to_grid(x, y, partial=True)
         if g is None or self._basis is None:
             return {"available": False}
-        fraction, ratio, resid = self._measure(g, self._basis, covered)
+        shapes = self._known()
+        fraction, ratio, resid = self._measure(g, shapes, covered)
         known = None
         for i, state in enumerate(self._states):     # a state accepted before is not new
             f_s, r_s, _ = self._measure(g, state, covered)
@@ -225,7 +240,7 @@ class DriftMonitor:
                 if len(self._recent) < m - 1:
                     break
                 mean = np.mean(self._recent[-(m - 1):] + [resid], axis=0)
-                e_noise = sigma ** 2 * max(g.size - self._basis.shape[1], 1) / m
+                e_noise = sigma ** 2 * max(g.size - shapes.shape[1], 1) / m
                 e_mean = float(mean @ mean)
                 frac_m = float(np.sqrt(max(e_mean - e_noise, 0.0) / self._structure(g, sigma)))
                 score_m = (e_mean / e_noise if e_noise > 0 else float("inf")) / typical
@@ -341,7 +356,7 @@ class DriftMonitor:
                                  "x_to": round(float(xs_all[b]), 6),
                                  "x_peak": round(float(xs_all[a if a else b]), 6),
                                  "share": round(float(b - a + 1) / common.size, 6)})
-        return self._locate_in(grids, xs_all[common], self._basis[common], max_regions) + lost
+        return self._locate_in(grids, xs_all[common], self._known()[common], max_regions) + lost
 
     def locate_from_reference(self, n_recent: int = 3, max_regions: int = 3) -> List[Dict[str, Any]]:
         """WHERE the stream now differs from its REFERENCE frames — for a change
@@ -503,8 +518,29 @@ class DriftBank:
         return max([self._monitor(n).seed([f[n] for f in frames if n in f], keep=keep)
                     for n in names] or [0])
 
+    def _lend(self, signals: Dict[str, Any]) -> None:
+        """A region borrows what the WHOLE field (the first curve) has learned.
+
+        A region's mean spectrum is noisier than the field's by the square root
+        of the area ratio, so a slow real change (a resonance drifting through a
+        ramp) sits below the noise of the region's own frames: its monitor never
+        learns that direction, the change accumulates, and the region misfires —
+        measured on the simulated series at a fifth of the dwell: 124 of 234
+        quiet frames suspected on a 2 x 2 grid, and false "novelties" in a region
+        for what was a shift of the whole field. The whole field sees that
+        direction at full signal-to-noise. With it lent to every region, a
+        region is suspected only for what neither its own history nor the
+        field's explains, which is what "confined to this region" means."""
+        names = list(signals)
+        if len(names) < 2:
+            return
+        lender = self._monitor(names[0])._basis
+        for n in names[1:]:
+            self._monitor(n)._borrowed = lender
+
     def judge(self, signals: Any) -> Dict[str, Any]:
         signals = self.as_signals(signals)
+        self._lend(signals)
         verdicts = {n: self._monitor(n).judge(x, y) for n, (x, y) in signals.items()}
         usable = {n: v for n, v in verdicts.items() if v.get("available")}
         if not usable:
@@ -520,9 +556,13 @@ class DriftBank:
         # change never makes a frame suspected): the furthest curve answers it.
         far = max(usable, key=lambda n: usable[n].get("from_reference") or 0.0)
         first = next(iter(signals))
-        if first in usable and (usable[first].get("from_reference") or 0.0) >= 0.8 * (
+        if first in usable and (usable[first].get("from_reference") or 0.0) >= 0.5 * (
                 usable[far].get("from_reference") or 0.0):
-            far = first                   # the whole field moved: no region is singled out
+            # The whole field moved: no region is singled out. A small region's
+            # distance is the field's plus its own noise, so among many regions
+            # one is always a little further; it is named only when it is far
+            # and the field is not.
+            far = first
         if usable[far].get("from_reference") is not None:
             out["from_reference"] = usable[far]["from_reference"]
             self._furthest = far
