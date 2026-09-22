@@ -410,8 +410,8 @@ export function LivePanel({
                   </optgroup>
                 )}
               </select>
-              {!showDemos && !isDemo && simulators.length > 0 && (
-                <button type="button" className="link-btn caption"
+              {instrument === MCP && mcpServers.length === 0 && !showDemos && simulators.length > 0 && (
+                <button type="button" className="link-btn caption live-demo-link"
                   onClick={() => { setShowDemos(true); setInstrument(simulators[0].name); }}>
                   Nothing connected yet? Try a simulated experiment.
                 </button>
@@ -549,7 +549,7 @@ export function LivePanel({
                   )}
                 </label>
               </div>
-              <div className="live-row">
+              {(framesAre !== "" || instrument === REPLAY) && <div className="live-row">
                 {(framesAre === "curve" || (framesAre === "" && instrument === REPLAY)) && (
                   <>
                     <label className="grow"><span>x axis</span>
@@ -595,7 +595,7 @@ export function LivePanel({
                     </label>
                   </>
                 )}
-              </div>
+              </div>}
               <label>
                 <span>Track
                   <Info>
