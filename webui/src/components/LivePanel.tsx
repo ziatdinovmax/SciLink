@@ -410,11 +410,15 @@ export function LivePanel({
                   </optgroup>
                 )}
               </select>
-              {instrument === MCP && mcpServers.length === 0 && !showDemos && simulators.length > 0 && (
-                <button type="button" className="link-btn caption live-demo-link"
-                  onClick={() => { setShowDemos(true); setInstrument(simulators[0].name); }}>
-                  Nothing connected yet? Try a simulated experiment.
-                </button>
+              {instrument === MCP && mcpServers.length === 0 && (
+                <span className="caption">
+                  Nothing is connected yet. Connect the instrument's server in the MCP tab
+                  {!showDemos && simulators.length > 0 && (
+                    <>, or <button type="button" className="link-btn live-demo-link"
+                      onClick={() => { setShowDemos(true); setInstrument(simulators[0].name); }}>
+                      try a simulated experiment</button></>
+                  )}.
+                </span>
               )}
             </label>
             <label className="grow">
@@ -453,9 +457,7 @@ export function LivePanel({
             </label>
           )}
 
-          {instrument === MCP && (mcpServers.length === 0 ? (
-            <p className="caption">Connect the instrument's server in the MCP tab first.</p>
-          ) : (
+          {instrument === MCP && mcpServers.length > 0 && (
             <div className="live-row">
               <label className="grow">
                 <span>Server
@@ -478,7 +480,7 @@ export function LivePanel({
                 </select>
               </label>
             </div>
-          ))}
+          )}
 
           {instrument === REPLAY && (
             <label>
@@ -497,20 +499,19 @@ export function LivePanel({
 
           {(instrument === REPLAY || instrument === MCP || instrument === CUSTOM) && (
             <>
-              {instrument !== REPLAY && (
-                <p className="caption">
-                  Optional when the {instrument === MCP ? "server" : "class"} describes itself.
-                  <Info>
-                    {instrument === MCP
-                      ? "If the server has a describe_instrument tool, its technique, sample, kind of frame and "
-                        + "tracked quantities are used. Anything you enter here wins."
-                      : "What the class declares (system_info, outputs, modality) is used. Anything you enter "
-                        + "here wins, so a class that only acquires is enough."}
-                  </Info>
-                </p>
-              )}
               <div className="live-row">
-                <label className="grow"><span>Technique</span>
+                <label className="grow"><span>Technique
+                    {instrument !== REPLAY && (
+                      <Info>
+                        These fields are optional when the {instrument === MCP ? "server" : "class"} describes
+                        itself. {instrument === MCP
+                          ? "If the server has a describe_instrument tool, its technique, sample, kind of frame and "
+                            + "tracked quantities are used. Anything you enter here wins."
+                          : "What the class declares (system_info, outputs, modality) is used. Anything you enter "
+                            + "here wins, so a class that only acquires is enough."}
+                      </Info>
+                    )}
+                  </span>
                   <input type="text" placeholder={hint.technique} value={technique}
                     onChange={(e) => setTechnique(e.target.value)} />
                 </label>
@@ -545,7 +546,7 @@ export function LivePanel({
                     <option value="hyperspectral">a datacube</option>
                   </select>
                   {framesAre === "" && instrument !== REPLAY && (
-                    <span className="caption">Choose it to enter the calibration (field of view, spectral axis).</span>
+                    <span className="caption live-under">Choose it to enter the calibration (field of view, spectral axis).</span>
                   )}
                 </label>
               </div>
