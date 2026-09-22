@@ -200,6 +200,11 @@ def _record_trace(model: str, messages, response, latency_s: float) -> None:
     """Record one completed LLM call to the opt-in global tracer (no-op if disabled)."""
     try:
         from .. import tracing
+        u = getattr(response, "usage", None)
+        tracing.note_llm_call(
+            latency_s=latency_s,
+            prompt_tokens=getattr(u, "prompt_tokens", None),
+            completion_tokens=getattr(u, "completion_tokens", None))
         if not tracing.is_enabled():
             return
         text, finish = "", None
@@ -209,7 +214,6 @@ def _record_trace(model: str, messages, response, latency_s: float) -> None:
             text = (getattr(message, "content", None) or "") if message else ""
             finish = getattr(choices[0], "finish_reason", None)
         usage = None
-        u = getattr(response, "usage", None)
         if u is not None:
             usage = {
                 "prompt_tokens": getattr(u, "prompt_tokens", None),
@@ -296,7 +300,13 @@ def litellm_completion(*args, **kwargs):
         ceiling = _registered_max_output_tokens(model)
         if ceiling:
             kwargs["max_tokens"] = ceiling
-    return litellm.completion(*args, **kwargs)
+    _t0 = time.perf_counter()
+    response = litellm.completion(*args, **kwargs)
+    # Every orchestrator chat loop comes through here: count it (and
+    # trace it when tracing is on) like the wrapper classes do.
+    _record_trace(model, kwargs.get("messages") or (args[1] if len(args) > 1 else None),
+                  response, time.perf_counter() - _t0)
+    return response
 
 
 class LiteLLMGenerativeModel:

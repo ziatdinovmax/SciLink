@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 from .. import auth
+from .vocabulary import MODES as _MODES
 
 MODEL_OPTIONS = [
     "claude-opus-4-6",
@@ -24,19 +25,15 @@ EMBEDDING_MODEL_OPTIONS = [
 ]
 
 # ── Mode registry ────────────────────────────────────────────────
+# Derived from the shared vocabulary (scilink/ui/vocabulary.py) so the
+# Streamlit UI, the web backend and the terminal shell agree on the modes,
+# their labels and where their sessions live.
 APP_MODES = [
-    {"key": "meta",    "label": "🧪 📋 ⚛️",  "description": "Routes your research goal to the Analyze & Plan specialists"},
-    {"key": "analyze", "label": "Analyze", "description": "Multi-modal data analysis"},
-    {"key": "plan",    "label": "Plan",    "description": "Experimental design & optimization"},
-    {"key": "simulate", "label": "Simulate", "description": "Submit and monitor DFT/MD simulations"},
+    {"key": m["key"], "label": m["label"], "description": m["description"]}
+    for m in _MODES.values()
 ]
 
-SESSION_DIR_PREFIXES = {
-    "meta": "meta_session",
-    "analyze": "analysis_session",
-    "plan": "planning_session",
-    "simulate": "simulation_session",
-}
+SESSION_DIR_PREFIXES = {k: m["session_prefix"] for k, m in _MODES.items()}
 
 # ── File extensions ──────────────────────────────────────────────
 SUPPORTED_DATA_EXTENSIONS = (

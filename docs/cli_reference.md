@@ -110,12 +110,52 @@ scilink serve --transport sse --host 0.0.0.0 --port 8000 \
 (`--ssl-keyfile-password` for an encrypted key; `--print-mcp-json` reflects
 the scheme.) `scilink-web` takes the same three flags.
 
-## In-session slash commands
+## The terminal shell
 
-Chat sessions accept slash commands alongside natural language. Common set:
-`/help`, `/tools`, `/files` (plan) or `/agents` (analyze), `/state` or
-`/status`, `/autonomy [level]` (plan) or `/mode [level]` (analyze),
-`/checkpoint`, `/schema` (analyze — metadata JSON schema), `/quit`.
+Bare `scilink`, `scilink analyze`, `scilink plan` and `scilink simulate` all
+run one terminal shell: line editing with history (`~/.scilink/history/`),
+Tab completion of slash commands and paths, Alt+Enter for a newline, a status
+row while the agent works (spinner, what it is doing, elapsed time), the
+agents' narration filtered to tool calls, reasoning and handoffs (Ctrl+O or
+`/verbose` shows everything), the answer rendered as markdown, and one line of
+accounting per turn (LLM calls, tokens, seconds). Ctrl+C stops a running turn
+the way the web UI's ■ button does; at the prompt it clears the line. Typing
+while a turn runs drafts the next message under the status row; Enter queues
+it, and queued messages run in order once the turn ends (after Ctrl+C they go
+back into the prompt instead). Ctrl+D or `/quit` saves a checkpoint and exits.
+
+Human-in-the-loop questions use the same widgets and labels as the web UI:
+free-text feedback with `Enter = Approve plan` (the empty answer accepts),
+numbered candidate pickers with the judge's pick as the default, keep/revert
+and launch/cancel choices. Generated-code execution is confirmed once at
+startup with the web UI's consent sentence (`--yes` or
+`SCILINK_ACCEPT_CODE_EXECUTION=1` pre-approves it; a detected sandbox needs
+no confirmation).
+
+Sessions stay where they are created (next to your data), and every one is
+registered in a central index (`~/.scilink/sessions.jsonl`, or under
+`$SCILINK_HOME`), so `--resume` lists and resumes sessions from any folder;
+the web UI's "Resume past session" reads the same index. The shell prints the
+resume command when you quit. Set `SCILINK_SESSION_ROOT` to put new sessions
+in one folder instead of the current one.
+
+Shell flags, on every mode:
+
+```bash
+scilink -p "Analyze ./grains.tif" --output-format json --yes   # headless: one task, result on stdout
+scilink plan --resume                                        # pick a past session in this folder
+scilink analyze --resume analysis_session_20260919_101500    # ... or name it
+scilink --verbose                                            # full narration from the start
+```
+
+### Slash commands
+
+Shared by every mode: `/help`, `/status` (`/state`), `/mode [level]`
+(`/autonomy`), `/tools`, `/mcp <config>`, `/skill <path>`, `/tool <path>`,
+`/skills`, `/memory [on|off]`, `/files [subdir]`, `/verbose`, `/cost`,
+`/sessions`, `/resume [id]`, `/checkpoint`, `/clear`, `/quit`.
+Per mode: `/delegations` (meta), `/agents` and `/schema` (analyze),
+`/objective` (plan), `/structures` (simulate).
 
 ## Persistent memory — `scilink memory`
 

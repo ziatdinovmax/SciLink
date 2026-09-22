@@ -326,6 +326,7 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .log-pane .thought-spec { color: var(--thought-specialist); font-style: italic; }
 .log-pane .answer-meta { color: var(--answer-meta); font-weight: bold; }
 .log-pane .answer-spec { color: var(--thought-specialist); font-weight: bold; }
+.log-pane .tool-call { color: var(--text-muted); }
 .log-pane .handoff {
   display: inline-block; color: var(--handoff); font-weight: bold;
   background: var(--handoff-bg); border-left: 3px solid var(--handoff);

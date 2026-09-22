@@ -32,6 +32,11 @@ def _record_trace(model: str, messages, response, latency_s: float) -> None:
     """
     try:
         from .. import tracing
+        u = getattr(response, "usage", None)
+        tracing.note_llm_call(
+            latency_s=latency_s,
+            prompt_tokens=getattr(u, "prompt_tokens", None),
+            completion_tokens=getattr(u, "completion_tokens", None))
         if not tracing.is_enabled():
             return
         text, finish = "", None
@@ -41,7 +46,6 @@ def _record_trace(model: str, messages, response, latency_s: float) -> None:
             text = (getattr(message, "content", None) or "") if message else ""
             finish = getattr(choices[0], "finish_reason", None)
         usage = None
-        u = getattr(response, "usage", None)
         if u is not None:
             usage = {
                 "prompt_tokens": getattr(u, "prompt_tokens", None),

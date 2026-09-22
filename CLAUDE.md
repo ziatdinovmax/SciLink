@@ -646,6 +646,33 @@ through inherited internals), no base class is required. The contract is
 duck-typed; what the children share is *interface shape*, not
 *implementation*.
 
+## The terminal is one shell over the four chat modes
+
+`scilink/cli/shell/` is the single REPL behind bare `scilink` (meta),
+`scilink analyze`, `scilink plan` and `scilink simulate`; the four
+`cli/<mode>.py` files are thin entry points. A `ModeAdapter` (`modes.py`)
+carries what differs per mode — flags, how to build/restore the
+orchestrator, autonomy get/set, status fields, extra slash commands,
+seed turns, headless `run_task` — and nothing else. This does not
+contradict the no-`BaseChatOrchestrator` rule above: the agents are
+untouched; only the terminal layer, which was four copies, is one.
+
+The shell reuses the web backend's turn machinery rather than
+re-implementing it: `RoutedCapture(echo_console=False)` for the
+print-driven stop, `ParkingChannel` (the base of the web `HTTPChannel`)
+for human-in-the-loop questions, `presenter.present_question` for the
+widget vocabulary, `sessions.discover_resumable` for resume. The words
+both surfaces show live in `scilink/ui/vocabulary.py` (mode names,
+placeholders, status badges, consent sentence, stop messages, the
+"Enter = <accept>" hint, activity labels); `scripts/gen_vocabulary.py`
+exports them to `webui/src/vocabulary.ts` and a test keeps the two equal.
+The narration reader (`scilink/ui/narration.py`, TS twin
+`webui/src/narration.ts`) classifies the agents' printed lines and derives
+the activity label; the web runner emits it as an `activity` event, the
+shell shows it on its status row, and one fixture pins both readers.
+**When a chat-surface label or behaviour changes, change it in the
+vocabulary or the narration reader, not in one surface.**
+
 ## Sequencing — hard features first, UI later
 
 Engineering philosophy on this codebase: implement load-bearing logic
