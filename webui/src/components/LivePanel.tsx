@@ -271,13 +271,14 @@ export function LivePanel({
 
   const simulators = snap?.simulators ?? [];
   const analyses = snap?.analyses ?? [];
-  // The first choice is a real instrument when one is connected, else a simulated
-  // experiment: the page should not open on a form that cannot be started.
+  // The form is for a real instrument. The simulated experiments stay in the
+  // library (tests, the MCP demo server) and are reachable here through one
+  // link, for a demo or a first look with nothing connected.
+  const [showDemos, setShowDemos] = useState(false);
   useEffect(() => {
-    if (instrument) return;
-    if ((snap?.mcp_servers ?? []).length) setInstrument(MCP);
-    else if (simulators.length) setInstrument(simulators[0].name);
-  }, [simulators, instrument, snap?.mcp_servers]);
+    if (!instrument) setInstrument(MCP);
+  }, [instrument]);
+  const isDemo = simulators.some((s) => s.name === instrument);
 
   // What kind of frame the chosen source produces, to offer references of the same kind.
   const hints = ({
@@ -397,16 +398,24 @@ export function LivePanel({
                   {localFiles && <option value={CUSTOM}>A Python class on this machine</option>}
                 </optgroup>
                 {localFiles && (
-                  <optgroup label="Recorded data">
-                    <option value={REPLAY}>A folder of measurements, replayed</option>
+                  <optgroup label="Data you already have">
+                    <option value={REPLAY}>A folder of measurements, replayed as a stream</option>
                   </optgroup>
                 )}
-                <optgroup label="Simulated experiments">
-                  {simulators.map((s) => (
-                    <option key={s.name} value={s.name}>{s.technique ?? s.name}</option>
-                  ))}
-                </optgroup>
+                {(showDemos || isDemo) && (
+                  <optgroup label="Simulated experiments">
+                    {simulators.map((s) => (
+                      <option key={s.name} value={s.name}>{s.technique ?? s.name}</option>
+                    ))}
+                  </optgroup>
+                )}
               </select>
+              {!showDemos && !isDemo && simulators.length > 0 && (
+                <button type="button" className="link-btn caption"
+                  onClick={() => { setShowDemos(true); setInstrument(simulators[0].name); }}>
+                  Nothing connected yet? Try a simulated experiment.
+                </button>
+              )}
             </label>
             <label className="grow">
               <span>Reference
