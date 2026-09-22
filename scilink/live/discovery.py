@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -97,6 +98,8 @@ def assess_change(data_path: str, *, modality: Any, system_info: Any, what_chang
     except Exception as e:  # noqa: BLE001 - reported, never raised
         result["error"] = f"{type(e).__name__}: {e}"
         log.warning(f"the analysis of the changed frame failed: {e}")
+    # The literature agents read FUTUREHOUSE_API_KEY themselves; a key given here wins.
+    futurehouse_api_key = futurehouse_api_key or os.environ.get("FUTUREHOUSE_API_KEY") or None
     if result["claims"] and (futurehouse_api_key or literature is not None):
         try:
             if literature is None:
@@ -126,7 +129,7 @@ def assess_change(data_path: str, *, modality: Any, system_info: Any, what_chang
         except Exception as e:  # noqa: BLE001
             result["literature"] = f"failed: {type(e).__name__}: {e}"
     elif result["claims"]:
-        result["literature"] = "not asked: no literature key (FutureHouse) was given"
+        result["literature"] = "not asked: no literature key (FutureHouse, or FUTUREHOUSE_API_KEY) was given"
     result["seconds"] = round(time.perf_counter() - t0, 1)
     try:
         (out / "discovery.json").write_text(json.dumps(result, indent=1, default=str), encoding="utf-8")

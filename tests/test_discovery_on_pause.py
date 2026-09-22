@@ -129,3 +129,23 @@ def test_an_assessment_whose_analysis_failed_is_tried_once_deeper_and_never_call
                         agent_kwargs={}, out_dir=str(tmp_path / "b"), agent_factory=Flaky)
     assert out["status"] == "unmeasured" and out["claims"] and out["features"] == {}
     assert "failed" in out["analysis_error"] and len(Agent.seen) == 2
+
+
+def test_the_literature_key_can_come_from_the_environment(tmp_path, monkeypatch):
+    """The literature agents read FUTUREHOUSE_API_KEY themselves; the chain must
+    not skip the literature just because no key was passed explicitly."""
+    made = []
+
+    class FakeLit(Lit):
+        def __init__(self, api_key=None, max_wait_time=0):
+            made.append(api_key)
+
+    monkeypatch.setenv("FUTUREHOUSE_API_KEY", "fh-from-env")
+    monkeypatch.setattr("scilink.agents.lit_agents.OwlLiteratureAgent", FakeLit, raising=False)
+    out = assess_change(str(tmp_path / "f.npy"), modality="image", system_info={}, what_changed=None,
+                        agent_kwargs={}, out_dir=str(tmp_path / "a"), agent_factory=Agent, scorer=Scorer())
+    assert made == ["fh-from-env"] and out["literature"].startswith("asked for")
+    monkeypatch.delenv("FUTUREHOUSE_API_KEY")
+    out = assess_change(str(tmp_path / "f.npy"), modality="image", system_info={}, what_changed=None,
+                        agent_kwargs={}, out_dir=str(tmp_path / "b"), agent_factory=Agent, scorer=Scorer())
+    assert out["literature"].startswith("not asked") and "FUTUREHOUSE_API_KEY" in out["literature"]
