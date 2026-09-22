@@ -950,6 +950,18 @@ after every verified one. Recorded data is not an instrument called "replay": a
 (`system_info["instrument"]`, "Recorded on" in the tab), else under its folder,
 so two folders never share a memory by accident.
 
+**The tab has three real sources and one of them is the recommended shape.**
+"Your instrument" is an MCP server (any language, works on a shared server) or a
+Python `Instrument` class on the machine (local only: importing runs code);
+"Recorded data" replays a folder; the simulated experiments come last. For all
+three real sources the form completes what the source declares (`_complete`,
+the same rule as for an MCP server): technique, sample, kind of frame, its
+calibration and the tracked names, and what the person enters wins. A class
+that only acquires is enough. Run live: a bare image class with the form
+supplying the rest armed in 123 s and answered 8 of 8 frames; leaving the kind
+on automatic hid the calibration fields and the analysis reported diameters in
+nm with no field of view, so the form now points at them.
+
 **What a driven run through the tab taught (real HAADF and EELS tiles, an image
 instrument behind MCP), each now structural.** (1) A change that arrives slowly
 is a change: the slow alarm applies `on_change` like the abrupt path does (an

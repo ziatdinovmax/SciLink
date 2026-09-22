@@ -271,9 +271,13 @@ export function LivePanel({
 
   const simulators = snap?.simulators ?? [];
   const analyses = snap?.analyses ?? [];
+  // The first choice is a real instrument when one is connected, else a simulated
+  // experiment: the page should not open on a form that cannot be started.
   useEffect(() => {
-    if (!instrument && simulators.length) setInstrument(simulators[0].name);
-  }, [simulators, instrument]);
+    if (instrument) return;
+    if ((snap?.mcp_servers ?? []).length) setInstrument(MCP);
+    else if (simulators.length) setInstrument(simulators[0].name);
+  }, [simulators, instrument, snap?.mcp_servers]);
 
   // What kind of frame the chosen source produces, to offer references of the same kind.
   const hints = ({
@@ -285,8 +289,10 @@ export function LivePanel({
       track: "particle_count: number of particles in the field\nmean_diameter_nm: mean particle diameter" },
   } as Record<string, { technique: string; sample: string; track: string }>);
   const wantedModality: string = framesAre || (simulators.find((x) => x.name === instrument)?.modality ?? "curve");
-  const hint = instrument === MCP && framesAre === ""
-    ? { technique: "from the server", sample: "from the server", track: "from the server, or name: definition per line" }
+  const hint = (instrument === MCP || instrument === CUSTOM) && framesAre === ""
+    ? (instrument === MCP
+      ? { technique: "from the server", sample: "from the server", track: "from the server, or name: definition per line" }
+      : { technique: "from the class", sample: "from the class", track: "from the class, or name: definition per line" })
     : hints[wantedModality] ?? hints.curve;
   const chosen: LiveInstrumentInfo | undefined =
     state === "idle" ? simulators.find((s) => s.name === instrument) : snap?.instrument;
@@ -335,7 +341,7 @@ export function LivePanel({
       assess_on_pause: pauseOn && pauseOn !== "breach" ? assessOnPause : undefined,
       pause_on: pauseOn === "both" ? ["novelty", "breach"] : pauseOn ? [pauseOn] : undefined,
       remember: remember || undefined,
-      ...(instrument === REPLAY || instrument === MCP ? {
+      ...(instrument === REPLAY || instrument === MCP || instrument === CUSTOM ? {
         replay_dir: instrument === REPLAY ? replayDir.trim() : undefined,
         mcp_server: instrument === MCP ? mcpServer : undefined,
         mcp_tool: instrument === MCP ? mcpTool : undefined,
@@ -375,7 +381,7 @@ export function LivePanel({
         <div className="live-form">
           <div className="live-row">
             <label className="grow">
-              <span>Data source
+              <span>Instrument
                 {chosen && (
                   <Info>
                     {chosen.about}
@@ -386,12 +392,20 @@ export function LivePanel({
                 )}
               </span>
               <select value={instrument} onChange={(e) => setInstrument(e.target.value)}>
-                {simulators.map((s) => (
-                  <option key={s.name} value={s.name}>{s.technique ?? s.name} (simulated)</option>
-                ))}
-                <option value={MCP}>Instrument on an MCP server</option>
-                {localFiles && <option value={REPLAY}>Recorded data in a folder</option>}
-                {localFiles && <option value={CUSTOM}>My instrument</option>}
+                <optgroup label="Your instrument">
+                  <option value={MCP}>Connected through an MCP server</option>
+                  {localFiles && <option value={CUSTOM}>A Python class on this machine</option>}
+                </optgroup>
+                {localFiles && (
+                  <optgroup label="Recorded data">
+                    <option value={REPLAY}>A folder of measurements, replayed</option>
+                  </optgroup>
+                )}
+                <optgroup label="Simulated experiments">
+                  {simulators.map((s) => (
+                    <option key={s.name} value={s.name}>{s.technique ?? s.name}</option>
+                  ))}
+                </optgroup>
               </select>
             </label>
             <label className="grow">
@@ -415,11 +429,14 @@ export function LivePanel({
 
           {instrument === CUSTOM && (
             <label>
-              <span>Instrument class
+              <span>Python class
                 <Info>
-                  A <code>scilink.live.Instrument</code> subclass the server can import. It declares the
-                  acquisition parameters it accepts and implements <code>acquire(params)</code>.
-                  See <code>examples/live_loop_demo.py</code>.
+                  A <code>scilink.live.Instrument</code> subclass this machine can import, as
+                  module:ClassName. It implements <code>acquire(params)</code> and returns a
+                  <code>Frame</code> with a curve, an image or a datacube. Its <code>schema</code> declares
+                  the acquisition parameters and their limits, which is what can be steered. See
+                  <code>examples/live_loop_demo.py</code>. An MCP server is the same thing in any language,
+                  and works on a shared server too.
                 </Info>
               </span>
               <input type="text" placeholder="package.module:ClassName" value={custom}
@@ -469,14 +486,17 @@ export function LivePanel({
             </label>
           )}
 
-          {(instrument === REPLAY || instrument === MCP) && (
+          {(instrument === REPLAY || instrument === MCP || instrument === CUSTOM) && (
             <>
-              {instrument === MCP && (
+              {instrument !== REPLAY && (
                 <p className="caption">
-                  Optional when the server describes itself.
+                  Optional when the {instrument === MCP ? "server" : "class"} describes itself.
                   <Info>
-                    If the server has a <code>describe_instrument</code> tool, its technique, sample and
-                    tracked quantities are used. Anything you enter here wins.
+                    {instrument === MCP
+                      ? "If the server has a describe_instrument tool, its technique, sample, kind of frame and "
+                        + "tracked quantities are used. Anything you enter here wins."
+                      : "What the class declares (system_info, outputs, modality) is used. Anything you enter "
+                        + "here wins, so a class that only acquires is enough."}
                   </Info>
                 </p>
               )}
@@ -503,9 +523,10 @@ export function LivePanel({
                 )}
                 <label><span>A frame is
                     <Info>
-                      A spectrum, an image or a datacube. Each is followed with its own analysis. Leave it
-                      on automatic for a folder (read off the first file) and for a server that says what
-                      it measures.
+                      A spectrum, an image or a datacube. Each is followed with its own analysis. Automatic
+                      reads it off the first file of a folder, or takes what the server or class declares.
+                      Choosing it here also opens the calibration fields (field of view for an image, the
+                      spectral axis for a datacube), which the analysis needs to report in real units.
                     </Info>
                   </span>
                   <select value={framesAre} onChange={(e) => setFramesAre(e.target.value as typeof framesAre)}>
@@ -514,10 +535,13 @@ export function LivePanel({
                     <option value="image">an image</option>
                     <option value="hyperspectral">a datacube</option>
                   </select>
+                  {framesAre === "" && instrument !== REPLAY && (
+                    <span className="caption">Choose it to enter the calibration (field of view, spectral axis).</span>
+                  )}
                 </label>
               </div>
               <div className="live-row">
-                {(framesAre === "curve" || (framesAre === "" && instrument !== MCP)) && (
+                {(framesAre === "curve" || (framesAre === "" && instrument === REPLAY)) && (
                   <>
                     <label className="grow"><span>x axis</span>
                       <input type="text" placeholder="Raman shift (cm^-1)" value={xAxis}

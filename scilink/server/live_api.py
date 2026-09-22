@@ -221,9 +221,31 @@ def _make_instrument(spec: str, seed: int, allow_custom: bool = True,
     if not (isinstance(cls, type) and issubclass(cls, Instrument)):
         raise LiveError(400, f"{spec!r} is not a scilink.live.Instrument subclass.")
     try:
-        return cls()
+        inst = cls()
     except Exception as e:  # noqa: BLE001
         raise LiveError(400, f"Could not construct {spec!r}: {type(e).__name__}: {e}")
+    return _complete(inst, config or {})
+
+
+def _complete(inst: Any, config: Dict[str, Any]) -> Any:
+    """The form completes what an instrument class declares, the way it does for
+    an MCP server: what the person entered wins, what the class says fills the
+    rest. A class that says nothing is fine as long as the form does."""
+    info, outputs, targets = _described(config)
+    inst.system_info = {**dict(getattr(inst, "system_info", None) or {}), **info}
+    if outputs:
+        inst.outputs = outputs
+    if targets:
+        inst.targets = targets
+    kind = str(config.get("frames_are") or "").strip()
+    if kind:
+        if kind not in ("curve", "image", "hyperspectral"):
+            raise LiveError(400, f"a frame cannot be {kind!r}: a spectrum, an image or a datacube")
+        inst.modality = kind
+    if not (inst.system_info or {}).get("technique"):
+        raise LiveError(400, "Say which measurement technique this is. The instrument class did "
+                             "not declare one and the analysis needs to know.")
+    return inst
 
 
 def list_reference_analyses(session_dir: str, limit: int = 40) -> List[Dict[str, Any]]:

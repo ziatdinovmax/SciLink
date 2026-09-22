@@ -150,8 +150,35 @@ class MyInstrument(Instrument):
 
 
 def test_custom_instrument_by_import_path():
-    inst = live_api._make_instrument(f"{__name__}:MyInstrument", 0)
+    inst = live_api._make_instrument(f"{__name__}:MyInstrument", 0,
+                                     config={"system_info": {"technique": "a test"}})
     assert isinstance(inst, MyInstrument)
+
+
+def test_the_form_completes_what_an_instrument_class_declares():
+    """A class that says nothing about the measurement is fine as long as the
+    form does, and what the person enters wins over what the class declares."""
+    with pytest.raises(LiveError) as e:
+        live_api._make_instrument(f"{__name__}:MyInstrument", 0)       # neither says the technique
+    assert "technique" in e.value.message
+    inst = live_api._make_instrument(f"{__name__}:MyInstrument", 0, config={
+        "system_info": {"technique": "Raman spectroscopy", "sample": "graphene"},
+        "outputs": {"g_position": "the G band"}, "targets": ["the G band"],
+        "frames_are": "image", "frame_metadata": {"field_of_view": "40", "field_of_view_units": "nm"}})
+    assert inst.system_info["technique"] == "Raman spectroscopy" and inst.outputs == {"g_position": "the G band"}
+    assert inst.modality == "image" and inst.targets == ["the G band"]
+    assert inst.system_info["experimental_details"]["spatial_info"]["field_of_view_x"] == 40.0
+
+    class Declares(MyInstrument):
+        system_info = {"technique": "from the class", "sample": "from the class"}
+        outputs = {"peak": "from the class"}
+    Declares.__module__, Declares.__qualname__ = __name__, "Declares"
+    globals()["Declares"] = Declares
+    inst = live_api._make_instrument(f"{__name__}:Declares", 0, config={"system_info": {"sample": "mine"}})
+    assert inst.system_info == {"technique": "from the class", "sample": "mine"}
+    assert inst.outputs == {"peak": "from the class"} and inst.modality == "curve"
+    with pytest.raises(LiveError):
+        live_api._make_instrument(f"{__name__}:Declares", 0, config={"frames_are": "video"})
 
 
 def test_a_named_attribute_that_is_not_an_instrument_is_never_called():
