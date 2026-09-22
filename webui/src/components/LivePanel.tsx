@@ -269,16 +269,13 @@ export function LivePanel({
     return () => { if (timer.current) window.clearInterval(timer.current); };
   }, [active, live, refresh]);
 
-  const simulators = snap?.simulators ?? [];
   const analyses = snap?.analyses ?? [];
-  // The form is for a real instrument. The simulated experiments stay in the
-  // library (tests, the MCP demo server) and are reachable here through one
-  // link, for a demo or a first look with nothing connected.
-  const [showDemos, setShowDemos] = useState(false);
+  // The form is for a real instrument or recorded data. The simulated
+  // experiments stay in the library (tests, the MCP demo server) and are not
+  // offered here.
   useEffect(() => {
     if (!instrument) setInstrument(MCP);
   }, [instrument]);
-  const isDemo = simulators.some((s) => s.name === instrument);
 
   // What kind of frame the chosen source produces, to offer references of the same kind.
   const hints = ({
@@ -289,14 +286,14 @@ export function LivePanel({
     image: { technique: "TEM bright-field imaging", sample: "gold nanoparticles on carbon, heated in situ",
       track: "particle_count: number of particles in the field\nmean_diameter_nm: mean particle diameter" },
   } as Record<string, { technique: string; sample: string; track: string }>);
-  const wantedModality: string = framesAre || (simulators.find((x) => x.name === instrument)?.modality ?? "curve");
+  const wantedModality: string = framesAre || "curve";
   const hint = (instrument === MCP || instrument === CUSTOM) && framesAre === ""
     ? (instrument === MCP
       ? { technique: "from the server", sample: "from the server", track: "from the server, or name: definition per line" }
       : { technique: "from the class", sample: "from the class", track: "from the class, or name: definition per line" })
     : hints[wantedModality] ?? hints.curve;
   const chosen: LiveInstrumentInfo | undefined =
-    state === "idle" ? simulators.find((s) => s.name === instrument) : snap?.instrument;
+    state === "idle" ? undefined : snap?.instrument;
   const mcpServers = snap?.mcp_servers ?? [];
   const mcpTools = mcpServers.find((m) => m.name === mcpServer)?.tools ?? [];
   useEffect(() => {
@@ -402,23 +399,9 @@ export function LivePanel({
                     <option value={REPLAY}>A folder of measurements, replayed as a stream</option>
                   </optgroup>
                 )}
-                {(showDemos || isDemo) && (
-                  <optgroup label="Simulated experiments">
-                    {simulators.map((s) => (
-                      <option key={s.name} value={s.name}>{s.technique ?? s.name}</option>
-                    ))}
-                  </optgroup>
-                )}
               </select>
               {instrument === MCP && mcpServers.length === 0 && (
-                <span className="caption">
-                  Nothing is connected yet. Connect the instrument's server in the MCP tab
-                  {!showDemos && simulators.length > 0 && (
-                    <>, or <button type="button" className="link-btn live-demo-link"
-                      onClick={() => { setShowDemos(true); setInstrument(simulators[0].name); }}>
-                      try a simulated experiment</button></>
-                  )}.
-                </span>
+                <span className="caption">Nothing is connected yet. Connect the instrument's server in the MCP tab.</span>
               )}
             </label>
             <label className="grow">

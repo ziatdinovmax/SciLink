@@ -955,9 +955,10 @@ so two folders never share a memory by accident.
 Python `Instrument` class on the machine (local only: importing runs code);
 "Data you already have" replays a folder (how a recipe is built and checked
 before beam time, and how a recorded series is run); the simulated experiments
-are NOT on the form: they stay in the library for the tests and the MCP demo
-server, and one link ("Nothing connected yet? Try a simulated experiment")
-reveals them for a first look. The form opens on the MCP choice. For all
+are NOT on the form at all: they stay in the library for the tests and the
+MCP demo server (`python -m scilink.live.mcp_demo_server <name>` is how one is
+tried through the tab, as an MCP instrument). The form opens on the MCP
+choice. For all
 three real sources the form completes what the source declares (`_complete`,
 the same rule as for an MCP server): technique, sample, kind of frame, its
 calibration and the tracked names, and what the person enters wins. A class
