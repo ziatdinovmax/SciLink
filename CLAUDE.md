@@ -924,7 +924,11 @@ profile. Do not collapse these into a majority rule.
 analysis of the changed frame told what changed, its scientific claims, and with a
 literature key a novelty score per claim; the outcome goes on the log as a
 `discovery` event and the Live tab shows it on a paused run. Without a key the
-claims stand and the result says the literature was not asked.
+claims stand and the result says the literature was not asked. The key comes
+from the call or from `FUTUREHOUSE_API_KEY`. Run live once: the chain scored a
+claim 4 of 5 on a question that conjoined several specifics, which the
+literature rarely matches as a set. The score is only as good as the question,
+so the explanation is shown with it and nothing acts on the number.
 
 **What an instrument learns outlives the run** (`live/instrument_home.py`,
 `~/.scilink/instruments/<id>/`, opt-in with `remember=True`). Recipes are kept per
