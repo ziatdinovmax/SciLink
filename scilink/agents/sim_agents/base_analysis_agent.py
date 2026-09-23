@@ -294,7 +294,6 @@ class BaseAnalysisAgent(ABC):
 
     def qc_record_initial(self, ctx: QCItemContext, result: dict) -> None:
         ctx.best_result = result
-        ctx.best_score = 1.0
 
     def qc_record_initial_failure(self, ctx: QCItemContext, result: dict) -> None:
         pass
@@ -336,7 +335,9 @@ class BaseAnalysisAgent(ABC):
 
     def qc_refine(self, ctx: QCItemContext, verification: dict) -> dict:
         reasoning = verification.get("reasoning", "")
-        level = min(ctx.annealing_level, len(self._CONSTRAINT_ANNEALING_SCHEDULE) - 1)
+        ctx.annealing_level = min(
+            ctx.iteration + 1, len(self._CONSTRAINT_ANNEALING_SCHEDULE) - 1)
+        level = ctx.annealing_level
         annealing_text = self._CONSTRAINT_ANNEALING_SCHEDULE[level]
         ctx.state["_verification_feedback"] = (
             f"The previous result was judged implausible: {reasoning}\n"
