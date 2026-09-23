@@ -378,3 +378,94 @@ def test_donor_record_persists_recipe(tmp_path, monkeypatch):
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# ---------------------------------------------------------------------------
+# Strict replay: a live frame. The whole analyze() call, zero model calls.
+# ---------------------------------------------------------------------------
+
+PEAK_SCRIPT = '''
+def analyze_feature(data, axis):
+    import numpy as np
+    w = data - data.min(axis=2, keepdims=True)
+    pos = (w * axis).sum(axis=2) / np.maximum(w.sum(axis=2), 1e-12)
+    return {"maps": {"Peak_Position": pos}, "units": "nm", "description": "centroid"}
+'''
+
+
+def _peak_cube(center=650.0, seed=0, h=6, w=6, n=64):
+    rng = np.random.default_rng(seed)
+    axis = np.linspace(400, 900, n)
+    field = center + 8.0 * np.linspace(-1, 1, h)[:, None] + 5.0 * np.linspace(-1, 1, w)[None, :]
+    cube = np.exp(-0.5 * ((axis[None, None, :] - field[..., None]) / 30.0) ** 2)
+    return cube + rng.normal(0, 0.01, cube.shape)
+
+
+def _strict_agent(tmp_path, name):
+    from scilink.agents.exp_agents.hyperspectral_analysis_agent import HyperspectralAnalysisAgent
+    ag = HyperspectralAnalysisAgent(api_key="sk-dummy", model_name="claude-opus-4-6",
+                                    output_dir=str(tmp_path / name), enable_human_feedback=False)
+    ag.model = _ExplodingModel()
+    for stage in list(getattr(ag, "pipeline", [])) + list(getattr(ag, "synthesis_pipeline", [])):
+        if hasattr(stage, "model"):
+            stage.model = _ExplodingModel()
+    return ag
+
+
+def _anchor_dir(tmp_path, script=PEAK_SCRIPT):
+    prior = tmp_path / "anchor"
+    prior.mkdir(exist_ok=True)
+    (prior / "dynamic_analysis_records.json").write_text(json.dumps(
+        [{"target": "peak position", "task_success": True, "required_outputs": ["Peak_Position"],
+          "script": script, "quality_history": {"approved": True}}]))
+    return prior
+
+
+def test_a_strict_replay_is_a_whole_analysis_with_no_model_call(tmp_path, monkeypatch):
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+    np.save(tmp_path / "cube.npy", _peak_cube(center=660.0, seed=1))
+    res = _strict_agent(tmp_path, "frame").analyze(
+        str(tmp_path / "cube.npy"), system_info=dict(AXIS_OK),
+        prior_analysis_paths=[str(_anchor_dir(tmp_path))], reuse_locked_script=True,
+        strict_replay=True,
+        replay_reference={"Peak_Position": {"min": 640.0, "max": 662.0, "mean": 650.0, "coverage": 1.0}})
+    assert res["status"] == "success", res.get("error")
+    assert res["profile"] == "realtime" and res["script_reuse"]["verbatim"] is True
+    [feat] = [f for f in res["extracted_features"] if f["name"] == "Peak_Position"]
+    assert abs(feat["stats"]["mean"] - 660.0) < 3.0
+    assert (res.get("stage_timings") or {}).get("llm_calls", 0) == 0
+    out = tmp_path / "frame"
+    assert list(out.glob("*Dashboard*.jpeg")) and not list(out.glob("*.html"))   # maps kept, no per-frame report
+
+
+def test_a_script_that_raises_fails_the_strict_frame_instead_of_being_repaired(tmp_path, monkeypatch):
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+    np.save(tmp_path / "cube.npy", _peak_cube(seed=2))
+    broken = PEAK_SCRIPT.replace("w = data", "w = undefined_name + data")
+    res = _strict_agent(tmp_path, "frame").analyze(
+        str(tmp_path / "cube.npy"), system_info=dict(AXIS_OK),
+        prior_analysis_paths=[str(_anchor_dir(tmp_path, broken))], reuse_locked_script=True,
+        strict_replay=True)
+    assert res["status"] != "success"                      # and the exploding model was never reached
+
+
+def test_strict_needs_a_script_to_replay(tmp_path):
+    np.save(tmp_path / "cube.npy", _peak_cube())
+    res = _agent().analyze(str(tmp_path / "cube.npy"), system_info=dict(AXIS_OK), strict_replay=True)
+    assert res["status"] == "error" and "strict_replay requires" in res["error"]["error"]
+
+
+def test_in_a_stream_a_moved_value_is_not_a_broken_method():
+    """Sibling datasets: a required output far from the anchor's is a breakdown.
+    A live stream: the tracked quantity is expected to move, so the loop asks the
+    gate for method health only and judges plausibility itself."""
+    ref = {"min": 0.451, "max": 0.472, "mean": 0.463, "coverage": 1.0}
+    moved = 0.405 + 0.004 * np.random.default_rng(0).standard_normal((20, 18))
+    ok, why = hc._replay_map_gate(moved, None, ref, required=True)
+    assert not ok and "plausible range" in why                       # the series rule, unchanged
+    assert hc._replay_map_gate(moved, None, {**ref, "values_may_move": True}, required=True) == (True, "")
+    # method health is still judged: a map that did not converge, or collapsed to a bound
+    holes = np.where(np.random.default_rng(1).random((20, 18)) < 0.9, np.nan, moved)
+    assert not hc._replay_map_gate(holes, None, {**ref, "values_may_move": True}, required=True)[0]
+    flat = np.full((20, 18), 0.36)
+    assert not hc._replay_map_gate(flat, None, {**ref, "values_may_move": True}, required=True)[0]

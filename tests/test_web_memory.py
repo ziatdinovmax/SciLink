@@ -114,7 +114,8 @@ def test_memory_overview_switch_and_records(mem_client, tmp_path):
     ov = c.get("/api/v1/memory").json()
     assert ov["enabled"] is False and ov["env_override"] is None
     assert not ov["home"].startswith(str(Path.home())) or ov["home"].startswith("~")
-    assert ov["pipeline"] == {"bank_total": 2, "bank_proven": 1, "inbox_total": 3,
+    assert ov["pipeline"] == {"bank_total": 2, "bank_proven": 1, "bank_archived": 0,
+                              "inbox_total": 3,
                               "inbox_ready": 1, "skills_total": 1, "skills_provisional": 1}
     bank = {d["domain"]: d for d in ov["bank"]}["curve_fitting"]
     rows = {r["id"]: r for r in bank["records"]}
@@ -288,3 +289,23 @@ def test_memory_overview_survives_hostile_records(mem_client, tmp_path):
     assert ov["pipeline"]["bank_total"] == 2
     assert [g["technique"] for g in ov["inbox"]] == ["unlabeled"]
     assert ov["inbox"][0]["records"][0]["provenance_label"] == "42"
+
+
+def test_memory_overview_reports_archive_and_independent_evidence(mem_client, tmp_path):
+    """Aged-out records leave the listing but are counted, and each row says
+    how many INDEPENDENT datasets back it (what "proven" counts) and how many
+    times it missed."""
+    from scilink.skills._shared import _script_bank as sb
+    ids = _seed(tmp_path)
+    sb.record_failure("curve_fitting", ids["bank"], "audition_gate_failed")
+    ov = mem_client.get("/api/v1/memory").json()
+    rows = {r["id"]: r for d in ov["bank"] for r in d["records"]}
+    assert rows[ids["bank"]]["n_independent"] == sb.independent_successes(
+        sb.get_record("curve_fitting", ids["bank"]))
+    assert rows[ids["bank"]]["n_failures"] == 1
+
+    plain = next(r for r in rows if r != ids["bank"])
+    assert sb.archive_records("curve_fitting", [plain], reason="never_used") == 1
+    ov = mem_client.get("/api/v1/memory").json()
+    assert ov["pipeline"]["bank_total"] == 1 and ov["pipeline"]["bank_archived"] == 1
+    assert plain not in {r["id"] for d in ov["bank"] for r in d["records"]}

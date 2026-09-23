@@ -1,0 +1,110 @@
+"""Live measurement loop: a simulated experiment first, your instrument next.
+
+Run it as is to watch SciLink follow a simulated in-situ Raman anneal:
+
+    python examples/live_loop_demo.py            # needs an LLM credential for setup
+
+One reference spectrum is analysed thoroughly (a few minutes, a handful of model
+calls). The verified script is locked as the recipe and the outputs you named
+are pinned to those names. Every later frame is then answered by the recipe
+alone — about a second, no model call — and flagged when the recipe stops
+fitting, at which point a new one is built in the background.
+
+To try it on data you have already recorded, swap the simulator for
+``ReplayInstrument("path/to/folder", system_info={...}, outputs={...})``: every
+two-column file in the folder is served as one frame, in file order.
+
+A stream of DATACUBES (spectrum images) works the same way: swap in
+``get_simulator("spectrum_image_series")``, or a ``ReplayInstrument`` over a
+folder of ``.npy`` / HDF5 cubes. The instrument says its frames are cubes and
+the loop follows them with the hyperspectral agent: the reference cube is
+analysed once, its per-pixel script is replayed on every later cube with no
+model call, the tracked quantities are the means of the maps it computes, and a
+change is reported with where on the spectral axis and in which part of the
+field it is.
+
+IMAGES are the third kind of frame (``get_simulator("particle_coarsening_images")``,
+or a folder of ``.npy`` / ``.tif`` / ``.png`` images). One caution that does not
+apply to spectra: an image analysis has no fit quality, so a replayed frame is
+checked only for whether the method still runs and still finds something. Whether
+it is still RIGHT is what the change signal and ``audit_every`` are for.
+
+Two things worth knowing before a first run on rich data. The first ``setup`` is
+the slow part (a full analysis; minutes for a spectrum, tens of minutes for a
+complex image) and is not a hang: every frame after it takes about a second. And
+``MeasurementLoop(..., instrument=inst, remember=True)`` keeps the recipe for the
+INSTRUMENT, so the next run on it tries what it already knows first and usually
+arms in seconds with no model call.
+
+To move to a real instrument there are two routes. If the instrument has (or
+can get) an MCP server in front of its controller, in any language, use
+
+    MCPInstrument.connect(command=["python", "my_instrument_server.py"], tool="acquire")
+
+The acquisition parameters and their limits are read from the tool's own input
+schema; ``scilink/live/mcp_demo_server.py`` is a reference server, and in the
+web UI the same server is connected in the MCP tab and picked in the Live tab.
+Otherwise replace ``get_simulator(...)`` with your own ``Instrument`` subclass
+(the sketch at the bottom). Nothing else changes; the
+same class also works in the web UI's Live tab as ``package.module:ClassName``.
+"""
+
+from scilink.live import MeasurementLoop, run_experiment
+from scilink.live.simulators import get_simulator
+
+MODEL = "claude-opus-4-6"           # or e.g. "bedrock/us.anthropic.claude-opus-4-8"
+
+
+def main():
+    instrument = get_simulator("insitu_raman")      # <- swap this line for MySpectrometer()
+
+    loop = MeasurementLoop(
+        "live_demo/loop", model_name=MODEL,
+        system_info=instrument.system_info,         # technique, sample, axes
+        targets=instrument.targets,                 # what matters, in plain words
+        outputs=instrument.outputs,                 # name -> definition; reported under these names
+        schema=instrument.schema,                   # what the controller accepts
+        auto_escalate=True)                         # rebuild the recipe when it stops fitting
+
+    reference = instrument.acquire({}).save("live_demo/reference", 0, stem="reference")
+    loop.setup(reference=reference)                 # the only slow, model-driven step
+
+    def show(frame, record):
+        values = {k: round(record["features"][k], 3) for k in instrument.outputs
+                  if k in record["features"]}
+        print(f"frame {record['step']:3d}  {record['latency_s']:.1f}s  {values}  {record['flags']}")
+
+    # apply="never": recommendations are recorded, parameters never change.
+    #
+    # Where the experiment can wait, a change in the data can be a decision
+    # point: add  pause_on="novelty", on_pause=decide  and the instrument is asked
+    # to hold (Instrument.pause / resume, or an MCP server's pause / resume
+    # tools) while  decide(event, record)  looks at what changed (event["where"])
+    # and returns "resume", "stop", or parameters to resume with.
+    run_experiment(instrument, loop, n_frames=40, apply="never", on_frame=show)
+    print(loop.status())
+
+
+# ── your instrument ──────────────────────────────────────────────────────────
+#
+# from scilink.live import Frame, Instrument, InstrumentSchema
+#
+# class MySpectrometer(Instrument):
+#     name = "my_raman"
+#     system_info = {"technique": "Raman spectroscopy", "sample": "...",
+#                    "x_axis": "Raman shift (cm^-1)", "y_axis": "intensity (counts)"}
+#     schema = InstrumentSchema.from_dict({
+#         "integration_s": {"low": 0.1, "high": 60, "units": "s",
+#                           "description": "detector integration time"}})
+#     defaults = {"integration_s": 1.0}
+#     outputs = {"g_position": "position of the G band maximum (cm^-1)"}
+#     targets = ["G band position"]
+#
+#     def acquire(self, params):
+#         p = self.check(params)                                  # defaults + schema guard
+#         x, y = vendor_api.measure(integration=p["integration_s"])
+#         return Frame(x=x, y=y, params=p, x_label="raman_shift", y_label="intensity")
+
+
+if __name__ == "__main__":
+    main()

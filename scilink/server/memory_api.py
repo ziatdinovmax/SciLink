@@ -107,6 +107,10 @@ def memory_overview() -> Dict[str, Any]:
             "records": [{
                 "id": r.get("id"), "label": r.get("label"),
                 "n_successes": r.get("n_successes"), "n_retrievals": r.get("n_retrievals"),
+                # Independent evidence (distinct datasets) is what "proven"
+                # counts; n_successes still counts runs.
+                "n_independent": r.get("n_independent"),
+                "n_failures": r.get("n_failures"),
                 "sessions": r.get("sessions") or [], "metric": r.get("metric"),
                 "created_at": r.get("created_at"), "proven": bool(r.get("proven")),
                 "promoted_to_staging": r.get("promoted_to_staging"),
@@ -150,6 +154,9 @@ def memory_overview() -> Dict[str, Any]:
         "pipeline": {
             "bank_total": len(bank_rows),
             "bank_proven": sum(1 for r in bank_rows if r.get("proven")),
+            # Aged out of the listing (never used / never succeeds /
+            # superseded) — intact on disk, restorable from the CLI.
+            "bank_archived": len(_safe(_script_bank.list_archived, [])),
             "inbox_total": len(staged),
             "inbox_ready": n_ready,
             "skills_total": len(skills),

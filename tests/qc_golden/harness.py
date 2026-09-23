@@ -155,16 +155,24 @@ def make_normalizer(volatile_paths: dict[str, str]) -> Callable[[str], str]:
     return norm
 
 
+#: Run accounting, not behavior: wall-clock timings and the script bank's
+#: assist block vary run to run and say nothing about what the QC loop did.
+#: The goldens pin behavior, so these keys are dropped before comparison
+#: (they have their own tests in test_stage_timing_and_bank_assist.py).
+INSTRUMENTATION_KEYS = frozenset({"stage_timings", "bank_assist"})
+
+
 def normalize_obj(obj: Any, norm: Callable[[str], str]) -> Any:
     """Recursively normalize a result structure for golden comparison.
 
     bytes -> placeholder, Path -> normalized str, floats rounded to 6 dp,
-    numpy scalars/arrays -> plain python.
+    numpy scalars/arrays -> plain python; instrumentation keys dropped.
     """
     import numpy as np
 
     if isinstance(obj, dict):
-        return {k: normalize_obj(v, norm) for k, v in obj.items()}
+        return {k: normalize_obj(v, norm) for k, v in obj.items()
+                if k not in INSTRUMENTATION_KEYS}
     if isinstance(obj, (list, tuple)):
         return [normalize_obj(v, norm) for v in obj]
     if isinstance(obj, bytes):

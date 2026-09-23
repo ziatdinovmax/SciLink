@@ -23,6 +23,7 @@ import { TelemetryDetails } from "./components/TelemetryDetails";
 import { LoginScreen } from "./components/LoginScreen";
 import { ToolsPanel } from "./components/ToolsPanel";
 import { SkillsPanel } from "./components/SkillsPanel";
+import { LivePanel } from "./components/LivePanel";
 
 interface SessionState {
   snapshot: SessionSnapshot | null;
@@ -194,7 +195,7 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null); // init overlay text
   const [startError, setStartError] = useState<string | null>(null);
   const [serverStopped, setServerStopped] = useState(false);
-  const [tab, setTab] = useState<"chat" | "files" | "telemetry" | "tools" | "skills">("chat");
+  const [tab, setTab] = useState<"chat" | "files" | "telemetry" | "tools" | "skills" | "live">("chat");
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   // Delegation the sidebar tree asked the Telemetry tab to expand.
   const [focusDelegation, setFocusDelegation] = useState<number | null>(null);
@@ -568,6 +569,13 @@ export default function App() {
                 </button>
               )}
               <button
+                className={tab === "live" ? "active" : ""}
+                onClick={() => setTab("live")}
+                title="Run a live measurement loop on a simulated experiment or your own instrument"
+              >
+                Live
+              </button>
+              <button
                 className={tab === "skills" ? "active" : ""}
                 onClick={() => setTab("skills")}
                 title="Upload custom skills; browse the skill catalog"
@@ -592,6 +600,12 @@ export default function App() {
                 active={tab === "files"}
                 selectedPath={selectedFile}
                 onSelect={setSelectedFile}
+              />
+            </div>
+            <div className="tab-body" hidden={tab !== "live"}>
+              <LivePanel
+                sessionId={session.id} active={tab === "live"} localFiles={auth.local_files}
+                onAskChat={(text) => { setTab("chat"); void sendMessage(text); }}
               />
             </div>
             <div className="tab-body" hidden={tab !== "skills"}>

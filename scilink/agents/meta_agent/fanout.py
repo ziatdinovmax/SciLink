@@ -1029,11 +1029,16 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
             # verbatim — re-composing it would duplicate the mesh blocks.
             task_text = (branch["task"] if branch.get("_premeshed")
                          else _mesh_task(branch, companions))
+            # Typed per-branch depth (the single-delegation path's twin): the
+            # child applies it to every run_analysis call of the branch.
+            _depth = {k: branch.get(k) for k in ("profile", "targets", "time_budget_s")
+                      if branch.get(k)}
             result = child.run_task(
                 task_text,
                 context=branch.get("context"),
                 autonomy=(branch_autonomy if branch_autonomy is not None
                           else AnalysisMode.AUTONOMOUS),
+                **_depth,
             )
         except Exception as e:  # noqa: BLE001
             logger.exception(f"fan-out branch {index} failed: {e}")
