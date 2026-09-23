@@ -51,6 +51,26 @@ SEARCH_DENSITY_BANDS = 10
 DEFAULT_FULL_READ_MAX_CHARS = 250_000
 
 
+def resolve_user_path(file_path, base_dir) -> Path:
+    """A path the user or the model named, made absolute.
+
+    Relative paths are tried against the session directory first (where the
+    web UI puts uploads) and then against the process working directory
+    (where a terminal user typed them). When neither exists the
+    session-relative form is returned, so the error names the expected
+    location. ``~`` is expanded."""
+    path = Path(str(file_path)).expanduser()
+    if path.is_absolute():
+        return path
+    in_session = Path(base_dir) / path
+    if in_session.exists():
+        return in_session
+    in_cwd = Path.cwd() / path
+    if in_cwd.exists():
+        return in_cwd
+    return in_session
+
+
 def _size_error(path: Path, cap_mb: float) -> Optional[Dict[str, Any]]:
     size_mb = path.stat().st_size / (1024 * 1024)
     if size_mb > cap_mb:

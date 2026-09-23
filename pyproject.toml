@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scilink"
-version = "0.0.81"
+version = "0.0.82"
 authors = [
   { name="SciLink Team", email="maxim.ziatdinov@gmail.com" },
 ]
@@ -66,6 +66,11 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "python-multipart>=0.0.9",
+    # Terminal shell (scilink/cli/shell): line editing, history and completion
+    # from prompt_toolkit; rendering from rich (already transitive via
+    # streamlit, but imported directly, so pinned directly).
+    "prompt_toolkit>=3.0.43",
+    "rich>=13.7",
 ]
 
 [project.optional-dependencies]

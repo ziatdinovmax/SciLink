@@ -75,6 +75,36 @@ CRITIC_DIMENSIONS = ("physics", "consistency", "design", "statistics",
                      "method", "evidence")
 
 _CRITIC_DIRECTION_CLIP = 2500   # chars of `details` per direction shown to the critic
+_CRITIC_PROTOCOL_CLIP = 16000   # chars of one experiment's protocol shown to the critic
+
+
+def _experiment_protocol(exp: Dict[str, Any]) -> str:
+    """An experiment's protocol as the critic reads it: steps, equipment,
+    parameter ranges, expected outcome — what can actually be run."""
+    lines: List[str] = []
+    steps = exp.get("experimental_steps")
+    if isinstance(steps, list) and steps:
+        lines.append("  Steps:")
+        lines += [f"    - {str(x)}" for x in steps]
+    eq = exp.get("required_equipment")
+    if isinstance(eq, list) and eq:
+        lines.append("  Equipment: " + "; ".join(str(x) for x in eq))
+    params = exp.get("optimization_params")
+    if isinstance(params, list) and params:
+        lines.append("  Parameters:")
+        for prm in params:
+            if isinstance(prm, dict):
+                rng = (f"{prm.get('min_value')} to {prm.get('max_value')}"
+                       if prm.get("min_value") is not None
+                       or prm.get("max_value") is not None
+                       else str(prm.get("levels") or prm.get("values") or ""))
+                lines.append(f"    - {prm.get('parameter_name')}: {rng}".rstrip(": "))
+    if exp.get("expected_outcome"):
+        lines.append(f"  Expected outcome: {exp.get('expected_outcome')}")
+    body = "\n".join(lines)
+    if len(body) > _CRITIC_PROTOCOL_CLIP:
+        body = body[:_CRITIC_PROTOCOL_CLIP] + "\n  [clipped]"
+    return body
 
 
 def summarize_plan_for_critic(result: Dict[str, Any]) -> str:
@@ -90,15 +120,32 @@ def summarize_plan_for_critic(result: Dict[str, Any]) -> str:
     trajectories" arithmetic contradiction and a "quenched coupons" Track-2
     mode both sat in ``details`` and never reached the critic.
 
-    Returns the conformance summary plus, when present, each direction's
-    ``details`` (clipped per direction, marked), the ``shared_protocol``, and
-    the author's ``open_questions`` (so the critic does not re-raise what the
-    author already flagged, and can judge whether a flagged risk is framed
-    the right way round).
+    The same held for an experimental plan: its protocol lives in
+    ``experimental_steps`` / ``required_equipment``, which the conformance
+    view omits. Live (2026-09-19), the critic called replication "never
+    defined" and an inert transfer "not specified" on a plan whose steps 12
+    and 7 specified both — and an orchestrator then rewrote the plan to fix
+    them. A reviewer who cannot read the protocol can neither confirm a
+    control exists nor see a step that cannot be run.
+
+    Returns the conformance summary plus, when present, each experiment's
+    protocol, each direction's ``details`` (clipped per direction, marked),
+    the ``shared_protocol``, and the author's ``open_questions`` (so the
+    critic does not re-raise what the author already flagged, and can judge
+    whether a flagged risk is framed the right way round).
     """
     experiments = result.get("proposed_experiments", []) or []
-    parts = [summarize_experiment(exp, i + 1) for i, exp in enumerate(experiments)]
     directions = result.get("directions")
+    # A portfolio's experiment entry is a shim; its design is rendered from
+    # ``directions`` / ``shared_protocol`` below.
+    _shim = isinstance(directions, list) and bool(directions)
+    parts = []
+    for i, exp in enumerate(experiments):
+        parts.append(summarize_experiment(exp, i + 1))
+        if not _shim and isinstance(exp, dict) and not exp.get("concepts"):
+            proto = _experiment_protocol(exp)
+            if proto:
+                parts.append(f"PROTOCOL of Experiment {i + 1}:\n{proto}")
     if isinstance(directions, list) and directions:
         parts.append("DIRECTION DETAILS (the author's full design per direction):")
         for d in directions:
@@ -225,6 +272,128 @@ def verify_plan_relevance(objective: str,
         return True, ""
 
 
+# Severity tiers of the plan critic, most material first. ``blocking`` is the
+# only tier anything acts on: a plan that cannot be run as written, or that is
+# hazardous. ``critical`` and ``minor`` stay advisory (see critique_plan).
+SEVERITY_ORDER = {"blocking": 0, "critical": 1, "minor": 2}
+
+# Keys the system stamps onto a plan. They describe one specific version of it,
+# so a pass that re-emits the plan must neither show them to the model nor let
+# an echoed copy survive onto the revision.
+SYSTEM_PLAN_KEYS = ("human_review", "auto_repair")
+
+# A repair that rewrites more than this share of an experiment is a redesign,
+# not a repair (SequenceMatcher ratio over the experiment's JSON).
+REPAIR_MIN_SIMILARITY = 0.6
+
+
+def sort_findings(findings: Any) -> List[Dict[str, Any]]:
+    """Critic findings ordered most material first; damaged records dropped."""
+    if not isinstance(findings, list):
+        return []
+    return sorted((f for f in findings if isinstance(f, dict)),
+                  key=lambda f: SEVERITY_ORDER.get(f.get("severity"), 2))
+
+
+def blocking_findings(findings: Any) -> List[Dict[str, Any]]:
+    """The findings that say the plan cannot be run as written."""
+    return [f for f in sort_findings(findings)
+            if f.get("severity") == "blocking"]
+
+
+def _normalise_blocking(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """A ``blocking`` finding must state the conflict it rests on.
+
+    The tier triggers an automatic rewrite, so it is held to a checkable
+    claim: what the plan says against the limit it violates. One that names
+    no conflict is a judgement call and is filed as ``critical`` instead.
+    """
+    for f in findings:
+        if (isinstance(f, dict) and f.get("severity") == "blocking"
+                and not str(f.get("conflict") or "").strip()):
+            f["severity"] = "critical"
+    return findings
+
+
+def _norm_text(value: Any) -> str:
+    return " ".join(str(value or "").split()).lower()
+
+
+def repair_preserves_scope(before: Dict[str, Any],
+                           after: Dict[str, Any]) -> Optional[str]:
+    """Why an automatic repair is a redesign — or None when it stayed local.
+
+    Deterministic guard on ``repair_blocking_defects``. The number of
+    experiments, each experiment's name and each hypothesis are frozen (the
+    hypothesis and name are where a plan states its material system), and the
+    rest of an experiment may only change locally.
+    """
+    import difflib
+
+    b = before.get("proposed_experiments") or []
+    a = after.get("proposed_experiments") or []
+    if len(a) != len(b):
+        return f"the number of experiments changed ({len(b)} -> {len(a)})"
+    for i, (eb, ea) in enumerate(zip(b, a), 1):
+        if not isinstance(ea, dict) or not isinstance(eb, dict):
+            return f"experiment {i} is no longer an object"
+        for key in ("hypothesis", "experiment_name"):
+            if _norm_text(eb.get(key)) != _norm_text(ea.get(key)):
+                return f"experiment {i}: the {key.replace('_', ' ')} changed"
+        # Over what MAY change only: the frozen fields are identical by now
+        # and would dilute a rewrite of everything else.
+        _free = lambda e: json.dumps(
+            {k: v for k, v in e.items()
+             if k not in ("hypothesis", "experiment_name")}, sort_keys=True)
+        ratio = difflib.SequenceMatcher(
+            None, _free(eb), _free(ea), autojunk=False).ratio()
+        if ratio < REPAIR_MIN_SIMILARITY:
+            return (f"experiment {i} was largely rewritten "
+                    f"(similarity {ratio:.2f} < {REPAIR_MIN_SIMILARITY})")
+    return None
+
+
+def repair_blocking_defects(plan: Dict[str, Any],
+                            findings: List[Dict[str, Any]],
+                            objective: str,
+                            model: Any,
+                            generation_config: Any,
+                            skill_context: Optional[str] = None
+                            ) -> Dict[str, Any]:
+    """One in-place repair of the ``blocking`` defects the critic named.
+
+    Not a refinement: the contract is to fix the cited conflict and nothing
+    else, and to decline (``repair_declined``) when that is impossible without
+    touching the hypothesis or the scope. The caller checks the result with
+    ``repair_preserves_scope`` and a resolution re-critique before accepting
+    it, and keeps the original plan otherwise.
+    """
+    cited = "\n".join(
+        f"{i}. [{f.get('dimension')}] {f.get('issue')}\n"
+        f"   conflict: {f.get('conflict')}"
+        for i, f in enumerate(findings, 1))
+    request = (
+        "AUTOMATIC DEFECT REPAIR. The plan has NOT been executed. A reviewer "
+        "found that it cannot be run as written:\n\n"
+        f"{cited}\n\n"
+        "Fix ONLY the cited conflicts, with the smallest change that removes "
+        "each one. Keep the hypothesis, the experiment name, the material "
+        "system, the number of experiments and every part of the plan a "
+        "conflict does not touch EXACTLY as they are. Address no other "
+        "weakness. If a conflict cannot be removed without changing the "
+        "hypothesis or the scope, leave the plan unchanged and add a "
+        "top-level key \"repair_declined\" saying why. Otherwise add a "
+        "top-level key \"repair_notes\": a list of "
+        "{\"finding\": <number>, \"was\": <the words you changed>, \"now\": "
+        "<what they say now>, \"why\": <one sentence>} — quote only the "
+        "clause that changed, never a whole step."
+    )
+    return refine_plan_with_feedback(
+        original_result=plan, feedback=request, objective=objective,
+        model=model, generation_config=generation_config,
+        skill_context=skill_context)
+
+
 def critique_plan(objective: str,
                   result: Dict[str, Any],
                   model: Any,
@@ -248,9 +417,12 @@ def critique_plan(objective: str,
     is ``verify_plan_relevance``'s enforcing job. This critic only flags physics
     and consistency caveats.
 
-    Returns {"findings": [{"dimension","severity","experiment","issue"}, ...]}
-    with ``dimension`` in {physics, consistency}. Empty findings == clean. Fails
-    open ({"findings": []}) on error so a critic crash never blocks the user.
+    Returns {"findings": [{"dimension","severity","experiment","issue"}, ...]}.
+    ``severity`` is blocking | critical | minor; a ``blocking`` finding also
+    carries ``conflict`` (the plan's value against the limit it violates) and is
+    the one tier the caller may act on — see ``repair_blocking_defects``. Empty
+    findings == clean. Fails open ({"findings": []}) on error so a critic crash
+    never blocks the user.
 
     Optional evidence args mirror what the plan author saw, so the critic checks
     against the same material rather than reasoning in a vacuum (the robustness
@@ -345,7 +517,9 @@ def critique_plan(objective: str,
             "  • a prior caveat the human EXPLICITLY ACCEPTED as a tradeoff -> RETAIN it\n"
             "    but mark it accepted: phrase the issue as an accepted limitation and set\n"
             "    its severity to 'minor' (documented for the record, not a blocker).\n"
-            "  • any NEW physics/consistency issue the revision introduced -> report it.\n\n"
+            "  • any NEW physics/consistency issue the revision introduced -> report it\n"
+            "    with \"introduced\": true. An issue the prior plan already had, raised\n"
+            "    or not, is NOT introduced by the revision.\n\n"
             + "\n\n".join(revision_parts) + "\n"
         )
     else:
@@ -390,15 +564,27 @@ repeat a risk the author already raised under OPEN QUESTIONS unless it is framed
 wrong way round. Report at most 10 findings, most material first.
 
 SEVERITY:
-  • critical — would make the plan infeasible or scientifically wrong.
+  • blocking — the plan cannot be run as written, or running it is a hazard to
+               people or the instrument: a stated condition is physically
+               impossible, or a step exceeds what the stated equipment can do.
+               Reserve it for a conflict you can state as two values — what the
+               plan says against the limit it violates. The limit is a property
+               you can cite (a boiling point, a rated maximum) and the plan's
+               value must exceed it: your estimate of how a step will turn out
+               is not a limit. A weak design, a missing control or an overclaim
+               is never blocking.
+  • critical — would make the plan scientifically wrong or its conclusion unsafe
+               to draw, though it can be run.
   • minor    — worth noting, but the plan still stands.
 
 OUTPUT — a single JSON object:
 {{"findings": [
    {{"dimension": "physics|consistency|design|statistics|method|evidence",
-     "severity": "critical|minor",
+     "severity": "blocking|critical|minor",
      "experiment": "<experiment name or 'plan-wide'>",
-     "issue": "<one concrete sentence>"}}
+     "issue": "<one concrete sentence>",
+     "conflict": "<blocking only: the plan's value vs the limit it violates>",
+     "introduced": <revisions only: true when the revision itself created the issue>}}
 ]}}
 If the plan is clean, return {{"findings": []}}.
 """
@@ -408,8 +594,9 @@ If the plan is clean, return {{"findings": []}}.
         prompt_parts.extend(loaded_images)
         response = model.generate_content(prompt_parts, generation_config=generation_config)
         verdict, _ = parse_json_from_response(response)
-        findings = (verdict or {}).get("findings", []) or []
-        crit = [f for f in findings if f.get("severity") == "critical"]
+        findings = _normalise_blocking((verdict or {}).get("findings", []) or [])
+        crit = [f for f in findings
+                if f.get("severity") in ("blocking", "critical")]
         if crit:
             print(f"    - ⚠️  Critic noted {len(crit)} significant caveat(s).")
         else:
@@ -419,7 +606,8 @@ If the plan is clean, return {{"findings": []}}.
     except Exception as e:
         logging.error(f"Critic step failed: {e}")
         # Fail open: if the critic crashes, assume the plan is okay to avoid blocking the user.
-        return {"findings": []}
+        # ``failed`` lets a caller that needs a real verdict (the repair check) tell.
+        return {"findings": [], "failed": True}
 
 
 def critique_tea(objective: str,
@@ -1129,7 +1317,8 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
     Feedback here is authoritative (human review, experimental results, or a
     discovered constraint) and is incorporated directly. The advisory critic does
     NOT route through this function — its caveats are surfaced for a human /
-    consumer to weigh, not auto-applied.
+    consumer to weigh, not auto-applied. The one exception is the ``blocking``
+    tier, which ``repair_blocking_defects`` sends here under a fix-only contract.
     """
 
     # Construct the context block if available
@@ -1143,7 +1332,8 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
 
     # Strip source_documents from plan so the LLM only cites references
     # it actually uses during refinement (from KB RAG or external context)
-    plan_for_prompt = {k: v for k, v in original_result.items() if k != "source_documents"}
+    plan_for_prompt = {k: v for k, v in original_result.items()
+                       if k != "source_documents" and k not in SYSTEM_PLAN_KEYS}
 
     refinement_prompt = f"""
     You are an expert Research Strategist acting as an editor.
@@ -1242,7 +1432,9 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
                 "message": "JSON parsed but missing 'proposed_experiments' key.",
                 "raw_output": str(refined_result)[:200]
             }
-            
+
+        for _k in SYSTEM_PLAN_KEYS:      # an echoed stamp describes the old plan
+            refined_result.pop(_k, None)
         return refined_result
         
     except Exception as e:

@@ -25,6 +25,7 @@ run over every registered tool so a non-portable schema fails in CI.
 from __future__ import annotations
 
 import copy
+import time
 from typing import Any, Dict, List, Optional
 
 # Keywords that only make sense on one JSON type; a multi-type schema's
@@ -229,7 +230,17 @@ class _PortableCompletions:
             model = kwargs.get("model") or self._default_model
             if openai_tools_need_no_reasoning(model) and "reasoning_effort" not in kwargs:
                 kwargs["reasoning_effort"] = "none"
-        return self._raw.create(*args, **kwargs)
+        _t0 = time.perf_counter()
+        response = self._raw.create(*args, **kwargs)
+        # The proxy path's chat loops call this shim directly: count the
+        # call (and trace it when tracing is on) like the wrapper classes.
+        try:
+            from .openai_wrapper import _record_trace
+            _record_trace(kwargs.get("model") or self._default_model,
+                          kwargs.get("messages"), response, time.perf_counter() - _t0)
+        except Exception:  # noqa: BLE001 - accounting must never break a call
+            pass
+        return response
 
     def __getattr__(self, name):
         return getattr(self._raw, name)

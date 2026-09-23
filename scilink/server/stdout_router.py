@@ -40,14 +40,15 @@ from scilink.utils.log_context import (clear_stop, effective_thread,
 class _Route:
     """One turn's capture target + console-attribution state."""
 
-    __slots__ = ("buffer", "lock", "stop", "tag", "at_line_start")
+    __slots__ = ("buffer", "lock", "stop", "tag", "at_line_start", "echo")
 
     def __init__(self, buffer: io.StringIO, lock: threading.Lock,
-                 stop: threading.Event, tag: str) -> None:
+                 stop: threading.Event, tag: str, echo: bool = True) -> None:
         self.buffer = buffer
         self.lock = lock
         self.stop = stop
         self.tag = tag
+        self.echo = echo   # also write to the real console
         self.at_line_start = True  # guarded by ``lock``
 
 
@@ -99,7 +100,10 @@ class _RoutingStream:
                             out = "".join(parts)
                 finally:
                     _tls.routing = False
-        self._original.write(out)
+        # A route that renders its own buffer (the terminal shell) opts
+        # out of the console tee, or every line would print twice.
+        if route is None or route.echo:
+            self._original.write(out)
         return len(data)
 
     def flush(self) -> None:
@@ -125,14 +129,19 @@ def install() -> None:
 
 class RoutedCapture:
     """Per-turn capture registered with the router instead of swapping the
-    global streams — drop-in for the runner's use of ``OutputCapture``."""
+    global streams — drop-in for the runner's use of ``OutputCapture``.
 
-    def __init__(self, tag: str = "") -> None:
+    ``echo_console=False`` keeps the turn's output in the buffer only:
+    for a front-end that renders the buffer itself on the same console
+    (the terminal shell), the tee would show every line twice."""
+
+    def __init__(self, tag: str = "", echo_console: bool = True) -> None:
         self._buffer = io.StringIO()
         self._buffer_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._agent_thread_id: Optional[int] = None
         self._tag = tag
+        self._echo = echo_console
 
     @property
     def stop_requested(self) -> bool:
@@ -155,7 +164,8 @@ class RoutedCapture:
         clear_stop(self._agent_thread_id)   # a fresh turn on a reused id
         with _ROUTES_LOCK:
             _ROUTES[self._agent_thread_id] = _Route(
-                self._buffer, self._buffer_lock, self._stop_event, self._tag)
+                self._buffer, self._buffer_lock, self._stop_event, self._tag,
+                echo=self._echo)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:

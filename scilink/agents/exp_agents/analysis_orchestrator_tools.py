@@ -1998,9 +1998,8 @@ class AnalysisOrchestratorTools:
                 sources.append(record["output_directory"])
             if source_paths:
                 for sp in ([source_paths] if isinstance(source_paths, str) else list(source_paths)):
-                    p = Path(sp)
-                    if not p.is_absolute():
-                        p = Path(self.orch.base_dir) / p
+                    from ...utils.file_io import resolve_user_path
+                    p = resolve_user_path(sp, self.orch.base_dir)
                     if not p.exists():
                         return json.dumps({"status": "error", "message": f"Path not found: {sp}"})
                     sources.append(str(p))
@@ -3223,10 +3222,8 @@ class AnalysisOrchestratorTools:
                     _paths = [reference_scripts] if isinstance(reference_scripts, str) else list(reference_scripts)
                     _resolved = []
                     for _rp in _paths:
-                        _pp = Path(str(_rp))
-                        if not _pp.is_absolute():
-                            _pp = Path(self.orch.base_dir) / _pp
-                        _resolved.append(str(_pp))
+                        from ...utils.file_io import resolve_user_path
+                        _resolved.append(str(resolve_user_path(_rp, self.orch.base_dir)))
                     if "reference_scripts" in _inspect.signature(agent.analyze).parameters:
                         analyze_kwargs["reference_scripts"] = _resolved
                     else:
@@ -6337,10 +6334,8 @@ class AnalysisOrchestratorTools:
             report — without triggering any analysis. PDF/DOCX are extracted
             to text. Reads from the top; offset / tail / search navigate."""
             print(f"  ⚡ Tool: Reading file '{file_path}'...")
-            path = Path(file_path)
-            if not path.is_absolute():
-                path = Path(self.orch.base_dir) / path
-            from ...utils.file_io import read_file_content
+            from ...utils.file_io import read_file_content, resolve_user_path
+            path = resolve_user_path(file_path, self.orch.base_dir)
             return json.dumps(read_file_content(
                 path, max_lines=max_lines, tail=tail, search=search,
                 offset=offset, match_offset=match_offset,

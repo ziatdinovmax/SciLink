@@ -329,6 +329,116 @@ iteration 0; a TEA run mid-campaign keeps the current iteration (stage
 `TEA Update`) and never resets the counter, and the report keys cards on
 (iteration, kind) so a TEA and the plan it assesses both render.
 
+## A plan the human approved is settled
+
+In autopilot the planning orchestrator used to re-refine a plan the human had
+just approved, on its own reading of the advisory critic. Observed live: three
+self-initiated rewrites after the first ENTER, the catalyst switched to the
+candidate the human had passed over, each round logged as experimental results
+(iteration 4, no experiment run), each later round repairing what the one
+before broke, and a final `edit_file` on `plan.json` that forked the disk copy
+from the state. The critic never converges — it raises a different set of
+advisory findings every time it is asked — so chasing it is unbounded, and a
+falling count of critical findings mostly measures a plan that claims less.
+
+**Approval is recorded, and only three things reopen it.** A review gate stamps
+`human_review` on the plan and the tool result says `SETTLED`. Every rewrite
+tool (`refine_plan_with_results`, `adjust_plan_for_constraints`,
+`refine_portfolio`) takes a required `trigger`: `new_results`, `user_request`,
+or `blocking_defect` — the plan cannot be run as written, or is unsafe. The
+trigger is self-declared, so each value is held to what can be checked
+(`_revision_refusal`): a `user_request` needs a user message since the
+approval; a `blocking_defect` needs a stated reason, has a budget of one per
+authored plan (`MAX_SELF_REVISIONS` — this is what bounds autonomous runs), and
+is final once the human has declined one. Anything less is a caveat in the
+summary. File tools refuse the files that mirror planner state
+(`_STATE_BACKED_FILES`); documents stay editable.
+
+**The reopen gate's default is the approved plan.** An agent-initiated revision
+of an approved plan is shown with its reason, and ENTER *keeps the approved
+plan* (`_revision_gate`, `get_reopen_decision`): a reviewer who waves a gate
+through must get the plan they chose. A declined revision leaves no trace in
+the campaign state — no history snapshot, no results entry, same iteration —
+only an action-log record. Results and user requests keep the ordinary gate.
+
+**Only an executed plan opens an iteration.** The refinement channel carries
+revision requests as well as results (#638), so each `experimental_results`
+entry says which it is (`kind`). `new_results` advances the iteration and is
+framed as "we executed the plan"; the other triggers keep the iteration, are
+framed as "NOT executed", and ask for the requested change only.
+
+**The critic has three tiers and acts on one.** `critical` and `minor` stay
+advisory — auto-applying them rescoped plans (a6b946af). `blocking` is reserved
+for a conflict that can be stated as two values, the plan's against the limit
+it violates — a limit that can be cited and that the plan's value exceeds,
+not the critic's estimate of how a step will turn out (the first blocking
+findings on a naturally authored plan were of that looser kind); one that
+states no `conflict` is filed as `critical`. A blocking
+finding gets ONE in-place repair before the plan is shown
+(`_auto_repair_blocking`, every autonomy mode, the selected candidate only —
+runner-ups stay as authored): a fix-only contract the author may decline, a
+deterministic scope guard (`repair_preserves_scope`: experiment count, names
+and hypotheses frozen — which is where a plan names its material system — and
+the rest at least `REPAIR_MIN_SIMILARITY` alike), and a resolution re-critique
+that must find the conflict gone and no critical finding marked `introduced`
+by the repair. Anything else keeps the plan as authored with the blocking
+caveat and the reason on record. The reviewer sees what changed and can type
+`revert`. Counting critical findings before and after does not work as an
+acceptance rule; the critic's set differs on every call.
+
+**Selection does not depend on what the repair fixes.** The repair runs on the
+selected candidate only — repairing all N before judging triples the cost and
+hides from the judge which author made a gross error — so the judge must not
+mark a candidate down for a defect a local edit would fix: it scores the
+design as it would stand once fixed and lists the defect under that
+candidate's `fixable_defects`. Live A/B on one pair of candidates: under the
+old prompt an impossible temperature in one step cost the stronger design the
+pick in 2 of 3 trials; under this one, 0 of 3. A defect that needs a new
+hypothesis or technique is not fixable and counts in full.
+
+**When the pick cannot be repaired.** With a human at the gate nothing
+switches: the selection prompt shows the blocking caveat and the discarded
+repair, and the human picks another candidate or approves knowingly — a
+decision that binds, because the critic can be wrong. With nobody at the gate
+(autonomous), the pick falls back down the judge's own ranking to the first
+candidate that can be run (`_fallback_order`, bounded by N, recorded as
+`plan_candidates.fallback`) — the one automatic switch of a selection, and
+only ever on a checked conflict. If none can be run, the judge's pick stands
+and nothing is enforced: the tool result carries `unresolved_blocking_finding`
+(issue, conflict, and that the repair failed) and the orchestrator decides —
+check the cited limit, fix the plan with its one guarded revision, proceed, or
+stop and report; the caveat reaches a headless caller in `warnings` either way
+(`_standing_blocker`; a human review settles it). A hard stop was tried
+(code generation refused, `run_task` forced to `error`) and removed: it failed
+runs on the critic's word alone, and live the critic cited three different
+limits for one hazard in three passes.
+
+**The agent's own revision is a repair too.** A `blocking_defect` rewrite from
+the orchestrator passes the same checks as the automatic one
+(`_discard_self_revision`: the scope guard, no critical finding `introduced`);
+one that fails is discarded before any gate and the tool says why. If the
+defect cannot be fixed locally, the agent reports it and the human decides.
+
+**The gates say what the decision is about.** A review question carries its
+subject on `origin`, not in the printed text: the plan gate's `auto_repair`
+change lines, the reopen gate's `reason`. The presenter turns them into a
+`notice` callout beside the buttons (count in the title, long lines clipped —
+the full text is in the review above) plus a one-click "Revert
+auto-correction"; the reopen gate reuses the keep/revert widget with its own
+words and a text box for "adopt with changes". Keying these on the printed
+notice failed in the browser: a real plan puts pages of caveats between the
+notice and the prompt, outside the presenter's context tail. `revert` counts
+as a declined reopen — the human just refused that exact fix. Mission Control
+relays the planning child's questions through the same panel, so the controls
+are identical there.
+
+**The critic reads the protocol.** `summarize_plan_for_critic` shows an
+experiment plan's steps, equipment, parameter ranges and expected outcome, as
+it shows a portfolio's `details`; the conformance pass keeps its
+coverage-and-identity view. Before this, the critic called replication "never
+defined" and an inert transfer "not specified" on a plan whose steps specified
+both, and could not have seen an unrunnable step at all.
+
 ## Plan-mode capability boundaries
 
 Two settled conventions on where capability lives in plan mode:
@@ -535,6 +645,33 @@ Because the meta consumes children through their `run_task` contract (not
 through inherited internals), no base class is required. The contract is
 duck-typed; what the children share is *interface shape*, not
 *implementation*.
+
+## The terminal is one shell over the four chat modes
+
+`scilink/cli/shell/` is the single REPL behind bare `scilink` (meta),
+`scilink analyze`, `scilink plan` and `scilink simulate`; the four
+`cli/<mode>.py` files are thin entry points. A `ModeAdapter` (`modes.py`)
+carries what differs per mode — flags, how to build/restore the
+orchestrator, autonomy get/set, status fields, extra slash commands,
+seed turns, headless `run_task` — and nothing else. This does not
+contradict the no-`BaseChatOrchestrator` rule above: the agents are
+untouched; only the terminal layer, which was four copies, is one.
+
+The shell reuses the web backend's turn machinery rather than
+re-implementing it: `RoutedCapture(echo_console=False)` for the
+print-driven stop, `ParkingChannel` (the base of the web `HTTPChannel`)
+for human-in-the-loop questions, `presenter.present_question` for the
+widget vocabulary, `sessions.discover_resumable` for resume. The words
+both surfaces show live in `scilink/ui/vocabulary.py` (mode names,
+placeholders, status badges, consent sentence, stop messages, the
+"Enter = <accept>" hint, activity labels); `scripts/gen_vocabulary.py`
+exports them to `webui/src/vocabulary.ts` and a test keeps the two equal.
+The narration reader (`scilink/ui/narration.py`, TS twin
+`webui/src/narration.ts`) classifies the agents' printed lines and derives
+the activity label; the web runner emits it as an `activity` event, the
+shell shows it on its status row, and one fixture pins both readers.
+**When a chat-surface label or behaviour changes, change it in the
+vocabulary or the narration reader, not in one surface.**
 
 ## Sequencing — hard features first, UI later
 

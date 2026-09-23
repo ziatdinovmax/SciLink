@@ -1062,7 +1062,7 @@ class MetaOrchestratorTools:
                                 "extra (pip install scilink[sim])."),
                     "detail": str(e),
                 })
-            print(f"  ⚛️  Delegating to simulation specialist: {task[:80]}...")
+            print("  " + _handoff(f"⚛️ Delegating to simulation specialist: {task[:80]}..."))
             return self.orch._delegate("simulation", task, context,
                                        context_from, label)
 
@@ -2061,10 +2061,8 @@ class MetaOrchestratorTools:
                       tail: bool = False, search: str = None,
                       offset: int = None, match_offset: int = None) -> str:
             print(f"  ⚡ Tool: Reading file '{file_path}'...")
-            path = Path(str(file_path)).expanduser()
-            if not path.is_absolute():
-                path = Path(self.orch.base_dir) / path
-            from ...utils.file_io import read_file_content
+            from ...utils.file_io import read_file_content, resolve_user_path
+            path = resolve_user_path(file_path, self.orch.base_dir)
             return json.dumps(read_file_content(
                 path, max_lines=max_lines, tail=tail, search=search,
                 offset=offset, match_offset=match_offset,
@@ -2089,8 +2087,8 @@ class MetaOrchestratorTools:
                 "it repeatedly hoping to see more — a truncated read lists "
                 "the section headings with line numbers: use offset=<line> "
                 "to jump, search='<pattern>' to find where something is, or "
-                "tail=true to read the END. Path is absolute or relative to "
-                "the meta session directory."
+                "tail=true to read the END. Path is absolute, or relative to "
+                "the meta session directory or the working directory."
             ),
             parameters={
                 "file_path": {"type": "string",

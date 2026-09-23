@@ -5,7 +5,8 @@ from datetime import datetime
 from typing import Dict, Any, List
 
 from .parser_utils import plan_directions, plan_is_portfolio, plan_thesis
-from .user_interface import format_caveats, concept_title, humanize_key
+from .user_interface import (format_caveats, format_auto_repair,
+                             concept_title, humanize_key)
 
 class HTMLReportGenerator:
     def __init__(self, agent_state: Dict[str, Any]):
@@ -508,6 +509,16 @@ class HTMLReportGenerator:
                                 if plan_is_portfolio(plan) else
                                 "".join(self._render_experiment(exp, x+1)
                                         for x, exp in enumerate(plan.get('proposed_experiments', []))))
+                # What the automatic defect repair changed (same source as the CLI)
+                repair_lines = format_auto_repair(plan.get('auto_repair'))
+                if repair_lines:
+                    items = "".join(f"<li>{html.escape(c)}</li>" for c in repair_lines)
+                    content_html += (
+                        '<div class="auto-repair" style="margin-top:18px;padding:14px 16px;'
+                        'background:#e0f2fe;border-left:4px solid #0284c7;border-radius:6px;">'
+                        '<strong style="color:#075985">🔧 Automatic defect repair</strong>'
+                        f'<ul style="margin:8px 0 0;color:#0c4a6e">{items}</ul></div>'
+                    )
                 # Advisory critic caveats (same source as the CLI summary / warnings)
                 caveat_lines = format_caveats(plan.get('critic_findings'))
                 if caveat_lines:
@@ -530,9 +541,12 @@ class HTMLReportGenerator:
             # Show a minimal results reference for experiment cards
             if not is_tea:
                 plan_iter = plan.get('iteration', None)
+                # Real results first: a revision request shares the iteration
+                # of the plan it revised and must not hide them.
+                _matches = [r for r in results if r.get('iteration') == plan_iter]
                 matching_result = next(
-                    (r for r in results if r.get('iteration') == plan_iter),
-                    None
+                    (r for r in _matches if r.get('kind') != 'feedback'),
+                    _matches[0] if _matches else None
                 )
                 if matching_result:
                     raw_input = matching_result.get('raw_input', '')

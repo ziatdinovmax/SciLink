@@ -177,6 +177,13 @@ Score EACH candidate 1-5 on:
 - "information_gain": how much the result advances the objective whichever way
   it falls.
 
+A defect that a local edit would fix — a value outside what is physically
+possible, a volume or range the stated equipment cannot deliver — is repaired
+after selection, so it is NOT a reason to score a candidate down: score the
+design as it would stand once fixed, and list each such defect under that
+candidate's "fixable_defects". A defect that can only be removed by changing
+the hypothesis or the technique is not fixable and counts in full.
+
 Then select ONE candidate. You are a selector, not an editor: do not rewrite,
 merge, or extend any plan. If your selection does NOT have the top score on
 some criterion, you MUST state that tradeoff plainly in your reasoning rather
@@ -185,6 +192,7 @@ than smoothing it over.
 Respond with a single JSON object:
 {"scores": [{"candidate": <1-based int>, "groundedness": <1-5>, "testability": <1-5>,
              "actionability": <1-5>, "feasibility": <1-5>, "information_gain": <1-5>,
+             "fixable_defects": ["<a locally fixable defect, in a few words>"],
              "comment": "<one sentence>"}],
  "selected_candidate": <1-based int>,
  "reasoning": "<short paragraph explaining the comparative pick, naming any criterion where the pick is not the top scorer>"}

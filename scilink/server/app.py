@@ -25,6 +25,7 @@ from scilink.ui.config import (
     resolve_prefill,
     resolve_embedding_prefill,
 )
+from scilink.ui import vocabulary as _vocab
 from scilink.ui.session_meta import save_session_name
 
 from . import files as files_mod
@@ -56,9 +57,9 @@ NO_BUNDLE_MESSAGE = (
     "    scripts/build_webui.sh        # or: cd webui && npm run build\n\n"
     "Release wheels (pip install scilink) ship the bundle already.\n")
 
-# Consent text mirrored from the Streamlit sidebar checkbox (sidebar.py:382).
-CONSENT_TEXT = ("I understand that the agent will execute generated "
-                "Python code on my machine")
+# The code-execution consent sentence — shared with the terminal shell's
+# startup confirmation through the vocabulary.
+CONSENT_TEXT = _vocab.CONSENT_TEXT
 
 
 def create_app(session_root: Path, serve_frontend: bool = True,
@@ -195,11 +196,10 @@ def create_app(session_root: Path, serve_frontend: bool = True,
             "models": MODEL_OPTIONS,
             "embedding_models": EMBEDDING_MODEL_OPTIONS,
             "autonomy_options": {
-                "meta": ["autopilot", "autonomous"],
-                "analyze": ["co-pilot", "autopilot", "autonomous"],
-                "plan": ["co-pilot", "autopilot", "autonomous"],
-            },
+                k: _vocab.autonomy_options(k) for k in _vocab.mode_keys()},
             "consent_text": CONSENT_TEXT,
+            # The words both chat surfaces share (labels, names, hints).
+            "vocabulary": _vocab.as_json(),
             "provider": {
                 "name": spec.name,
                 "key_label": spec.key_label,

@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { api, type PresentedQuestion } from "../api";
 import { MarkdownBody } from "./MarkdownBody";
+import { fill } from "../narration";
+import { VOCAB } from "../vocabulary";
 
 /** Renders the parked HITL question — the React twin of the Streamlit
  * feedback branch (app.py:1053-1327). The response contracts are identical:
@@ -26,6 +28,11 @@ export function FeedbackPanel({
     setSent(true);
     onRespond(response);
   };
+  // The empty answer accepts as-is on every surface; the terminal shell
+  // shows the same hint next to its prompt.
+  const hint = question.labels.accept
+    ? fill(VOCAB.enter_accepts_hint, { accept: question.labels.accept })
+    : "";
 
   const previews = question.preview_images.map((p) => {
     const base = p.split("/").pop() ?? p;
@@ -56,11 +63,23 @@ export function FeedbackPanel({
     <div className="context-box">{question.context_display}</div>
   ) : null;
 
+  const notice = question.notice ? (
+    <div className="feedback-notice">
+      <strong>{question.notice.title}</strong>
+      <ul>
+        {question.notice.lines.map((l) => (
+          <li key={l}>{l}</li>
+        ))}
+      </ul>
+    </div>
+  ) : null;
+
   if (question.widget === "keep_revert") {
     return (
       <div className="feedback-panel">
         {previews}
         {contextBox}
+        {notice}
         <div className="feedback-actions">
           <button className="primary" onClick={() => respond("keep")} disabled={sent}>
             {question.labels.keep}
@@ -69,6 +88,26 @@ export function FeedbackPanel({
             {question.labels.revert}
           </button>
         </div>
+        {question.labels.submit && (
+          <div className="feedback-followup">
+            <label className="field">
+              <span>{question.labels.input}</span>
+              <textarea
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                rows={2}
+              />
+            </label>
+            <div className="feedback-actions">
+              <button
+                disabled={sent || !text.trim()}
+                onClick={() => respond(text.trim())}
+              >
+                {question.labels.submit}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -110,7 +149,15 @@ export function FeedbackPanel({
     const cands = question.candidates ?? [];
     const pick = question.judge_pick;
     return (
-      <div className="feedback-panel">
+      <div
+        className="feedback-panel"
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            respond("");
+          }
+        }}
+      >
         {previews}
         {contextBox}
         <p style={{ marginTop: 0 }}>{question.labels.select}</p>
@@ -139,10 +186,11 @@ export function FeedbackPanel({
             className="success"
             disabled={sent}
             onClick={() => respond("")}
-            title={`Accept the judge's pick (Candidate ${pick})`}
+            title={`${hint} — Candidate ${pick}`}
           >
             {question.labels.accept}
           </button>
+          <span className="caption">{hint}</span>
         </div>
       </div>
     );
@@ -154,11 +202,19 @@ export function FeedbackPanel({
       {previews}
       {codeFiles}
       {contextBox}
+      {notice}
       <label className="field">
         <span>{question.labels.input}</span>
         <textarea
           value={text}
           onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            // Enter sends: text is the feedback, empty accepts as-is.
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              respond(text.trim());
+            }
+          }}
           rows={3}
         />
       </label>
@@ -170,9 +226,15 @@ export function FeedbackPanel({
         >
           {question.labels.submit}
         </button>
-        <button className="primary" disabled={sent} onClick={() => respond("")}>
+        <button className="primary" disabled={sent} onClick={() => respond("")} title={hint}>
           {question.labels.accept}
         </button>
+        {question.labels.revert_repair && (
+          <button disabled={sent} onClick={() => respond("revert")}>
+            {question.labels.revert_repair}
+          </button>
+        )}
+        <span className="caption">{hint}</span>
       </div>
     </div>
   );

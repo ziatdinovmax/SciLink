@@ -1,3 +1,4 @@
+import { VOCAB } from "../vocabulary";
 import { useEffect, useState } from "react";
 import {
   api,
@@ -551,7 +552,7 @@ export function Sidebar({
           <h3>Session</h3>
           <p style={{ margin: "0 0 6px" }}>
             <span className={`status-badge ${status}`}>
-              {status === "awaiting_input" ? "awaiting your input" : status}
+              {(VOCAB.status_labels as Record<string, string>)[status] ?? status}
             </span>
           </p>
           <label className="field">
@@ -620,11 +621,7 @@ export function Sidebar({
                   <div className="session-info">
                     {s.name ?? s.id}
                     <span className="caption">
-                      {s.status === "awaiting_input"
-                        ? "🟠 awaiting input"
-                        : s.status === "running"
-                          ? "🟢 running"
-                          : "⚪ idle"}{" "}
+                      {(VOCAB.status_badges as Record<string, string>)[s.status] ?? s.status}{" "}
                       · {s.mode} · {s.n_messages} messages
                     </span>
                   </div>
