@@ -79,6 +79,26 @@ What a shared server changes, and only a shared server:
   server for everyone);
 - cookie sessions live in memory, so a restart signs everyone out.
 
+### Behind an authenticating proxy
+
+When something in front of the server already knows who the user is — an
+OIDC / SSO proxy, a load balancer with authentication — let it say so
+instead of handing out tokens:
+
+```bash
+scilink-web --host 0.0.0.0 --auth-header X-Auth-Request-User \
+            --trusted-proxy 10.0.0.0/8
+```
+
+The user is the value of that header, honoured only on requests that arrive
+from a `--trusted-proxy` address or network (default: loopback, the
+reverse-proxy-on-the-same-host case). Each user gets an isolated session
+root under `<session-root>/users/<name>/`, exactly as with `--users`; the
+sign-in screen never appears, tokens and the login cookie are not accepted,
+and a restart signs nobody out because identity comes with every request.
+The proxy must strip that header from incoming requests before adding its
+own, or anyone could name themselves.
+
 ### Embeddings
 
 Plan and Mission Control sessions ground on a knowledge base when one is

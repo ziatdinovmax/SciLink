@@ -35,11 +35,12 @@ construction.
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import json
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -64,6 +65,12 @@ class AuthConfig:
     users: Dict[str, str]                       # user name -> token
     multi_user: bool = False                    # per-user session roots
     _cookies: Dict[str, str] = field(default_factory=dict)  # cookie id -> user
+    # Trusted-header mode: the user is whoever a proxy in front says it is
+    # (an OIDC / SSO proxy, a load balancer with authentication), read from
+    # ``header`` on requests that arrive FROM one of ``trusted_proxies``.
+    # Nothing else is trusted: no tokens, no cookie sign-in.
+    header: Optional[str] = None
+    trusted_proxies: Tuple[Any, ...] = ()       # ip_network objects
 
     # -- construction ---------------------------------------------------
     @classmethod
@@ -74,6 +81,22 @@ class AuthConfig:
                 "The access token must be at least 16 characters; generate "
                 "one with: python -c 'import secrets; print(secrets.token_urlsafe(32))'")
         return cls(users={DEFAULT_USER: token}, multi_user=False)
+
+    @classmethod
+    def from_header(cls, header: str, trusted_proxies: Iterable[str] = ()) -> "AuthConfig":
+        """Identity from a proxy's header. ``trusted_proxies`` are the
+        addresses or networks the proxy connects from; empty means loopback
+        only, which is the reverse-proxy-on-the-same-host case."""
+        name = (header or "").strip()
+        if not name or any(c.isspace() for c in name):
+            raise AuthConfigError("The identity header needs a name, e.g. X-Auth-Request-User")
+        nets = []
+        for raw in (list(trusted_proxies) or ["127.0.0.1/32", "::1/128"]):
+            try:
+                nets.append(ipaddress.ip_network(str(raw).strip(), strict=False))
+            except ValueError as exc:
+                raise AuthConfigError(f"Bad trusted proxy {raw!r}: {exc}")
+        return cls(users={}, multi_user=True, header=name, trusted_proxies=tuple(nets))
 
     @classmethod
     def from_users_file(cls, path: Path) -> "AuthConfig":
@@ -110,7 +133,9 @@ class AuthConfig:
 
     def login(self, token: str) -> Optional[str]:
         """Mint a cookie session for the token's user; returns the cookie
-        value, or None for an unknown token."""
+        value, or None for an unknown token (always, in header mode)."""
+        if self.header:
+            return None
         user = self.user_for_token(token)
         if user is None:
             return None
@@ -125,7 +150,25 @@ class AuthConfig:
     def user_for_cookie(self, cookie: Optional[str]) -> Optional[str]:
         return self._cookies.get(cookie or "")
 
+    def _from_trusted_proxy(self, request: Request) -> bool:
+        client = getattr(request, "client", None)
+        host = getattr(client, "host", None) if client else None
+        try:
+            addr = ipaddress.ip_address(host)
+        except (TypeError, ValueError):
+            return False
+        return any(addr in net for net in self.trusted_proxies)
+
     def user_for_request(self, request: Request) -> Optional[str]:
+        if self.header:
+            if not self._from_trusted_proxy(request):
+                return None
+            name = (request.headers.get(self.header) or "").strip()
+            # what a proxy sends is a name to sanitize, not a token to match
+            n = name.lower()
+            if not n or set(n) - _USERNAME_OK or n in (".", ".."):
+                return None
+            return n
         auth = request.headers.get("authorization", "")
         if auth.lower().startswith("bearer "):
             return self.user_for_token(auth[7:].strip())

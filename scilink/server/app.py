@@ -171,6 +171,9 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         browser needs (EventSource / <img> / downloads cannot send headers)."""
         if auth is None:
             return {"user": DEFAULT_USER}
+        if auth.header:
+            raise HTTPException(401, "This server is signed into through the proxy "
+                                     "in front of it, not with a token.")
         cookie = auth.login(body.token)
         if cookie is None:
             raise HTTPException(401, "Invalid access token.")
