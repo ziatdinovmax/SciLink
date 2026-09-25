@@ -94,11 +94,14 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         user = getattr(request.state, "user", None)
         return user or DEFAULT_USER
 
+    confined = bool(auth is not None and auth.multi_user)
+
     def _mgr(request: Request) -> SessionManager:
         user = _user(request)
         mgr = managers.get(user)
         if mgr is None:
-            mgr = SessionManager(user_root(session_root, auth, user))
+            mgr = SessionManager(user_root(session_root, auth, user),
+                                 confined=confined)
             managers[user] = mgr
         return mgr
     app.state.manager_for_user = lambda user: managers.get(user)

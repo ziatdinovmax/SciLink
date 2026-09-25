@@ -195,10 +195,20 @@ def collect_restored_deliverables(session_path: Path) -> tuple:
 
 
 class SessionManager:
-    def __init__(self, session_root: Path) -> None:
+    def __init__(self, session_root: Path, *, confined: bool = False) -> None:
+        """``confined`` keeps discovery and resume inside ``session_root``.
+        The central sessions index is one file per ``SCILINK_HOME``, shared
+        by every user root on a multi-user server, so there a manager may
+        only see and resume sessions under its own root. A single-user
+        server keeps the index's "resume from anywhere"."""
         self.session_root = session_root.resolve()
+        self.confined = confined
         self._sessions: Dict[str, WebSession] = {}
         self._lock = threading.Lock()
+
+    @property
+    def _within(self) -> Optional[Path]:
+        return self.session_root if self.confined else None
 
     # -- lookup ---------------------------------------------------------
     def get(self, session_id: str) -> Optional[WebSession]:
@@ -235,7 +245,8 @@ class SessionManager:
         (any folder) plus a scan of the root for sessions that predate it,
         minus the ones already live here. An entry from another folder
         carries that folder in its label."""
-        entries = list_sessions(mode, root=self.session_root, exclude=self._sessions)
+        entries = list_sessions(mode, root=self.session_root, exclude=self._sessions,
+                                within=self._within)
         for e in entries:
             if Path(e["folder"]).resolve() != self.session_root:
                 e["label"] = f"{e['label']} · {e['folder']}"
@@ -312,7 +323,8 @@ class SessionManager:
         if session_path.parent != self.session_root or not session_path.is_dir():
             # Not under the root: an id the central index knows (a session
             # from another folder, e.g. one the terminal shell created).
-            indexed = resolve_session(resume_dir, mode, root=self.session_root)
+            indexed = resolve_session(resume_dir, mode, root=self.session_root,
+                                      within=self._within)
             if indexed is None or not indexed.is_dir():
                 raise SessionError(f"No such session: {resume_dir}")
             session_path = indexed
