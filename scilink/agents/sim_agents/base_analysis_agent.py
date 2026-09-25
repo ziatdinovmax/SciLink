@@ -89,6 +89,7 @@ class BaseAnalysisAgent(ABC):
         max_refinement_attempts: int = 2,
         google_api_key: Optional[str] = None,
         local_model: Optional[str] = None,
+        max_verification_iterations: Optional[int] = None,
     ):
         """Construct the agent and its LLM client + sandbox executor.
 
@@ -101,10 +102,16 @@ class BaseAnalysisAgent(ABC):
             base_url: OpenAI-compatible internal-proxy URL; when set, requests
                 route through the proxy client, otherwise through LiteLLM.
             executor_timeout: Per-script sandbox timeout, in seconds.
-            max_refinement_attempts: How many times a failed script is
-                regenerated from its error before giving up.
+            max_refinement_attempts: How many times a script that *crashed*
+                (or violated the output contract) is regenerated from its
+                error before giving up. Bounds the initial attempt only.
             google_api_key: Deprecated. Use ``api_key``.
             local_model: Deprecated. Use ``base_url``.
+            max_verification_iterations: How many times a script that ran but
+                produced an *implausible* result is regenerated with verifier
+                feedback (each iteration is one generation, one execution and
+                one verification, plus a final verification after the last).
+                Defaults to ``max_refinement_attempts``.
 
         Raises:
             ValueError: If ``base_url`` is set and no key can be resolved.
@@ -113,6 +120,7 @@ class BaseAnalysisAgent(ABC):
         self.output_dir = Path(output_dir).resolve()
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.max_refinement_attempts = max_refinement_attempts
+        self._max_verification_iterations = max_verification_iterations
         self.state: Dict[str, Any] = {}
 
         api_key, base_url = normalize_params(
@@ -146,6 +154,8 @@ class BaseAnalysisAgent(ABC):
 
     @property
     def max_verification_iterations(self) -> int:
+        if self._max_verification_iterations is not None:
+            return self._max_verification_iterations
         return self.max_refinement_attempts
 
     # ── skills ────────────────────────────────────────────────────────
@@ -272,8 +282,16 @@ class BaseAnalysisAgent(ABC):
                                          output_type)
             result = self._execute_script(preamble + code, task)
             if result.get("ok"):
+                # The script ran and produced its answer (success OR an honest
+                # error). Return it as-is — do not retry, and never overwrite an
+                # honest error with success.
                 out = {k: v for k, v in result.items() if k != "ok"}
                 out["attempts"] = attempt + 1
+                # Non-scalar outputs (curve/image/datacube) hand back a file; the
+                # script writes it into OUTPUT_DIR and references it. Resolve and
+                # require it. A success with no artifact on disk is a fixable
+                # codegen slip — feed the refine loop and retry (like a
+                # missing-JSON result), not a terminal error.
                 if output_type != "scalar" and out.get("status") == "success":
                     artifact = self._resolve_artifact(out.get("artifact"))
                     if artifact is None:
@@ -323,11 +341,15 @@ class BaseAnalysisAgent(ABC):
         pass
 
     def qc_assess(self, ctx: QCItemContext, verification: dict) -> None:
+        # The verdict travels with the result it judged, so whichever result
+        # is returned carries its own verification, not the latest one.
+        judged = ctx.current_result or ctx.best_result
+        judged["verification"] = verification
         score = 1.0 if verification.get("plausible", True) else 0.0
         ctx.current_score = score
         if score > ctx.best_score:
             ctx.best_score = score
-            ctx.best_result = ctx.current_result
+            ctx.best_result = judged
         ctx.verification_history.append(verification)
 
     def qc_check_accept(self, ctx: QCItemContext, verification: dict) -> bool:
@@ -353,14 +375,15 @@ class BaseAnalysisAgent(ABC):
         output_type, preamble = s["output_type"], s["preamble"]
         feedback = s.get("_verification_feedback", "")
 
-        level = min(ctx.annealing_level, len(self._CONSTRAINT_ANNEALING_SCHEDULE) - 1)
-        if just_escalated_to_hot or level >= len(self._CONSTRAINT_ANNEALING_SCHEDULE) - 1:
-            recipe_instruction = ""
-        else:
-            recipe_instruction = recipe
+        # The recipe stays at every level: it is what tells codegen how to read
+        # the engine's output format. At hot it becomes advisory (the method
+        # may change) rather than dropped.
+        hot = len(self._CONSTRAINT_ANNEALING_SCHEDULE) - 1
+        advisory = just_escalated_to_hot or ctx.annealing_level >= hot
 
-        code = self._generate_code(task, data_files, recipe_instruction, pkgs,
-                                    output_type, verification_feedback=feedback)
+        code = self._generate_code(task, data_files, recipe, pkgs, output_type,
+                                    verification_feedback=feedback,
+                                    recipe_advisory=advisory)
         result = self._execute_script(preamble + code, task)
         if result.get("ok"):
             out = {k: v for k, v in result.items() if k != "ok"}
@@ -381,18 +404,17 @@ class BaseAnalysisAgent(ABC):
     def qc_after_refit(self, ctx: QCItemContext, refit_result: dict,
                        verification: dict) -> None:
         ctx.current_result = refit_result
-        ctx.current_score = 1.0
+        ctx.current_score = -1.0  # unverified until qc_assess scores it
 
     def qc_final_verify(self, ctx: QCItemContext) -> None:
         result = ctx.current_result
         if not result or result.get("status") != "success":
             return
-        if not ctx.state.get("verify", True):
-            ctx.approved = True
-            return
         if result.get("value") is not None or result.get("artifact"):
             v = self._verify_result(
                 ctx.state["task"], result, ctx.state["output_type"])
+            result["verification"] = v
+            ctx.verification_history.append(v)
             if v.get("plausible", True):
                 ctx.best_result = result
                 ctx.best_score = 1.0
@@ -400,20 +422,14 @@ class BaseAnalysisAgent(ABC):
 
     def qc_post_verification(self, ctx: QCItemContext):
         if ctx.approved and ctx.best_result:
-            out = {k: v for k, v in ctx.best_result.items()
-                   if k not in ("success", "script", "ok")}
-            if ctx.state.get("verify", True) and ctx.verification_history:
-                out["verification"] = ctx.verification_history[-1]
-            return out
+            return {k: v for k, v in ctx.best_result.items()
+                    if k not in ("success", "script", "ok")}
         return None
 
     def qc_fallback(self, ctx: QCItemContext) -> dict:
         if ctx.best_result and ctx.best_result.get("status") == "success":
-            out = {k: v for k, v in ctx.best_result.items()
-                   if k not in ("success", "script", "ok")}
-            if ctx.verification_history:
-                out["verification"] = ctx.verification_history[-1]
-            return out
+            return {k: v for k, v in ctx.best_result.items()
+                    if k not in ("success", "script", "ok")}
         source = ctx.best_result or ctx.initial_result or {}
         return {"status": "error",
                 "message": source.get("message", "all attempts failed"),
@@ -423,7 +439,8 @@ class BaseAnalysisAgent(ABC):
     def _generate_code(self, task: str, data_files: Dict[str, str],
                        recipe: str, packages: List[str],
                        output_type: str = "scalar",
-                       verification_feedback: str = "") -> str:
+                       verification_feedback: str = "",
+                       recipe_advisory: bool = False) -> str:
         """Generate a self-contained analysis script for ``task``.
 
         ``output_type`` selects the output contract the script must satisfy: a
@@ -434,6 +451,8 @@ class BaseAnalysisAgent(ABC):
         ``verification_feedback``, when non-empty, carries the reasoning from a
         prior verification failure and the current annealing-level guidance, so
         the regenerated script addresses the identified issue.
+        ``recipe_advisory`` (the hot annealing level) keeps the recipe in the
+        prompt — it documents how to read the data — but frees the method.
         """
         files_desc = "\n".join(f"  - {name}: {path}"
                                for name, path in data_files.items())
@@ -442,6 +461,11 @@ class BaseAnalysisAgent(ABC):
             f"\nPRIOR ATTEMPT FEEDBACK:\n{verification_feedback}\n"
             if verification_feedback else ""
         )
+        recipe_label = (
+            "TECHNIQUE RECIPE (advisory at this level: keep its guidance on "
+            "reading the data files, but you may change the method)"
+            if recipe_advisory else "TECHNIQUE RECIPE (follow this)"
+        )
         prompt = (
             "You are a scientific data-analysis engineer. Write a complete, "
             "self-contained Python script that computes the requested property "
@@ -449,7 +473,7 @@ class BaseAnalysisAgent(ABC):
             "JSON object on the LAST line of stdout.\n\n"
             f"TASK: {task}\n\n"
             f"DATA FILES (globals `DATA_FILES` maps name -> path):\n{files_desc}\n\n"
-            + (f"TECHNIQUE RECIPE (follow this):\n{recipe}\n\n" if recipe else "")
+            + (f"{recipe_label}:\n{recipe}\n\n" if recipe else "")
             + feedback_block
             + "REQUIREMENTS:\n"
             f"- Import only from: {', '.join(packages)}.\n"
