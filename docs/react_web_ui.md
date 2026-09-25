@@ -99,6 +99,32 @@ and a restart signs nobody out because identity comes with every request.
 The proxy must strip that header from incoming requests before adding its
 own, or anyone could name themselves.
 
+### In a container, one per workspace
+
+The Dockerfile has a `web` target whose entrypoint is `scilink-web`:
+
+```bash
+docker build --target web -t scilink-web .
+docker run -p 8422:8422 -e SCILINK_WEB_TOKEN=<secret> \
+           -e AWS_BEARER_TOKEN_BEDROCK=... -e AWS_REGION_NAME=us-east-1 \
+           -v /srv/campaigns/perovskites:/workspace -v scilink-models:/models \
+           scilink-web
+```
+
+`/workspace` is the campaign's own volume: `sessions/` (the session root),
+`home/` (`SCILINK_HOME`: knowledge bases, banked scripts, graduated skills,
+instrument memory, the memory switch), `data/`, the usage ledger, and an
+optional `workspace.json` manifest that `/api/v1/ops/health` names.
+`/models` is the shared, read-only model cache. Everything one campaign
+learns or uploads stays on its volume, and vendor keys ride the container's
+environment and never reach generated scripts. The server binds all
+interfaces and therefore requires authentication: a token, or
+`--auth-header` behind an authenticating proxy. A control plane drives it
+through `/api/v1/ops/health`, `/api/v1/ops/status` (busy or idle, and for
+how long), `/api/v1/ops/drain` and `/api/v1/usage` (with the ops token,
+`SCILINK_OPS_TOKEN` as `X-Ops-Token`), and stops the container only after a
+drain reports idle.
+
 ### Embeddings
 
 Plan and Mission Control sessions ground on a knowledge base when one is
