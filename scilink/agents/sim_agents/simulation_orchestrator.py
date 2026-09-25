@@ -23,6 +23,7 @@ import os
 import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+from scilink.utils.path_fence import PathFence
 from datetime import datetime
 from enum import Enum
 
@@ -305,6 +306,7 @@ class SimulationOrchestratorAgent:
         # Deprecated
         google_api_key: Optional[str] = None,
         local_model: Optional[str] = None,
+        file_roots: Optional[List[str]] = None,
     ):
         self.logger = logging.getLogger(self.__class__.__name__)
 
@@ -359,6 +361,8 @@ class SimulationOrchestratorAgent:
         self.history_path = self.base_dir / "chat_history.json"
         self.checkpoint_path = self.base_dir / "checkpoint.json"
         self.structures_dir = self.base_dir / "structures"
+        self.file_roots = list(file_roots) if file_roots else None
+        self.path_fence = PathFence.build(self.base_dir, file_roots)
         self.structures_dir.mkdir(parents=True, exist_ok=True)
 
         # Session state — structure-centric (vs analysis-centric in analyze mode)

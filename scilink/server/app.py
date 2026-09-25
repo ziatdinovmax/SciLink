@@ -32,7 +32,7 @@ from scilink.ui.session_meta import save_session_name
 
 from . import files as files_mod
 from . import runner
-from .auth import COOKIE_NAME, DEFAULT_USER, AuthConfig, AuthMiddleware, user_root
+from .auth import _USERNAME_OK, COOKIE_NAME, DEFAULT_USER, AuthConfig, AuthMiddleware, user_root
 from .schemas import (
     CreateSessionRequest,
     FeedbackResponseRequest,
@@ -104,7 +104,7 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         mgr = managers.get(user)
         if mgr is None:
             mgr = SessionManager(user_root(session_root, auth, user),
-                                 confined=confined)
+                                 confined=confined, fenced=not local_files)
             managers[user] = mgr
         return mgr
     app.state.manager_for_user = lambda user: managers.get(user)
@@ -114,7 +114,7 @@ def create_app(session_root: Path, serve_frontend: bool = True,
     # Multi-user servers have none to single out.
     if auth is None or not auth.multi_user:
         managers[DEFAULT_USER] = SessionManager(
-            user_root(session_root, auth, DEFAULT_USER))
+            user_root(session_root, auth, DEFAULT_USER), fenced=not local_files)
         app.state.manager = managers[DEFAULT_USER]
     else:
         app.state.manager = None
@@ -601,13 +601,22 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         from .memory_api import set_enabled
         return set_enabled(body.enabled)
 
+    def _skill_ref(domain: str, name: str) -> None:
+        """A skill is addressed by two names; neither may be a path."""
+        for part in (domain, name):
+            if not part or part in (".", "..") or set(part.lower()) - _USERNAME_OK:
+                raise HTTPException(400, f"Bad skill reference {part!r}: letters, "
+                                         "digits, '_', '-', '.' only")
+
     @app.get("/api/v1/memory/skills/{domain}/{name}")
     def memory_skill_text(domain: str, name: str):
+        _skill_ref(domain, name)
         from .memory_api import skill_text
         return PlainTextResponse(_mem(skill_text, domain, name), media_type="text/markdown; charset=utf-8")
 
     @app.put("/api/v1/memory/skills/{domain}/{name}")
     def memory_skill_edit(domain: str, name: str, body: MemoryEditRequest):
+        _skill_ref(domain, name)
         from .memory_api import skill_edit
         return _mem(skill_edit, domain, name, body.content)
 
@@ -615,6 +624,7 @@ def create_app(session_root: Path, serve_frontend: bool = True,
     def memory_skill_action(domain: str, name: str, action: str):
         """promote · demote · prune · diff (a fork against its built-in) ·
         fork (copy a built-in into the store, shadowing it)."""
+        _skill_ref(domain, name)
         from .memory_api import fork_builtin, skill_action
         if action == "fork":
             return _mem(fork_builtin, domain, name)

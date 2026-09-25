@@ -99,7 +99,7 @@ def _resolve_credentials(model: str, api_key: str, base_url: str,
 # ── agent factories (ports of sidebar.py:883-980) ────────────────
 
 def _init_analysis_agent(session_dir: Path, api_key, model, base_url,
-                         autonomy, fh_api_key):
+                         autonomy, fh_api_key, file_roots=None):
     from scilink.agents.exp_agents.analysis_orchestrator import (
         AnalysisMode, AnalysisOrchestratorAgent)
     mode_map = {"co-pilot": AnalysisMode.CO_PILOT,
@@ -108,13 +108,13 @@ def _init_analysis_agent(session_dir: Path, api_key, model, base_url,
     return AnalysisOrchestratorAgent(
         base_dir=str(session_dir), api_key=api_key, model_name=model,
         base_url=base_url or None, analysis_mode=mode_map[autonomy],
-        futurehouse_api_key=fh_api_key or None)
+        futurehouse_api_key=fh_api_key or None, file_roots=file_roots)
 
 
 def _init_planning_agent(session_dir: Path, api_key, model, base_url,
                          autonomy, fh_api_key, objective, session_root: Path,
                          embedding_model=None, embedding_api_key=None,
-                         embedding_base_url=None):
+                         embedding_base_url=None, file_roots=None):
     from scilink.agents.planning_agents.planning_orchestrator import (
         AutonomyLevel, PlanningOrchestratorAgent)
     mode_map = {"co-pilot": AutonomyLevel.CO_PILOT,
@@ -141,13 +141,13 @@ def _init_planning_agent(session_dir: Path, api_key, model, base_url,
         base_url=base_url or None, autonomy_level=mode_map[autonomy],
         futurehouse_api_key=fh_api_key or None,
         knowledge_dir=str(knowledge_dir), code_dir=str(code_dir),
-        data_dir=str(data_dir), **kwargs)
+        data_dir=str(data_dir), file_roots=file_roots, **kwargs)
 
 
 def _init_meta_agent(session_dir: Path, api_key, model, base_url,
                      autonomy, fh_api_key,
                      embedding_model=None, embedding_api_key=None,
-                         embedding_base_url=None):
+                         embedding_base_url=None, file_roots=None):
     from scilink.agents.meta_agent.meta_orchestrator import (
         MetaMode, MetaOrchestratorAgent)
     mode_map = {"autopilot": MetaMode.AUTOPILOT,
@@ -167,7 +167,7 @@ def _init_meta_agent(session_dir: Path, api_key, model, base_url,
         futurehouse_api_key=fh_api_key or None,
         # a bare filename or a shared ./kb_storage is looked for in the
         # session root, never in the server process's own directory
-        launch_dir=str(session_dir.parent), **kwargs)
+        launch_dir=str(session_dir.parent), file_roots=file_roots, **kwargs)
 
 
 # ── history / deliverable helpers (ports of sidebar.py:1032-1076) ─
@@ -198,7 +198,8 @@ def collect_restored_deliverables(session_path: Path) -> tuple:
 
 
 class SessionManager:
-    def __init__(self, session_root: Path, *, confined: bool = False) -> None:
+    def __init__(self, session_root: Path, *, confined: bool = False,
+                 fenced: bool = False) -> None:
         """``confined`` keeps discovery and resume inside ``session_root``.
         The central sessions index is one file per ``SCILINK_HOME``, shared
         by every user root on a multi-user server, so there a manager may
@@ -206,12 +207,20 @@ class SessionManager:
         server keeps the index's "resume from anywhere"."""
         self.session_root = session_root.resolve()
         self.confined = confined
+        # ``fenced``: every path an agent of this manager is handed must lie
+        # under this root (or the persistent store); set on a remote server,
+        # where the machine's other files are not the user's.
+        self.fenced = fenced
         self._sessions: Dict[str, WebSession] = {}
         self._lock = threading.Lock()
 
     @property
     def _within(self) -> Optional[Path]:
         return self.session_root if self.confined else None
+
+    @property
+    def _file_roots(self) -> Optional[List[str]]:
+        return [str(self.session_root)] if self.fenced else None
 
     # -- lookup ---------------------------------------------------------
     def get(self, session_id: str) -> Optional[WebSession]:
@@ -289,18 +298,18 @@ class SessionManager:
                     session_dir, resolved_key, model, base_url, autonomy,
                     fh_api_key, embedding_model=embedding_model,
                     embedding_api_key=embedding_api_key,
-                    embedding_base_url=embedding_base_url)
+                    embedding_base_url=embedding_base_url, file_roots=self._file_roots)
             elif mode == "plan":
                 agent = _init_planning_agent(
                     session_dir, resolved_key, model, base_url, autonomy,
                     fh_api_key, objective, self.session_root,
                     embedding_model=embedding_model,
                     embedding_api_key=embedding_api_key,
-                    embedding_base_url=embedding_base_url)
+                    embedding_base_url=embedding_base_url, file_roots=self._file_roots)
             else:
                 agent = _init_analysis_agent(
                     session_dir, resolved_key, model, base_url, autonomy,
-                    fh_api_key)
+                    fh_api_key, file_roots=self._file_roots)
         except Exception as exc:
             raise SessionError(f"Failed to initialize agent: {exc}") from exc
 
