@@ -164,7 +164,10 @@ def _init_meta_agent(session_dir: Path, api_key, model, base_url,
     return MetaOrchestratorAgent(
         base_dir=str(session_dir), api_key=api_key, model_name=model,
         base_url=base_url or None, meta_mode=mode_map[autonomy],
-        futurehouse_api_key=fh_api_key or None, **kwargs)
+        futurehouse_api_key=fh_api_key or None,
+        # a bare filename or a shared ./kb_storage is looked for in the
+        # session root, never in the server process's own directory
+        launch_dir=str(session_dir.parent), **kwargs)
 
 
 # ── history / deliverable helpers (ports of sidebar.py:1032-1076) ─

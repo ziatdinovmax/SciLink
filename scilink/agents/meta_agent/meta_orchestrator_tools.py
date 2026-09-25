@@ -1571,7 +1571,8 @@ class MetaOrchestratorTools:
                     continue
                 p = Path(fname)
                 cands = [p] if p.is_absolute() else (
-                    ([base / fname] if base is not None else []) + [Path.cwd() / fname])
+                    ([base / fname] if base is not None else [])
+                    + [Path(getattr(self.orch, "launch_dir", None) or Path.cwd()) / fname])
                 target = next((c for c in cands if c.is_file()), None)
                 if target is None:
                     unresolved.append(str(fname))

@@ -452,8 +452,14 @@ class MetaOrchestratorAgent:
         meta_mode: MetaMode = MetaMode.AUTOPILOT,
         max_iterations: Optional[int] = None,
         knowledge_dir: Optional[str] = None,
+        launch_dir: Optional[str] = None,
     ):
         self.logger = logging.getLogger(self.__class__.__name__)
+        # The directory the user launched from — where a bare filename is
+        # looked for and where a standalone plan session's ./kb_storage
+        # would be. The CLI leaves it as the process cwd; a server passes
+        # the session root, because ITS cwd belongs to nobody in particular.
+        self.launch_dir = Path(launch_dir).expanduser().resolve() if launch_dir else Path.cwd()
 
         if base_url:
             if api_key is None:
@@ -508,7 +514,7 @@ class MetaOrchestratorAgent:
         # of a config surface; attach_knowledge_base performs the attachment.
         self._shared_kb_candidate: Optional[Path] = None
         if not self.knowledge_dir:
-            _cand = Path.cwd() / "kb_storage"
+            _cand = self.launch_dir / "kb_storage"
             if _cand.is_dir() and any(_cand.iterdir()):
                 self._shared_kb_candidate = _cand.resolve()
 
