@@ -278,6 +278,109 @@ def get_execution_description():
     return LLM_EXECUTION_DESCRIPTION
 
 
+# ── what a generated script may see and use ─────────────────────────
+#
+# A script runs as a child of the agent process. It used to inherit that
+# process's whole environment, which is where the model's vendor keys, a
+# Bedrock token, the web server's access token and the proxy key live. None of
+# those is the script's business (the consent text says the model is not
+# instructed to reach the network; the environment should not hand it the
+# means either), so the child gets an allowlist: what Python, the scientific
+# stack and SciLink's own tools legitimately read, plus what the executor was
+# given explicitly. Anything secret-shaped is dropped even inside an allowed
+# family. ``SCILINK_SANDBOX_ENV`` names extra variables to pass (comma
+# separated) for a site that needs something not listed here.
+
+_SANDBOX_ENV_NAMES = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LANGUAGE",
+    "TMPDIR", "TEMP", "TMP", "DISPLAY", "PWD",
+    "PYTHONPATH", "PYTHONHOME", "PYTHONHASHSEED", "PYTHONIOENCODING",
+    "PYTHONUNBUFFERED", "PYTHONDONTWRITEBYTECODE", "PYTHONWARNINGS",
+    "VIRTUAL_ENV", "MPLBACKEND", "MPLCONFIGDIR", "MP_API_KEY",
+    "FEFF_DIR", "FEFF_BIN",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
+    "MKLROOT", "CC", "CXX", "FC", "UNSAFE_EXECUTION_OK",
+})
+_SANDBOX_ENV_PREFIXES = (
+    "SCILINK_", "LC_", "XDG_", "CONDA_", "CUDA_", "PYTORCH_", "TORCH_", "HF_",
+    "OMP_", "MKL_", "OPENBLAS_", "NUMEXPR_", "KMP_", "VECLIB_", "TF_", "JAX_",
+    "NUMBA_",
+    # the simulation toolchain a generated script may drive locally
+    "ASE_", "VASP_", "LAMMPS_", "PMG_", "OPENMM_", "OMPI_", "MPICH_", "I_MPI_",
+    "SLURM_", "PBS_",
+)
+# Never passed, whatever family they fall in.
+_SANDBOX_ENV_DENY = frozenset({"SCILINK_API_KEY", "SCILINK_WEB_TOKEN", "HF_TOKEN"})
+_SECRET_SUFFIXES = ("_TOKEN", "_SECRET", "_PASSWORD", "_PASSWD", "_CREDENTIALS")
+
+
+def sandbox_env(extra: "dict | None" = None, source: "dict | None" = None) -> dict:
+    """The environment a generated script runs with: the allowlist above
+    filtered from ``source`` (the process environment by default), plus
+    ``extra`` verbatim (what the executor was handed explicitly, e.g. the
+    Materials Project key)."""
+    src = os.environ if source is None else source
+    env: dict = {}
+    for k, v in src.items():
+        if k in _SANDBOX_ENV_DENY or k.upper().endswith(_SECRET_SUFFIXES):
+            continue
+        if k in _SANDBOX_ENV_NAMES or k.startswith(_SANDBOX_ENV_PREFIXES):
+            env[k] = v
+    for name in (src.get("SCILINK_SANDBOX_ENV") or "").split(","):
+        name = name.strip()
+        if name and name in src:
+            env[name] = src[name]
+    env.update({str(k): str(v) for k, v in (extra or {}).items() if v is not None})
+    return env
+
+
+def _sandbox_limits() -> "dict[str, int]":
+    """Resource limits for a script's process, from the environment (megabytes;
+    unset means unlimited): ``SCILINK_SANDBOX_MEM_MB`` (address space),
+    ``SCILINK_SANDBOX_FILE_MB`` (largest file it may write),
+    ``SCILINK_SANDBOX_PROCS`` (processes per user, a fork-bomb stop). Off by
+    default: an address-space cap breaks CUDA and Metal, which reserve far
+    more than they use, so a deployment sets what its container can take."""
+    out = {}
+    for var, key, scale in (("SCILINK_SANDBOX_MEM_MB", "RLIMIT_AS", 1 << 20),
+                            ("SCILINK_SANDBOX_FILE_MB", "RLIMIT_FSIZE", 1 << 20),
+                            ("SCILINK_SANDBOX_PROCS", "RLIMIT_NPROC", 1)):
+        raw = os.environ.get(var)
+        if raw:
+            try:
+                out[key] = int(float(raw) * scale)
+            except ValueError:
+                logging.warning(f"{var}={raw!r} is not a number; ignored")
+    return out
+
+
+def _sandbox_preexec():
+    """``preexec_fn`` applying :func:`_sandbox_limits` in the child, or ``None``
+    when there is nothing to apply (or no ``resource`` module: Windows)."""
+    limits = _sandbox_limits()
+    if not limits:
+        return None
+    try:
+        import resource
+    except ImportError:
+        return None
+
+    def apply():
+        for key, value in limits.items():
+            res = getattr(resource, key, None)
+            if res is None:
+                continue
+            try:
+                soft, hard = resource.getrlimit(res)
+                cap = value if hard == resource.RLIM_INFINITY else min(value, hard)
+                resource.setrlimit(res, (cap, hard))
+            except (ValueError, OSError):
+                pass
+    return apply
+
+
 class ScriptExecutor:
     """
     Executes Python scripts for scientific analysis.
@@ -325,14 +428,13 @@ class ScriptExecutor:
                 tf.write(script_content)
                 temp_script_file = tf.name
 
-            env = os.environ.copy()
-            if self.mp_api_key:
-                env['MP_API_KEY'] = self.mp_api_key
+            env = sandbox_env({"MP_API_KEY": self.mp_api_key} if self.mp_api_key else None)
 
             proc = subprocess.Popen(
                 [sys.executable, os.path.basename(temp_script_file)],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, env=env, cwd=script_dir,
+                preexec_fn=_sandbox_preexec(),
             )
             # Register so OutputCapture.kill_subprocesses() can terminate it.
             _register_subprocess(proc)
@@ -402,7 +504,9 @@ class WarmScriptExecutor(ScriptExecutor):
         try:
             self._proc = subprocess.Popen(
                 [sys.executable, "-u", worker], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL, text=True, bufsize=1, env=os.environ.copy())
+                stderr=subprocess.DEVNULL, text=True, bufsize=1,
+                env=sandbox_env({"MP_API_KEY": self.mp_api_key} if self.mp_api_key else None),
+                preexec_fn=_sandbox_preexec())
             ready = self._read_line(30.0)
             self._runs = 0
             return bool(ready and json.loads(ready).get("ready"))
