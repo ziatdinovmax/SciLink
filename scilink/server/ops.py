@@ -113,3 +113,11 @@ class Workload:
             from fastapi import HTTPException
             raise HTTPException(503, "This server is draining: it finishes the work "
                                      "it has and takes no new turns. Try again later.")
+
+    def refuse_if_over_budget(self, usage) -> None:
+        if usage is not None and usage.over_budget():
+            from fastapi import HTTPException
+            raise HTTPException(
+                429, f"This workspace's token budget is spent "
+                     f"({usage.total_tokens:,} of {usage.budget:,} in the current "
+                     "period). Running work finishes; new turns wait for a new period.")

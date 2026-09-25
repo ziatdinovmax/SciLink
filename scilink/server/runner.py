@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from scilink import hitl as _hitl
+from scilink import tracing
 from scilink.ui import vocabulary as _vocab
 from scilink.ui.narration import current_activity
 from scilink.ui.output_capture import AgentStoppedError
@@ -364,6 +365,7 @@ def _run_turn(session, turn: TurnState, user_input: str) -> None:
     try:
         builtins.input = _http_input
         _hitl.set_thread_channel(channel)
+        tracing.bind_session(session.id)
         with cap:
             result = agent.chat(user_input)
         if not turn.stopped:

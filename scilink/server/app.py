@@ -122,6 +122,13 @@ def create_app(session_root: Path, serve_frontend: bool = True,
     from .ops import Workload
     ops = Workload(session_root)
     app.state.ops = ops
+    # Every LLM call in this process lands in one ledger: one server, one
+    # workspace. Sessions are tagged on their turn threads (runner, live).
+    from scilink import tracing
+    from scilink.usage import ledger_for
+    usage = ledger_for(session_root)
+    app.state.usage = usage
+    tracing.set_usage_sink(usage.record)
 
     def _ops_allowed(request: Request, *, mutating: bool) -> None:
         """Status and drain are for the control plane: the ops token
@@ -217,6 +224,20 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         ops.draining = bool(body.drain)
         return ops.status(managers)
 
+    @app.get("/api/v1/usage")
+    def usage_summary(request: Request):
+        """LLM usage in the current period: totals, per model, per session
+        (best-effort), and the budget."""
+        _ops_allowed(request, mutating=False)
+        return usage.summary()
+
+    @app.post("/api/v1/usage/period")
+    def usage_new_period(request: Request):
+        """Start a new billing period (the control plane, after it read the
+        old one). The records stay on disk under a period marker."""
+        _ops_allowed(request, mutating=True)
+        return usage.new_period()
+
     @app.get("/api/v1/workspace")
     def workspace(request: Request):
         """The workspace manifest this server serves, if one is present."""
@@ -291,6 +312,7 @@ def create_app(session_root: Path, serve_frontend: bool = True,
             raise HTTPException(400, "Consent to code execution is required "
                                      "to start a session.")
         ops.refuse_if_draining()
+        ops.refuse_if_over_budget(usage)
         ops.touch()
         mgr = _mgr(request)
         try:
@@ -361,6 +383,7 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         if not content:
             raise HTTPException(400, "Empty message.")
         ops.refuse_if_draining()
+        ops.refuse_if_over_budget(usage)
         ops.touch()
         with session.lock:
             if session.turn is not None and session.turn.is_running:
@@ -714,6 +737,7 @@ def create_app(session_root: Path, serve_frontend: bool = True,
     async def live_start(request: Request, session_id: str):
         from .live_api import start
         ops.refuse_if_draining()
+        ops.refuse_if_over_budget(usage)
         ops.touch()
         body = await request.json()
         return _live(start, _session_or_404(request, session_id), body or {},
