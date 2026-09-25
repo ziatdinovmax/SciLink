@@ -9,7 +9,9 @@ thread per open stream — fine for the local single-user posture).
 
 from __future__ import annotations
 
+import hmac
 import mimetypes
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -47,6 +49,7 @@ from .schemas import (
     PlanDirsRequest,
     RenameSessionRequest,
     SendMessageRequest,
+    DrainRequest,
 )
 from .session_manager import SessionError, SessionManager, WebSession
 
@@ -116,6 +119,28 @@ def create_app(session_root: Path, serve_frontend: bool = True,
     else:
         app.state.manager = None
 
+    from .ops import Workload
+    ops = Workload(session_root)
+    app.state.ops = ops
+
+    def _ops_allowed(request: Request, *, mutating: bool) -> None:
+        """Status and drain are for the control plane: the ops token
+        (``SCILINK_OPS_TOKEN``, sent as ``X-Ops-Token``) always works; a
+        signed-in user works on a single-user server, and for status on a
+        shared one. Drain on a shared server is the operator's alone, like
+        /quit."""
+        expected = os.environ.get("SCILINK_OPS_TOKEN")
+        given = request.headers.get("x-ops-token", "")
+        if expected and hmac.compare_digest(given, expected):
+            return
+        if auth is None:
+            return
+        user = auth.user_for_request(request)
+        if user is None:
+            raise HTTPException(401, "Not authenticated.")
+        if mutating and auth.multi_user:
+            raise HTTPException(403, "Draining a shared server needs the ops token.")
+
     def _session_or_404(request: Request, session_id: str) -> WebSession:
         session = _mgr(request).get(session_id)
         if session is None:
@@ -166,6 +191,33 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         return resp
 
     # ── config ───────────────────────────────────────────────────
+
+    # ── ops: what a control plane asks ───────────────────────────
+
+    @app.get("/api/v1/ops/health")
+    def ops_health():
+        """Up, version, workspace. Open: a load balancer cannot sign in."""
+        return ops.health()
+
+    @app.get("/api/v1/ops/status")
+    def ops_status(request: Request):
+        """Busy or idle, with the reasons, and for how long it has been
+        idle as seen by whoever polls this."""
+        _ops_allowed(request, mutating=False)
+        return ops.status(managers)
+
+    @app.post("/api/v1/ops/drain")
+    def ops_drain(request: Request, body: DrainRequest):
+        """Stop taking new turns, sessions and live runs (503 to those) so
+        running work can finish; ``{"drain": false}`` reopens."""
+        _ops_allowed(request, mutating=True)
+        ops.draining = bool(body.drain)
+        return ops.status(managers)
+
+    @app.get("/api/v1/workspace")
+    def workspace(request: Request):
+        """The workspace manifest this server serves, if one is present."""
+        return {"workspace": ops.workspace}
 
     @app.get("/api/v1/config")
     def get_config(request: Request, model: str = "", base_url: str = "",
@@ -235,6 +287,8 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         if not body.consent:
             raise HTTPException(400, "Consent to code execution is required "
                                      "to start a session.")
+        ops.refuse_if_draining()
+        ops.touch()
         mgr = _mgr(request)
         try:
             if body.resume_dir:
@@ -303,6 +357,8 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         content = body.content.strip()
         if not content:
             raise HTTPException(400, "Empty message.")
+        ops.refuse_if_draining()
+        ops.touch()
         with session.lock:
             if session.turn is not None and session.turn.is_running:
                 raise HTTPException(409, "A turn is already running.")
@@ -654,6 +710,8 @@ def create_app(session_root: Path, serve_frontend: bool = True,
     @app.post("/api/v1/sessions/{session_id}/live/start")
     async def live_start(request: Request, session_id: str):
         from .live_api import start
+        ops.refuse_if_draining()
+        ops.touch()
         body = await request.json()
         return _live(start, _session_or_404(request, session_id), body or {},
                      allow_custom=local_files)
