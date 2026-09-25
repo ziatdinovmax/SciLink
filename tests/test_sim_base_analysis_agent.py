@@ -5,6 +5,7 @@ canned scripts) but a REAL sandbox executor: static helpers, construction, scrip
 execution + JSON parsing, the compute_property loop, and error-driven refinement.
 """
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -248,6 +249,164 @@ class TestComputePropertyLoop:
         agent._llm = fake
         r = agent.compute_property("t", {"traj": "/nope"}, verify=True)
         assert r["verification"]["plausible"] is True
+
+
+class TestQCEngineIntegration:
+    """Tests for the CodegenQCEngine-driven verification loop (#439 Tier 2)."""
+
+    def test_verification_retry_on_implausible(self, agent):
+        """A plausibility failure triggers a refit; the second attempt passes."""
+        calls = {"gen": 0, "verify": 0}
+
+        def fake(prompt):
+            if "physically plausible" in prompt or "produced a" in prompt:
+                calls["verify"] += 1
+                if calls["verify"] <= 1:
+                    return '{"plausible": false, "reasoning": "value too high"}'
+                return '{"plausible": true, "reasoning": "ok now"}'
+            calls["gen"] += 1
+            if "PRIOR ATTEMPT FEEDBACK" in prompt:
+                return 'import json; print(json.dumps({"status":"success","value":2.0,"units":"x"}))'
+            return 'import json; print(json.dumps({"status":"success","value":999.0,"units":"x"}))'
+
+        agent._llm = fake
+        r = agent.compute_property("t", {"traj": "/nope"}, verify=True)
+        assert r["status"] == "success"
+        assert r["verification"]["plausible"] is True
+        assert calls["verify"] >= 2
+
+    def test_verify_false_bypasses_qc_loop(self, agent):
+        """verify=False skips the verification loop entirely."""
+        calls = {"verify": 0}
+
+        def fake(prompt):
+            if "physically plausible" in prompt:
+                calls["verify"] += 1
+                return '{"plausible": false, "reasoning": "bad"}'
+            return 'import json; print(json.dumps({"status":"success","value":1.0}))'
+
+        agent._llm = fake
+        r = agent.compute_property("t", {"traj": "/nope"}, verify=False)
+        assert r["status"] == "success" and r["value"] == 1.0
+        assert calls["verify"] == 0
+
+    def test_crash_recovery_inside_initial(self, agent):
+        """Execution crashes are retried inside qc_run_initial."""
+        calls = {"n": 0}
+
+        def fake(prompt):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return "raise RuntimeError('crash')"
+            return 'import json; print(json.dumps({"status":"success","value":42}))'
+
+        agent._llm = fake
+        r = agent.compute_property("t", {"traj": "/nope"}, verify=False)
+        assert r["status"] == "success" and r["value"] == 42
+
+    def test_annealing_feedback_in_refit_prompt(self, agent):
+        """The refit prompt carries verification feedback and annealing text."""
+        prompts = []
+
+        def fake(prompt):
+            prompts.append(prompt)
+            if "physically plausible" in prompt:
+                return '{"plausible": false, "reasoning": "divergent"}'
+            return 'import json; print(json.dumps({"status":"success","value":1.0,"units":"x"}))'
+
+        agent.max_refinement_attempts = 1
+        agent._llm = fake
+        agent.compute_property("t", {"traj": "/nope"}, verify=True)
+        refit_prompts = [p for p in prompts if "PRIOR ATTEMPT FEEDBACK" in p]
+        assert len(refit_prompts) >= 1
+        assert "divergent" in refit_prompts[0]
+
+    def test_fallback_returns_best_on_exhaustion(self, agent):
+        """When all verification retries fail, the best result is returned."""
+        def fake(prompt):
+            if "physically plausible" in prompt:
+                return '{"plausible": false, "reasoning": "always bad"}'
+            return 'import json; print(json.dumps({"status":"success","value":7.0,"units":"x"}))'
+
+        agent.max_refinement_attempts = 1
+        agent._llm = fake
+        r = agent.compute_property("t", {"traj": "/nope"}, verify=True)
+        assert r["status"] == "success"
+        assert r["value"] == 7.0
+        assert r["verification"]["plausible"] is False
+
+    def test_returned_verification_judged_the_returned_value(self, agent):
+        """Distinct values per attempt, every verdict implausible: the value
+        that comes back must carry the verdict that judged *it*."""
+        n = {"gen": 0, "verify": 0}
+
+        def fake(prompt):
+            if "physically plausible" in prompt:
+                n["verify"] += 1
+                return json.dumps({"plausible": False,
+                                   "reasoning": f"bad #{n['verify']}"})
+            n["gen"] += 1
+            return ('import json; print(json.dumps({"status":"success",'
+                    f'"value":{float(n["gen"])},"units":"x"}}))')
+
+        agent.max_refinement_attempts = 2
+        agent._llm = fake
+        r = agent.compute_property("t", {"traj": "/nope"}, verify=True)
+        assert n["gen"] == 3 and n["verify"] == 3
+        assert r["verification"]["reasoning"] == f"bad #{int(r['value'])}"
+
+    def test_final_verify_keeps_its_verdict_on_reject(self, agent):
+        from scilink.agents.exp_agents._qc_engine import QCItemContext
+        agent._verify_result = lambda *a, **k: {"plausible": False,
+                                                "reasoning": "final no"}
+        ctx = QCItemContext(state={"task": "t", "output_type": "scalar",
+                                   "verify": True},
+                            data={}, data_path=".", item_name="t", item_idx=0)
+        ctx.current_result = {"status": "success", "value": 3.0}
+        agent.qc_final_verify(ctx)
+        assert ctx.approved is False
+        assert ctx.current_result["verification"]["reasoning"] == "final no"
+        assert ctx.verification_history[-1]["reasoning"] == "final no"
+
+    def test_after_refit_leaves_score_unverified(self, agent):
+        from scilink.agents.exp_agents._qc_engine import QCItemContext
+        ctx = QCItemContext(state={}, data={}, data_path=".", item_name="t",
+                            item_idx=0)
+        ctx.current_score = 1.0
+        refit = {"status": "success", "value": 1.0, "success": True}
+        agent.qc_after_refit(ctx, refit, {})
+        assert ctx.current_result is refit
+        assert ctx.current_score < 0
+
+    def test_hot_level_keeps_recipe_as_advisory(self, agent):
+        """The recipe (how to read the engine output) survives escalation to
+        hot; only its instruction loosens."""
+        recipe = "LOAD_WITH_THE_MAGIC_READER"
+        gen_prompts = []
+
+        def fake(prompt):
+            if "physically plausible" in prompt:
+                return '{"plausible": false, "reasoning": "nope"}'
+            gen_prompts.append(prompt)
+            return 'import json; print(json.dumps({"status":"success","value":1.0,"units":"x"}))'
+
+        agent.max_refinement_attempts = 2
+        agent._llm = fake
+        agent.compute_property("t", {"traj": "/nope"}, recipe=recipe, verify=True)
+        assert len(gen_prompts) == 3           # initial + relaxed + hot
+        assert all(recipe in p for p in gen_prompts)
+        assert "follow this" in gen_prompts[0]
+        assert "advisory" in gen_prompts[-1] and "follow this" not in gen_prompts[-1]
+
+    def test_verification_iterations_knob_is_separate(self, tmp_path):
+        a = _Concrete(output_dir=str(tmp_path), api_key="k",
+                      max_refinement_attempts=1, max_verification_iterations=3)
+        assert a.max_verification_iterations == 3
+        b = _Concrete(output_dir=str(tmp_path), api_key="k",
+                      max_refinement_attempts=1)
+        assert b.max_verification_iterations == 1
+        b.max_refinement_attempts = 4
+        assert b.max_verification_iterations == 4
 
 
 if __name__ == "__main__":
