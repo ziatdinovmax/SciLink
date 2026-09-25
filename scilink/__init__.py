@@ -1,3 +1,10 @@
+from importlib.metadata import version as _pkg_version, PackageNotFoundError
+
+try:
+    __version__ = _pkg_version("scilink")
+except PackageNotFoundError:
+    __version__ = "0.0.0+unknown"
+
 from .auth import set_api_key, show_api_status
 from .tracing import enable_tracing, disable_tracing, is_enabled as is_tracing_enabled
 import torch  # Load PyTorch's BLAS first to avoid conflicts with faiss
@@ -37,6 +44,7 @@ def show_config():
 
 
 __all__ = [
+    '__version__',
     'configure',
     'configure_from_dict',
     'show_config',
