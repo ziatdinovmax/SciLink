@@ -1093,8 +1093,16 @@ def _replay_map_gate(result_map, fit_mask, reference: dict | None,
             return False, ("map is constant across the frame while the anchor's varied "
                            f"over [{float(reference['min']):.4g}, {float(reference['max']):.4g}] "
                            "(fit collapsed to a bound)")
-    if required and isinstance(reference, dict) and all(
-            isinstance(reference.get(k), (int, float)) for k in ("min", "max")):
+    # The range rule is for SIBLING datasets, where a required output far from
+    # the anchor's means the method broke. In a stream the tracked quantity is
+    # expected to move (a resonance shifting through a ramp, another part of a
+    # sample), so a live loop sets ``values_may_move``: method health is judged
+    # here (coverage, collapse), plausibility by the loop's own range gate, which
+    # flags a jump and then adopts a value that keeps saying the same thing.
+    # Observed live on tiles of one real EELS field: four of eleven tiles were
+    # withheld for a plasmon 35 to 60 meV below the first tile's range.
+    if (required and isinstance(reference, dict) and not reference.get("values_may_move")
+            and all(isinstance(reference.get(k), (int, float)) for k in ("min", "max"))):
         lo, hi = float(reference["min"]), float(reference["max"])
         mean = float(reference.get("mean", (lo + hi) / 2.0))
         span = max(hi - lo, 0.005 * abs(mean), 1e-9)
@@ -3453,6 +3461,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         # Per-target stash for the minimal-edit adapt
                         # attempt (Phase B) — ctx is fresh per target.
                         ctx.bank_exemplar = match
+                        ctx.bank_query_fingerprint = _bank_cube_fp
                         _script_bank.mark_retrieved(
                             "hyperspectral", match["record"]["id"])
                         self.logger.info(
@@ -3492,10 +3501,19 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 "facts": facts,
             }
             engine = CodegenQCEngine(host=self, spec=self._QC_ENGINE_SPEC)
+            import time as _time
+            _t0 = _time.perf_counter()
             out = engine.run_item(ctx) or {}
             record = out.get("record")
             if record is not None:
                 state.setdefault("dynamic_analysis_records", []).append(record)
+                # Assist log: every target runs the full ladder here, so
+                # there is no anchor-only rule (locked replays are skipped
+                # inside the recorder).
+                from .._qc_engine import record_bank_assist
+                record_bank_assist(self, ctx, record, domain="hyperspectral",
+                                   seconds=_time.perf_counter() - _t0,
+                                   anchor_only=False)
                 # Clean acceptance of an edit-adapted script accumulates
                 # proven-N on the SAME bank record (provenance only exists
                 # on task_success records — see _build_target_record).
@@ -3504,7 +3522,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     bump_bank_adapt_success(
                         self, {"success": True,
                                "bank_edit_adapt": record["bank_edit_adapt"]},
-                        domain="hyperspectral")
+                        domain="hyperspectral", ctx=ctx)
 
         # --- FINAL AGGREGATION ---
         # Persist the per-target records (script, verdict, quality history,
@@ -3784,11 +3802,19 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 result_summary += "\n\n" + ctx.session["flux_table"]
             rep_dash = (best_attempt["images"][0]["data"]
                         if best_attempt["images"] else None)
-            present, conf, caveat = self._judge_salvage(
-                rep_dash, code_str, mean_spec_bytes or None,
-                state.get("system_info"), state.get("analysis_objective"),
-                _used_tool_descriptions(state, code_str), result_summary,
-                spatial_evidence=_footprint_evidence(state))
+            if state.get("_strict_replay"):
+                # No judge on a live frame: what passed the deterministic gate
+                # is kept, and the run says it was not reviewed.
+                present, conf, caveat = True, "low", (
+                    "Strict replay: the maps that passed the replay gate are kept "
+                    "without a physics review; the required output(s) that did not "
+                    "pass are withheld.")
+            else:
+                present, conf, caveat = self._judge_salvage(
+                    rep_dash, code_str, mean_spec_bytes or None,
+                    state.get("system_info"), state.get("analysis_objective"),
+                    _used_tool_descriptions(state, code_str), result_summary,
+                    spatial_evidence=_footprint_evidence(state))
 
             # Record the degradation so the top-level status reflects it
             # (a salvage is NOT a clean success). Threaded up to analyze().
@@ -3948,7 +3974,11 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             # go to the ladder, whose critique feedback can restructure the
             # method. QC rejections remain ladder currency as before.
             code_str, result_dict, _mech_tb = "", None, ""
-            for _exec_try in range(self.MAX_EXEC_ATTEMPTS):
+            # A strict replay (a live frame) never calls a model: a locked
+            # script that raises FAILS the frame, which is what tells a live
+            # loop that the recipe no longer works on this data.
+            _strict = bool(state.get("_strict_replay"))
+            for _exec_try in range(1 if _strict else self.MAX_EXEC_ATTEMPTS):
                 if _exec_try == 0 and getattr(ctx, "supplied_script", None):
                     # Given-script execution mode (bank edit-adapt): run the
                     # supplied script instead of generating. Mechanical
@@ -4062,7 +4092,11 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             # A rejected declaration raises -> the normal retry feedback path.
             _nm = result_dict.get("not_measurable")
             if isinstance(_nm, dict) and not result_dict.get("maps"):
-                ok, critique = self._judge_not_measurable(_nm, ctx)
+                # Strict replay: the approved script's own declaration stands
+                # (it carries its numeric evidence); a live loop reads a missing
+                # named output as a change, which is what it is.
+                ok, critique = ((True, "") if state.get("_strict_replay")
+                                else self._judge_not_measurable(_nm, ctx))
                 if ok:
                     _log_structured_block(
                         self.logger,

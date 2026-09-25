@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import subprocess
@@ -363,6 +364,147 @@ class ScriptExecutor:
                     os.remove(temp_script_file)
                 except OSError:
                     pass
+
+
+class WarmScriptExecutor(ScriptExecutor):
+    """Runs scripts in ONE long-lived interpreter instead of a fresh one each time.
+
+    For a live loop's fast path, where the same approved script answers every
+    frame: a fresh process pays the script's imports on every frame (measured on
+    a real atomic-resolution recipe: 5 of 8 seconds were importing torch). Here
+    they are paid once. What is kept from the cold executor:
+
+    - each run has its own working directory, and the caller's is never touched;
+    - the timeout is hard: the worker is killed and replaced, as a fresh process
+      would be;
+    - the user's Stop reaches it (the worker is registered like any subprocess);
+    - stdout / stderr are captured at the file-descriptor level, so the result
+      has the same shape and the same success rule (exit code 0).
+
+    What is NOT kept is a clean interpreter per run: module state survives from
+    one run to the next (that is the point: imports, loaded model weights). So
+    this is for replaying a script that has already been verified, not for
+    trying generated code, and the worker is retired after ``max_runs`` runs.
+    Any failure of the worker itself falls back to a cold run of the same script.
+    """
+
+    def __init__(self, timeout: int = DEFAULT_TIMEOUT, mp_api_key: str = None, max_runs: int = 500):
+        super().__init__(timeout=timeout, mp_api_key=mp_api_key)
+        self.max_runs = int(max_runs)
+        self._proc: subprocess.Popen | None = None
+        self._runs = 0
+        self._lock = threading.Lock()
+        self.cold_fallbacks = 0
+
+    # -- worker lifecycle -------------------------------------------------
+    def _start(self) -> bool:
+        worker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_warm_worker.py")
+        try:
+            self._proc = subprocess.Popen(
+                [sys.executable, "-u", worker], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, text=True, bufsize=1, env=os.environ.copy())
+            ready = self._read_line(30.0)
+            self._runs = 0
+            return bool(ready and json.loads(ready).get("ready"))
+        except Exception:  # noqa: BLE001 - no worker: the cold path still works
+            self.close()
+            return False
+
+    def _read_line(self, timeout: float):
+        """One line from the worker, or ``None`` on timeout / a dead worker."""
+        import queue
+        box: "queue.Queue" = queue.Queue(maxsize=1)
+        proc = self._proc
+
+        def reader():
+            try:
+                box.put(proc.stdout.readline())
+            except Exception:  # noqa: BLE001
+                box.put("")
+        threading.Thread(target=reader, daemon=True).start()
+        try:
+            line = box.get(timeout=timeout)
+        except queue.Empty:
+            return None
+        return line or None
+
+    def close(self) -> None:
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None:
+                try:
+                    proc.stdin.write(json.dumps({"op": "quit"}) + "\n")
+                    proc.stdin.flush()
+                    proc.wait(timeout=2)
+                except Exception:  # noqa: BLE001
+                    proc.kill()
+                    proc.wait(timeout=5)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def __del__(self):  # noqa: D401 - best effort
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # -- execution --------------------------------------------------------
+    def execute_script(self, script_content: str, working_dir: str = None,
+                       timeout: int | None = None) -> dict:
+        effective_timeout = self.timeout if timeout is None else timeout
+        with self._lock:
+            if self._proc is None or self._proc.poll() is not None or self._runs >= self.max_runs:
+                self.close()
+                if not self._start():
+                    self.cold_fallbacks += 1
+                    return super().execute_script(script_content, working_dir, timeout)
+            script_dir = os.path.abspath(working_dir) if working_dir else os.getcwd()
+            os.makedirs(script_dir, exist_ok=True)
+            temp_script_file = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, dir=script_dir,
+                                                 encoding="utf-8") as tf:
+                    tf.write(script_content)
+                    temp_script_file = tf.name
+                env = {"MP_API_KEY": self.mp_api_key} if self.mp_api_key else {}
+                _register_subprocess(self._proc)
+                try:
+                    self._proc.stdin.write(json.dumps(
+                        {"script": temp_script_file, "cwd": script_dir, "env": env}) + "\n")
+                    self._proc.stdin.flush()
+                    line = self._read_line(float(effective_timeout))
+                finally:
+                    _unregister_subprocess(self._proc)
+                self._runs += 1
+                if line is None:
+                    dead = self._proc.poll() is not None
+                    self._proc.kill()
+                    self.close()
+                    if dead:                      # the worker died (a crash in native code, a Stop)
+                        return {"status": "error", "message": "Script execution was stopped or the "
+                                                              "interpreter running it died."}
+                    return {"status": "error",
+                            "message": f"Script execution timed out after {effective_timeout} seconds."}
+                reply = json.loads(line)
+                if reply.get("returncode") == 0:
+                    return {"status": "success", "stdout": reply.get("stdout", ""),
+                            "stderr": reply.get("stderr", "")}
+                return {"status": "error",
+                        "message": (f"Script execution failed with return code {reply.get('returncode')}."
+                                    f"\nSTDERR:\n{reply.get('stderr', '')}")}
+            except Exception as e:  # noqa: BLE001 - the worker failed, not the script: run it cold
+                self.close()
+                self.cold_fallbacks += 1
+                logging.warning(f"warm executor failed ({e}); running this script in a fresh process")
+                return super().execute_script(script_content, working_dir, timeout)
+            finally:
+                if temp_script_file and os.path.exists(temp_script_file):
+                    try:
+                        os.remove(temp_script_file)
+                    except OSError:
+                        pass
 
 
 class ExecutionTimeout:

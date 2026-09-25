@@ -28,6 +28,12 @@ between excitations are fluorescence or artifacts.
    Implementation) BEFORE any peak fitting. Never fit peak components to
    the raw curve in this regime — a smooth curve through the ramp gives
    near-perfect R² while ignoring every Raman band.
+   **Broad bands are the exception.** When the bands themselves are broad
+   (disordered carbon D and G, glasses, amorphous phases: widths of tens to
+   hundreds of cm⁻¹), a baseline estimated from the data cannot tell band
+   from background and removes part of the band. Fit the background together
+   with the bands instead (a low-order polynomial or a line as model terms),
+   anchored on the band-free ends of the range.
 2. **Fit the full measured range.** Do not restrict fitting to the
    dominant band region unless the user asked for it; weak low-wavenumber
    and high-wavenumber bands (lattice modes, OH stretches, overtones) carry
@@ -226,6 +232,11 @@ identification is pattern-only and rank candidates accordingly.
   parked on noise or reproducing background curvature).
 - If fluorescence was subtracted, report both the corrected fit and the
   baseline fraction so the user can judge the correction.
+- A subtracted baseline must not decide the answer: band heights, areas and
+  their ratios have to survive a tenfold stiffer baseline (`lam` × 10)
+  within their uncertainties. If they do not, the baseline is eating the
+  bands — fit the background inside the model instead. Near-unity R² does
+  not show this; both versions fit equally well.
 - For identification tasks: the top candidate must explain the strongest
   three bands AND not conflict with provided chemistry; alternatives
   within the same family should be listed when band positions cannot

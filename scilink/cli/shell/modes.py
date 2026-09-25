@@ -303,6 +303,7 @@ Examples:
   scilink analyze --data ./sample.tif --metadata ./metadata.json
   scilink analyze --mode autopilot --data ./data/
   scilink analyze --mode autonomous --data ./sample.npy --metadata ./description.txt
+  scilink analyze --profile quick --data ./spectrum.csv      # a fast look, same gates
   scilink analyze -p "Analyze ./grains.tif" --output-format json   # headless
 
 Analysis Modes:
@@ -334,6 +335,16 @@ Metadata Options:
         p.add_argument("--data", type=str, dest="data_path", help="Path to data file or directory")
         p.add_argument("--metadata", type=str, dest="metadata_path",
                        help="Path to metadata file (.json or .txt)")
+        p.add_argument("--profile", type=str, choices=["thorough", "quick", "extract"], default=None,
+                       help=("Analysis depth for every analysis in this session. 'thorough' "
+                             "(default): full verification, refits, trend and synthesis. "
+                             "'quick': a fast look, a couple of verification passes, short "
+                             "interpretation. 'extract': numbers only, no narrative (for an "
+                             "optimizer or a feature table). Deterministic quality gates are "
+                             "kept under all three. Reduced depth is a trade: a difficult fit "
+                             "can end flagged, or in error when the verifier still rejects at "
+                             "the iteration cap, where 'thorough' would converge. A first fit "
+                             "that produces nothing gets one re-plan before a run gives up."))
         _extras_flags(p, "scilink analyze", agents=True)
         _session_flags(p)
         _deprecated_flags(p)
@@ -356,6 +367,7 @@ Metadata Options:
             model_name=args.model,
             base_url=creds.base_url,
             analysis_mode=AnalysisMode[_ENUM_NAME[self.autonomy_from_args(args)]],
+            analysis_profile=getattr(args, "profile", None),
             restore_checkpoint=restore,
             futurehouse_api_key=resolve_optional_key(args.futurehouse_api_key, "FUTUREHOUSE_API_KEY"),
         )
@@ -370,6 +382,7 @@ Metadata Options:
     def status_fields(self, agent):
         return [("Current data", str(getattr(agent, "current_data_path", None) or "none")),
                 ("Data type", str(getattr(agent, "current_data_type", None) or "none")),
+                ("Analysis depth", str(getattr(agent, "default_profile", None) or "thorough")),
                 ("Selected agent", str(getattr(agent, "selected_agent_id", None))),
                 ("Metadata", "yes" if getattr(agent, "current_metadata", None) else "no"),
                 ("Analyses completed", str(len(getattr(agent, "analysis_results", None) or [])))]

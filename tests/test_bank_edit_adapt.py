@@ -133,7 +133,7 @@ def test_success_bump_only_with_surviving_provenance(monkeypatch):
     from scilink.skills._shared import _script_bank
     bumped = []
     monkeypatch.setattr(_script_bank, "record_success",
-                        lambda d, rid, session=None: bumped.append(rid))
+                        lambda d, rid, session=None, **kw: bumped.append(rid))
     fake, _ = make_self([])
     C._bump_bank_adapt_success(fake, {
         "success": True, "bank_edit_adapt": {"id": "rec_001"}})
@@ -186,7 +186,7 @@ def test_image_bump_uses_image_domain(monkeypatch):
     from scilink.skills._shared import _script_bank
     bumped = []
     monkeypatch.setattr(_script_bank, "record_success",
-                        lambda d, rid, session=None: bumped.append((d, rid)))
+                        lambda d, rid, session=None, **kw: bumped.append((d, rid)))
     fake, _ = make_self([])
     IC._bump_bank_adapt_success(fake, {
         "success": True, "bank_edit_adapt": {"id": "rec_009"}})

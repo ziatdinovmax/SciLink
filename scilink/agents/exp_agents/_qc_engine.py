@@ -104,6 +104,11 @@ def try_bank_edit_adapt(host, ctx, *, domain: str, script_kind: str,
             data_context=data_context,
             output_contract=output_contract,
         )
+        # Attempt provenance for the assist log, from the moment the call is
+        # spent: an adaptation that never applies or never runs still cost
+        # an LLM call, and that waste has to be visible.
+        ctx.bank_adapt_attempt = {"n_edits": None, "applied": False,
+                                  "executed": False}
         raw = host.model.generate_content(
             prompt, generation_config=host.generation_config)
         raw = raw.text if hasattr(raw, "text") else str(raw)
@@ -130,7 +135,9 @@ def try_bank_edit_adapt(host, ctx, *, domain: str, script_kind: str,
             f"   🏦 ✏️  Bank edit-adapt: record {rec.get('id')} "
             f"(score {score}), {n_edits} edit(s) — "
             f"{str(parsed.get('rationale'))[:120]}")
+        ctx.bank_adapt_attempt.update(n_edits=n_edits, applied=True)
         result = run_fn(adapted_script)
+        ctx.bank_adapt_attempt["executed"] = bool(result.get("success"))
         if not result.get("success"):
             host.logger.info(
                 "   🏦 ↩️  Edit-adapted script did not execute cleanly — "
@@ -144,13 +151,89 @@ def try_bank_edit_adapt(host, ctx, *, domain: str, script_kind: str,
         }
         return result
     except Exception as e:  # noqa: BLE001 - never worse than today
+        _att = getattr(ctx, "bank_adapt_attempt", None)
+        if isinstance(_att, dict):
+            _att["fell_through"] = str(e)[:160]
         host.logger.info(
             f"   🏦 ↩️  Edit-adapt fell through ({e}) — falling back to "
             "exemplar-guided generation.")
         return None
 
 
-def bump_bank_adapt_success(host, res, *, domain: str) -> None:
+def record_bank_assist(host, ctx, res, *, domain: str,
+                       seconds: Optional[float] = None,
+                       anchor_only: bool = True) -> Optional[dict]:
+    """Attach a ``bank_assist`` block to a finished QC-loop item and append
+    it to the bank's assist log.
+
+    One block per item that went through the codegen QC loop (``anchor_only``
+    = the curve / image rule that only anchors do; hyperspectral targets all
+    do) — including
+    ``mode="none"`` (nothing in the bank matched), which is the baseline the
+    assisted runs are compared against. Locked-script reuse is not a bank
+    event and is skipped. ``survived`` says whether an edit-adapted script is
+    still the accepted one: a verification-loop refit drops the
+    ``bank_edit_adapt`` provenance, and with it the claim that the bank
+    helped. Bookkeeping only — never raises, never changes ``res``'s verdict.
+    """
+    try:
+        if (not isinstance(res, dict) or res.get("reuse_validity")
+                or res.get("locked_replay")):
+            return None
+        # Curve / image run the verification loop on anchors only; a
+        # non-anchor item's zero iterations would corrupt the baseline.
+        if anchor_only and not getattr(ctx, "is_anchor", True):
+            return None
+        match = getattr(ctx, "bank_exemplar", None) or {}
+        attempt = getattr(ctx, "bank_adapt_attempt", None) or {}
+        rec = match.get("record") or {}
+        if attempt:
+            mode = "edit_adapt"
+        elif rec:
+            mode = "exemplar"
+        else:
+            mode = "none"
+        qh = res.get("quality_history") or {}
+        block = {
+            "domain": domain,
+            "mode": mode,
+            "record_id": rec.get("id"),
+            "score": match.get("score"),
+            "fingerprint_score": match.get("fingerprint_score"),
+            "iterations": len(qh.get("verification_iterations") or []),
+            "approved": bool(qh.get("approved")),
+            "item": getattr(ctx, "item_name", None),
+        }
+        if mode == "edit_adapt":
+            block["n_edits"] = attempt.get("n_edits")
+            block["applied"] = bool(attempt.get("applied"))
+            block["executed"] = bool(attempt.get("executed"))
+            block["survived"] = bool(res.get("bank_edit_adapt"))
+            if attempt.get("fell_through"):
+                block["fell_through"] = attempt["fell_through"]
+        if seconds is not None:
+            block["seconds"] = round(float(seconds), 2)
+        res["bank_assist"] = block
+        from scilink.skills._shared import _script_bank
+        # The bank must learn bad news too: an adaptation that did not end up
+        # as the accepted script cost a call and delivered nothing.
+        if mode == "edit_adapt" and not block["survived"] and rec.get("id"):
+            _script_bank.record_failure(
+                domain, rec["id"],
+                "edit_adapt_" + ("replaced" if block["executed"]
+                                 else "not_executed" if block["applied"]
+                                 else "not_applied"),
+                session=Path(str(getattr(host, "output_dir", "") or "")).name or None)
+        _script_bank.log_assist(
+            {**block, "session": Path(
+                str((ctx.state or {}).get("output_dir")
+                    or getattr(host, "output_dir", "") or "")).name or None})
+        return block
+    except Exception:  # noqa: BLE001 - bookkeeping must never fail a run
+        return None
+
+
+def bump_bank_adapt_success(host, res, *, domain: str, ctx=None) -> None:
     """CLEAN acceptance of an edit-adapted script accumulates proven-N
     evidence on the SAME bank record. A verification-loop refit replaces
     the result and drops the provenance, so a rejected adaptation never
@@ -163,7 +246,21 @@ def bump_bank_adapt_success(host, res, *, domain: str) -> None:
         if (bea and bea.get("id") and res.get("success")
                 and not res.get("quality_warning")):
             from scilink.skills._shared import _script_bank
-            _script_bank.record_success(domain, bea["id"])
+            # Evidence = the NEW data's digest (independent of the data the
+            # record was banked on), plus the session.
+            _script_bank.record_success(
+                domain, bea["id"],
+                session=Path(str(getattr(host, "output_dir", "") or "")).name or None,
+                fingerprint=getattr(ctx, "bank_query_fingerprint", None),
+                # An adaptation with edits means the ADAPTED script passed,
+                # not the banked one: evidence that the record is a good
+                # starting point, not that it runs unchanged. An adaptation
+                # with ZERO edits is the banked script itself, accepted under
+                # LLM verification — verbatim evidence earned under review,
+                # which is also the only way a script born under a
+                # reduced-depth profile can become eligible for unreviewed
+                # reuse.
+                adapted=bool(bea.get("n_edits")))
             host.logger.info(
                 f"   🏦 📈 Bank record {bea['id']}: cross-session success "
                 "recorded (edit-adapted script survived QC).")
@@ -258,6 +355,12 @@ class QCItemContext:
         # Anchor = first item overall OR first in a regime; gets full QC
         self.is_anchor = item_idx == 0 or is_regime_anchor
 
+        # Set by the engine when the run's time budget ran out mid-loop.
+        self.budget_expired: bool = False
+        # Set by the engine when a reduced-depth profile's iteration cap was
+        # reached with the verifier still rejecting.
+        self.capped: bool = False
+
         self.all_attempts: list = []
         self.verification_history: list = []
         self.best_result: Optional[dict] = None
@@ -312,6 +415,15 @@ class CodegenQCEngine:
             ctx.state["_annealing_level"] = ctx.start_level
 
         result = host.qc_run_initial(ctx)
+        if not result["success"]:
+            host.qc_record_initial_failure(ctx, result)
+            # A first fit that produced NOTHING leaves no best attempt for any
+            # later stage to return. A host may spend one bounded recovery here
+            # (curve: one re-plan told why the first plan could not be fitted).
+            recover = getattr(host, "qc_recover_initial_failure", None)
+            recovered = recover(ctx, result) if recover is not None else None
+            if recovered is not None and recovered.get("success"):
+                result = recovered
         ctx.initial_result = result
 
         if result["success"]:
@@ -334,8 +446,6 @@ class CodegenQCEngine:
             post = host.qc_post_verification(ctx)
             if post is not None:
                 return post
-        else:
-            host.qc_record_initial_failure(ctx, result)
 
         # --- Human feedback / judge / best-available fallback ---
         return host.qc_fallback(ctx)
@@ -368,10 +478,23 @@ class CodegenQCEngine:
         import time as _time
         _budget = getattr(host, "qc_time_budget_s", None)
         _loop_t0 = _time.monotonic()
+        # The RUN's deadline (QCProfile.time_budget_s, stamped into the state
+        # by the agent) is separate from the host's own loop budget above and
+        # stricter about what it spends once it is gone: no final verify, no
+        # judge — the best result so far is returned as-is, and the host
+        # marks it unverified (ctx.budget_expired).
+        _run_deadline = (ctx.state or {}).get("_run_deadline")
 
         max_iters = host.max_verification_iterations
         for verification_iter in range(max_iters):
             ctx.iteration = verification_iter
+            if _run_deadline is not None and _time.monotonic() >= _run_deadline:
+                logger.warning(
+                    f"   ⏱️  Run time budget spent after {verification_iter} "
+                    "verification iteration(s) — returning the best result "
+                    "so far, unverified (no further LLM calls).")
+                ctx.budget_expired = True
+                return
             if _budget and _time.monotonic() - _loop_t0 > _budget:
                 logger.warning(
                     f"   Verification loop wall-clock budget exceeded "
@@ -408,6 +531,22 @@ class CodegenQCEngine:
 
             if host.qc_check_accept(ctx, verification):
                 ctx.approved = True
+                return
+
+            # Reduced-depth profiles (purpose-scoped verification): the last
+            # allowed verification has just rejected. Refining and refitting
+            # once more would produce an attempt nobody may verify within the
+            # cap — observed live, that attempt then cost a final verify AND a
+            # judge (four LLM calls, ~170 s) only for the best fit to be
+            # accepted on the deterministic gate anyway. Stop here; the host
+            # returns the best attempt, flagged (ctx.capped).
+            if (verification_iter == max_iters - 1
+                    and (ctx.state or {}).get("_verification_mode") == "purpose"):
+                logger.info(
+                    "   Iteration cap reached with the verifier still rejecting "
+                    "— returning the best attempt so far, flagged (reduced-depth "
+                    "profile: no further refit, final verify or judge).")
+                ctx.capped = True
                 return
 
             # Apply the verifier's recommended fixes.

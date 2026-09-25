@@ -123,9 +123,20 @@ def validate_bound_pinning(parameters, bounds, rel_tol: float = 0.01) -> list:
             tol = max(tol, 1e-12)
             if any(f in str(name).lower() for f in _FRACTION_KEYS):
                 continue
-            if hi is not None and v >= hi - tol:
+
+            def _at(bound):
+                # Within the span tolerance AND close relative to the numbers
+                # themselves. The span alone misfires when it dwarfs the value:
+                # observed live, k = 0.084 with bounds [1e-6, wide] was called
+                # "pinned at its lower bound 1e-06" — five orders of magnitude
+                # above a positivity floor — and each false alarm costs a
+                # model call to "relax" a bound that was never binding.
+                return (abs(v - bound) <= tol
+                        and abs(v - bound) <= rel_tol * max(abs(v), abs(bound)))
+
+            if hi is not None and v >= hi - tol and _at(hi):
                 out.append({"component": comp, "parameter": name, "value": v, "bound": hi, "side": "upper"})
-            elif lo is not None and lo != 0 and v <= lo + tol:
+            elif lo is not None and lo != 0 and v <= lo + tol and _at(lo):
                 out.append({"component": comp, "parameter": name, "value": v, "bound": lo, "side": "lower"})
     return out
 

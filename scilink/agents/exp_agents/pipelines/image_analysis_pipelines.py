@@ -62,6 +62,9 @@ def create_unified_image_analysis_pipeline(
     outlier_sigma: float = 2.0,
     max_verification_iterations: int = 7,
     num_plan_candidates: int = 1,
+    profile: Any = None,
+    explicit_verification_budget: bool = False,
+    write_reports: bool = True,
 ) -> List:
     """
     Factory function to create the unified image analysis pipeline.
@@ -150,6 +153,17 @@ def create_unified_image_analysis_pipeline(
         )
     )
 
+    from .._qc_profile import resolve_profile
+    qc_profile = resolve_profile(profile)
+    if qc_profile.name not in ("thorough", "realtime"):
+        # The caller's explicit iteration budget wins over the preset's.
+        if not explicit_verification_budget:
+            max_verification_iterations = qc_profile.max_verification_iterations
+        if not qc_profile.best_of_n_eligible:
+            num_plan_candidates = 1
+    _conformance = (IMAGE_ANALYSIS_PLAN_CONFORMANCE_CHECK_INSTRUCTIONS
+                    if qc_profile.check_plan_conformance else "")
+
     # Step 4: LLM planning with optional human feedback
     planning_controller = ImagePlanningController(
         model=model,
@@ -162,17 +176,19 @@ def create_unified_image_analysis_pipeline(
         enable_human_feedback=enable_human_feedback,
         max_iterations=5,
         num_plan_candidates=num_plan_candidates,
+        validate_plan=qc_profile.plan_validation,
     )
     pipeline.append(planning_controller)
 
     # Step 5: Literature search (runs once)
-    pipeline.append(
-        LiteratureSearchController(
-            logger=logger,
-            literature_agent=literature_agent,
-            output_dir=output_dir,
+    if qc_profile.literature:
+        pipeline.append(
+            LiteratureSearchController(
+                logger=logger,
+                literature_agent=literature_agent,
+                output_dir=output_dir,
+            )
         )
-    )
 
     # Step 6: Unified series processing with quality control
     pipeline.append(
@@ -191,7 +207,7 @@ def create_unified_image_analysis_pipeline(
             enable_human_feedback=enable_human_feedback,
             outlier_sigma=outlier_sigma,
             max_verification_iterations=max_verification_iterations,
-            conformance_instructions=IMAGE_ANALYSIS_PLAN_CONFORMANCE_CHECK_INSTRUCTIONS,
+            conformance_instructions=_conformance,
             refinement_instructions=IMAGE_ANALYSIS_SCRIPT_REFINEMENT_PROMPT,
             # Lets each best-of-N fan-out candidate (>=1) plan its own
             # independent approach instead of sharing the locked plan.
@@ -200,7 +216,8 @@ def create_unified_image_analysis_pipeline(
     )
 
     # Step 7: Adaptive refit of flagged images
-    pipeline.append(
+    if qc_profile.adaptive_refit:
+      pipeline.append(
         ImageAdaptiveRefitController(
             model=model,
             logger=logger,
@@ -221,7 +238,8 @@ def create_unified_image_analysis_pipeline(
     )
 
     # Step 8: Conditional trend analysis (only for n>=2)
-    pipeline.append(
+    if qc_profile.trend:
+      pipeline.append(
         ConditionalImageTrendController(
             model=model,
             logger=logger,
@@ -234,8 +252,10 @@ def create_unified_image_analysis_pipeline(
         )
     )
 
-    # Step 9: Synthesis (adapts to single vs series)
-    pipeline.append(
+    # Step 9: Synthesis (adapts to single vs series). One LLM call, so
+    # "light" == "full"; "none" leaves the result as its numbers.
+    if qc_profile.synthesis != "none":
+      pipeline.append(
         UnifiedImageSynthesisController(
             model=model,
             logger=logger,
@@ -252,12 +272,15 @@ def create_unified_image_analysis_pipeline(
         StoreAnalysisResultsController(logger, store_fn)
     )
 
-    # Step 11: Report generation (adapts to single vs series)
-    pipeline.append(
-        GenerateImageReportController(logger, output_dir)
-    )
+    # Step 11: Report generation (adapts to single vs series). A live frame
+    # (strict replay) keeps its overlay and numbers and writes no HTML report.
+    if write_reports:
+        pipeline.append(
+            GenerateImageReportController(logger, output_dir)
+        )
 
-    logger.info(f"Unified image analysis pipeline created: {len(pipeline)} steps")
+    logger.info(f"Unified image analysis pipeline created: {len(pipeline)} steps"
+                + (f" (profile: {qc_profile.name})" if qc_profile.name != "thorough" else ""))
     logger.info(f"  Outlier sigma: {outlier_sigma}")
     logger.info(f"  Verification iterations: {max_verification_iterations}")
 

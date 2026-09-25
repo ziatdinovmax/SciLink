@@ -54,10 +54,18 @@ def get_or_download_atomistic_model(settings: dict, logger: logging.Logger = Non
         logger.info(f"Using user-provided model path: {user_provided_path}")
         return user_provided_path
     
-    # 2. Check default path
+    # 2. Check default path. The default is a PERSISTENT per-user cache, not
+    # the current directory: generated analysis scripts run in a fresh per-item
+    # working directory, so a relative default downloaded the ~770 MB ensemble
+    # again into EVERY image's folder (observed live: 11 frames of a live loop
+    # took 36 s each and filled a disk with 12 GB of identical weights). A
+    # ``dcnn_trained`` folder already in the working directory still wins, so
+    # an existing setup keeps working.
     default_path = DEFAULT_MODEL_DIR
-    
-    if not os.path.isdir(default_path):
+    if not os.path.isabs(default_path) and not os.path.isdir(default_path):
+        default_path = _persistent_model_dir(default_path)
+
+    if not os.path.isdir(default_path) or not _locate_model_files(default_path, logging.getLogger("quiet")):
         logger.warning(f"Default model directory '{default_path}' not found. Downloading...")
         
         # Download the model
@@ -80,6 +88,16 @@ def get_or_download_atomistic_model(settings: dict, logger: logging.Logger = Non
         logger.error(f"Could not find model files in '{default_path}' or subdirectories.")
     
     return model_path
+
+
+def _persistent_model_dir(name: str) -> str:
+    """``<SCILINK_HOME or ~/.scilink>/models/<name>``: downloaded once, shared by
+    every analysis on this machine."""
+    from pathlib import Path
+    home = Path(os.environ.get("SCILINK_MODELS") or "").expanduser() if os.environ.get("SCILINK_MODELS") \
+        else Path(os.environ.get("SCILINK_HOME") or (Path.home() / ".scilink")).expanduser() / "models"
+    home.mkdir(parents=True, exist_ok=True)
+    return str(home / name)
 
 
 def _download_and_extract_model(gdrive_id: str, output_dir: str, logger: logging.Logger) -> bool:

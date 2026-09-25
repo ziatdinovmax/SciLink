@@ -44,9 +44,13 @@ _KNOWN_SECTIONS = {"overview", "planning", "analysis", "interpretation", "valida
 # (issue #196): setup → data framing, surrogate/acquisition → strategy config,
 # diagnostics → diagnostics + visual inspection, implementation → bounded
 # codegen recipe.
+# Acquisition skills (scilink/live/acquisition_skills.py) say how to STEER a
+# running measurement, not how to analyse it: what each knob buys and costs,
+# where damage starts, how to read the stream, in what order to move.
 _DOMAIN_VOCABULARIES = {
     "optimization": {"overview", "setup", "surrogate", "acquisition",
                      "diagnostics", "interpretation", "implementation"},
+    "acquisition": {"overview", "tradeoffs", "limits", "quality", "strategy"},
 }
 
 

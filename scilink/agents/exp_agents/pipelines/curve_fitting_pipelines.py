@@ -64,7 +64,10 @@ def create_unified_curve_fitting_pipeline(
     max_verification_iterations: int = 7,
     parallel_workers: int | None = None,
     load_skills_fn: Callable | None = None,
-    profile: str | None = None,
+    profile: Any = None,
+    explicit_verification_budget: bool = False,
+    bank_recipe: bool = False,
+    write_reports: bool = True,
 ) -> List:
     """
     Factory function to create the unified curve fitting pipeline.
@@ -142,7 +145,14 @@ def create_unified_curve_fitting_pipeline(
     # arithmetic gate (verification is bypassed via
     # max_verification_iterations=0). Zero LLM calls on the happy path; the
     # fallback (prior script cannot execute) costs a single generation.
-    if profile == "realtime":
+    from .._qc_profile import resolve_profile
+    qc_profile = resolve_profile(profile)
+    # The caller's explicit iteration budget wins over the preset's; without
+    # one, a non-default profile brings its own.
+    if qc_profile.name != "thorough" and not explicit_verification_budget:
+        max_verification_iterations = qc_profile.max_verification_iterations
+
+    if qc_profile.name == "realtime":
         realtime_pipeline = [
             AnalyzeDataController(logger, plot_fn),
             UnifiedSeriesProcessingController(
@@ -167,15 +177,62 @@ def create_unified_curve_fitting_pipeline(
                 replanner=None,
             ),
             StoreAnalysisResultsController(logger, store_fn),
-            GenerateCurveFittingReportController(
-                logger, output_dir, r2_threshold=r2_threshold),
-            UnifiedCurveReportController(logger, output_dir),
         ]
+        # A frame of a live stream (strict replay) is one of thousands: an HTML
+        # report per frame is dead weight on the fast path, and in a web session
+        # each one surfaced as a chat artifact (observed: 50 reports listed
+        # under the next chat turn). The numbers, the plot and the arrays are
+        # still written; a one-off realtime run keeps its report.
+        if write_reports:
+            realtime_pipeline += [
+                GenerateCurveFittingReportController(
+                    logger, output_dir, r2_threshold=r2_threshold),
+                UnifiedCurveReportController(logger, output_dir),
+            ]
         logger.info(
             f"Realtime curve pipeline created: {len(realtime_pipeline)} steps "
             f"(zero-LLM happy path)"
         )
         return realtime_pipeline
+
+    # BANK RECIPE (quick / extract with a verbatim audition winner): the
+    # agent seeded the locked config from the bank record, so skill
+    # selection, planning, plan validation and literature have nothing left
+    # to decide — the series controller's reuse path runs the banked script
+    # under the arithmetic gate, and synthesis follows the profile.
+    if bank_recipe:
+        recipe_pipeline = [
+            AnalyzeDataController(logger, plot_fn),
+            UnifiedSeriesProcessingController(
+                model=model, logger=logger, generation_config=generation_config,
+                safety_settings=safety_settings, parse_fn=parse_fn,
+                executor=executor,
+                script_instructions=FITTING_SCRIPT_INSTRUCTIONS,
+                correction_instructions=FITTING_SCRIPT_CORRECTION_INSTRUCTIONS,
+                quality_instructions=FIT_QUALITY_ASSESSMENT_INSTRUCTIONS,
+                output_dir=output_dir, plot_fn=plot_fn,
+                r2_threshold=r2_threshold, max_model_retries=max_model_retries,
+                enable_human_feedback=enable_human_feedback,
+                outlier_sigma=outlier_sigma,
+                max_verification_iterations=max_verification_iterations,
+                conformance_instructions=None,
+                parallel_workers=parallel_workers, replanner=None,
+            ),
+        ]
+        if qc_profile.synthesis != "none":
+            recipe_pipeline.append(UnifiedCurveSynthesisController(
+                model=model, logger=logger, generation_config=generation_config,
+                safety_settings=safety_settings, parse_fn=parse_fn,
+                single_spectrum_instructions=FITTING_INTERPRETATION_INSTRUCTIONS,
+                output_dir=output_dir))
+        recipe_pipeline += [
+            StoreAnalysisResultsController(logger, store_fn),
+            GenerateCurveFittingReportController(logger, output_dir, r2_threshold=r2_threshold),
+            UnifiedCurveReportController(logger, output_dir),
+        ]
+        logger.info(f"Bank-recipe curve pipeline created: {len(recipe_pipeline)} steps "
+                    f"(profile: {qc_profile.name}; banked script, no planning)")
+        return recipe_pipeline
 
     pipeline = []
 
@@ -216,18 +273,20 @@ def create_unified_curve_fitting_pipeline(
         instructions=CURVE_ANALYSIS_INSTRUCTIONS,
         output_dir=output_dir,
         enable_human_feedback=enable_human_feedback,
-        max_iterations=5
+        max_iterations=5,
+        validate_plan=qc_profile.plan_validation,
     )
     pipeline.append(planning_controller)
 
     # Step 3: Literature search (runs once, uses first spectrum context)
-    pipeline.append(
-        LiteratureSearchController(
-            logger=logger,
-            literature_agent=literature_agent,
-            output_dir=output_dir
+    if qc_profile.literature:
+        pipeline.append(
+            LiteratureSearchController(
+                logger=logger,
+                literature_agent=literature_agent,
+                output_dir=output_dir
+            )
         )
-    )
 
     # Step 4: Unified series processing with quality control
     pipeline.append(
@@ -248,7 +307,8 @@ def create_unified_curve_fitting_pipeline(
             enable_human_feedback=enable_human_feedback,
             outlier_sigma=outlier_sigma,
             max_verification_iterations=max_verification_iterations,
-            conformance_instructions=PLAN_CONFORMANCE_CHECK_INSTRUCTIONS,
+            conformance_instructions=(PLAN_CONFORMANCE_CHECK_INSTRUCTIONS
+                                      if qc_profile.check_plan_conformance else None),
             parallel_workers=parallel_workers,
             # Lets each best-of-N fan-out candidate (>=1) plan its own
             # independent fitting approach instead of sharing the locked plan.
@@ -257,7 +317,8 @@ def create_unified_curve_fitting_pipeline(
     )
 
     # Step 5: Adaptive refit of flagged spectra (post-processing recovery)
-    pipeline.append(
+    if qc_profile.adaptive_refit:
+      pipeline.append(
         AdaptiveRefitController(
             model=model,
             logger=logger,
@@ -279,7 +340,8 @@ def create_unified_curve_fitting_pipeline(
     )
 
     # Step 6: Conditional trend analysis (only for n>=2)
-    pipeline.append(
+    if qc_profile.trend:
+      pipeline.append(
         ConditionalTrendAnalysisController(
             model=model,
             logger=logger,
@@ -292,8 +354,10 @@ def create_unified_curve_fitting_pipeline(
         )
     )
 
-    # Step 7: Synthesis (adapts to single vs series)
-    pipeline.append(
+    # Step 7: Synthesis (adapts to single vs series). A single LLM call for
+    # curves, so "light" == "full"; "none" leaves the result as its numbers.
+    if qc_profile.synthesis != "none":
+      pipeline.append(
         UnifiedCurveSynthesisController(
             model=model,
             logger=logger,
@@ -320,7 +384,8 @@ def create_unified_curve_fitting_pipeline(
         UnifiedCurveReportController(logger, output_dir)
     )
 
-    logger.info(f"Unified curve fitting pipeline created: {len(pipeline)} steps")
+    logger.info(f"Unified curve fitting pipeline created: {len(pipeline)} steps"
+                + (f" (profile: {qc_profile.name})" if qc_profile.name != "thorough" else ""))
     logger.info(f"  Quality settings: R² threshold={r2_threshold}, max_retries={max_model_retries}, outlier_sigma={outlier_sigma}")
     logger.info(f"  Verification iterations: {max_verification_iterations}")
     

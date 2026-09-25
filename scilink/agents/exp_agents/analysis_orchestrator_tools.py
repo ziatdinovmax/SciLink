@@ -137,8 +137,9 @@ def _build_skill_description(agent_registry: dict = None,
     # Prefer the frontmatter `description` field when present; fall back
     # to the first line of the overview section.
     for domain, names in list_all_skills().items():
-        if domain == "data_preparation":
-            continue   # preparation skills belong to prepare_data, not run_analysis
+        if domain in ("data_preparation", "acquisition"):
+            continue   # preparation skills belong to prepare_data, acquisition
+            #            skills to the live loop's recommender — not run_analysis
         skill_descs = []
         for name in names:
             try:
@@ -2580,6 +2581,8 @@ class AnalysisOrchestratorTools:
             reuse_locked_script: bool = False,
             script_edits: List[dict] = None,
             profile: str = None,
+            time_budget_s: float = None,
+            targets: List[str] = None,
             literature_file: str = None,
             reference_scripts: List[str] = None,
             r2_threshold: float = None,
@@ -3248,13 +3251,36 @@ class AnalysisOrchestratorTools:
                                 "script, currently supported for curve "
                                 "fitting and image analysis. Re-run "
                                 "without script_edits.")})
-                if profile:
+                # Depth / scope fixed by whoever drives this orchestrator (a
+                # meta delegation, or --profile) win over this call's own
+                # arguments: the caller knows what the result is for. The one
+                # exception is 'realtime', which is a different mechanism (a
+                # locked replay), not a depth.
+                _caller_profile = getattr(self.orch, "default_profile", None)
+                if _caller_profile and profile != "realtime":
+                    if profile and profile != _caller_profile:
+                        print(f"  ℹ️  Depth is set by the caller: using "
+                              f"'{_caller_profile}' (not '{profile}').")
+                    profile = _caller_profile
+                time_budget_s = (getattr(self.orch, "default_time_budget_s", None)
+                                 or time_budget_s)
+                targets = getattr(self.orch, "default_targets", None) or targets
+                if targets:
+                    import inspect as _inspect
+                    if "targets" in _inspect.signature(agent.analyze).parameters:
+                        analyze_kwargs["targets"] = [str(x) for x in targets]
+                if profile or time_budget_s:
                     # Operating profile (#346): forward only to agents whose
                     # analyze() accepts it (all three do; introspection keeps
-                    # this robust for custom agents).
+                    # this robust for custom agents). A time budget is a
+                    # field of the profile, so it travels as an override on
+                    # whichever preset was chosen (thorough when none was).
                     import inspect as _inspect
                     if "profile" in _inspect.signature(agent.analyze).parameters:
-                        analyze_kwargs["profile"] = profile
+                        analyze_kwargs["profile"] = (
+                            {"base": profile or "thorough",
+                             "time_budget_s": float(time_budget_s)}
+                            if time_budget_s else profile)
                 if literature_file:
                     analyze_kwargs["literature_file"] = literature_file
                 if r2_threshold is not None:
@@ -3320,6 +3346,10 @@ class AnalysisOrchestratorTools:
                 # unless explicitly requested; forwarded only to agents whose
                 # analyze() accepts it.
                 resolved_n = _resolve_n_candidates(agent, n_candidates)
+                if profile in ("quick", "extract"):
+                    # Fit-for-purpose profiles run one candidate; do not
+                    # forward (or announce) the agent's best-of-N default.
+                    resolved_n, n_candidates = None, None
                 if resolved_n is None:
                     if n_candidates is not None:
                         self.logger.info(
@@ -3774,10 +3804,29 @@ class AnalysisOrchestratorTools:
                 },
                 "profile": {
                     "type": "string",
-                    "enum": ["thorough", "realtime"],
+                    "enum": ["thorough", "quick", "extract", "realtime"],
                     "description": (
-                        "Operating profile. Omit (or 'thorough') for the normal "
-                        "full-quality analysis. 'realtime' is the per-frame "
+                        "Analysis depth — choose it by who consumes the result, "
+                        "not by how interesting the data looks. Omit (or "
+                        "'thorough') for a result that will be interpreted or "
+                        "reported: the full verification loop, refits, trend and "
+                        "synthesis. 'quick' is a fast look for a person: a "
+                        "couple of verification passes, no literature, refits or "
+                        "trend script, and a short interpretation. 'extract' is "
+                        "numbers for a machine — an optimizer objective, a "
+                        "feature table, a screening pass: 'quick' with no "
+                        "narrative at all. Both keep every deterministic quality "
+                        "gate, mark the result with `profile` so it can be "
+                        "re-run thoroughly later, and work for curves, images "
+                        "and datacubes. Use them when the user asks for a quick "
+                        "/ rough / first look or the numbers feed another step. "
+                        "The shorter verification budget is a real trade: a fit "
+                        "that needs several refinement rounds can end flagged, "
+                        "or in error when the verifier still rejects at the "
+                        "iteration cap, where 'thorough' would converge — re-run "
+                        "thoroughly when that happens. (A first fit that produces "
+                        "nothing is re-planned once before a run ends in error.) "
+                        "'realtime' is the per-frame "
                         "in-situ mode for curve data: it executes the locked "
                         "script from `prior_analysis_paths` with ZERO LLM calls "
                         "— requires `prior_analysis_paths` + "
@@ -3791,6 +3840,34 @@ class AnalysisOrchestratorTools:
                         "re-analysis of such frames. Use for high-cadence "
                         "measurement streams; interpretation is deferred to a "
                         "post-experiment sweep."
+                    )
+                },
+                "targets": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "The quantities the consumer of this result actually "
+                        "needs, in plain words (e.g. ['G-band position', 'D/G "
+                        "intensity ratio']). The quality verifier then judges "
+                        "whether THOSE are trustworthy and stops asking for "
+                        "refinement of features they do not depend on. Use it "
+                        "when the user or a downstream step names what it "
+                        "wants; omit it to have the whole analysis judged. "
+                        "Curve and image analyses."
+                    )
+                },
+                "time_budget_s": {
+                    "type": "number",
+                    "description": (
+                        "Soft wall-clock budget for this analysis, in seconds. "
+                        "Use it when the caller has a deadline (an instrument "
+                        "waiting, a user who asked for an answer within a "
+                        "time). Once it is spent, optional stages are skipped "
+                        "and the quality loop returns its best result so far "
+                        "marked `unverified` — a result always comes back, and "
+                        "`time_budget` in it says what was cut. Soft: a call or "
+                        "script already running is not interrupted. Combines "
+                        "with any `profile`."
                     )
                 },
                 "literature_file": {

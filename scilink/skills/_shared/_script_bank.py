@@ -74,10 +74,168 @@ def _domain_dir(domain: str, *, root: Optional[Path] = None) -> Path:
     return (root or bank_dir()) / safe_path_component(domain, fallback="unknown_domain")
 
 
+# ──────────────────────────────────────────────────────────────
+# Locking
+#
+# Every stats update is a read-modify-write of a record's JSON file, and the
+# bank is written from several processes at once — a series' replay pool, a
+# meta fan-out, a live loop's escalation worker. Without a lock the last
+# writer wins and the others' successes / failures / evidence vanish. One
+# advisory lock per domain (flock on ``<domain>/.lock``) serialises them; it
+# is reentrant within a thread because a bank write triggers the aging sweep,
+# which archives under the same lock. Platforms without ``fcntl`` run
+# unlocked, as before.
+# ──────────────────────────────────────────────────────────────
+
+import contextlib
+import threading
+
+_lock_state = threading.local()
+
+
+@contextlib.contextmanager
+def _domain_lock(domain: str, *, root: Optional[Path] = None):
+    try:
+        import fcntl
+    except ImportError:          # pragma: no cover - non-POSIX
+        yield
+        return
+    d = (root or bank_dir()) / safe_path_component(domain, fallback="unknown_domain")
+    key = str(d)
+    held = getattr(_lock_state, "held", None)
+    if held is None:
+        held = _lock_state.held = {}
+    if held.get(key):
+        held[key] += 1
+        try:
+            yield
+        finally:
+            held[key] -= 1
+        return
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        fh = open(d / ".lock", "a")
+    except OSError:              # read-only store: nothing to protect
+        yield
+        return
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        held[key] = 1
+        try:
+            yield
+        finally:
+            held[key] = 0
+            fcntl.flock(fh, fcntl.LOCK_UN)
+    finally:
+        fh.close()
+
+
 def script_hash(script: str) -> str:
     """Content hash identifying a script up to trailing whitespace."""
     normalized = "\n".join(line.rstrip() for line in (script or "").strip().splitlines())
     return hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:16]
+
+
+def verify_record(rec: Optional[Dict[str, Any]]) -> bool:
+    """Whether a record's script still matches the hash it was banked under.
+
+    The bank stores code that the verbatim path executes with no LLM review,
+    so a record edited on disk — or one that never carried a hash — is not
+    retrievable. Bookkeeping writes (stats, evidence) never touch the script,
+    so they keep a record valid.
+    """
+    if not isinstance(rec, dict):
+        return False
+    stored = rec.get("script_hash")
+    script = rec.get("working_script")
+    return bool(stored) and bool((script or "").strip()) \
+        and script_hash(script) == stored
+
+
+#: Bumped whenever a fingerprint function changes what it computes. Records
+#: keep the version they were fingerprinted under; similarity between
+#: different versions is meaningless, so retrieval skips a mismatch rather
+#: than compare apples with oranges. Records from before versioning are v1.
+FINGERPRINT_VERSION = 1
+
+_MAX_EVIDENCE = 50
+ARCHIVE_DIRNAME = "_archive"
+
+
+def _fp_version(fp: Optional[Dict[str, Any]]) -> int:
+    try:
+        return int((fp or {}).get("v") or 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def data_key(fingerprint: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Short digest identifying WHICH data a success was earned on.
+
+    Two runs on the same file produce the same key; a new measurement of even
+    the same sample does not (noise moves the peak census). That is the
+    distinction "independent evidence" needs.
+    """
+    if not fingerprint or not fingerprint.get("kind"):
+        return None
+    blob = json.dumps(fingerprint, sort_keys=True, default=str)
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:12]
+
+
+def _add_evidence(rec: Dict[str, Any], fingerprint: Optional[Dict[str, Any]],
+                  session: Optional[str], *, adapted: bool = False) -> None:
+    """Note one success's evidence key: the data digest when the data is
+    known, else the session (one campaign = one piece of evidence).
+
+    Two ledgers, because two different claims ride on them. ``evidence``
+    counts every dataset the record helped solve — including through an
+    edit-adaptation, which may have changed the model (observed live: a
+    two-peak script that FAILED verbatim on three-peak data was adapted to
+    three peaks, passed, and the original was credited). That is honest
+    evidence that the record is a good starting point — the graduation
+    signal. ``verbatim_evidence`` counts only datasets the script solved
+    UNCHANGED, which is the only evidence that may license running it with
+    no LLM review.
+    """
+    key = data_key(fingerprint) or (f"session:{session}" if session else None)
+    if not key:
+        return
+    for ledger in (("evidence",) if adapted else ("evidence", "verbatim_evidence")):
+        ev = rec.setdefault(ledger, [])
+        if key not in ev:
+            ev.append(key)
+            del ev[:-_MAX_EVIDENCE]
+
+
+def independent_successes(rec: Dict[str, Any], *, verbatim_only: bool = False) -> int:
+    """How many INDEPENDENT successes back a record.
+
+    ``stats.n_successes`` counts runs, so re-running one file three times
+    used to make a record "proven". Evidence keys count distinct datasets
+    instead; ``verbatim_only`` counts just those the script solved unchanged
+    (see :func:`_add_evidence`). Records written before evidence tracking
+    fall back to their distinct sessions — weaker, but never more than the
+    runs they recorded.
+    """
+    ev = rec.get("verbatim_evidence" if verbatim_only else "evidence")
+    if isinstance(ev, list) and ev:
+        return len(set(ev))
+    if verbatim_only and isinstance(rec.get("evidence"), list) and rec["evidence"]:
+        return 1  # evidence-tracked record with no verbatim ledger: its own data
+    n_succ = int((rec.get("stats") or {}).get("n_successes", 1) or 1)
+    sessions = {s for s in (rec.get("sessions") or []) if s}
+    return max(1, min(n_succ, len(sessions) or 1))
+
+
+def is_proven(rec: Dict[str, Any]) -> bool:
+    """Graduation signal: keeps helping solve new data (any route)."""
+    return independent_successes(rec) >= proven_n()
+
+
+def is_verbatim_proven(rec: Dict[str, Any]) -> bool:
+    """Trust signal: keeps solving new data UNCHANGED — the bar for running
+    a record with no LLM review where the arithmetic gate alone is weak."""
+    return independent_successes(rec, verbatim_only=True) >= proven_n()
 
 
 # ──────────────────────────────────────────────────────────────
@@ -88,7 +246,7 @@ def script_hash(script: str) -> str:
 _MAX_SESSIONS = 20
 
 
-def add_record(domain: str, record: Dict[str, Any], *, root: Optional[Path] = None) -> Dict[str, Any]:
+def _add_record_unlocked(domain: str, record: Dict[str, Any], *, root: Optional[Path] = None) -> Dict[str, Any]:
     """Bank one successful script; return ``{"id", "action"}``.
 
     ``record`` must carry ``working_script``; everything else (context,
@@ -107,9 +265,21 @@ def add_record(domain: str, record: Dict[str, Any], *, root: Optional[Path] = No
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     session = (record.get("provenance") or {}).get("session")
     metric = (record.get("outcome") or {}).get("metric")
+    action = "updated"
+    if existing is None:
+        # A script that was archived for disuse and has now succeeded again
+        # earned its place back — restore it rather than bank a duplicate.
+        archived = _find_by_hash(domain, h, root=root, archived=True)
+        if archived is not None:
+            rec, apath = archived
+            path = _domain_dir(domain, root=root) / apath.name
+            apath.replace(path)
+            rec.pop("archived", None)
+            existing, action = (rec, path), "restored"
 
     if existing is not None:
         rec, path = existing
+        _add_evidence(rec, record.get("data_fingerprint"), session)
         # Backfill matching tiers an earlier write couldn't compute.
         for key in ("data_fingerprint", "measurement_context", "technique_signals"):
             if not rec.get(key) and record.get(key):
@@ -129,7 +299,7 @@ def add_record(domain: str, record: Dict[str, Any], *, root: Optional[Path] = No
                 rec["outcome"]["best_metric"] = metric
         rec["updated_at"] = now
         atomic_write_text(path, json.dumps(rec, indent=2, default=str))
-        return {"id": rec["id"], "action": "updated"}
+        return {"id": rec["id"], "action": action}
 
     warn_if_ephemeral_store()
     d = _domain_dir(domain, root=root)
@@ -141,10 +311,14 @@ def add_record(domain: str, record: Dict[str, Any], *, root: Optional[Path] = No
         "script_hash": h,
         "created_at": now,
         "sessions": [session] if session else [],
-        "stats": {"n_successes": 1, "n_retrievals": 0},
+        "stats": {"n_successes": 1, "n_retrievals": 0, "n_failures": 0},
         **record,
     }
+    _add_evidence(payload, record.get("data_fingerprint"), session)
     atomic_write_text(d / f"{rid}.json", json.dumps(payload, indent=2, default=str))
+    # A growing bank is the moment to retire what nobody uses (at most one
+    # sweep a day per domain; failure-isolated).
+    auto_archive(domain, root=root)
     return {"id": rid, "action": "created"}
 
 
@@ -158,8 +332,11 @@ def _metric_value(metric: Any) -> Optional[float]:
         return None
 
 
-def _find_by_hash(domain: str, h: str, *, root: Optional[Path] = None):
+def _find_by_hash(domain: str, h: str, *, root: Optional[Path] = None,
+                  archived: bool = False):
     d = _domain_dir(domain, root=root)
+    if archived:
+        d = d / ARCHIVE_DIRNAME
     if not d.is_dir():
         return None
     for f in sorted(d.glob("*.json")):
@@ -205,7 +382,7 @@ def get_record(domain: str, rid: str, *, root: Optional[Path] = None) -> Optiona
         return None
 
 
-def remove_records(domain: str, ids: List[str], *, root: Optional[Path] = None) -> int:
+def _remove_records_unlocked(domain: str, ids: List[str], *, root: Optional[Path] = None) -> int:
     """Delete bank records by id; return count removed."""
     d = _domain_dir(domain, root=root)
     n = 0
@@ -355,7 +532,8 @@ def curve_fingerprint(x: Any, y: Any, x_units: Optional[str] = None) -> Dict[str
     y = np.asarray(y, dtype=float).ravel()
     n = min(x.size, y.size)
     x, y = x[:n], y[:n]
-    fp: Dict[str, Any] = {"kind": "curve", "n_points": int(n)}
+    fp: Dict[str, Any] = {"kind": "curve", "v": FINGERPRINT_VERSION,
+                          "n_points": int(n)}
     if n == 0:
         return fp
     fp["x_units"] = x_units
@@ -383,7 +561,8 @@ def image_fingerprint(image: Any, pixel_size_nm: Optional[float] = None) -> Dict
     img = np.asarray(image, dtype=float)
     if img.ndim == 3:  # collapse channels
         img = img.mean(axis=-1)
-    fp: Dict[str, Any] = {"kind": "image", "shape": [int(s) for s in img.shape]}
+    fp: Dict[str, Any] = {"kind": "image", "v": FINGERPRINT_VERSION,
+                          "shape": [int(s) for s in img.shape]}
     if img.ndim != 2 or img.size == 0:
         return fp
     fp["pixel_size_nm"] = _r(pixel_size_nm) if pixel_size_nm else None
@@ -508,6 +687,9 @@ def _log_ratio_sim(a: Any, b: Any, scale: float = 1.0) -> Optional[float]:
     return float(np.exp(-abs(np.log(a / b)) / scale))
 
 
+_IMAGE_TERMS_FOR_FULL_SCORE = 3
+
+
 def _image_similarity(a: Dict[str, Any], b: Dict[str, Any]) -> float:
     sims = []
     ia, ib = a.get("intensity") or {}, b.get("intensity") or {}
@@ -521,7 +703,13 @@ def _image_similarity(a: Dict[str, Any], b: Dict[str, Any]) -> float:
     s = _log_ratio_sim(a.get("pixel_size_nm"), b.get("pixel_size_nm"), scale=1.0)
     if s is not None:
         sims.append(s)
-    return float(np.mean(sims)) if sims else 0.0
+    if not sims:
+        return 0.0
+    # Averaging only the terms both sides carry made matching MORE lenient as
+    # metadata went missing: one agreeing term (contrast alone) scored a
+    # perfect 1.0. Agreement on fewer than three of the four terms is weak
+    # evidence, so it is scaled down rather than trusted.
+    return float(np.mean(sims)) * min(1.0, len(sims) / _IMAGE_TERMS_FOR_FULL_SCORE)
 
 
 def _hs_similarity(a: Dict[str, Any], b: Dict[str, Any]) -> float:
@@ -578,16 +766,29 @@ def _units_of(fp: Dict[str, Any]) -> Optional[str]:
     return u.strip().lower() if isinstance(u, str) and u.strip() else None
 
 
+def _skills_of(rec: Dict[str, Any]) -> set:
+    raw = (rec.get("technique_signals") or {}).get("active_skills") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    return {str(s).strip().lower() for s in raw if str(s).strip()}
+
+
 def find_exemplar(domain: str, fingerprint: Optional[Dict[str, Any]],
                   context: Any = None, *, k: int = 1,
                   min_score: float = _MIN_EXEMPLAR_SCORE,
+                  active_skills: Optional[List[str]] = None,
                   root: Optional[Path] = None) -> List[Dict[str, Any]]:
     """Rank bank records against a new dataset; return the top match(es).
 
-    Hard filters: fingerprint kind must match; axis units must agree when
-    both sides declare them. Score = 0.8 × fingerprint similarity + 0.2 ×
-    context token overlap + a small usage bonus (capped at 0.05) for scripts
-    that keep succeeding across sessions. Returns ``[{"record", "score",
+    Hard filters: the record's script must still match its stored hash
+    (:func:`verify_record`); fingerprint kind and version must match; axis
+    units must agree when both sides declare them; and when both the run and
+    the record name technique skills, they must share one — a script written
+    under the Raman skill's mandatory rules is not a candidate for an FTIR
+    run, whatever the axis looks like. Score = 0.8 × fingerprint similarity +
+    0.2 × context token overlap + a small usage bonus (capped at 0.05) for
+    scripts backed by INDEPENDENT successes, minus a reliability penalty
+    (capped at 0.15) for scripts that were retrieved and then failed. Returns ``[{"record", "score",
     "fingerprint_score"}, ...]`` above ``min_score`` — empty when nothing in
     the bank resembles this data (offering a poor exemplar is worse than
     generating from scratch).
@@ -600,19 +801,34 @@ def find_exemplar(domain: str, fingerprint: Optional[Dict[str, Any]],
         return []
     query_units = _units_of(fingerprint)
     query_tokens = _context_tokens(context)
+    query_skills = {str(s).strip().lower() for s in (active_skills or [])
+                    if str(s).strip()}
+    query_version = _fp_version(fingerprint)
 
     scored = []
     for rec in list_records(domain, root=root):
         fp = rec.get("data_fingerprint") or {}
         if fp.get("kind") != kind or not (rec.get("working_script") or "").strip():
             continue
+        if _fp_version(fp) != query_version or not verify_record(rec):
+            continue
+        rec_skills = _skills_of(rec)
+        if query_skills and rec_skills and not (query_skills & rec_skills):
+            continue
         rec_units = _units_of(fp)
         if query_units and rec_units and query_units != rec_units:
             continue
         s_fp = simfn(fingerprint, fp)
         s_ctx = _context_similarity(query_tokens, rec)
-        n_succ = (rec.get("stats") or {}).get("n_successes", 1) or 1
-        usage = min(0.05, 0.01 * (int(n_succ) - 1))
+        n_ind = independent_successes(rec)
+        usage = min(0.05, 0.01 * (n_ind - 1))
+        # Reliability: a record retrieved and then failing (gate miss,
+        # adaptation replaced by a refit) is an attractive nuisance. The
+        # penalty grows with the failure count and with the failure SHARE,
+        # so one miss on a well-proven script costs almost nothing.
+        n_fail = int((rec.get("stats") or {}).get("n_failures", 0) or 0)
+        penalty = (min(0.15, 0.05 * n_fail) * n_fail / (n_fail + n_ind)
+                   if n_fail else 0.0)
         # Quality tie-breaker: a small term from the record's gate metric so
         # near-ties (same-system variants with equal fingerprints and usage)
         # resolve toward the better-quality script instead of record-id order.
@@ -622,7 +838,7 @@ def find_exemplar(domain: str, fingerprint: Optional[Dict[str, Any]],
         outcome = rec.get("outcome") or {}
         mv = _metric_value(outcome.get("best_metric") or outcome.get("metric"))
         quality = 0.02 * min(max(mv, 0.0), 1.0) if mv is not None else 0.0
-        score = 0.8 * s_fp + 0.2 * s_ctx + usage + quality
+        score = 0.8 * s_fp + 0.2 * s_ctx + usage + quality - penalty
         if score >= min_score:
             scored.append((score, s_fp, rec))
     scored.sort(key=lambda t: (-t[0], t[2].get("id", "")))
@@ -630,20 +846,23 @@ def find_exemplar(domain: str, fingerprint: Optional[Dict[str, Any]],
             for sc, sfp, rec in scored[:k]]
 
 
-def mark_retrieved(domain: str, rid: str, *, root: Optional[Path] = None) -> None:
+def _mark_retrieved_unlocked(domain: str, rid: str, *, root: Optional[Path] = None) -> None:
     """Increment a record's retrieval counter (usage stat; never raises)."""
     try:
         f = _domain_dir(domain, root=root) / f"{rid}.json"
         rec = json.loads(f.read_text())
         stats = rec.setdefault("stats", {})
         stats["n_retrievals"] = int(stats.get("n_retrievals", 0)) + 1
+        rec["last_retrieved_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         atomic_write_text(f, json.dumps(rec, indent=2, default=str))
     except Exception:
         pass
 
 
-def record_success(domain: str, rid: str, session: Optional[str] = None,
-                   *, root: Optional[Path] = None) -> None:
+def _record_success_unlocked(domain: str, rid: str, session: Optional[str] = None,
+                   *, fingerprint: Optional[Dict[str, Any]] = None,
+                   adapted: bool = False,
+                   root: Optional[Path] = None) -> None:
     """Bump a record's cross-session success stats without re-banking.
 
     For verbatim cold-start wins (#346 step 4): the banked script passed the
@@ -657,6 +876,9 @@ def record_success(domain: str, rid: str, session: Optional[str] = None,
         rec = json.loads(f.read_text())
         stats = rec.setdefault("stats", {})
         stats["n_successes"] = int(stats.get("n_successes", 1)) + 1
+        # Evidence: the new data's digest when the caller has it, else one
+        # key per session (so a campaign counts once).
+        _add_evidence(rec, fingerprint, session, adapted=adapted)
         if session:
             sessions = rec.setdefault("sessions", [])
             if session not in sessions:
@@ -666,6 +888,341 @@ def record_success(domain: str, rid: str, session: Optional[str] = None,
         atomic_write_text(f, json.dumps(rec, indent=2, default=str))
     except Exception:
         pass
+
+
+def _record_failure_unlocked(domain: str, rid: str, reason: str,
+                   session: Optional[str] = None,
+                   *, root: Optional[Path] = None) -> None:
+    """Note that a retrieved record did NOT deliver on new data.
+
+    The counterpart of :func:`record_success`: a verbatim audition that
+    missed the gate, or an edit-adaptation that a verification refit had to
+    replace. Without it the bank only ever learned good news, and a record
+    could be retrieved forever without paying for its misses. Feeds the
+    reliability penalty in :func:`find_exemplar` and the ``never_succeeds``
+    aging rule. Never raises.
+    """
+    try:
+        f = _domain_dir(domain, root=root) / f"{rid}.json"
+        rec = json.loads(f.read_text())
+        stats = rec.setdefault("stats", {})
+        stats["n_failures"] = int(stats.get("n_failures", 0) or 0) + 1
+        rec["last_failure"] = {
+            "reason": str(reason)[:120], "session": session,
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        atomic_write_text(f, json.dumps(rec, indent=2, default=str))
+    except Exception:
+        pass
+
+
+# ──────────────────────────────────────────────────────────────
+# Aging — retire what nobody uses
+#
+# Every approved analysis banks a script, so a bank only grows, and most of
+# what it holds is never retrieved again: the listing (CLI, UI) fills with
+# one-off scripts and the records worth looking at get buried. Aging moves
+# such records to ``<domain>/_archive/`` — out of listings and retrieval, but
+# intact on disk. An archive is reversible (``restore_records``; re-banking
+# the same script restores it automatically), which is why it may run
+# unattended where a delete may not.
+#
+# A record is stale when it is
+#   never_used      never retrieved, succeeded only on its original data, and
+#                   older than the idle window;
+#   never_succeeds  retrieved and failed at least ``_STALE_FAILURES`` times
+#                   with no independent success — age is irrelevant, it is an
+#                   attractive nuisance today;
+#   superseded      an unproven member of a variant group (same system) that
+#                   contains a proven member, idle past the window.
+# Proven records and records awaiting review in staging are never stale.
+# ──────────────────────────────────────────────────────────────
+
+_DEFAULT_STALE_DAYS = 60
+_STALE_FAILURES = 3
+_SWEEP_STAMP = ".last_sweep"
+
+
+def stale_days() -> int:
+    raw = os.environ.get("SCILINK_BANK_STALE_DAYS", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return _DEFAULT_STALE_DAYS
+
+
+def _age_days(stamp: Any, now: datetime) -> Optional[float]:
+    try:
+        then = datetime.fromisoformat(str(stamp))
+        if then.tzinfo is None:
+            then = then.replace(tzinfo=timezone.utc)
+        return (now - then).total_seconds() / 86400.0
+    except (TypeError, ValueError):
+        return None
+
+
+def stale_records(domain: Optional[str] = None, *,
+                  idle_days: Optional[int] = None,
+                  now: Optional[datetime] = None,
+                  root: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Records the aging rules would archive: ``[{domain, id, reason, label,
+    idle_days}]``. Pure — nothing is moved."""
+    now = now or datetime.now(timezone.utc)
+    window = idle_days if idle_days is not None else stale_days()
+    recs = list_records(domain, root=root)
+
+    # Variant groups holding a proven member, per domain.
+    superseded_by: Dict[tuple, str] = {}
+    by_id = {(r.get("domain"), r.get("id")): r for r in recs}
+    for dom in sorted({r.get("domain") for r in recs if r.get("domain")}):
+        try:
+            groups = find_variant_groups(dom, root=root)
+        except Exception:
+            groups = []
+        for g in groups:
+            members = [by_id.get((dom, i)) for i in g.get("ids") or []]
+            proven = [m for m in members if m and is_proven(m)]
+            if not proven:
+                continue
+            for m in members:
+                if m and not is_proven(m):
+                    superseded_by[(dom, m["id"])] = proven[0]["id"]
+
+    out: List[Dict[str, Any]] = []
+    for rec in recs:
+        if is_proven(rec) or rec.get("promoted_to_staging"):
+            continue
+        stats = rec.get("stats") or {}
+        n_ret = int(stats.get("n_retrievals", 0) or 0)
+        n_fail = int(stats.get("n_failures", 0) or 0)
+        n_ind = independent_successes(rec)
+        idle = _age_days(rec.get("last_retrieved_at") or rec.get("updated_at")
+                         or rec.get("created_at"), now)
+        reason = None
+        if n_fail >= _STALE_FAILURES and n_ind <= 1:
+            reason = "never_succeeds"
+        elif idle is not None and idle > window:
+            key = (rec.get("domain"), rec.get("id"))
+            if n_ret == 0 and n_ind <= 1:
+                reason = "never_used"
+            elif key in superseded_by:
+                reason = "superseded"
+        if reason:
+            row = {"domain": rec.get("domain"), "id": rec.get("id"),
+                   "reason": reason, "label": record_label(rec)[:100],
+                   "idle_days": round(idle, 1) if idle is not None else None}
+            if reason == "superseded":
+                row["superseded_by"] = superseded_by[(rec.get("domain"), rec.get("id"))]
+            out.append(row)
+    return out
+
+
+def _archive_records_unlocked(domain: str, ids: List[str], *, reason: Optional[str] = None,
+                    root: Optional[Path] = None) -> int:
+    """Move records into ``<domain>/_archive/``; return the count moved."""
+    d = _domain_dir(domain, root=root)
+    n = 0
+    for rid in ids:
+        f = d / f"{safe_path_component(rid, fallback='x')}.json"
+        if not f.exists():
+            continue
+        try:
+            rec = json.loads(f.read_text())
+            rec["archived"] = {
+                "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "reason": reason}
+            (d / ARCHIVE_DIRNAME).mkdir(parents=True, exist_ok=True)
+            atomic_write_text(d / ARCHIVE_DIRNAME / f.name,
+                              json.dumps(rec, indent=2, default=str))
+            f.unlink()
+            n += 1
+        except Exception:
+            continue
+    return n
+
+
+def list_archived(domain: Optional[str] = None, *,
+                  root: Optional[Path] = None) -> List[Dict[str, Any]]:
+    base = root or bank_dir()
+    if not base.is_dir():
+        return []
+    domains = [base / domain] if domain else [
+        p for p in sorted(base.iterdir())
+        if p.is_dir() and not p.name.startswith((".", "_"))]
+    out: List[Dict[str, Any]] = []
+    for dd in domains:
+        for f in sorted((dd / ARCHIVE_DIRNAME).glob("*.json")):
+            try:
+                rec = json.loads(f.read_text())
+            except Exception:
+                continue
+            rec.setdefault("domain", dd.name)
+            out.append(rec)
+    return out
+
+
+def _restore_records_unlocked(domain: str, ids: List[str], *,
+                    root: Optional[Path] = None) -> int:
+    """Bring archived records back into the live bank."""
+    d = _domain_dir(domain, root=root)
+    n = 0
+    for rid in ids:
+        f = d / ARCHIVE_DIRNAME / f"{safe_path_component(rid, fallback='x')}.json"
+        if not f.exists():
+            continue
+        try:
+            rec = json.loads(f.read_text())
+            rec.pop("archived", None)
+            # A restore is a vote of confidence: restart the idle clock so
+            # the next sweep does not take it straight back.
+            rec["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            atomic_write_text(d / f.name, json.dumps(rec, indent=2, default=str))
+            f.unlink()
+            n += 1
+        except Exception:
+            continue
+    return n
+
+
+def sweep(domain: Optional[str] = None, *, idle_days: Optional[int] = None,
+          dry_run: bool = False,
+          root: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Archive every stale record (or just report them with ``dry_run``)."""
+    stale = stale_records(domain, idle_days=idle_days, root=root)
+    if not dry_run:
+        for row in stale:
+            archive_records(row["domain"], [row["id"]], reason=row["reason"],
+                            root=root)
+    return stale
+
+
+def auto_archive(domain: str, *, root: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """The unattended sweep: at most once a day per domain, on a bank write.
+
+    ``SCILINK_BANK_AUTO_ARCHIVE=0`` turns it off (the manual ``bank-sweep``
+    still works). Never raises.
+    """
+    try:
+        if (os.environ.get("SCILINK_BANK_AUTO_ARCHIVE", "").strip().lower()
+                in _FALSY):
+            return []
+        d = _domain_dir(domain, root=root)
+        stamp = d / ARCHIVE_DIRNAME / _SWEEP_STAMP
+        now = datetime.now(timezone.utc)
+        if stamp.exists():
+            age = _age_days(stamp.read_text().strip(), now)
+            if age is not None and age < 1.0:
+                return []
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(stamp, now.isoformat(timespec="seconds"))
+        return sweep(domain, root=root)
+    except Exception:
+        return []
+
+
+# ──────────────────────────────────────────────────────────────
+# Assist log — did the bank actually help?
+#
+# Retrieval thresholds were hand-set from a single corpus. Whether a banked
+# script shortens a run is an empirical question, so every QC-loop item
+# appends one event here: which mode served it (none / exemplar / edit_adapt /
+# verbatim), the record and its score, how many verification iterations the
+# item then needed, and whether it was approved. ``mode == "none"`` events are
+# the baseline the assisted ones are compared against.
+#
+# One append-only JSONL file for the whole bank (single short writes, so
+# concurrent runs interleave whole lines). Bookkeeping only — never raises.
+# ──────────────────────────────────────────────────────────────
+
+ASSIST_LOG_NAME = "assist_log.jsonl"
+ASSIST_MODES = ("none", "exemplar", "edit_adapt", "verbatim")
+_SCORE_BUCKETS = ((0.0, 0.45), (0.45, 0.55), (0.55, 0.70), (0.70, 1.01))
+
+
+def assist_log_path(*, root: Optional[Path] = None) -> Path:
+    return (root or bank_dir()) / ASSIST_LOG_NAME
+
+
+def log_assist(event: Dict[str, Any], *, root: Optional[Path] = None) -> None:
+    """Append one assist event. No-op when the bank is disabled."""
+    try:
+        if not bank_enabled():
+            return
+        path = assist_log_path(root=root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rec = {"timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+               **event}
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, default=str) + "\n")
+    except Exception:
+        pass
+
+
+def read_assist_log(domain: Optional[str] = None, *,
+                    root: Optional[Path] = None) -> List[Dict[str, Any]]:
+    path = assist_log_path(root=root)
+    if not path.exists():
+        return []
+    events = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue  # a torn line from a killed run
+        if domain is None or ev.get("domain") == domain:
+            events.append(ev)
+    return events
+
+
+def _assist_rollup(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    n = len(events)
+    iters = [e["iterations"] for e in events
+             if isinstance(e.get("iterations"), (int, float))]
+    secs = [e["seconds"] for e in events
+            if isinstance(e.get("seconds"), (int, float))]
+    return {
+        "n": n,
+        "approved_rate": (round(sum(1 for e in events if e.get("approved")) / n, 3)
+                          if n else None),
+        "mean_iterations": round(float(np.mean(iters)), 2) if iters else None,
+        "mean_seconds": round(float(np.mean(secs)), 1) if secs else None,
+    }
+
+
+def assist_stats(domain: Optional[str] = None, *,
+                 root: Optional[Path] = None) -> Dict[str, Any]:
+    """Summarise the assist log per domain → mode, and per score bucket.
+
+    ``survived_rate`` (edit_adapt only) is the fraction of adaptations whose
+    script was still the accepted one at the end — the rest were replaced by
+    a verification-loop refit, i.e. the adaptation cost a call and bought
+    nothing.
+    """
+    out: Dict[str, Any] = {}
+    events = read_assist_log(domain, root=root)
+    for dom in sorted({e.get("domain") or "unknown" for e in events}):
+        evs = [e for e in events if (e.get("domain") or "unknown") == dom]
+        modes: Dict[str, Any] = {}
+        for mode in ASSIST_MODES:
+            sel = [e for e in evs if e.get("mode") == mode]
+            if not sel:
+                continue
+            roll = _assist_rollup(sel)
+            if mode == "edit_adapt":
+                roll["survived_rate"] = round(
+                    sum(1 for e in sel if e.get("survived")) / len(sel), 3)
+            modes[mode] = roll
+        buckets: Dict[str, Any] = {}
+        assisted = [e for e in evs if e.get("mode") not in (None, "none")
+                    and isinstance(e.get("score"), (int, float))]
+        for lo, hi in _SCORE_BUCKETS:
+            sel = [e for e in assisted if lo <= e["score"] < hi]
+            if sel:
+                buckets[f"{lo:.2f}-{min(hi, 1.0):.2f}"] = _assist_rollup(sel)
+        out[dom] = {"n_events": len(evs), "by_mode": modes,
+                    "by_score": buckets}
+    return out
 
 
 # ──────────────────────────────────────────────────────────────
@@ -730,14 +1287,17 @@ def bank_summary(domain: Optional[str] = None, *,
             "id": rec.get("id"),
             "label": record_label(rec)[:120],
             "n_successes": int(stats.get("n_successes", 1) or 1),
+            "n_independent": independent_successes(rec),
+            "n_verbatim": independent_successes(rec, verbatim_only=True),
+            "n_failures": int(stats.get("n_failures", 0) or 0),
             "n_retrievals": int(stats.get("n_retrievals", 0) or 0),
             "sessions": rec.get("sessions") or [],
             "metric": metric,
             "created_at": rec.get("created_at"),
-            "proven": int(stats.get("n_successes", 1) or 1) >= threshold,
+            "proven": independent_successes(rec) >= threshold,
             "promoted_to_staging": sid,
         })
-    rows.sort(key=lambda r: (-r["n_successes"], -r["n_retrievals"],
+    rows.sort(key=lambda r: (-r["n_independent"], -r["n_successes"], -r["n_retrievals"],
                              -(_metric_value(r["metric"]) or 0.0), r["id"] or ""))
     return rows
 
@@ -796,7 +1356,7 @@ def promote_to_staging(domain: str, rid: str, technique: Optional[str] = None,
     # The default provenance must not overstate the evidence: "proven"
     # is reserved for records that actually earned the star (>= proven_n
     # cross-session successes); an ordinary nomination is just that.
-    if provenance == "bank_proven" and             int(stats.get("n_successes", 1) or 1) < proven_n():
+    if provenance == "bank_proven" and not is_proven(rec):
         provenance = "bank_nominated"
     staged_record: Dict[str, Any] = {
         "provenance": provenance,
@@ -1000,7 +1560,7 @@ def hyperspectral_fingerprint(cube: Any, axis: Any = None,
                               n_bands: int = 16) -> Dict[str, Any]:
     """Fingerprint of a 3D datacube via its field-mean spectrum."""
     data = np.asarray(cube, dtype=float)
-    fp: Dict[str, Any] = {"kind": "hyperspectral",
+    fp: Dict[str, Any] = {"kind": "hyperspectral", "v": FINGERPRINT_VERSION,
                           "shape": [int(s) for s in data.shape]}
     if data.ndim != 3 or data.size == 0:
         return fp
@@ -1023,3 +1583,29 @@ def hyperspectral_fingerprint(cube: Any, axis: Any = None,
     fp["snr"] = _snr_estimate(mean_spec)
     fp["peaks"] = _peak_summary(axis, mean_spec)
     return fp
+
+
+# ──────────────────────────────────────────────────────────────
+# Locked public entry points (see "Locking" above). Each takes the domain
+# lock around the read-modify-write implemented by its ``_<name>_unlocked``.
+# ──────────────────────────────────────────────────────────────
+
+def _locked(fn):
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(domain, *args, **kwargs):
+        with _domain_lock(domain, root=kwargs.get("root")):
+            return fn(domain, *args, **kwargs)
+    wrapper.__name__ = fn.__name__.replace("_unlocked", "").lstrip("_")
+    wrapper.__qualname__ = wrapper.__name__
+    return wrapper
+
+
+add_record = _locked(_add_record_unlocked)
+mark_retrieved = _locked(_mark_retrieved_unlocked)
+record_success = _locked(_record_success_unlocked)
+record_failure = _locked(_record_failure_unlocked)
+archive_records = _locked(_archive_records_unlocked)
+restore_records = _locked(_restore_records_unlocked)
+remove_records = _locked(_remove_records_unlocked)

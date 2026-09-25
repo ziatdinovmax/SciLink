@@ -547,6 +547,49 @@ def _load_prior_state(raw_path):
     return anchor_dir, data
 
 
+def _replay_feature_gate(features, reference) -> tuple:
+    """Evidence-only acceptance of an image analysed by a LOCKED-SCRIPT replay.
+
+    A strict replay (a live frame) has no model to look at the overlay, and an
+    image analysis has no R²: what it has is the numbers the approved script
+    reports, and what that script reported on its reference. The gate judges
+    METHOD HEALTH from them and nothing else:
+
+    - every numeric quantity the reference run reported is reported again, and
+      is finite (a script that silently stops measuring something is broken);
+    - the analysis still finds SOMETHING: if every quantity that was non-zero on
+      the reference is zero now (no particles, no mask, no lattice), the method
+      collapsed on this image or there is nothing in it, and either way the
+      frame is not one to track quietly.
+
+    It does not ask whether the values are plausible: in a stream they are
+    expected to move, and that is the live loop's range gate (which flags a
+    jump and adopts a value that persists) and its audits. What no gate here
+    can see is a segmentation that runs, reports finite numbers and is wrong;
+    the independent audit is the check for that. Returns ``(ok, reason)``."""
+    import math
+    ref = {k: v for k, v in (reference or {}).items()
+           if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)}
+    got = features if isinstance(features, dict) else {}
+    if not ref:
+        numeric = [v for v in got.values() if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        if not numeric or not all(math.isfinite(v) for v in numeric):
+            return False, "the replay reported no finite quantity"
+        return True, ""
+    missing = [k for k in ref if not isinstance(got.get(k), (int, float)) or isinstance(got.get(k), bool)]
+    if missing:
+        return False, ("the locked script no longer reports "
+                       + ", ".join(sorted(missing)[:4]) + " (it did on the reference)")
+    broken = [k for k in ref if not math.isfinite(float(got[k]))]
+    if broken:
+        return False, "not finite: " + ", ".join(sorted(broken)[:4])
+    alive = [k for k, v in ref.items() if v != 0]
+    if alive and all(float(got[k]) == 0.0 for k in alive):
+        return False, ("every quantity that was non-zero on the reference is zero here "
+                       "(nothing was found: the method collapsed on this image, or it is empty)")
+    return True, ""
+
+
 def _first_prior_image_script(state: dict):
     """Return the first reusable analysis script for locked-script reuse (#172).
 
@@ -1047,7 +1090,7 @@ class SkillSuggestionController:
         # Skip when a skill was already provided (orchestrator/user) — check
         # both the multi-skill list and the legacy singular field.
         if (state.get("error_dict") or state.get("skills_loaded")
-                or state.get("skill_sections")):
+                or state.get("skill_sections") or state.get("_strict_replay")):
             return state
 
         from ....skills._shared._skill_selector import select_relevant_skills
@@ -1119,6 +1162,7 @@ class ImagePlanningController:
         enable_human_feedback: bool = False,
         max_iterations: int = 5,
         num_plan_candidates: int = 1,
+        validate_plan: bool = True,
     ):
         self.model = model
         self.logger = logger
@@ -1130,6 +1174,8 @@ class ImagePlanningController:
         self.enable_human_feedback = enable_human_feedback
         self.max_iterations = max_iterations
         self.num_plan_candidates = num_plan_candidates
+        # QCProfile.plan_validation (the curve planner's twin).
+        self.validate_plan = validate_plan
 
     def _get_instructions(self, state: dict) -> str:
         """Return planning instructions, using state override if present."""
@@ -1683,6 +1729,11 @@ class ImagePlanningController:
 
     def _validate_plan(self, state: dict) -> dict:
         """Validate the selected plan against the actual images."""
+        # A fit-for-purpose profile skips this multimodal LLM call, except
+        # when a domain skill is loaded (its guidance is what gets checked).
+        if not getattr(self, "validate_plan", True) and not _active_skill_names(state):
+            self.logger.info("  Plan validation skipped (profile; no skill guidance to check).")
+            return state
         from ..instruct import IMAGE_ANALYSIS_PLAN_VALIDATION_PROMPT
 
         is_single = state.get("is_single_image", True)
@@ -1804,6 +1855,20 @@ class ImagePlanningController:
 
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"):
+            return state
+
+        if state.get("_strict_replay"):
+            # A live frame: the approved script IS the plan. No model call.
+            state.setdefault("observations", "")
+            state["analysis_approach"] = "Locked-script replay (strict): no planning"
+            state["processing_pipeline"] = "The prior run's approved script, verbatim"
+            state.setdefault("features_to_extract", [])
+            state.setdefault("quality_criteria", "deterministic replay gate")
+            state.setdefault("expected_outputs", [])
+            state["literature_query"] = None
+            state.setdefault("locked_analysis_config", {})
+            state["series_analysis_plan"] = None
+            state["regime_configs"] = None
             return state
 
         is_single = state.get("is_single_image", True)
@@ -2601,6 +2666,14 @@ Your guidance: '''
                             "    Justified plan deviations: %s",
                             "; ".join(conformance["justified_deviations"]),
                         )
+                elif base_script is not None and state.get("_strict_replay"):
+                    # Strict replay (a live loop's fast clock): repairing the
+                    # locked script means calling a model, which a frame never
+                    # does. Stop; the failure is the signal.
+                    self.logger.warning(
+                        f"    🔒 Strict replay: the locked script failed on this "
+                        f"image ({str(last_error)[:120]}) — not repaired in-frame.")
+                    break
                 else:
                     if should_escalate_timeout_model(
                             base_script, attempt, self.MAX_ATTEMPTS,
@@ -3094,6 +3167,9 @@ Return JSON:
             except Exception:
                 pass
         prompt_parts.append("\n\n" + VERIFIER_TOOL_SCRUTINY_PRINCIPLE)
+        from .._qc_profile import verification_addendum
+        if verification_addendum(state):
+            prompt_parts.append(verification_addendum(state))
 
         state["_last_verify_error"] = None
         try:
@@ -3509,8 +3585,13 @@ Return JSON with:
             is_regime_anchor=is_regime_anchor,
             reuse_script=reuse_script, reuse_source=reuse_source,
         )
+        import time as _time
+        _t0 = _time.perf_counter()
         res = engine.run_item(ctx)
-        self._bump_bank_adapt_success(res)
+        self._bump_bank_adapt_success(res, ctx)
+        from .._qc_engine import record_bank_assist
+        record_bank_assist(self, ctx, res, domain="image_analysis",
+                           seconds=_time.perf_counter() - _t0)
         # Whichever path produced the returned dict (approved, exhausted,
         # judge / best-available fallback), it carries the stalled
         # prescriptions so the failure mode is legible (#568).
@@ -3549,6 +3630,35 @@ Return JSON with:
             image_name=ctx.item_name, image_idx=ctx.item_idx,
             base_script=ctx.reuse_script,
         )
+        if reuse_result.get("success") and ctx.state.get("_strict_replay"):
+            # A live frame: no vision review. The verdict is evidence only —
+            # what the approved script reports, against what it reported on its
+            # reference (see _replay_feature_gate for what that can and cannot see).
+            ok, reason = _replay_feature_gate(
+                reuse_result.get("extracted_features"),
+                ctx.state.get("replay_reference"))
+            (self.logger.info if ok else self.logger.warning)(
+                "   🔒 Deterministic replay gate: " + ("pass" if ok else f"REJECT — {reason}"))
+            reuse_result["reuse_validity"] = {
+                "reused": True, "source": ctx.reuse_source, "gate": "deterministic",
+                "verdict": "good" if ok else "poor", "message": reason or "replay gate passed"}
+            reuse_result["quality_history"] = self._build_quality_history(
+                0.0, ctx.quality_threshold, [], [], None)
+            reuse_result["quality_history"]["approved_by"] = "replay_gate" if ok else None
+            if not ok:
+                reuse_result["quality_warning"] = reason
+            from .._qc_engine import attach_script_edit_provenance
+            attach_script_edit_provenance(ctx, reuse_result)
+            return reuse_result
+        if ctx.state.get("_strict_replay"):
+            # No re-derivation on the fast clock: the failure is the item's result.
+            reuse_result.setdefault(
+                "error", "the locked script could not execute on this image")
+            reuse_result["reuse_validity"] = {
+                "reused": True, "source": ctx.reuse_source, "verdict": "failed",
+                "message": "Strict replay: the locked script failed on this image; "
+                           "no in-frame repair or re-derivation."}
+            return reuse_result
         if reuse_result.get("success"):
             # Softer validity guard: a single vision-verification pass,
             # no iterative re-derivation.
@@ -3660,9 +3770,9 @@ Return JSON with:
                 image_idx=ctx.item_idx, base_script=script),
         )
 
-    def _bump_bank_adapt_success(self, res) -> None:
+    def _bump_bank_adapt_success(self, res, ctx=None) -> None:
         from .._qc_engine import bump_bank_adapt_success
-        bump_bank_adapt_success(self, res, domain="image_analysis")
+        bump_bank_adapt_success(self, res, domain="image_analysis", ctx=ctx)
 
     def _offer_bank_exemplar(self, ctx: QCItemContext) -> None:
         """Adapt-mode script-bank retrieval (#346 step 2) — image mirror of
@@ -3690,9 +3800,11 @@ Return JSON with:
                 "image_analysis", fingerprint,
                 _script_bank.measurement_context(state.get("system_info") or {}),
             )
+            ctx.bank_query_fingerprint = fingerprint
             if matches:
                 match = matches[0]
                 state["_bank_exemplar"] = match
+                ctx.bank_exemplar = match  # per-item, for the assist log
                 _script_bank.mark_retrieved("image_analysis", match["record"]["id"])
                 self.logger.info(
                     f"   🏦 Bank exemplar offered: id={match['record']['id']} "
@@ -4103,6 +4215,37 @@ Return JSON with:
 
     def qc_post_verification(self, ctx: QCItemContext) -> Optional[dict]:
         self._stamp_stalled(ctx)
+        # --- Run time budget spent mid-loop (the curve host's twin) ---
+        # Best result so far, as it stands: not approved, flagged unverified;
+        # no final verify, judge or human prompt once the budget is gone.
+        if getattr(ctx, "budget_expired", False) and ctx.best_result:
+            quality_history = self._build_quality_history(
+                ctx.best_score, ctx.quality_threshold, ctx.all_attempts,
+                ctx.verification_history, ctx.judge_result,
+                ctx.best_result.get("script_errors"),
+            )
+            quality_history["approved"] = False
+            quality_history["unverified"] = True
+            quality_history["stopped_by"] = "time_budget"
+            ctx.best_result["quality_history"] = quality_history
+            self._stamp_hot_deviation(ctx.best_result)
+            return ctx.best_result
+        # --- Reduced-depth profile: iteration cap reached (curve twin) ---
+        # Best attempt, flagged, no judge — only when it clears the accept gate.
+        if (getattr(ctx, "capped", False) and ctx.best_result
+                and ctx.accept_gate.is_accept(ctx.best_score)):
+            quality_history = self._build_quality_history(
+                ctx.best_score, ctx.quality_threshold, ctx.all_attempts,
+                ctx.verification_history, ctx.judge_result,
+                ctx.best_result.get("script_errors"),
+            )
+            quality_history["approved"] = False
+            quality_history["verifier_rejected"] = True
+            quality_history["stopped_by"] = "iteration_cap"
+            ctx.best_result["quality_history"] = quality_history
+            self._stamp_hot_deviation(ctx.best_result)
+            return ctx.best_result
+
         # --- Explicit fast-path bypass (#271) ---
         # The initial score is provisional (0.0) when no verification ran,
         # so the accept gate below cannot pass it; return the accepted
@@ -5857,6 +6000,8 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
 
                 state["flagged_images_path"] = str(flagged_report_path)
 
+        from .._qc_profile import stamp_profile
+        stamp_profile(state, series_results)
         state["series_results"] = series_results
         state["flagged_images"] = flagged_images
 
@@ -7242,6 +7387,9 @@ Return JSON with:
         _append_skill_context(prompt_parts, state, "interpretation")
         _append_prior_knowledge_context(prompt_parts, state)
         _append_subagent_context(prompt_parts, state)
+        from .._qc_profile import synthesis_addendum
+        if synthesis_addendum(state):
+            prompt_parts.append(synthesis_addendum(state))
 
         try:
             response = self.model.generate_content(
@@ -7421,6 +7569,9 @@ Return JSON with:
         _append_skill_context(prompt_parts, state, "interpretation")
         _append_prior_knowledge_context(prompt_parts, state)
         _append_subagent_context(prompt_parts, state)
+        from .._qc_profile import synthesis_addendum
+        if synthesis_addendum(state):
+            prompt_parts.append(synthesis_addendum(state))
 
         try:
             response = self.model.generate_content(

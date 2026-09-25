@@ -2166,7 +2166,8 @@ class CurveFittingPlanningController:
         instructions: str,
         output_dir: str,
         enable_human_feedback: bool = False,
-        max_iterations: int = 5
+        max_iterations: int = 5,
+        validate_plan: bool = True,
     ):
         self.model = model
         self.logger = logger
@@ -2177,6 +2178,9 @@ class CurveFittingPlanningController:
         self.output_dir = Path(output_dir)
         self.enable_human_feedback = enable_human_feedback
         self.max_iterations = max_iterations
+        # QCProfile.plan_validation. Off (quick / extract) skips only the
+        # skill-free sanity pass; see _validate_plan.
+        self.validate_plan = validate_plan
 
     def _display_plan(self, state: dict) -> None:
         is_single = state.get("is_single_spectrum", True)
@@ -2325,6 +2329,8 @@ class CurveFittingPlanningController:
 
         if state.get("analysis_hints"):
             prompt.append(f"\n## User Guidance\n{state['analysis_hints']}")
+        if state.get("_failed_plan"):
+            prompt.append(_failed_plan_block(state["_failed_plan"]))
         _ref_block = _reference_script_block(state, heading="##")
         if _ref_block:
             prompt.append(_ref_block)
@@ -2332,6 +2338,9 @@ class CurveFittingPlanningController:
         _append_auxiliary_context(prompt, state)
         _append_skill_context(prompt, state, "planning")
         _append_prior_knowledge_context(prompt, state)
+        from .._qc_profile import planning_addendum
+        if planning_addendum(state):
+            prompt.append(planning_addendum(state))
         _prior_runs = _prior_curve_fit_block(state)
         if _prior_runs:
             prompt.append(_prior_runs)
@@ -2398,6 +2407,12 @@ class CurveFittingPlanningController:
         only when skill rules are present (the validation prompt applies the
         "MANDATORY Domain Skill Rules" clause conditionally).
         """
+        # A fit-for-purpose profile skips this LLM call — but never when a
+        # technique skill is loaded: enforcing its MANDATORY rules is the one
+        # job of this pass that the execution stage does not repeat.
+        if not getattr(self, "validate_plan", True) and not _active_skill_names(state):
+            self.logger.info("  Plan validation skipped (profile; no skill rules to enforce).")
+            return state
         from ..instruct import CURVE_FITTING_PLAN_VALIDATION_PROMPT
 
         regime_section = self._build_regime_section(
@@ -2996,6 +3011,20 @@ class CurveFittingPlanningController:
         state = self._validate_plan(state)
         self._lock_config(state, state.get("column_mapping_locked"))
         return state
+
+
+def _failed_plan_block(failed: dict) -> str:
+    """What the planner is told when an earlier plan for THIS data could not be
+    fitted at all: the plan, and how its scripts failed. One principle, no recipe
+    — the new plan must be one the data can support, not the old one reworded."""
+    errors = "\n".join(f"- {e}" for e in (failed.get("errors") or [])[-3:]) or "- (no detail)"
+    return (
+        "\n## An earlier plan for this data could not be fitted\n"
+        f"**Model:** {failed.get('physical_model') or 'unknown'}\n"
+        f"**Strategy:** {failed.get('fitting_strategy') or 'unknown'}\n"
+        f"**How every attempt ended:**\n{errors}\n"
+        "Plan a model this data can actually support. A simpler or differently "
+        "parameterised model that converges is worth more than this one reworded.")
 
 
 def _write_series_fit_results(output_dir, state, series_results, quality_settings):
@@ -3823,6 +3852,16 @@ Your guidance: '''
                             "    \u2139\ufe0f Justified plan deviations: %s",
                             "; ".join(conformance["justified_deviations"]),
                         )
+                elif base_script is not None and state.get("_strict_replay"):
+                    # Strict replay (a live loop's fast clock): the locked
+                    # script failed on this data, and repairing it means
+                    # calling a model — which a frame must never do. Stop;
+                    # the failure is the signal (the loop flags the frame and
+                    # escalates off the fast path).
+                    self.logger.warning(
+                        f"    🔒 Strict replay: the locked script failed on this "
+                        f"data ({str(last_error)[:120]}) — not repaired in-frame.")
+                    break
                 else:
                     if self._should_escalate_timeout_model(
                             base_script, attempt, self.MAX_ATTEMPTS,
@@ -3915,7 +3954,10 @@ Your guidance: '''
                     consecutive_timeouts = (
                         consecutive_timeouts + 1
                         if _is_timeout_error(last_error) else 0)
-                    self.logger.warning(f"    ⚠️ Attempt {attempt} failed: {last_error[:100]}")
+                    # A traceback's head is boilerplate; its LAST line names the error.
+                    _lines = [ln.strip() for ln in str(last_error).splitlines() if ln.strip()]
+                    _headline = _lines[-1][:240] if _lines else "unknown error"
+                    self.logger.warning(f"    ⚠️ Attempt {attempt} failed: {_headline}")
             except Exception as e:
                 last_error = str(e)
                 consecutive_timeouts = 0
@@ -4595,6 +4637,9 @@ Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2
             except Exception:
                 pass
         prompt_parts.append("\n\n" + VERIFIER_TOOL_SCRUTINY_PRINCIPLE)
+        from .._qc_profile import verification_addendum
+        if verification_addendum(state):
+            prompt_parts.append(verification_addendum(state))
 
         try:
             response = self.model.generate_content(
@@ -4924,8 +4969,13 @@ Return JSON with:
             is_regime_anchor=is_regime_anchor,
             reuse_script=reuse_script, reuse_source=reuse_source,
         )
+        import time as _time
+        _t0 = _time.perf_counter()
         res = engine.run_item(ctx)
-        self._bump_bank_adapt_success(res)
+        self._bump_bank_adapt_success(res, ctx)
+        from .._qc_engine import record_bank_assist
+        record_bank_assist(self, ctx, res, domain="curve_fitting",
+                           seconds=_time.perf_counter() - _t0)
         return res
 
     # --- CodegenQCEngine hooks (bodies moved verbatim from the old driver) ---
@@ -5009,8 +5059,19 @@ Return JSON with:
             # series). The fingerprint distance to the anchor frame sees the
             # data change; both signals are reported, escalation stays the
             # caller's move.
-            if ctx.state.get("_qc_profile") == "realtime":
+            if (ctx.state.get("_qc_profile") == "realtime"
+                    or ctx.state.get("_cold_start_reuse")):
                 self._attach_drift_signal(ctx, reuse_result["reuse_validity"])
+            return reuse_result
+        if ctx.state.get("_strict_replay"):
+            # No re-derivation on the fast clock: return the failure as the
+            # item's result (a non-None return ends the engine's reuse path).
+            reuse_result.setdefault(
+                "error", "the locked script could not execute on this data")
+            reuse_result["reuse_validity"] = {
+                "reused": True, "source": ctx.reuse_source, "verdict": "failed",
+                "message": "Strict replay: the locked script failed on this data; "
+                           "no in-frame repair or re-derivation."}
             return reuse_result
         self.logger.warning(
             f"   ⚠️  Prior fitting script could not execute on this data "
@@ -5103,9 +5164,9 @@ Return JSON with:
                 spectrum_idx=ctx.item_idx, base_script=script),
         )
 
-    def _bump_bank_adapt_success(self, res) -> None:
+    def _bump_bank_adapt_success(self, res, ctx=None) -> None:
         from .._qc_engine import bump_bank_adapt_success
-        bump_bank_adapt_success(self, res, domain="curve_fitting")
+        bump_bank_adapt_success(self, res, domain="curve_fitting", ctx=ctx)
 
     def _offer_bank_exemplar(self, ctx: QCItemContext) -> None:
         """Adapt-mode script-bank retrieval (#346 step 2).
@@ -5130,13 +5191,18 @@ Return JSON with:
                 xy[0], xy[1],
                 x_units=_script_bank.guess_x_units(state.get("system_info")),
             )
+            # Curve skills are exclusive technique rules, so a record banked
+            # under a different technique skill is not a candidate.
             matches = _script_bank.find_exemplar(
                 "curve_fitting", fingerprint,
                 _script_bank.measurement_context(state.get("system_info") or {}),
+                active_skills=_active_skill_names(state),
             )
+            ctx.bank_query_fingerprint = fingerprint
             if matches:
                 match = matches[0]
                 state["_bank_exemplar"] = match
+                ctx.bank_exemplar = match  # per-item, for the assist log
                 _script_bank.mark_retrieved("curve_fitting", match["record"]["id"])
                 self.logger.info(
                     f"   🏦 Bank exemplar offered: id={match['record']['id']} "
@@ -5508,6 +5574,57 @@ Return JSON with:
                     self._log_verification_issues(final_verification)
 
     def qc_post_verification(self, ctx: QCItemContext) -> Optional[dict]:
+        # --- Run time budget spent mid-loop (QCProfile.time_budget_s) ---
+        # The best fit so far is returned as it stands: no final verify, no
+        # judge, no human prompt — the budget is gone. It is NOT approved;
+        # `unverified` is what the series flagging and a later thorough sweep
+        # key on. The deterministic gate still speaks: a best fit below the
+        # accept threshold carries a quality warning.
+        if getattr(ctx, "budget_expired", False) and ctx.best_result:
+            quality_history = self._build_quality_history(
+                ctx.best_score, self.r2_threshold, ctx.all_attempts,
+                ctx.verification_history, None,
+                ctx.best_result.get("script_errors"),
+            )
+            quality_history["approved"] = False
+            quality_history["unverified"] = True
+            quality_history["stopped_by"] = "time_budget"
+            ctx.best_result["quality_history"] = quality_history
+            if not self._accept_gate().is_accept(ctx.best_score):
+                ctx.best_result.setdefault(
+                    "quality_warning",
+                    f"Time budget spent before the fit cleared the quality gate "
+                    f"({self._gate_metric_str(ctx.state, ctx.best_result, ctx.best_score)}).")
+            self._stamp_hot_deviation(ctx.best_result)
+            return ctx.best_result
+
+        # --- Reduced-depth profile: iteration cap reached, verifier rejecting ---
+        # The best attempt is returned WITHOUT a judge call, but only when it
+        # clears the deterministic accept gate — otherwise the normal
+        # fallback (judge, best-available handling) still decides. Flagged,
+        # never reported as approved, and the verifier's last issues travel
+        # with it.
+        if (getattr(ctx, "capped", False) and ctx.best_result
+                and self._accept_gate().is_accept(ctx.best_score)):
+            quality_history = self._build_quality_history(
+                ctx.best_score, self.r2_threshold, ctx.all_attempts,
+                ctx.verification_history, None,
+                ctx.best_result.get("script_errors"),
+            )
+            quality_history["approved"] = False
+            quality_history["verifier_rejected"] = True
+            quality_history["stopped_by"] = "iteration_cap"
+            ctx.best_result["quality_history"] = quality_history
+            ctx.best_result.setdefault(
+                "quality_warning",
+                f"Reduced-depth profile: the verifier still had objections when "
+                f"the iteration cap was reached; the best attempt "
+                f"({self._gate_metric_str(ctx.state, ctx.best_result, ctx.best_score)}) "
+                f"clears the quality gate and is returned as-is. Re-run "
+                f"thoroughly before relying on more than the requested quantities.")
+            self._stamp_hot_deviation(ctx.best_result)
+            return ctx.best_result
+
         # --- Verifier-approved fits bypass the R² threshold check ---
         if ctx.approved:
             self.logger.info(f"✅ Verifier approved fit ({self._gate_metric_str(ctx.state, ctx.best_result, ctx.best_score)})")
@@ -5549,6 +5666,63 @@ Return JSON with:
     def qc_record_initial_failure(self, ctx: QCItemContext, result: dict) -> None:
         self.logger.error(f"   Initial fit failed: {result.get('error', 'Unknown')[:50]}")
         ctx.all_attempts.append({"model": ctx.initial_label, "r2": 0, "result": result})
+
+    def qc_recover_initial_failure(self, ctx: QCItemContext, result: dict) -> Optional[dict]:
+        """One bounded recovery when the first fit produced NOTHING.
+
+        Every later stage — the verification loop, the judge, the iteration-cap
+        and time-budget exits — returns the best attempt so far, so a run that
+        has one never ends in ``error``. A first fit whose every script pass
+        failed has none, and nothing recovered it: adaptive refit is a series
+        stage, and a reduced-depth profile has no best-of-N whose other
+        candidates would plan differently. So the anchor is re-planned ONCE,
+        told which plan could not be fitted and how it failed, and fitted
+        again; success re-enters the normal flow under the same profile (the
+        verification cap still applies) and is stamped ``recovered_from``.
+
+        Not for a realtime frame or a strict replay (a frame the recipe cannot
+        fit must fail fast, with no model call), not inside a best-of-N
+        candidate (its siblings are the recovery), not after a timeout or a
+        pre-flight refusal (a new plan does not make the data or the machine
+        faster), and not once the run's time budget is spent."""
+        import time as _time
+        state = ctx.state
+        if (not ctx.is_anchor or self.replanner is None
+                or not state.get("_recover_failed_fit", False)
+                or state.get("_candidate_subdir") or state.get("_recovered_once")
+                or result.get("kind") == "timeout" or not result.get("script")):
+            return None
+        deadline = state.get("_run_deadline")
+        if deadline is not None and _time.monotonic() >= deadline:
+            return None
+        state["_recovered_once"] = True
+        errors = [str(e.get("error") or "").strip().splitlines()[-1][:300]
+                  for e in (result.get("script_errors") or []) if e.get("error")]
+        if result.get("error"):
+            errors.append(str(result["error"]).strip().splitlines()[-1][:300])
+        failed = {"physical_model": state.get("physical_model"),
+                  "fitting_strategy": state.get("fitting_strategy"), "errors": errors}
+        self.logger.warning(
+            "   🔁 The first fit produced nothing usable — re-planning once with the "
+            "failure as feedback (a run with a usable attempt never reaches this).")
+        state["_failed_plan"] = failed
+        try:
+            self.replanner.replan_headless(state)
+        except Exception as e:  # noqa: BLE001 - recovery never makes a failure worse
+            self.logger.warning(f"   Re-planning failed ({e}); keeping the original failure.")
+            return None
+        finally:
+            state.pop("_failed_plan", None)
+        ctx.initial_label = state.get("physical_model") or "Re-planned model"
+        recovered = self._fit_single_spectrum(
+            state=state, curve_data=ctx.data, data_path=ctx.data_path,
+            spectrum_name=ctx.item_name, spectrum_idx=ctx.item_idx, base_script=None)
+        if recovered.get("success"):
+            # On the STATE as well: a verification refit may replace this result.
+            state["_recovered_from"] = recovered["recovered_from"] = {
+                "failed_model": failed["physical_model"], "errors": errors[-3:]}
+            self.logger.info(f"   ✅ Recovered with a new plan: {str(ctx.initial_label)[:80]}")
+        return recovered
 
     def qc_fallback(self, ctx: QCItemContext) -> dict:
         # NOTE: the alternative-model loop was removed.  Hot annealing
@@ -6433,9 +6607,16 @@ Return JSON with:
             return fq.get("r_squared")
 
         self._score_fn = _score
+
+        def _unverified(r):
+            # Returned as-is when the run's time budget ran out mid-loop: no
+            # verifier ever passed it, so it neither anchors the series
+            # statistics nor gets scored against them.
+            return bool((r.get("quality_history") or {}).get("unverified"))
+
         r2_values = []
         for r in series_results:
-            if r["success"]:
+            if r["success"] and not _unverified(r):
                 r2 = _score(r)
                 if r2 is not None:
                     r2_values.append(r2)
@@ -6468,6 +6649,18 @@ Return JSON with:
                 continue
 
             r2 = self._score_fn(r)
+            if _unverified(r):
+                flagged.append({
+                    "index": r["index"], "name": r["name"], "reason": "unverified",
+                    "r_squared": float(r2) if r2 is not None else None,
+                    "series_mean": median_r2, "series_std": robust_scale,
+                    "deviation_sigma": None,
+                    "recommendation": ("The time budget ran out before this fit was "
+                                       "verified. The numbers are the best attempt so "
+                                       "far — re-run it under the thorough profile "
+                                       "before relying on them."),
+                })
+                continue
             # A pinned-at-bound fit is flagged regardless of its R² (#592):
             # the gate metric can stay high while the extracted value is
             # wrong, which is exactly how the degeneracy hid before.
@@ -6981,6 +7174,8 @@ Return JSON with:
                 
                 state["flagged_spectra_path"] = str(flagged_report_path)
         
+        from .._qc_profile import stamp_profile
+        stamp_profile(state, series_results)
         state["series_results"] = series_results
         state["flagged_spectra"] = flagged_spectra
 
@@ -8407,6 +8602,9 @@ same trend.
         prompt_parts.append(FITTING_INTERPRETATION_STAGE3)
         if is_id_mode:
             prompt_parts.append(ID_MODE_OUTPUT_ADDENDUM)
+        from .._qc_profile import synthesis_addendum
+        if synthesis_addendum(state):
+            prompt_parts.append(synthesis_addendum(state))
 
         try:
             response = self.model.generate_content(
@@ -8580,6 +8778,9 @@ same trend.
         prompt_parts.append(self.SERIES_STAGE3)
         if is_id_mode:
             prompt_parts.append(ID_MODE_OUTPUT_ADDENDUM)
+        from .._qc_profile import synthesis_addendum
+        if synthesis_addendum(state):
+            prompt_parts.append(synthesis_addendum(state))
 
         try:
             response = self.model.generate_content(contents=prompt_parts, generation_config=self.generation_config, safety_settings=self.safety_settings)

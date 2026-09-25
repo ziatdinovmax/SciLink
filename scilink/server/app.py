@@ -603,6 +603,84 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         from .memory_api import job_status
         return _mem(job_status, job_id)
 
+    # ── live measurement loop ────────────────────────────────────
+    # A live run is a session-level background job that outlives chat turns;
+    # the Live tab only observes it (everything shown is read back from the
+    # loop's own loop_log.jsonl). See scilink/server/live_api.py.
+
+    from .live_api import LiveError
+
+    def _live(fn, *args, **kw):
+        try:
+            return fn(*args, **kw)
+        except LiveError as exc:
+            raise HTTPException(exc.status, exc.message) from exc
+
+    @app.get("/api/v1/live/simulators")
+    def live_simulators():
+        from .live_api import list_simulators
+        return {"simulators": list_simulators()}
+
+    # What the instruments on this machine remember (scilink.live.instrument_home).
+    # The store belongs to the machine, not to a session, so it has no session
+    # in its path. On a shared multi-user server it is read-only: one user must
+    # not delete what another user's runs rely on.
+    @app.get("/api/v1/live/instruments")
+    def live_instruments():
+        from .live_api import list_instruments
+        return {"instruments": list_instruments(),
+                "can_forget": not (auth is not None and auth.multi_user)}
+
+    @app.get("/api/v1/live/instruments/{instrument}")
+    def live_instrument(instrument: str):
+        from .live_api import instrument_memory
+        return _live(instrument_memory, instrument)
+
+    @app.delete("/api/v1/live/instruments/{instrument}/recipes/{recipe_id}")
+    def live_forget_recipe(instrument: str, recipe_id: str):
+        if auth is not None and auth.multi_user:
+            raise HTTPException(403, "Forgetting a recipe is disabled on a shared server.")
+        from .live_api import forget_recipe
+        return _live(forget_recipe, instrument, recipe_id)
+
+    @app.get("/api/v1/sessions/{session_id}/live")
+    def live_snapshot(request: Request, session_id: str):
+        from .live_api import snapshot
+        return _live(snapshot, _session_or_404(request, session_id))
+
+    @app.post("/api/v1/sessions/{session_id}/live/start")
+    async def live_start(request: Request, session_id: str):
+        from .live_api import start
+        body = await request.json()
+        return _live(start, _session_or_404(request, session_id), body or {},
+                     allow_custom=local_files)
+
+    @app.post("/api/v1/sessions/{session_id}/live/stop")
+    def live_stop(request: Request, session_id: str):
+        from .live_api import stop
+        return _live(stop, _session_or_404(request, session_id))
+
+    @app.post("/api/v1/sessions/{session_id}/live/params")
+    async def live_params(request: Request, session_id: str):
+        """The operator's hand on the controls: an accepted recommendation or a
+        manual change, used from the next frame on."""
+        from .live_api import set_params
+        body = await request.json()
+        return _live(set_params, _session_or_404(request, session_id),
+                     (body or {}).get("params") or {})
+
+    @app.post("/api/v1/sessions/{session_id}/live/resume")
+    async def live_resume(request: Request, session_id: str):
+        """The answer to a pause: {"action": "resume" | "stop", "params": {...}}."""
+        from .live_api import decide
+        body = await request.json()
+        return _live(decide, _session_or_404(request, session_id), body or {})
+
+    @app.post("/api/v1/sessions/{session_id}/live/clear")
+    def live_clear(request: Request, session_id: str):
+        from .live_api import clear
+        return _live(clear, _session_or_404(request, session_id))
+
     # ── tools / MCP ──────────────────────────────────────────────
 
     @app.get("/api/v1/sessions/{session_id}/tools")

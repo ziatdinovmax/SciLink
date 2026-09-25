@@ -918,6 +918,298 @@ This resolves the preemption risk: an autonomous orchestrator guess no
 longer suppresses the agent's richer, data-level (and possibly multi-skill)
 selection, while a genuine user request still binds.
 
+### Live loops reuse the technique skills; steering knowledge is its own domain
+
+A live measurement loop (`scilink/live/`) has no analysis skills of its own.
+Its slow clock — the reference analysis and every re-anchor — is an ordinary
+`CurveFittingAgent.analyze()`, so the same technique skill (`curve_fitting/raman`,
+`xrd_profile`, ...) is auto-selected there as in a chat run; the per-frame fast
+path replays a locked script and reads no skill. **Do not add a live-flavoured
+copy of an analysis skill**: a technique missing from `curve_fitting/` is
+missing for chat runs too, and that is where it gets added.
+
+What *is* specific to a running experiment is how to steer it, and that lives in
+the knowledge-only `skills/acquisition/<technique>/` domain with its own section
+vocabulary — `overview · tradeoffs · limits · quality · strategy` (declared in
+`loader._DOMAIN_VOCABULARIES`, like optimization's). It is read by the loop's
+slow-clock consumers — today `LLMRecommender`, which selects one skill through
+the shared selector (exclusive: one technique per measurement) on its first
+call and records it on every recommendation as `acquisition_skill`. Two
+boundaries: acquisition skills are **per technique, not per instrument** (a
+vendor's API, limits and file format belong to the `Instrument` subclass and its
+`schema`), and they stay out of the `run_analysis` skill menu, like
+`data_preparation`.
+
+**A live loop makes three judgements per stream, and they are deliberately
+separate.** (1) *Does the recipe still fit this frame?* — the fit gate, the
+agent's R² verdict relaxed to what the reference achieved in units of its own
+noise (`live/gates.py`). (2) *Has the data changed?* — a graded, model-free
+signal (`live/drift.py`): the share of a frame that the frames seen so far
+cannot describe, read from the data alone so it cannot depend on which recipe
+was locked (it replaced a thresholded peak-counting fingerprint that saturated on
+rich patterns and gave opposite verdicts on the same series under two recipes).
+(3) *Is a recipe that fits also right?* — no gate can answer that; only a second,
+independent analysis can, so the loop runs **audits** (the re-anchor worker with a
+different adoption rule) and compares named outputs. What the slow clock does
+follows from which judgement fired: a run of frames the recipe fails on is
+rebuilt; a run that fits but looks different follows `on_change` — `report`
+(default: accept the state for tracking once the changed frames agree, no model
+call), `audit` (agreement keeps the recipe, disagreement adopts the audit's) or
+`rebuild`; periodic audits only report.
+
+**A lasting change is always announced, and never quietly absorbed.** A locked
+recipe is a hypothesis about what the data looks like, and in discovery work the
+hypothesis breaking is the result. So before anything is rebuilt or accepted the
+loop emits a `novelty` event — how much of a frame is unlike the stream so far
+and WHERE on the axis (new / missing / shifted / broad, and `window` when the
+frames now cover less of the axis: they are located where they overlap), read from
+the data with no model — once per change, after the usual patience so a glitch is not a
+discovery. The recommender is told (and asked at once: where the data is new is
+usually where to measure next), and the follow-up — a thorough analysis of that
+frame in chat — is one click for a person, never automatic. Do not add a path
+that makes a change disappear without that event. Free-text notes from the user
+travel in `system_info` as context for every model-driven stage; they inform,
+they do not constrain. Two analyses are never asked to agree better than one agrees
+with itself (the output's own frame-to-frame scatter), and a state accepted once
+is remembered so the same kind of region is not asked about twice. The frame that
+announces a change never also accepts it: a driver may pause there, and what is
+decided at the pause comes before the state is taken as normal. The monitor
+works on any 1D curve, which is how it watches a datacube (its mean spectrum,
+whole and by region).
+
+**The loop is modality-neutral; what a frame IS lives in `live/modality.py`.**
+Two clocks, flags, patience, the change signal, novelty, audits, pausing, the
+recommender and the log do not care whether a frame is a spectrum or a datacube.
+What differs is a small adapter: which agent locks and replays the recipe, how a
+result becomes flat features, what "still fits" means, and which curves the
+change signal reads. An instrument declares it (`Instrument.modality`), the loop
+follows. `HyperspectralModality` is the datacube instantiation, built from the
+series machinery rather than beside it: the fast path is the existing locked
+replay made strict (`analyze(strict_replay=True)`: the whole run with ZERO model
+calls — no skill selection, no execution repair, no salvage or not-measurable
+judge, no synthesis; a script that raises fails the frame) and judged by
+`_replay_map_gate` against the reference's own map statistics; a rebuild or an
+audit is a `locked_targets` run, so tracked quantities keep their names by
+construction and nothing is pinned. Tracked features are per-map MEANS and
+scalars (a map's min and max are the extremes of a noisy field). What a modality
+does differently is a method or a capability flag on it, never a branch in the
+loop: a curve's snippet edits are applied per frame while a cube's are baked
+into a copy of the anchor run (`bake_edits`); a curve's portability is judged on
+R², a cube's on its OUTPUTS (under a change of signal level each must stay put or
+scale with the counts, else the script carries a constant read off the
+reference). Pinning and window re-anchors stay curve-only on purpose: a cube
+rebuild has fixed targets and no planning step, which is what a window serves,
+and it would multiply a rebuild that already takes minutes. A cube is watched by
+REGION as well as whole (`DriftBank`: one monitor per curve, the frame is as
+changed as its most changed region), on a small pyramid of grids (2x2, 3x3, 4x4
+while a region keeps 9 pixels), because a change confined to part of the field
+is diluted in the mean spectrum by the area it covers and a feature that
+straddles the blocks of one grid sits inside a block of another; the novelty
+names the smallest region that holds it. **A region borrows what the whole
+field has learned** (`DriftBank._lend`): its own frames are too noisy to learn a
+slow real change, which then accumulates until the region misfires (measured:
+half the quiet frames of a noisier simulated series, and false novelties in a
+region for a shift of the whole field), while the field sees that direction at
+full signal. Do not add a per-region monitor that stands on its own history. Several first cubes are a
+reference too: they go to the hyperspectral series driver (scout, regime plan,
+anchor, replays) and the loop locks the recipe of the regime the LAST cube
+belongs to.
+
+`ImageModality` is the third instantiation. Its fast path is
+`ImageAnalysisAgent.analyze(strict_replay=True)`: an ordinary image reuse still
+made about six model calls (skill suggestion, planning, plan validation, one
+vision review, the tier-2 decision, synthesis); a strict replay makes none, does
+not repair a script that raises, and writes no report. **An image analysis has no
+R², so its replay verdict is evidence of method HEALTH only** (`_replay_feature_gate`:
+the approved script still reports every quantity it reported on its reference,
+finite, and still finds something). It cannot see a segmentation that runs and
+is wrong. Observed live on a simulated coarsening series: when a second
+population of small particles nucleated, the locked recipe kept counting only the
+large ones (60 of 117) and its gate said good; what caught it was the change
+signal, on the exact frame. So for images the change signal and the audit are not
+extras, they are the correctness checks, and nobody should be told an image frame
+was "verified". Tracked names are only ASKED for (in the objective) and therefore
+checked: a rebuilt recipe that does not report a tracked output is refused
+(`require_outputs_after_rebuild`). The change signal reads the radially averaged
+power spectrum (log power on 96 linear bins from k = 0.01, whole field and
+quarters, after a robust normalisation): chosen by benchmark on the simulated
+series and on tiles of a real HAADF image, where linear-power variants missed a
+defocus blur and doubled noise and misfired on slow coarsening, and an intensity
+histogram added nothing. A located change is reported as a LENGTH SCALE
+(`annotate_where`), not a spatial frequency.
+
+**For images, a change that "still fits" is audited, and an audit is not a vote.**
+`ImageModality.default_on_change` is `"audit"` (curves and cubes report). What
+the live runs taught, in order: (1) one quick image audit can be the worse of the
+two analyses (an 18 nm diameter against the recipe's 6.6), so a disagreeing audit
+asks for a second, deeper one (`audit_needs_second_opinion`); (2) a deeper audit
+that is NOT told what changed shares the recipe's blind spot (it left the newly
+nucleated particles out exactly as the recipe did, and "agreed"), so **every
+analysis made because of a change is told what changed and where**
+(`_what_changed` → `hints`: model-free, context and not a constraint; told, the
+same audit went from 56 particles to 89 of 105); (3) a vote is not the truth: when
+the second audit sides with the recipe the result is an `audit_split`, the recipe
+is kept and the state is NOT called verified, and the dissent stays on the record
+and on the page; (4) a recipe that two independent analyses both reject is
+replaced by the deeper one even when the two do not agree with each other, marked
+`contested`, because keeping it is the worst of the three choices. An audit that
+could not be formed (no value for a tracked output) is retried once at a deeper
+profile. Do not collapse these into a majority rule.
+
+**A pause is when the slow half of a discovery runs.** `loop.assess_change()`
+(`live/discovery.py`) is the chain of the first SciLink paper for one frame: an
+analysis of the changed frame told what changed, its scientific claims, and with a
+literature key a novelty score per claim; the outcome goes on the log as a
+`discovery` event and the Live tab shows it on a paused run. Without a key the
+claims stand and the result says the literature was not asked. The key comes
+from the call or from `FUTUREHOUSE_API_KEY`. Run live once: the chain scored a
+claim 4 of 5 on a question that conjoined several specifics, which the
+literature rarely matches as a set. The score is only as good as the question,
+so the explanation is shown with it and nothing acts on the number.
+
+**What an instrument learns outlives the run** (`live/instrument_home.py`,
+`~/.scilink/instruments/<id>/`, opt-in with `remember=True`). Recipes are kept per
+instrument identity, not per chat session. At `setup` the instrument's known
+recipes are tried on the reference by strict replay before anything is analysed;
+one that fits AND reports what is tracked arms the loop with no model call, and a
+rebuild tries them too (`recall_known` is shared by setup and the worker). A
+recalled recipe is a hypothesis about the new sample: it is replayed and judged
+before use, and watched like any other after. Opt-in for that reason. A recipe
+taken from the store is COPIED into the run before it is replayed
+(`_own_anchor`): the store is trimmed and a person can forget a recipe, and
+neither may break a run that is using it. The store is readable without a
+session (`known_instruments`, `remembered`, `forget_recipe` in the same module):
+`scilink instrument list/show/forget` and the Live tab's Instrument memory card
+are two views of those functions, and on a shared multi-user server the card is
+read-only. A recipe adopted as `contested` is remembered as contested and tried
+after every verified one. Recorded data is not an instrument called "replay": a
+`ReplayInstrument` is remembered under the instrument its metadata names
+(`system_info["instrument"]`, "Recorded on" in the tab), else under its folder,
+so two folders never share a memory by accident.
+
+**The tab has three real sources and one of them is the recommended shape.**
+"Your instrument" is an MCP server (any language, works on a shared server) or a
+Python `Instrument` class on the machine (local only: importing runs code);
+"Data you already have" replays a folder (how a recipe is built and checked
+before beam time, and how a recorded series is run); the simulated experiments
+are NOT on the form at all: they stay in the library for the tests and the
+MCP demo server (`python -m scilink.live.mcp_demo_server <name>` is how one is
+tried through the tab, as an MCP instrument). The form opens on the MCP
+choice. For all
+three real sources the form completes what the source declares (`_complete`,
+the same rule as for an MCP server): technique, sample, kind of frame, its
+calibration and the tracked names, and what the person enters wins. A class
+that only acquires is enough. Run live: a bare image class with the form
+supplying the rest armed in 123 s and answered 8 of 8 frames; leaving the kind
+on automatic hid the calibration fields and the analysis reported diameters in
+nm with no field of view, so the form now points at them.
+
+**What a driven run through the tab taught (real HAADF and EELS tiles, an image
+instrument behind MCP), each now structural.** (1) A change that arrives slowly
+is a change: the slow alarm applies `on_change` like the abrupt path does (an
+image stream's nucleation was announced and nothing looked at the recipe).
+(2) A run that ends with an audit still working waits for it
+(`pending_work()`, `close(wait=True, stop=...)`, the tab's `finishing` state): a
+24-frame run had cancelled the second audit of a disagreed change, which is the
+answer the run was asked. Stop ends the wait; the instrument's run summary is
+written after it. (3) The pause-time assessment asks for the tracked quantities
+by name and its numbers go BESIDE the recipe's for the same frame (`compared`):
+that, not the prose, is what a person at a pause decides on. An assessment whose
+analysis failed is tried once deeper, and if it still has no measurement it is
+`unmeasured` and says its claims come from looking at the frame. (4) For an
+image or a cube the tab shows the frame itself (the reference while arming), not
+only the curve the change signal reads.
+
+**The fast path runs in one long-lived interpreter** (`executors.WarmScriptExecutor`,
+`warm_replay=True`): a fresh process paid the recipe's imports on every frame (a
+real atomic-resolution recipe: 7.5 s cold, 1.5 s warm, identical numbers). It is
+for REPLAYING a verified script only: module state survives between runs, which
+is the point and also why generated, unverified code never runs there. Each run
+keeps its own working directory, the timeout is hard (the worker is killed and
+replaced), Stop reaches it, and any failure of the worker falls back to a cold run.
+
+Measured and declined, so nobody redoes it blind: finer region grids for IMAGES
+(3x3, 4x4) add false novelties on a coarsening series (7 against 0), halve the
+detection of a nucleation and gain nothing on real HAADF patches, because small
+image regions hold too few objects for a stable power spectrum; quarters stay.
+Pinning for images: the names asked for were honoured in every live run, and the
+failures were missing VALUES, which the refusal check already catches.
+
+A first `setup` on rich image data is slow-clock work and can take tens of
+minutes (a multi-pass analysis, segmentation, the portability replays): it is
+paid once per recipe, and with `remember=True` once per instrument.
+
+**What a frame leaves on disk is bounded, and heavy assets are per machine.** A
+live run is open-ended, so the loop keeps the newest `keep_frame_dirs` per-frame
+folders (the log and the measured data are never pruned). Model weights a skill
+tool needs are cached once under `~/.scilink/models` (`SCILINK_MODELS` relocates
+it), never relative to the working directory: generated scripts run in a fresh
+per-item folder, and a relative default re-downloaded a 770 MB ensemble into
+every image's folder (live: 36 s a frame and a full disk; 8 s once cached, of
+which 5 s is importing torch in a fresh subprocess).
+
+**A change that arrives slowly has its own alarm.** Every frame of a gradual
+onset is explained by the frames just before it, so no frame is ever suspected
+and nothing is held. The loop therefore also watches how far the stream has
+moved from its REFERENCE frames and announces that as a `novelty` with
+`onset="gradual"` and a location read against the reference
+(`locate_from_reference`), once the distance stays above `gradual_bar`, then
+again only at double the distance; an abrupt change that was announced raises
+the level past itself, so the same change is never news twice.
+
+**A rebuild first tries what this run already knows.** The loop remembers the
+recipes it has used and left (`_known_recipes`); the worker replays each strictly
+on the new frame (no model call) and adopts the first the modality's own verdict
+calls good (`source="recalled"`), before any new analysis. It is the in-run
+analogue of asking the script bank first, and it is what makes a stream that
+returns to a state (a mosaic crossing the same kind of region, a cycled sample)
+pay for each state once. An audit never recalls: it must be independent.
+
+**Onboarding an instrument has two halves, and neither is a SciLink class.**
+The *driver* — how to talk to the controller, its file formats, its real limits —
+is an MCP server in front of the instrument, in any language: one tool that
+takes acquisition parameters and returns a measurement.
+`scilink.live.MCPInstrument` turns that tool into the loop's instrument and
+reads the parameters and their limits from the tool's own `inputSchema` (a
+number with no declared limits is held at its default and never steered: the
+loop does not invent safe limits). `scilink/live/mcp_demo_server.py` is the
+reference server. A measurement is a curve (`x` / `y` in the reply), an image or
+a datacube: the server says which in its description (`modality`), and an array
+too large for a JSON reply comes back as a `path` to a file the server wrote
+(`.npy`, an image file, HDF5), which is how a real microscope hands over a frame
+anyway. The *knowledge* — how to steer this kind of measurement — is
+an acquisition skill per technique, selected from `system_info["technique"]`,
+which the server can supply through a `describe_instrument` tool. A Python
+`Instrument` subclass remains the in-process alternative. Uploaded skills stay
+markdown-only, so a driver never arrives through the skill uploader.
+
+**Novelty has two layers, and a pause is what connects them.** The loop's
+`novelty` event is *statistical*: this frame is unlike the stream so far, here,
+with no model. Whether it is *scientifically* new is the question the original
+SciLink pipeline asks (observation → falsifiable claims → novelty scored against
+the literature → follow-up measurement or theory; arXiv:2508.06569), and
+`assess_novelty` still asks it in analyze mode. The first layer is the trigger
+for the second; the second is slow-clock work and never runs on a frame's path.
+Where an experiment can wait, `run_experiment(pause_on=("novelty", "breach"),
+on_pause=...)` makes the change a decision point: the instrument is asked to
+hold (`Instrument.pause()` / `resume()`, mapped onto optional `pause` / `resume`
+MCP tools; `can_pause` says whether the experiment is really held or only the
+acquisition), the slow work happens while the sample is still in the state that
+looked new, and the decision — resume, resume with checked parameters, stop —
+comes back from a person (the Live tab's Resume / Stop) or a callable. A pause
+needs someone who can end it (`on_pause` is required), is off by default, and is
+recorded (`paused` / `resumed`) beside what the analysis saw.
+
+**The live layer is written for an instrument-centric SciLink.** The expected
+direction is one SciLink per instrument (the paper's "lab of labs"), so
+`scilink.live` stays free of session, chat and orchestrator imports: the
+contracts are `Instrument` (identity via `describe()`: id, technique, whether it
+can pause), `loop_log.jsonl`, and the recommendation schema. Every run records
+which instrument it served (`setup.instrument`), so recipes, accepted states and
+acquisition history can later be collected per instrument instead of per chat
+session. The web session is one host for a loop, not its owner; do not add live
+features that only work through `server/live_api.py`.
+
 ### Comparison with Anthropic Skills
 
 |  | Anthropic | SciLink |

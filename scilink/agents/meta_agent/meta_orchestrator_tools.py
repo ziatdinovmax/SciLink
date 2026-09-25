@@ -522,11 +522,19 @@ class MetaOrchestratorTools:
                                  context_from: list = None,
                                  label: str = None,
                                  data_path: str = None,
-                                 metadata: str = None) -> str:
+                                 metadata: str = None,
+                                 profile: str = None,
+                                 targets: list = None,
+                                 time_budget_s: float = None) -> str:
             print("  " + _handoff(f"🧪 Delegating to analysis specialist: {_task_summary(task)}"))
-            return self.orch._delegate("analysis", task, context, context_from,
-                                       label, data_path=data_path,
-                                       metadata=metadata)
+            if profile and profile != "thorough":
+                print(f"     depth: {profile}"
+                      + (f", targets: {', '.join(map(str, targets))}" if targets else ""))
+            return self.orch._delegate(
+                "analysis", task, context, context_from, label,
+                data_path=data_path, metadata=metadata,
+                depth={"profile": profile, "targets": targets,
+                       "time_budget_s": time_budget_s})
 
         self._register_tool(
             func=delegate_to_analysis,
@@ -619,6 +627,41 @@ class MetaOrchestratorTools:
                         "Optional: metadata JSON path or short inline "
                         "description of the dataset (feeds a later fusion's "
                         "complementarity re-gate)."
+                    ),
+                },
+                "profile": {
+                    "type": "string",
+                    "enum": ["thorough", "quick", "extract"],
+                    "description": (
+                        "How good the result has to be — decided by what it is "
+                        "FOR, which only you know (the specialist never sees "
+                        "the conversation). Omit (thorough) for a result that "
+                        "will be interpreted, reported or fused. 'quick' for a "
+                        "fast look a person asked for. 'extract' when the "
+                        "numbers feed another step — an optimization "
+                        "objective, a screening pass, a feature table — and "
+                        "nobody will read a narrative. It is applied to every "
+                        "analysis the specialist runs for this task; "
+                        "deterministic quality gates are kept either way."
+                    ),
+                },
+                "targets": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "The quantities the consumer needs, in plain words "
+                        "(e.g. ['G-band position', 'D/G ratio']). The "
+                        "specialist's verifier then judges THOSE and stops "
+                        "refining features they do not depend on. Give it "
+                        "whenever the user or the next step names what it wants."
+                    ),
+                },
+                "time_budget_s": {
+                    "type": "number",
+                    "description": (
+                        "Soft wall-clock budget per analysis, in seconds, when "
+                        "the caller has a deadline. A result always comes back; "
+                        "it says what was cut."
                     ),
                 },
             },
@@ -816,6 +859,17 @@ class MetaOrchestratorTools:
                                          "description": "Optional: path to a metadata JSON "
                                                         "or inline description (also feeds "
                                                         "the complementarity gate)."},
+                            "profile": {"type": "string",
+                                        "enum": ["thorough", "quick", "extract"],
+                                        "description": "Optional analysis depth for THIS "
+                                                       "branch, chosen by what its result is "
+                                                       "for (see delegate_to_analysis). Omit "
+                                                       "for thorough — the right default when "
+                                                       "the branches will be fused."},
+                            "targets": {"type": "array", "items": {"type": "string"},
+                                        "description": "Optional: the quantities needed from "
+                                                       "THIS branch, in plain words; scopes "
+                                                       "its verifier to them."},
                             "steer": {"type": "boolean",
                                       "description": "Explicit opt-in (default false): give "
                                                      "THIS branch a change-point hint from "

@@ -280,6 +280,19 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Operating profile (#346): plumbed for parity with the curve agent;
         # the realtime toggles are wired for curve only in v1 — see below.
         profile: Optional[Any] = None,
+        # The quantities the consumer of this result needs (e.g. ["G-band
+        # position", "D/G ratio"]). Scopes the LLM verifier to them under any
+        # profile — see _qc_profile.verification_addendum. None = judge the
+        # whole analysis (today's behavior).
+        targets: Optional[List[str]] = None,
+        # A live frame: the locked replay runs with ZERO model calls — no skill
+        # selection, no planning, no vision review, no in-frame repair, no tier
+        # 2, no synthesis, no report — and is judged on evidence alone
+        # (_replay_feature_gate) against ``replay_reference``, the quantities the
+        # approved script reported on its reference (default: the prior run's
+        # own). Needs reuse_locked_script.
+        strict_replay: bool = False,
+        replay_reference: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -388,6 +401,26 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "script_edits do not apply", _res["message"],
                     failed_edit=_res.get("failed_edit"))
 
+        if strict_replay:
+            from .controllers.image_analysis_controllers import (
+                _first_prior_image_script, _load_prior_state)
+            _script, _ = (_first_prior_image_script({"prior_analysis_paths": prior_analysis_paths})
+                          if (prior_analysis_paths and reuse_locked_script) else (None, None))
+            if not _script:
+                return {"status": "error",
+                        "error": {"error": "strict_replay requires reuse_locked_script",
+                                  "details": ("A strict replay executes a prior run's approved "
+                                              "script with no model call; pass prior_analysis_paths="
+                                              "[<a prior image run with a saved script>] and "
+                                              "reuse_locked_script=True.")},
+                        "output_directory": str(self.output_dir)}
+            if replay_reference is None:
+                for _p in prior_analysis_paths:
+                    _dir, _data = _load_prior_state(_p)
+                    if _data and isinstance(_data.get("extracted_features"), dict):
+                        replay_reference = _data["extracted_features"]
+                        break
+
         # Parse input
         data_path, data_paths, data_array, error = self._parse_data_input(data)
 
@@ -397,6 +430,10 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "error": error,
                 "output_directory": str(self.output_dir),
             }
+
+        _dir_error = self._reject_directory_input(data_path)
+        if _dir_error:
+            return _dir_error
 
         # Normalize to internal variables
         image_path = data_path
@@ -524,21 +561,44 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     f"   🏷️  Recovered embedded metadata from {Path(image_paths[0]).name}"
                 )
 
-        # Operating profile (#346): accepted for surface parity; realtime
-        # toggles are wired for the curve agent only in v1 (image lacks a
-        # deterministic per-frame gate metric — a design decision to make
-        # before a zero-LLM image frame is honest). Thorough is unaffected.
-        from ._qc_profile import resolve_profile
+        # Operating profile. The fit-for-purpose presets (quick / extract)
+        # are honoured: the pipeline builder drops the stages they turn off
+        # and tier 2 is gated on them. 'realtime' means something for a STRICT
+        # locked replay only (a live frame, judged by the deterministic replay
+        # gate); any other use falls back to thorough, because a fresh image
+        # analysis has no deterministic per-frame gate.
+        from ._qc_profile import REALTIME, THOROUGH, resolve_profile
         qc_profile = resolve_profile(profile)
-        if qc_profile.name == "realtime":
+        if strict_replay:
+            qc_profile = REALTIME
+        elif qc_profile.name == "realtime":
             self.logger.warning(
-                "profile='realtime' is not wired for image analysis yet "
-                "(no deterministic per-frame gate metric); running under "
-                "the thorough profile."
+                "profile='realtime' applies to a strict locked replay only for "
+                "image analysis; running under the thorough profile."
             )
+            qc_profile = THOROUGH
+        if qc_profile.name != "thorough":
+            if max_verification_iterations is None:
+                effective_max_verification = qc_profile.max_verification_iterations
+            _off = [label for label, on in (
+                ("plan validation", qc_profile.plan_validation),
+                ("plan conformance", qc_profile.check_plan_conformance),
+                ("literature", qc_profile.literature),
+                ("adaptive refit", qc_profile.adaptive_refit),
+                ("trend", qc_profile.trend),
+                ("tier 2", qc_profile.tier2),
+                ("synthesis", qc_profile.synthesis != "none")) if not on]
+            self.logger.info(
+                f"⚡ {qc_profile.name.upper()} profile: up to "
+                f"{effective_max_verification} verification pass(es); skipped: "
+                f"{', '.join(_off) or 'nothing'}. Deterministic gates are unchanged.")
 
         # Build initial state
         state = {
+            "_qc_profile": qc_profile.name,
+            "_synthesis_level": qc_profile.synthesis,
+            "_verification_mode": qc_profile.verification,
+            "analysis_targets": [str(x) for x in (targets or []) if str(x).strip()],
             # Input data
             "image_paths": image_paths,
             "image_stack": image_stack,
@@ -570,6 +630,8 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # Opt-in verbatim reuse of the prior locked script (#172); default
             # False — prior runs are agent-judged reference material.
             "reuse_locked_script": bool(reuse_locked_script),
+            "_strict_replay": bool(strict_replay),
+            "replay_reference": replay_reference,
             # Surgical follow-up edits applied to the reused script (already
             # validated at entry; the series controller applies them).
             "script_edits": script_edits or [],
@@ -636,15 +698,25 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             outlier_sigma=effective_outlier_sigma,
             max_verification_iterations=effective_max_verification,
             num_plan_candidates=self.num_plan_candidates,
+            profile=qc_profile,
+            explicit_verification_budget=max_verification_iterations is not None,
+            write_reports=not strict_replay,
         )
 
-        # Execute pipeline
+        # Execute pipeline. The timer lives on the instance so the Tier 2
+        # pass (``_run_tier2``) reports into the same ``stage_timings``.
+        from ._stage_timing import RunBudget, StageTimer
+        self._stage_timer = StageTimer()
+        # Soft run budget (QCProfile.time_budget_s); see the curve agent.
+        self._run_budget = RunBudget(qc_profile.time_budget_s)
+        self._run_budget.stamp(state)
         for i, controller in enumerate(pipeline, 1):
             step_name = controller.__class__.__name__
             self.logger.info(f"\n📍 STEP {i}: {step_name}\n")
 
             try:
-                state = controller.execute(state)
+                state = self._stage_timer.run_within_budget(
+                    controller, state, self._run_budget, logger=self.logger)
 
                 if state.get("error_dict"):
                     self.logger.error(
@@ -713,10 +785,16 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             effective_max_verification=effective_max_verification,
         )
 
-        if self.analysis_depth == "auto" and tier1_results["status"] == "success":
-            tier2_decision = self._evaluate_tier2_needed(
-                tier1_results, objective
-            )
+        if not qc_profile.tier2:
+            self.logger.info(f"\n📊 Tier 2: skipped (profile: {qc_profile.name})")
+        elif self._run_budget.expired:
+            self.logger.warning("\n⏱️  Tier 2: skipped — the time budget is spent.")
+            state.setdefault("_budget_skipped", []).append("Tier2")
+        elif self.analysis_depth == "auto" and tier1_results["status"] == "success":
+            with self._stage_timer.stage("Tier2Evaluation"):
+                tier2_decision = self._evaluate_tier2_needed(
+                    tier1_results, objective
+                )
             if tier2_decision and tier2_decision.get("tier2_needed"):
                 run_tier2 = True
                 if self.enable_human_feedback:
@@ -769,6 +847,28 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         fb_staged = self._maybe_stage_feedback_errors(tier1_state, final_results)
         if fb_staged:
             final_results.setdefault("staged_solutions", []).extend(fb_staged)
+
+        # Did the script bank help? One block per QC-loop item (also in
+        # the bank's assist log, where `scilink memory bank stats` reads it).
+        _assists = [r["bank_assist"] for r in tier1_state.get("series_results", []) or []
+                    if isinstance(r, dict) and r.get("bank_assist")]
+        if _assists:
+            final_results["bank_assist"] = _assists
+
+        if self._run_budget.seconds:
+            _unverified = [r.get("name") for r in tier1_state.get("series_results", []) or []
+                           if isinstance(r, dict)
+                           and (r.get("quality_history") or {}).get("unverified")]
+            final_results["time_budget"] = {
+                "seconds": self._run_budget.seconds,
+                "expired": self._run_budget.expired,
+                "skipped_stages": tier1_state.get("_budget_skipped") or [],
+                "unverified_items": _unverified,
+            }
+
+        # Where the time went, per pipeline stage (wall-clock + LLM calls).
+        final_results["stage_timings"] = self._stage_timer.summary()
+        self._stage_timer.log_summary(self.logger)
 
         # Save final merged results
         results_path = self.output_dir / "analysis_results.json"
@@ -1378,7 +1478,12 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             step_name = controller.__class__.__name__
             self.logger.info(f"\n📍 TIER 2 STEP {i}: {step_name}\n")
             try:
-                tier2_state = controller.execute(tier2_state)
+                _timer = getattr(self, "_stage_timer", None)
+                tier2_state = (
+                    _timer.run(controller, tier2_state,
+                               name=f"tier2:{step_name}")
+                    if _timer is not None
+                    else controller.execute(tier2_state))
                 if tier2_state.get("error_dict"):
                     self.logger.error(
                         f"Tier 2 failed at {step_name}: "
@@ -1573,10 +1678,37 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         synthesis = state.get("synthesis_result", {})
         flagged_images = state.get("flagged_images", [])
 
+        # Fit-for-purpose provenance (the curve agent's twin): mark what was
+        # produced under a reduced-depth profile, and when the narrative was
+        # skipped (extract) say so in one deterministic line.
+        _profile = state.get("_qc_profile")
+        _reduced = _profile not in (None, "thorough")
+        if _reduced:
+            for r in series_results:
+                if isinstance(r, dict):
+                    r.setdefault("quality_history", {})[
+                        "produced_under_profile"] = _profile
+        # The narrative field is never left empty: when synthesis did not run
+        # BY DESIGN — the profile asked for none, or the time budget was spent
+        # before it — one deterministic line says so.
+        _budget_cut = any("Synthesis" in s for s in state.get("_budget_skipped") or [])
+        if ((_reduced or _budget_cut)
+                and not (synthesis or {}).get("detailed_analysis") and series_results):
+            ok = [r for r in series_results if isinstance(r, dict) and r.get("success")]
+            synthesis = dict(synthesis or {})
+            synthesis["detailed_analysis"] = (
+                f"{len(ok)}/{len(series_results)} image(s) analysed. "
+                + ("The time budget was spent before the narrative synthesis"
+                   if _budget_cut else
+                   f"No narrative synthesis was requested (profile '{_profile}')")
+                + " — the result is the extracted features.")
+
         results = {
             "status": "success",
             "output_directory": str(self.output_dir),
         }
+        if _reduced:
+            results["profile"] = _profile
 
         # Zero-success guard: if every image failed every attempt (a
         # per-item condition, so no controller set error_dict), the run must
