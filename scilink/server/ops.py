@@ -59,6 +59,24 @@ class Workload:
         with self._lock:
             self._last_activity = time.time()
 
+    def sole_active_session(self, managers: Dict[str, Any]) -> Optional[str]:
+        """The one session running a turn or a live run, else None: what an
+        LLM call on an untagged worker thread is attributed to."""
+        active: List[str] = []
+        for mgr in list(managers.values()):
+            for s in list(getattr(mgr, "_sessions", {}).values()):
+                turn = getattr(s, "turn", None)
+                if turn is not None and getattr(turn, "is_running", False):
+                    active.append(s.id)
+        try:
+            from . import live_api
+            active.extend(sid for sid, run in list(live_api._RUNS.items())
+                          if getattr(run, "state", None) in self.LIVE_BUSY_STATES
+                          and sid not in active)
+        except Exception:  # noqa: BLE001
+            pass
+        return active[0] if len(active) == 1 else None
+
     def busy_reasons(self, managers: Dict[str, Any]) -> List[str]:
         reasons: List[str] = []
         for mgr in list(managers.values()):

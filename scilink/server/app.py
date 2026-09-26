@@ -129,6 +129,7 @@ def create_app(session_root: Path, serve_frontend: bool = True,
     usage = ledger_for(session_root)
     app.state.usage = usage
     tracing.set_usage_sink(usage.record)
+    tracing.set_session_resolver(lambda: ops.sole_active_session(managers))
 
     def _ops_allowed(request: Request, *, mutating: bool) -> None:
         """Status and drain are for the control plane: the ops token

@@ -116,6 +116,11 @@ _off_path = threading.local()
 # per workspace.
 _usage_sink = None
 _session_tag = threading.local()
+# For a thread that carries no tag (a worker a turn spawned): a resolver the
+# host installs, answering "which ONE session is running work right now" or
+# None. On a server that runs one turn at a time it is exact; with several
+# turns in flight it declines and the call stays unattributed.
+_session_resolver = None
 
 
 def set_usage_sink(sink) -> None:
@@ -130,8 +135,20 @@ def bind_session(session_id: Optional[str]) -> None:
     _session_tag.value = session_id
 
 
+def set_session_resolver(resolver) -> None:
+    """``resolver() -> session id | None`` consulted for untagged threads."""
+    global _session_resolver
+    _session_resolver = resolver
+
+
 def current_session() -> Optional[str]:
-    return getattr(_session_tag, "value", None)
+    tagged = getattr(_session_tag, "value", None)
+    if tagged is not None or _session_resolver is None:
+        return tagged
+    try:
+        return _session_resolver()
+    except Exception:
+        return None
 
 
 class off_path:

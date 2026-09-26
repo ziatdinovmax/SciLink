@@ -17,9 +17,11 @@ from scilink.usage import UsageLedger, ledger_for
 def _no_sink():
     tracing.set_usage_sink(None)
     tracing.bind_session(None)
+    tracing.set_session_resolver(None)
     yield
     tracing.set_usage_sink(None)
     tracing.bind_session(None)
+    tracing.set_session_resolver(None)
 
 
 def test_ledger_counts_persists_and_reloads(tmp_path):
@@ -110,3 +112,41 @@ def test_server_routes_and_budget_gate(tmp_path, monkeypatch):
     assert r.status_code == 429 and "budget" in r.json()["detail"]
     assert c.post("/api/v1/usage/period").json()["total_tokens"] == 0
     assert c.post(f"/api/v1/sessions/{s.id}/messages", json={"content": "hi"}).status_code != 429
+
+
+def test_untagged_worker_threads_fall_back_to_the_sole_active_session(tmp_path, monkeypatch):
+    """A curve fit runs most of its model calls on worker threads (live: 31 of
+    40 calls in a container run carried no tag). When exactly one session is
+    running work, those calls are its; with two in flight they stay
+    unattributed rather than guessed."""
+    pytest.importorskip("fastapi")
+    from scilink.server.app import create_app
+    from scilink.server.runner import TurnState
+    from scilink.server.session_manager import WebSession
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("SCILINK_USAGE_FILE", raising=False)
+    monkeypatch.delenv("SCILINK_TOKEN_BUDGET", raising=False)
+    app = create_app(tmp_path, serve_frontend=False)
+    mgr = app.state.manager_for_user("default")
+
+    def session(name):
+        d = tmp_path / name; d.mkdir()
+        s = WebSession(id=d.name, session_dir=str(d), mode="analyze", model="m",
+                       autonomy="autonomous", agent=SimpleNamespace())
+        mgr._sessions[s.id] = s
+        return s
+    a, b = session("analysis_session_20260101_000001"), session("analysis_session_20260101_000002")
+    a.turn = TurnState(is_running=True)
+    seen = []
+    def worker():
+        seen.append(tracing.current_session())
+        tracing.note_llm_call(prompt_tokens=5, completion_tokens=1, model="m")
+    t = threading.Thread(target=worker); t.start(); t.join()
+    assert seen == [a.id]
+    b.turn = TurnState(is_running=True)                 # two in flight: no guess
+    t = threading.Thread(target=worker); t.start(); t.join()
+    assert seen[-1] is None
+    tracing.bind_session("explicit")                    # a tag always wins
+    assert tracing.current_session() == "explicit"
+    by = app.state.usage.summary()["by_session"]
+    assert by[a.id]["calls"] == 1 and by["unattributed"]["calls"] == 1
