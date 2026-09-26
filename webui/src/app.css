@@ -443,11 +443,6 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .qs-table th { font-weight: 600; color: var(--text-dim); }
 .qs-figure { margin: 0; }
 .qs-figure img.preview { max-width: 100%; border-radius: 6px; }
-.qs-claims { margin: 0; padding-left: 20px; }
-.qs-claims li { margin: 0 0 4px; }
-.qs-claims summary { cursor: pointer; font-weight: 500; }
-.qs-claim-body { margin: 4px 0 6px 2px; color: var(--text-dim); }
-.qs-claim-body p { margin: 4px 0; }
 .qs-candidates { display: flex; flex-direction: column; gap: 8px; }
 .qs-candidate {
   border: 1px solid var(--border-strong); border-radius: 8px; padding: 8px 12px;

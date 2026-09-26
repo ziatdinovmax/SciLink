@@ -6,8 +6,6 @@ from types import SimpleNamespace
 import pytest
 
 from scilink import hitl
-from scilink.agents.exp_agents.human_feedback import (
-    SimpleFeedbackCollector, analysis_result_subject)
 from scilink.agents.exp_agents.controllers import curve_fitting_controllers as cfc
 
 
@@ -88,22 +86,3 @@ def test_fitting_plan_gate_asks_with_the_subject(capsys):
     assert cap.req.kind == "review_plan" and cap.req.origin == {"stage": "fitting_plan"}
     assert cap.req.subject["title"].startswith("📋 Proposed fitting plan")
     assert out["_refine_feedback"] == "use Voigt"
-
-
-def test_analysis_result_subject_and_gate(capsys):
-    result = {"detailed_analysis": "The doublet narrows.",
-              "scientific_claims": [{"claim": "Peak A narrows", "scientific_impact": "strain",
-                                     "has_anyone_question": "Has anyone…", "keywords": ["raman"]}]}
-    s = analysis_result_subject(result)
-    assert s["title"] == "🤖 Agent's analysis results"
-    assert s["blocks"][0] == {"type": "text", "label": "📋 Detailed analysis",
-                              "markdown": "The doublet narrows."}
-    assert s["blocks"][1]["label"] == "🎯 Scientific claims (1)"
-    assert s["blocks"][1]["items"][0]["keywords"] == ["raman"]
-    assert analysis_result_subject({})["blocks"][1]["type"] == "notice"
-
-    cap = Capture()
-    hitl.set_default_channel(cap)
-    assert SimpleFeedbackCollector().collect_optional_feedback(result) is None
-    assert cap.req.kind == "review_result" and cap.req.subject == s
-    assert "CLAIM 1:" in capsys.readouterr().out       # the console printout is unchanged

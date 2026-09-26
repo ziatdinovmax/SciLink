@@ -148,39 +148,6 @@ function Block({
           {block.caption && <figcaption className="caption">{block.caption}</figcaption>}
         </figure>
       );
-    case "claims":
-      return (
-        <ol className="qs-claims">
-          {block.items.map((c, i) => (
-            <li key={i}>
-              <details>
-                <summary>{c.claim}</summary>
-                <div className="qs-claim-body">
-                  {c.impact && (
-                    <p>
-                      <b>Impact.</b> {c.impact}
-                    </p>
-                  )}
-                  {c.question && (
-                    <p>
-                      <b>Question.</b> {c.question}
-                    </p>
-                  )}
-                  {c.keywords && c.keywords.length > 0 && (
-                    <div className="qs-chips">
-                      {c.keywords.map((k, j) => (
-                        <span key={j} className="qs-chip">
-                          {k}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </details>
-            </li>
-          ))}
-        </ol>
-      );
     case "candidates":
       return (
         <div className="qs-candidates">

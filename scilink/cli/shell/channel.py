@@ -227,17 +227,6 @@ class Widgets:
                 where = b.get("file") or b.get("path") or ""
                 cap = f" ({b['caption']})" if b.get("caption") else ""
                 emit(label, Text.from_markup(f"[dim]figure:[/] {where}{cap}"))
-            elif kind == "claims":
-                lines = []
-                for n, c in enumerate(b.get("items") or [], 1):
-                    lines.append(Text(f"{n}. {c.get('claim', '')}", style="bold"))
-                    for key, name in (("impact", "Impact"), ("question", "Question")):
-                        if c.get(key):
-                            lines.append(Text(f"     {name}: {c[key]}", style="dim"))
-                    if c.get("keywords"):
-                        lines.append(Text("     Keywords: " + ", ".join(map(str, c["keywords"])),
-                                          style="dim"))
-                emit(label, Group(*lines))
             elif kind == "candidates":
                 lines = []
                 pick = b.get("pick")

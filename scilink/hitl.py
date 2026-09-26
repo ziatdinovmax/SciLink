@@ -64,13 +64,12 @@ def _next_id() -> str:
 #   table       columns: [str], rows: [[cell, ...]], caption?
 #   figure      path (absolute at the gate; presented relative to the
 #               session), caption?
-#   claims      items: [{claim, impact?, question?, keywords?: [str]}]
 #   candidates  items: [{idx, name, metric?, value?, approved?, figure?,
 #               judge_comment?}], pick, reasoning?, caveats?: [str]
 #   compare     left: {label, blocks}, right: {label, blocks}
 #   notice      title, lines: [str], tone? (info|warn)
 SUBJECT_BLOCKS = ("text", "fields", "chips", "steps", "table", "figure",
-                  "claims", "candidates", "compare", "notice")
+                  "candidates", "compare", "notice")
 
 
 def subject_block(type_: str, **payload: Any) -> Dict[str, Any]:

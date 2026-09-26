@@ -4,31 +4,9 @@ import textwrap
 from typing import Dict, Any, Optional
 from datetime import datetime
 
-from ...hitl import make_subject, request_human_feedback, subject_block
+from ...hitl import request_human_feedback
 
 
-
-
-def analysis_result_subject(analysis_result: Dict[str, Any]) -> Dict[str, Any]:
-    """What the analysis-review gate shows, as subject blocks (scilink.hitl):
-    the detailed analysis and the claims, read from the same result the
-    console printout comes from."""
-    claims = analysis_result.get("scientific_claims") or []
-    blocks = [
-        subject_block("text", label="📋 Detailed analysis", markdown=str(
-            analysis_result.get("detailed_analysis") or "No analysis provided")),
-    ]
-    if claims:
-        blocks.append(subject_block("claims", label=f"🎯 Scientific claims ({len(claims)})", items=[
-            {"claim": str(c.get("claim", "N/A")),
-             "impact": c.get("scientific_impact"),
-             "question": c.get("has_anyone_question"),
-             "keywords": [str(k) for k in c.get("keywords") or []]}
-            for c in claims]))
-    else:
-        blocks.append(subject_block("notice", title="❌ No claims were generated",
-                                    lines=[], tone="warn"))
-    return make_subject("🤖 Agent's analysis results", blocks)
 
 
 class SimpleFeedbackCollector:
@@ -73,7 +51,6 @@ class SimpleFeedbackCollector:
                 "\n🤔 Your feedback (or press Enter to use analysis as-is): ",
                 kind="review_result",
                 origin={"stage": "analysis_review"},
-                subject=analysis_result_subject(analysis_result),
             ).strip()
             
             if not feedback_text:

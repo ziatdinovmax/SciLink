@@ -229,8 +229,6 @@ SUBJECT = {"title": "📋 Proposed fitting plan — single spectrum", "blocks": 
      "caption": "Regimes"},
     {"type": "figure", "path": "results/fit.png", "file": "/tmp/s/results/fit.png",
      "caption": "review"},
-    {"type": "claims", "items": [{"claim": "Peak A splits", "impact": "big",
-                                  "keywords": ["raman"]}]},
     {"type": "candidates", "pick": 2, "items": [
         {"idx": 1, "name": "Voigt", "metric": "R²", "value": 0.99, "approved": True},
         {"idx": 2, "name": "Gaussian", "judge_comment": "cleanest"}], "reasoning": "fewer params",
@@ -253,8 +251,7 @@ def test_subject_blocks_are_rendered_and_console_text_is_behind_ctrl_o():
     for needle in ("📋 Proposed fitting plan — single spectrum", "Physical model", "2 Gaussians",
                    "📊 Approach", "Fit the doublet", "🎯 Parameters", "width · area",
                    "1. Subtract baseline.",
-                   "Regimes", "low T", "figure: /tmp/s/results/fit.png", "Peak A splits",
-                   "Impact: big", "Candidate 2 — Gaussian", "Judge's pick", "Judge: fewer params",
+                   "Regimes", "low T", "figure: /tmp/s/results/fit.png", "Candidate 2 — Gaussian", "Judge's pick", "Judge: fewer params",
                    "⚠ seed near edge", "original", "user-guided", "Locked model",
                    "applies to all 4 spectra", "console output: Ctrl+O shows it"):
         assert needle in out, needle

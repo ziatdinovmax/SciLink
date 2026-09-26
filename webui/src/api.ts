@@ -117,15 +117,6 @@ export type SubjectBlock = { label?: string } & (
     }
   | { type: "figure"; path: string | null; file?: string; caption?: string }
   | {
-      type: "claims";
-      items: {
-        claim: string;
-        impact?: string;
-        question?: string;
-        keywords?: string[];
-      }[];
-    }
-  | {
       type: "candidates";
       items: {
         idx: number;

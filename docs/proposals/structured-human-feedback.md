@@ -4,17 +4,17 @@ Status: plan, drafted 2026-09-26. Stage 1 is implemented (the contract,
 both renderers, the kind tables, two pilot gates) and was checked live on
 2026-09-26 in the browser and in the shell on a Raman-like spectrum
 (Bedrock Opus 4.8): the curve fitting plan gate renders from its subject on
-both surfaces and Enter approves it. Note for stage 3: the `analysis_review`
-gate (`SimpleFeedbackCollector`) is unreachable today — the mixin's
-`_apply_feedback_if_enabled` has no caller in any pipeline — so its subject
-builder exists and is unit-tested but has not been seen live.
+both surfaces and Enter approves it. Scope rule: this work improves how the
+existing gates are shown; it adds no gate and re-enables none. The
+`analysis_review` gate (`SimpleFeedbackCollector`) was judged impractical
+and is not wired into any pipeline, so it is not in the table below.
 
 ## The problem
 
 The web UI's feedback surface looks like a terminal because it *is* the
 terminal. Every agent gate (25 `request_human_feedback` calls) holds a
 structured object at ask time — a plan dict, a fit result with a review PNG,
-a candidate list with per-candidate judge comments, a claims list — and
+a candidate list with per-candidate judge comments — and
 prints it, then asks. The web channel (`server/hitl_channel.py`) captures
 stdout, and the presenter (`server/presenter.py`) regex-parses the captured
 text back into widgets. Its own docstring calls this "regex-over-captured-
@@ -61,7 +61,6 @@ with each):
 | `steps` | `{"label": str, "items": [str]}` | numbered pipeline / strategy steps |
 | `table` | `{"columns": [str], "rows": [[...]], "caption"?}` | fitted parameters, scalarizer columns, per-regime rows |
 | `figure` | `{"path": str, "caption"?}` | image via `/files`; path relative to the session dir |
-| `claims` | `{"items": [{"claim", "impact", "question", "keywords"}]}` | expandable claim items |
 | `candidates` | `{"items": [{"idx", "name", "metric"?, "value"?, "approved"?, "figure"?, "judge_comment"?}], "pick": int, "reasoning"?, "caveats"?} ` | one card per candidate, pick highlighted |
 | `compare` | `{"left": {"label", "blocks"}, "right": {"label", "blocks"}}` | two columns (old vs new fit, approved plan vs revision) |
 | `notice` | `{"title", "lines", "tone"}` | the callout the plan gates already have |
@@ -145,7 +144,6 @@ server keep working while they are updated; `subject` is additive.
 | curve `fit_review` | review_fit | figure (review PNG), fields (model, R² flagged vs threshold), table (component, parameter, value), text (series note) |
 | curve `poor_fit_review`, image `poor_quality_review` | review_fit / review_result | figure, fields (best score), table (attempts tried, score) |
 | image `result_review` | review_result | figure, fields (analysis type, quality score), table (extracted features) |
-| exp `analysis_review` | review_result | text (detailed analysis), claims |
 | scalarizer `scalarizer_review` | review_metrics | table (columns × first rows), figure (plot) |
 | planning `missing_metadata` | dataset_description | fields (file, columns seen) |
 | curve/image `user_guided_fit` / `user_guided_result` | keep_or_revert | compare (original vs user-guided: figure + R²/score) |
@@ -181,8 +179,7 @@ the web UI live-test notes).
    regimes, iteration feedback). These are the gates a scientist sits at
    longest. Subject builders unit-tested against sample `state` dicts.
 3. **Fit and result gates** (fit review, poor fit / poor quality, result
-   review, analysis review with claims, scalarizer). Adds `figure`,
-   `table`, `claims` in anger.
+   review, scalarizer). Adds `figure` and `table` in anger.
 4. **Candidate and compare gates** (best-of-N ×2, plan candidates,
    consensus ×2, user-guided ×2, consistency ×2, plan reopen). Retires
    `parse_bestofn_review` and `parse_plan_candidate_review`.
