@@ -1174,6 +1174,12 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         outcome. Fully failure-isolated; gated by ``SCILINK_SCRIPT_BANK`` /
         persistent-memory setting.
         """
+        if state.get("_strict_replay"):
+            # A live loop's fast path: the recipe runs unreviewed on every
+            # frame with no model call. Banking each frame credited a
+            # "proven" record from one stream (live: six frames, six
+            # successes); the reference analysis banked it once already.
+            return []
         from scilink.skills._shared import _script_bank
         if not _script_bank.bank_enabled():
             return []

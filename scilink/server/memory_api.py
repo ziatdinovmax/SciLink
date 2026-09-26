@@ -234,8 +234,17 @@ def skill_action(domain: str, name: str, action: str) -> Dict[str, Any]:
     return out
 
 
+def _check_ref(domain: str, name: str) -> None:
+    _, _memory, *_ = _mods()
+    try:
+        _memory.check_skill_ref(domain, name)
+    except ValueError as exc:
+        raise MemoryError(400, str(exc)) from exc
+
+
 def fork_builtin(domain: str, name: str) -> Dict[str, Any]:
     _, _memory, *_ = _mods()
+    _check_ref(domain, name)
     try:
         out = _memory.fork_builtin(domain, name)
     except FileNotFoundError as exc:
@@ -422,11 +431,28 @@ def llm_call_for(agent: Any) -> Callable[[str], str]:
     return _call
 
 
+#: Finished jobs kept for polling; older ones are dropped so the in-process
+#: registry cannot grow without bound over a long-lived server.
+MAX_FINISHED_JOBS = 50
+
+
+def _restore_labels(_staging, domain: str, previous: Dict[str, Any]) -> None:
+    for rid, label in previous.items():
+        if label and _staging.get_staged(domain, rid) is not None:
+            try:
+                _staging.relabel_staged(domain, rid, label)
+            except Exception:  # noqa: BLE001 - best effort after a failure
+                pass
+
+
 def _start_job(kind: str, fn: Callable[[], Dict[str, Any]], label: str) -> Dict[str, Any]:
     job_id = uuid.uuid4().hex[:12]
     job = {"id": job_id, "kind": kind, "label": label, "status": "running",
            "result": None, "error": None}
     with _jobs_lock:
+        finished = [k for k, j in _jobs.items() if j.get("status") != "running"]
+        for k in finished[:max(0, len(finished) - MAX_FINISHED_JOBS + 1)]:
+            _jobs.pop(k, None)
         _jobs[job_id] = job
 
     def _run():
@@ -484,14 +510,25 @@ def start_consolidate(domain: str, ids: List[str], label: str,
         SKILL_UPDATE_INSTRUCTIONS, T2_CONSOLIDATION_INSTRUCTIONS)
 
     def _work():
+        # The consolidation reads a whole technique group, so the selection
+        # is relabelled first. A failed distillation puts the labels back:
+        # the UI promises the records are unchanged after a failure.
+        previous = {rid: (_staging.get_staged(domain, rid) or {}).get("technique")
+                    for rid in ids}
         for rid in ids:
             _staging.relabel_staged(domain, rid, norm)
-        res = _staging.consolidate_technique(
-            domain, norm, llm_call=llm_call,
-            consolidation_template=T2_CONSOLIDATION_INSTRUCTIONS,
-            update_template=SKILL_UPDATE_INSTRUCTIONS)
+        try:
+            res = _staging.consolidate_technique(
+                domain, norm, llm_call=llm_call,
+                consolidation_template=T2_CONSOLIDATION_INSTRUCTIONS,
+                update_template=SKILL_UPDATE_INSTRUCTIONS)
+        except Exception:
+            _restore_labels(_staging, domain, previous)
+            raise
         if res.get("status") == "success":
             res = {**res, "skill_name": f"auto_{norm}", "domain": domain}
+        else:
+            _restore_labels(_staging, domain, previous)
         return res
     return _start_job("consolidate", _work, f"{len(ids)} → auto_{norm}")
 
@@ -508,6 +545,7 @@ def start_propose_upgrade(domain: str, ids: List[str], target_domain: str,
     recs = [r for r in (_staging.get_staged(domain, i) for i in ids) if r]
     if len(recs) != len(ids):
         raise MemoryError(404, "One or more selected records no longer exist.")
+    _check_ref(target_domain, target_name)
     persistent = {s["name"] for s in _safe(lambda: _memory.list_memory(domain=target_domain), [])}
     builtin_target = target_name not in persistent
     from scilink.agents.exp_agents.instruct import (
@@ -559,6 +597,7 @@ def apply_upgrade(domain: str, ids: List[str], target_domain: str, target_name: 
     when the target was one, back up the current file, write, consume the
     records."""
     _, _memory, _, _staging = _mods()
+    _check_ref(target_domain, target_name)
     if not (content or "").strip():
         raise MemoryError(400, "Empty skill content.")
     if fork_first:

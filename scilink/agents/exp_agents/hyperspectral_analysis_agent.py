@@ -1722,6 +1722,11 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # The anchor banked this script once for the series; banking each
             # verbatim replay would inflate its proven-N per dataset.
             return []
+        if getattr(self, "_strict_replay", False):
+            # Same rule for a live loop's strict replays: unreviewed, no
+            # model call, one stream (live: setup alone wrote three
+            # successes and every cube added one).
+            return []
         from scilink.skills._shared import _script_bank
         if not _script_bank.bank_enabled():
             return []

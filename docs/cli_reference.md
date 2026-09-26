@@ -163,16 +163,43 @@ Learned skills (graduated or distilled from sessions) live under `~/.scilink/`
 (override with `$SCILINK_HOME`), outside the installed package, so they
 survive upgrades and load on every future run:
 
+Persistent memory is OFF in a fresh store: nothing is banked or staged and
+learned skills are not loaded until it is switched on. The in-session
+graduation tools (`graduate_to_skill`, `update_skill`) and the meta agent's
+skill review refuse to write while it is off.
+
 ```bash
-scilink memory status | enable | disable    # opt-in switch
-scilink memory list                         # persisted skills
-scilink memory staged                       # raw solutions awaiting distillation
+# the switch
+scilink memory status | enable | disable    # opt-in; SCILINK_MEMORY=0/1 overrides
+
+# skills (stage 3)
+scilink memory list [--domain D] [--provisional-only | --promoted-only]
 scilink memory show <domain>/<name>         # print a skill's markdown
-scilink memory upgrade <domain>/<id> --into <domain>/<name>
+scilink memory promote <domain>/<name> [--to-domain D]   # make it auto-routable
+scilink memory demote <domain>/<name>       # back to provisional (out of routing)
+scilink memory fork <domain>/<name>         # copy a built-in into the store (shadows it)
+scilink memory diff-builtin <domain>/<name> # a fork against the shipped built-in
+scilink memory prune <domain>/<name> [--yes]
+
+# review inbox (stage 2)
+scilink memory staged [--domain D]          # nominations, error lessons, feedback by technique
+scilink memory upgrade <domain>/<id>... --into <domain>/<name> [--yes]   # merge into an existing skill
 scilink memory consolidate <domain>/<technique>   # distill N staged into a new skill
-scilink memory promote <domain>/<name>      # make a provisional skill auto-routable
-scilink memory bank                         # proven-script bank; also bank-show
+scilink memory move-staged <domain>/<id> --to <technique>
+scilink memory prune-staged <domain>/<id> [--yes]
+
+# script bank (stage 1)
+scilink memory bank [--domain D] [--proven-only]   # banked scripts with usage stats
+scilink memory bank-show <domain>/<id>      # one record incl. its script
+scilink memory bank-promote <domain>/<id>... [--technique T]   # nominate (a group under one label)
+scilink memory bank-groups [--threshold X]  # same-system variant clusters
+scilink memory bank-stats [--json]          # assist log: iterations / approval by mode
+scilink memory bank-sweep [--days N] [--dry-run]   # archive stale records (reversible)
+scilink memory bank-archived | bank-restore <domain>/<id> | bank-prune <domain>/<id>
 ```
+
+The distillation commands (`upgrade`, `consolidate`) take `--model`,
+`--base-url` and `--api-key` like the chat modes.
 
 > **Docker:** `~/.scilink` inside a container is ephemeral — mount a volume
 > (`-v ~/.scilink:/home/scilinkuser/.scilink`, or set `SCILINK_HOME` to a

@@ -3140,6 +3140,7 @@ are added by the caller.
 
 {{
   "description": "<one self-contained sentence (no trailing period) that lets a downstream agent decide if this skill is relevant>",
+  "technique": ["<measurement technique names and common aliases this skill applies to, e.g. \"Raman spectroscopy\", \"micro-Raman\"; [] if it is not technique-specific>"],
   "overview": "<what domain/technique this skill covers, what data it applies to, and when to use it>",
   "planning": "<strategy constraints, recommended parameter ranges, setup considerations, and any user-specified corrections or preferences>",
   "analysis": "<code patterns, workflows, or processing steps that have proven effective; include specific parameter values that worked>",
@@ -3209,9 +3210,16 @@ old_text must appear EXACTLY ONCE in the script. Keep each edit small (a value, 
 thresholds, windows, scale factors. Keep the vetted algorithm, model family, and overall structure.
 3. NEVER touch the output contract: {output_contract}.
 4. If the script fits this dataset as-is, return an empty edits list.
+5. If THIS dataset is a different KIND of signal than the proven script models (a peak script \
+for oscillation / ring-down data, a step or edge for a peak, a decay for a resonance, ...), do \
+NOT repurpose the script: return an empty edits list with "model_family_kept": false. Changing \
+the peak profile (Gaussian, Voigt, EMG, ...), the baseline form or the number of components to \
+follow the plan IS an adaptation of the same kind of signal — make those edits.
+6. Copy each old_text verbatim from the script above, including its exact leading whitespace \
+(top-level lines have none).
 
 Return ONLY a JSON object: {{"edits": [{{"old_text": "...", "new_text": "..."}}, ...], \
-"rationale": "<one sentence on what was adapted and why>"}}
+"model_family_kept": true, "rationale": "<one sentence on what was adapted and why>"}}
 Do not wrap in code blocks. No prose outside the JSON."""
 
 
@@ -3241,6 +3249,7 @@ the caller.
 
 {{
   "description": "<one self-contained sentence (no trailing period) naming the technique/model so a downstream agent can decide if this skill is relevant>",
+  "technique": ["<measurement technique names and common aliases this skill applies to, e.g. \"Raman spectroscopy\", \"micro-Raman\"; [] if it is not technique-specific>"],
   "overview": "<what kind of data/problem this approach fits and when to reach for it>",
   "planning": "<the model form and fitting strategy in general terms; parameter init/bounds heuristics; why the originally-planned model was insufficient>",
   "analysis": "<the generalized, parameterized recipe: how to set up and run the fit, abstracted from this dataset's specifics>",
@@ -3303,6 +3312,7 @@ Return a JSON object with exactly the following keys. Use markdown within values
 
 {{
   "description": "<one self-contained sentence (no trailing period) naming the technique/model so a downstream agent can decide if this skill is relevant>",
+  "technique": ["<measurement technique names and common aliases this skill applies to, e.g. \"Raman spectroscopy\", \"micro-Raman\"; [] if it is not technique-specific>"],
   "overview": "<what kind of data/problem this approach fits and when to reach for it>",
   "planning": "<the model form and strategy in general terms; parameter heuristics; what varies across the examples and how to choose; why the default plan was insufficient>",
   "analysis": "<the generalized, parameterized recipe distilled from all examples>",
@@ -3342,6 +3352,7 @@ the caller.
 
 {{
   "description": "<one self-contained sentence (no trailing period) naming the technique/imaging problem so a downstream agent can decide if this skill is relevant>",
+  "technique": ["<measurement technique names and common aliases this skill applies to, e.g. \"Raman spectroscopy\", \"micro-Raman\"; [] if it is not technique-specific>"],
   "overview": "<what kind of image/problem this approach fits and when to reach for it>",
   "planning": "<the pipeline shape and strategy in general terms; key parameter heuristics; why the originally-planned pipeline was insufficient>",
   "analysis": "<the generalized, parameterized recipe: how to set up and run the analysis, abstracted from this image's specifics>",

@@ -1293,6 +1293,14 @@ class MetaOrchestratorTools:
                 return r.text if hasattr(r, "text") else str(r)
 
             act = (action or "list").lower()
+            if act not in ("list", "list_staged", "show"):
+                from ...skills.loader import memory_enabled
+                if not memory_enabled():
+                    return json.dumps({
+                        "status": "error", "action": act,
+                        "message": ("Persistent memory is OFF, so the store is inert and "
+                                    "nothing is written. Enable it with `scilink memory "
+                                    "enable` (or the Memory panel) first.")})
 
             # Curated (built-in) skills are ALREADY available and auto-selected by
             # the domain agents — surface them so the orchestrator has the full

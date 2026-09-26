@@ -610,7 +610,8 @@ def consolidate_technique(
     with the consolidation template (skill name ``auto_<technique>``), tags
     ``provenance=t2_consolidated`` + ``n_examples``, and removes the consumed staged
     records. The full verbatim scripts are NOT copied into the skill (kept concise
-    and reusable; scripts remain in the staging records).
+    and reusable); the consumed staging records are deleted, so a script survives
+    only where its bank record still holds it.
     """
     recs = list_staged(domain, technique, root=root)
     if not recs:
@@ -621,6 +622,14 @@ def consolidate_technique(
         "n_examples": len(recs),
         "examples": [_record_for_prompt(r) for r in recs],
     }
+    # The measurement techniques the examples were recorded under become
+    # the skill's routing key (built-ins carry ``technique:`` in their
+    # frontmatter; the selectors read it).
+    measured = []
+    for r in recs:
+        for src in (r.get("measurement_context"), r.get("system_info")):
+            if isinstance(src, dict) and src.get("technique"):
+                measured.append(src["technique"])
     skill_name = f"auto_{technique}"
     result = graduate_to_skill_file(
         knowledge_entry=knowledge_entry,
@@ -631,6 +640,7 @@ def consolidate_technique(
         update_template=update_template,
         skills_root=skills_root,
         extra_meta={
+            "technique": measured or None,
             "provisional": True,
             "provenance": "t2_consolidated",
             "n_examples": len(recs),

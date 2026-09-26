@@ -5966,6 +5966,14 @@ class AnalysisOrchestratorTools:
             from scilink.skills._shared._graduation import graduate_to_skill_file
 
             print(f"  ⚡ Tool: Graduating knowledge '{knowledge_id}' to skill '{skill_name}'...")
+            from scilink.skills.loader import memory_enabled
+            if not memory_enabled():
+                return json.dumps({
+                    "status": "error",
+                    "message": ("Persistent memory is OFF, so the store is inert and "
+                                "nothing is written. Enable it with `scilink memory enable` "
+                                "(or the Memory panel) and call this tool again."),
+                })
 
             # Find the knowledge entry
             knowledge_entry = None
@@ -6097,6 +6105,14 @@ class AnalysisOrchestratorTools:
             )
             from scilink.skills._shared._graduation import graduate_to_skill_file
             from scilink.skills.loader import graduated_skills_dir
+            from scilink.skills.loader import memory_enabled
+            if not memory_enabled():
+                return json.dumps({
+                    "status": "error",
+                    "message": ("Persistent memory is OFF, so the store is inert and "
+                                "nothing is written. Enable it with `scilink memory enable` "
+                                "(or the Memory panel) and call this tool again."),
+                })
 
             print(f"  ⚡ Tool: Updating skill '{skill_name}'...")
 

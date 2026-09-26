@@ -247,7 +247,9 @@ scilink analyze --agents ./my_xrd_agent.py
 SciLink agents learn from hard problems and keep that knowledge across sessions.
 Graduated and auto-distilled skills are stored under **`~/.scilink/`** (override
 with `$SCILINK_HOME`) — outside the installed package, so they survive a `pip`
-upgrade and are auto-discovered on every future run. Manage them with:
+upgrade and are auto-discovered on every future run. The store is **off by
+default**: run `scilink memory enable` (or use the Memory panel) before anything
+is banked, staged or loaded. Manage them with:
 
 ```bash
 scilink memory list                 # graduated/auto-distilled skills
@@ -696,7 +698,8 @@ parameter choice, a domain rule), it can be **graduated** into a Markdown skill 
 that's stored on disk and auto-loaded into agent context on every subsequent run. No
 code changes, no manual skill authoring.
 
-The graduation tool is exposed in all three modes — `analyze`, `plan`, and `simulate` —
-under the same name (`graduate_to_skill`). In **autopilot** and **autonomous** modes the
+The graduation tool is exposed in `analyze` and `plan` mode under the same name
+(`graduate_to_skill`); it writes only while persistent memory is switched on
+(`scilink memory enable`). In **autopilot** and **autonomous** modes the
 agent decides itself when an observation is worth graduating; in **co-pilot** it surfaces
 the candidate and asks first.
