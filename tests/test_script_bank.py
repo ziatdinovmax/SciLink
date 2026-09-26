@@ -679,3 +679,47 @@ class TestVariantGroups:
         assert out["skipped"][0]["id"] == a
         assert sb.promote_group_to_staging(
             "curve_fitting", ["nope0000"])["status"] == "error"
+
+
+class TestStrictReplaysNeverBank:
+    """A live loop's fast path replays the locked recipe on every frame with
+    no model call. Live (2026-09-26): six image frames became a "proven"
+    record and the hyperspectral setup alone wrote three successes. The
+    reference analysis banked the script once; replays add nothing."""
+
+    def test_image_strict_replay_is_skipped(self, tmp_path):
+        from scilink.agents.exp_agents.image_analysis_agent import ImageAnalysisAgent
+        rs = np.random.RandomState(0)
+        state = {
+            "analysis_approach": "grain segmentation", "skills_loaded": [],
+            "system_info": {"instrument": "SEM"}, "image_paths": ["/data/frame.tif"],
+            "image_stack": [rs.normal(0, 1, (64, 64))],
+            "_strict_replay": True,
+            "series_results": [{
+                "index": 0, "name": "frame", "success": True,
+                "script": "import numpy as np\n# IMG\n",
+                "reuse_validity": {"verdict": "good"},
+                "quality_history": {"approved": True, "final_score": 0.9}}],
+        }
+        assert ImageAnalysisAgent._maybe_bank_scripts(_fake_agent(tmp_path), state) == []
+        assert sb.list_records("image_analysis") == []
+        state.pop("_strict_replay")
+        assert len(ImageAnalysisAgent._maybe_bank_scripts(_fake_agent(tmp_path), state)) == 1
+
+    def test_hyperspectral_strict_replay_is_skipped(self, tmp_path):
+        from scilink.agents.exp_agents.hyperspectral_analysis_agent import (
+            HyperspectralAnalysisAgent)
+        rs = np.random.RandomState(0)
+        cube = rs.random((4, 4, 128)) + np.linspace(0, 1, 128)
+        agent = _fake_agent(tmp_path)
+        agent._handle_system_info = lambda si: si or {}
+        agent._load_hyperspectral_data = lambda p: cube
+        agent._strict_replay = True
+        records = [{"target": "thickness map", "required_outputs": ["map"],
+                    "script": "import numpy as np\n# HS\n",
+                    "quality_history": {"approved": True, "final_passed_fraction": 1.0}}]
+        args = (agent, records, {"skills_loaded": []}, "/data/cube.npy", {"technique": "EELS"})
+        assert HyperspectralAnalysisAgent._maybe_bank_scripts(*args) == []
+        assert sb.list_records("hyperspectral") == []
+        agent._strict_replay = False
+        assert len(HyperspectralAnalysisAgent._maybe_bank_scripts(*args)) == 1

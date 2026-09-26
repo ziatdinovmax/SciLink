@@ -27,9 +27,11 @@ class FakeModel:
     def __init__(self, replies):
         self.replies = list(replies)
         self.calls = 0
+        self.prompts = []
 
     def generate_content(self, prompt, generation_config=None):
         self.calls += 1
+        self.prompts.append(prompt)
         return SimpleNamespace(text=self.replies.pop(0))
 
 
@@ -45,6 +47,7 @@ def make_self(model_replies, fit_result=None):
         logger=SimpleNamespace(info=lambda *a, **k: None,
                                warning=lambda *a, **k: None),
         model=FakeModel(model_replies),
+        output_dir="/tmp/sess",
         generation_config=None,
         _fit_single_spectrum=_fit_single_spectrum,
         _process_single_image=lambda **kw: (
@@ -304,3 +307,126 @@ def test_single_shared_implementation():
         assert "from .._qc_engine import try_bank_edit_adapt" in src
         assert "def try_bank_edit_adapt" not in src.replace(
             "from .._qc_engine import try_bank_edit_adapt", "")
+
+
+# ── hardening (live audit 2026-09-26) ──────────────────────────────────
+# Four out of four live adaptations of a column-0 script came back with a
+# four-space indent and were refused by the exact applier; a damped
+# oscillation anchored to a peak script and was "adapted" into a different
+# model, then credited as a peak-fit success.
+
+INDENTED_BANKED = ("import numpy as np\n"
+                   "params = Parameters()\n"
+                   "params.add('center', value=5.0, min=4.5, max=5.5)\n"
+                   "def helper():\n"
+                   "    return 1\n"
+                   "print('FIT_RESULTS_JSON: {}')\n"
+                   "print('CUSTOM_SCRIPT_SUCCESS')\n")
+
+
+def test_leading_whitespace_drift_is_re_anchored():
+    reply = json.dumps({"edits": [
+        {"old_text": "    params.add('center', value=5.0, min=4.5, max=5.5)",
+         "new_text": "    params.add('center', value=6.5, min=6.0, max=7.0)"}],
+        "model_family_kept": True, "rationale": "shifted peak"})
+    fake, captured = make_self([reply])
+    ctx = make_ctx(script=INDENTED_BANKED)
+    res = C._try_bank_edit_adapt(fake, ctx)
+    assert res is not None and fake.model.calls == 1
+    assert "params.add('center', value=6.5, min=6.0, max=7.0)\n" in captured["base_script"]
+    assert "    params.add" not in captured["base_script"]
+    assert ctx.bank_adapt_attempt["n_relaxed"] == 1 and res["bank_edit_adapt"]["n_edits"] == 1
+
+
+def test_non_applying_edits_get_one_corrected_attempt():
+    bad = json.dumps({"edits": [{"old_text": "CENTER_GUESS = 9.9", "new_text": "x"}],
+                      "model_family_kept": True, "rationale": "r"})
+    fake, captured = make_self([bad, GOOD_REPLY])
+    ctx = make_ctx()
+    res = C._try_bank_edit_adapt(fake, ctx)
+    assert res is not None and fake.model.calls == 2
+    assert "CENTER_GUESS = 7.2" in captured["base_script"]
+    assert ctx.bank_adapt_attempt["retried"] is True
+    # the corrected attempt carries the applier's message back to the model
+    assert "did not apply" in fake.model.prompts[1] and "leading whitespace" in fake.model.prompts[1]
+
+
+def test_second_bad_edit_list_falls_through_without_a_third_call():
+    bad = json.dumps({"edits": [{"old_text": "NOPE", "new_text": "x"}],
+                      "model_family_kept": True, "rationale": "r"})
+    fake, captured = make_self([bad, bad])
+    assert C._try_bank_edit_adapt(fake, make_ctx()) is None
+    assert fake.model.calls == 2 and "base_script" not in captured
+
+
+def test_adapter_declines_a_different_model_family_without_executing():
+    reply = json.dumps({"edits": [], "model_family_kept": False,
+                        "rationale": "oscillation data needs a damped cosine, not a peak"})
+    fake, captured = make_self([reply])
+    ctx = make_ctx()
+    assert C._try_bank_edit_adapt(fake, ctx) is None
+    assert "base_script" not in captured
+    assert ctx.bank_adapt_attempt["model_mismatch"] is True
+    assert "model family mismatch" in ctx.bank_adapt_attempt["fell_through"]
+
+
+def test_family_guard_withholds_credit_for_a_rewritten_model(monkeypatch):
+    from scilink.skills._shared import _script_bank
+    bumped = []
+    monkeypatch.setattr(_script_bank, "record_success",
+                        lambda d, rid, session=None, **kw: bumped.append(rid))
+    fake, _ = make_self([])
+    rec = {"id": "rec_001", "technique_signals": {
+        "model_type": "Linear baseline + single exponentially-modified Gaussian peak"}}
+    ctx = SimpleNamespace(bank_exemplar={"record": rec}, bank_adapt_attempt={})
+    res = {"success": True, "bank_edit_adapt": {"id": "rec_001", "n_edits": 8},
+           "model_type": "Constant baseline + damped cosine ring-down"}
+    C._bump_bank_adapt_success(fake, res, ctx)
+    assert bumped == [] and res["bank_edit_adapt"]["model_changed"] is True
+    assert ctx.bank_adapt_attempt["model_changed"] is True
+    # a profile swap within the same kind of signal still counts
+    res2 = {"success": True, "bank_edit_adapt": {"id": "rec_001", "n_edits": 3},
+            "model_type": "Sigmoidal step baseline + pseudo-Voigt peak"}
+    C._bump_bank_adapt_success(fake, res2, ctx)
+    assert bumped == ["rec_001"] and "model_changed" not in res2["bank_edit_adapt"]
+
+
+def test_family_words_map_to_signal_kinds():
+    from scilink.agents.exp_agents._qc_engine import (
+        model_families_disjoint, model_family_tokens, relax_snippet_edits)
+    assert model_family_tokens("EMG asymmetric peak on a linear baseline") == {"peak"}
+    assert model_families_disjoint("Gaussian peak", "damped cosine")
+    assert not model_families_disjoint("Gaussian peak", "Lorentzian doublet")
+    assert not model_families_disjoint("", "damped cosine")          # nothing to compare
+    # an ambiguous block (two identical stripped matches) is left alone
+    text = "a = 1\n    x = 2\nb = 3\n    x = 2\n"
+    out, n = relax_snippet_edits(text, [{"old_text": "        x = 2", "new_text": "x = 9"}])
+    assert n == 0 and out[0]["old_text"] == "        x = 2"
+
+
+def test_only_applied_adaptations_charge_the_record(monkeypatch):
+    from scilink.agents.exp_agents._qc_engine import record_bank_assist
+    from scilink.skills._shared import _script_bank
+    failures, logged = [], []
+    monkeypatch.setattr(_script_bank, "record_failure",
+                        lambda d, rid, reason, session=None, **kw: failures.append(reason))
+    monkeypatch.setattr(_script_bank, "log_assist", lambda block: logged.append(block))
+    host = SimpleNamespace(output_dir="/tmp/sess")
+    rec = {"record": {"id": "rec_001"}, "score": 0.5}
+
+    def ctx(attempt):
+        return SimpleNamespace(bank_exemplar=rec, bank_adapt_attempt=attempt,
+                               item_name="s", is_anchor=True, state={})
+    res = {"success": True, "quality_history": {"approved": True}}
+    record_bank_assist(host, ctx({"applied": False, "executed": False, "n_edits": None,
+                                  "fell_through": "edits do not apply: ..."}),
+                       dict(res), domain="curve_fitting")
+    record_bank_assist(host, ctx({"applied": False, "executed": False, "model_mismatch": True,
+                                  "fell_through": "model family mismatch"}),
+                       dict(res), domain="curve_fitting")
+    assert failures == [] and logged[1]["model_mismatch"] is True
+    record_bank_assist(host, ctx({"applied": True, "executed": False, "n_edits": 2}),
+                       dict(res), domain="curve_fitting")
+    record_bank_assist(host, ctx({"applied": True, "executed": True, "n_edits": 2}),
+                       dict(res), domain="curve_fitting")   # executed, then replaced by a refit
+    assert failures == ["edit_adapt_not_executed", "edit_adapt_replaced"]

@@ -1111,3 +1111,47 @@ class TestT2BankUnification(TestT2StageHook):
         staged = _staging.get_staged("curve_fitting", out[0])
         assert "bank_id" not in staged            # legacy shape
         assert "VERBATIM_MARKER" in staged["working_script"]
+
+
+class TestGraduationHonoursTheSwitch:
+    """Live (2026-09-26): with persistent memory OFF the in-session
+    ``graduate_to_skill`` still wrote a non-provisional skill into the store,
+    against the loader's "fully inert" promise. Every writer now checks."""
+
+    def test_analysis_tool_refuses_when_off(self, tmp_path, monkeypatch):
+        import json, types
+        monkeypatch.setenv("SCILINK_HOME", str(tmp_path))
+        monkeypatch.delenv("SCILINK_MEMORY", raising=False)
+        from scilink.agents.exp_agents.analysis_orchestrator_tools import AnalysisOrchestratorTools
+        tools = AnalysisOrchestratorTools(types.SimpleNamespace(
+            _agent_registry={}, analysis_results=[], results_dir=tmp_path, active_knowledge=[]))
+        for name, kw in (("graduate_to_skill", {"knowledge_id": "k1", "skill_name": "s"}),
+                         ("update_skill", {"skill_name": "s", "knowledge_ids": ["k1"]})):
+            out = json.loads(tools.functions_map[name](**kw))
+            assert out["status"] == "error" and "OFF" in out["message"], name
+        assert not (tmp_path / "graduated_skills").exists()
+
+    def test_planning_tool_refuses_when_off(self, tmp_path, monkeypatch):
+        import json, types
+        monkeypatch.setenv("SCILINK_HOME", str(tmp_path))
+        monkeypatch.delenv("SCILINK_MEMORY", raising=False)
+        from scilink.agents.planning_agents.orchestrator_tools import OrchestratorTools
+        try:
+            tools = OrchestratorTools(types.SimpleNamespace(active_knowledge=[]))
+        except Exception as exc:  # construction needs more of the orchestrator
+            import pytest
+            pytest.skip(f"planning tools need a fuller orchestrator: {exc}")
+        out = json.loads(tools.functions_map["graduate_to_skill"](knowledge_id="k1", skill_name="s"))
+        assert out["status"] == "error" and "OFF" in out["message"]
+
+    def test_meta_review_write_actions_refuse_when_off(self, tmp_path, monkeypatch):
+        import json, types
+        monkeypatch.setenv("SCILINK_HOME", str(tmp_path))
+        monkeypatch.delenv("SCILINK_MEMORY", raising=False)
+        from scilink.agents.meta_agent.meta_orchestrator_tools import MetaOrchestratorTools
+        tool = MetaOrchestratorTools(types.SimpleNamespace()).functions_map["review_distilled_skills"]
+        assert json.loads(tool(action="list"))["status"] == "success"
+        for act in ("promote", "consolidate", "upgrade", "discard"):
+            out = json.loads(tool(action=act, skill="curve_fitting/x", technique="t",
+                                  staged="curve_fitting/x", into="curve_fitting/x"))
+            assert out["status"] == "error" and "OFF" in out["message"], act

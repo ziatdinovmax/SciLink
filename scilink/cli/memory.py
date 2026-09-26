@@ -10,6 +10,9 @@ Auto-distilled skills (from successful T=2 "hot annealing" curve fits) are
 written **provisional**: discoverable and explicitly usable, but kept out of
 the auto-routing menu until you review and promote them.
 
+The switch (OFF in a fresh store; nothing is banked, staged or loaded until on):
+  enable / disable / status   (``SCILINK_MEMORY=0|1`` overrides the stored setting)
+
 Skills (graduated_skills) subcommands:
   list      List persisted skills (use --provisional-only to triage)
   show      Print a skill's markdown
@@ -25,14 +28,16 @@ Staged T=2 solutions (distill_staging) subcommands:
   staged       List staged raw T=2 solutions, grouped by technique
   upgrade      Merge a staged solution INTO an existing skill (--into <domain>/<name>)
   consolidate  Distill all staged solutions of a technique into a NEW skill
+  move-staged  Move a staged record to another technique group (regroup first)
   prune-staged Delete staged solution(s)
 
 Script bank (script_bank — episodic memory of successful scripts) subcommands:
   bank         List banked scripts with cross-session usage stats
                (★ proven = graduation candidates)
   bank-show    Print a bank record including its script
-  bank-promote Send a proven record into distill staging — it then flows
+  bank-promote Send a bank record into distill staging — it then flows
                through the same review-gated upgrade/consolidate path
+  bank-groups  Same-system variant clusters (candidates for group promotion)
   bank-stats   Does the bank shorten runs? Iterations / approval by assist
                mode and match score, from the bank's assist log
   bank-sweep   Archive stale records (never used / never succeeds / superseded).
@@ -398,6 +403,9 @@ def _cmd_prune_staged(args) -> int:
 def _cmd_bank(args) -> int:
     """`scilink memory bank` — list script-bank records (episodic memory)."""
     from scilink.skills._shared import _script_bank
+    from scilink.skills import loader
+    if not loader.memory_enabled() and not _script_bank.bank_enabled():
+        print("[persistent memory: OFF — inert; `scilink memory enable` to use]\n")
     rows = _script_bank.bank_summary(args.domain)
     if args.proven_only:
         rows = [r for r in rows if r["proven"]]
@@ -424,7 +432,7 @@ def _cmd_bank(args) -> int:
             print(f"    · id={r['id']}  successes={r['n_successes']} "
                   f"retrievals={r['n_retrievals']}{mtxt}{marks}")
             print(f"      {r['label'][:100]}")
-    print(f"\n{len(rows)} record(s); ★ = succeeded in ≥{threshold} sessions "
+    print(f"\n{len(rows)} record(s); ★ = succeeded on ≥{threshold} independent datasets "
           f"(a graduation candidate). Inspect with `bank-show <domain>/<id>`; "
           f"send a proven one into the review-gated skill path with "
           f"`bank-promote <domain>/<id>`.")

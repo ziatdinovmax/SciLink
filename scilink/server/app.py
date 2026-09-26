@@ -600,6 +600,14 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         except MemoryError as exc:
             raise HTTPException(exc.status, exc.message) from exc
 
+    def _shared_store_guard(what: str) -> None:
+        # The store is one per host. On a multi-user server a destructive
+        # action by one user is a loss for everyone, so those are the
+        # operator's (the CLI on the host), like forgetting a live recipe.
+        if auth is not None and auth.multi_user:
+            raise HTTPException(403, f"{what} is disabled on a shared server; "
+                                     "an operator can do it with `scilink memory`.")
+
     @app.get("/api/v1/memory")
     def memory_overview():
         """The switch, the pipeline strip, the bank, the inbox, the skills."""
@@ -636,6 +644,8 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         fork (copy a built-in into the store, shadowing it)."""
         _skill_ref(domain, name)
         from .memory_api import fork_builtin, skill_action
+        if action == "prune":
+            _shared_store_guard("Deleting a skill")
         if action == "fork":
             return _mem(fork_builtin, domain, name)
         return _mem(skill_action, domain, name, action)
@@ -648,6 +658,7 @@ def create_app(session_root: Path, serve_frontend: bool = True,
     @app.delete("/api/v1/memory/bank/{domain}/{rid}")
     def memory_bank_delete(domain: str, rid: str):
         from .memory_api import bank_delete
+        _shared_store_guard("Deleting a bank record")
         return _mem(bank_delete, domain, rid)
 
     @app.post("/api/v1/memory/bank/{domain}/{rid}/nominate")
@@ -668,6 +679,7 @@ def create_app(session_root: Path, serve_frontend: bool = True,
     @app.delete("/api/v1/memory/inbox/{domain}/{sid}")
     def memory_inbox_discard(domain: str, sid: str):
         from .memory_api import inbox_discard
+        _shared_store_guard("Discarding an inbox record")
         return _mem(inbox_discard, domain, sid)
 
     @app.post("/api/v1/memory/inbox/{domain}/targets")

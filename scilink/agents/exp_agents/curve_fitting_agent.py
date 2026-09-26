@@ -1146,7 +1146,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             final_results.setdefault("staged_solutions", []).extend(fb_staged)
 
         # Did the script bank help? One block per QC-loop item (also in
-        # the bank's assist log, where `scilink memory bank stats` reads it).
+        # the bank's assist log, where `scilink memory bank-stats` reads it).
         _assists = [r["bank_assist"] for r in state.get("series_results", []) or []
                     if isinstance(r, dict) and r.get("bank_assist")]
         if _assists:

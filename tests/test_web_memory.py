@@ -309,3 +309,83 @@ def test_memory_overview_reports_archive_and_independent_evidence(mem_client, tm
     ov = mem_client.get("/api/v1/memory").json()
     assert ov["pipeline"]["bank_total"] == 1 and ov["pipeline"]["bank_archived"] == 1
     assert plain not in {r["id"] for d in ov["bank"] for r in d["records"]}
+
+
+# ── hardening (live audit 2026-09-26) ──────────────────────────────────
+
+def test_traversal_shaped_targets_are_400_not_500(mem_client, tmp_path):
+    ids = _seed(tmp_path)
+    c = mem_client
+    c.post("/api/v1/memory/enabled", json={"enabled": True})
+    # fork of a traversal-shaped name
+    r = c.post("/api/v1/memory/skills/curve_fitting/..%2F..%2Fzz/fork")
+    assert r.status_code in (400, 404)
+    # apply-upgrade with a traversal-shaped target domain + fork requested
+    r = c.post("/api/v1/memory/inbox/curve_fitting/apply-upgrade",
+               json={"ids": [ids["staged"]], "target_domain": "../zz_dom", "target_name": "x",
+                     "content": "---\ndescription: x\n---\n## overview\nprobe\n",
+                     "fork_builtin": True})
+    assert r.status_code == 400 and "Invalid domain" in r.json()["detail"]
+    r = c.post("/api/v1/memory/inbox/curve_fitting/apply-upgrade",
+               json={"ids": [ids["staged"]], "target_domain": "curve_fitting",
+                     "target_name": "../../zz_probe",
+                     "content": "---\ndescription: x\n---\n## overview\nprobe\n",
+                     "fork_builtin": False})
+    assert r.status_code == 400
+    assert not list(tmp_path.rglob("zz_*"))
+    # propose-upgrade validates before starting a job
+    session = _session(c, tmp_path)
+    r = c.post("/api/v1/memory/inbox/curve_fitting/propose-upgrade",
+               json={"ids": [ids["staged"]], "target_domain": "curve_fitting",
+                     "target_name": "../raman", "session_id": session.id})
+    assert r.status_code == 400
+
+
+def test_failed_consolidation_leaves_the_records_as_they_were(mem_client, tmp_path, monkeypatch):
+    from scilink.skills._shared import _staging
+    ids = _seed(tmp_path)
+    c = mem_client
+    session = _session(c, tmp_path)
+    session.agent.model.generate_content = lambda contents: SimpleNamespace(text="no json here")
+    c.post("/api/v1/memory/enabled", json={"enabled": True})
+    before = {r["id"]: r["technique"] for r in _staging.list_staged("curve_fitting")}
+    r = c.post("/api/v1/memory/inbox/curve_fitting/consolidate",
+               json={"ids": [ids["staged"], ids["err"]], "label": "brand_new",
+                     "session_id": session.id})
+    assert r.status_code == 200
+    job = _wait_job(c, r.json()["job_id"])
+    assert job["status"] == "error"
+    after = {r["id"]: r["technique"] for r in _staging.list_staged("curve_fitting")}
+    assert after == before                      # relabelled for the attempt, put back
+    assert not (tmp_path / "home" / "graduated_skills" / "curve_fitting" / "auto_brand_new").exists()
+
+
+def test_finished_jobs_are_bounded(mem_client, tmp_path, monkeypatch):
+    from scilink.server import memory_api
+    monkeypatch.setattr(memory_api, "MAX_FINISHED_JOBS", 3)
+    memory_api._jobs.clear()
+    for i in range(6):
+        memory_api._start_job("consolidate", lambda: {"status": "success"}, f"j{i}")
+    _wait_job(mem_client, list(memory_api._jobs)[-1])
+    memory_api._start_job("consolidate", lambda: {"status": "success"}, "last")
+    assert len(memory_api._jobs) <= 4
+
+
+def test_destructive_memory_actions_are_refused_on_a_shared_server(tmp_path, monkeypatch):
+    from scilink.server.auth import AuthConfig
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("SCILINK_MEMORY", raising=False)
+    ids = _seed(tmp_path)
+    users = tmp_path / "users.json"
+    users.write_text(json.dumps({"alice": "a" * 32, "bob": "b" * 32}))
+    app = create_app(tmp_path / "sessions", serve_frontend=False,
+                     auth=AuthConfig.from_users_file(users))
+    alice = TestClient(app, headers={"Authorization": f"Bearer {'a' * 32}"})
+    # reading and curating stay open
+    assert alice.get("/api/v1/memory").status_code == 200
+    assert alice.post("/api/v1/memory/skills/curve_fitting/myskill/promote").status_code == 200
+    # deleting host-wide state is the operator's
+    assert alice.post("/api/v1/memory/skills/curve_fitting/myskill/prune").status_code == 403
+    assert alice.delete(f"/api/v1/memory/bank/curve_fitting/{ids['bank2']}").status_code == 403
+    assert alice.delete(f"/api/v1/memory/inbox/curve_fitting/{ids['err']}").status_code == 403
+    assert (tmp_path / "home" / "graduated_skills" / "curve_fitting" / "myskill").exists()

@@ -163,6 +163,7 @@ def promote_memory(
 
     moved_to = None
     if to_domain and to_domain != domain:
+        check_skill_ref(to_domain, name)
         dest_dir = root / to_domain / name
         dest_dir.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(md.parent), str(dest_dir))
@@ -263,6 +264,21 @@ def edit_memory(domain: str, name: str, content: str, *,
     return {"status": "success", "path": str(md), "backup_path": str(backup)}
 
 
+def check_skill_ref(domain: str, name: str) -> None:
+    """Refuse a domain / name that is not a single flat path component.
+
+    The persistent store and the package tree are joined from these two
+    strings; ``../x`` must be an error, not a path (live: a traversal-shaped
+    target domain reached ``fork_builtin`` and died as a 500).
+    """
+    from ._graduation import safe_path_component
+    for label, value in (("domain", domain), ("skill name", name)):
+        v = str(value or "")
+        if not v or safe_path_component(v, fallback="") != v:
+            raise ValueError(f"Invalid {label} {value!r}: letters, digits, '.', '_' "
+                             "and '-' only.")
+
+
 def fork_builtin(domain: str, name: str, *, root: Optional[Path] = None) -> Dict[str, Any]:
     """Copy a built-in (package) skill into the persistent store.
 
@@ -280,6 +296,7 @@ def fork_builtin(domain: str, name: str, *, root: Optional[Path] = None) -> Dict
     """
     from ..loader import _SKILLS_DIR
 
+    check_skill_ref(domain, name)
     src_md = _SKILLS_DIR / domain / name / f"{name}.md"
     if not src_md.is_file():
         raise FileNotFoundError(f"No built-in skill: {domain}/{name}")
@@ -311,6 +328,7 @@ def diff_builtin(domain: str, name: str, *, root: Optional[Path] = None) -> Dict
     import difflib
     from ..loader import _SKILLS_DIR
 
+    check_skill_ref(domain, name)
     src_md = _SKILLS_DIR / domain / name / f"{name}.md"
     fork_md = (root or graduated_skills_dir()) / domain / name / f"{name}.md"
     if not src_md.is_file():
