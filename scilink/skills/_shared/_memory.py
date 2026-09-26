@@ -94,8 +94,103 @@ def list_memory(
             "session": meta.get("session"),
             "r_squared": meta.get("r_squared"),
             "description": meta.get("description", ""),
+            "technique": _technique_list(meta.get("technique")),
+            "n_examples": meta.get("n_examples"),
+            "has_backup": md.with_name(md.name + ".bak").is_file(),
         })
     return out
+
+
+def _technique_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    items = [value] if isinstance(value, str) else list(value) if isinstance(value, (list, tuple)) else []
+    return [" ".join(str(x).split()) for x in items if str(x).strip()]
+
+
+def _rewrite_frontmatter(md: Path, mutate) -> Dict[str, Any]:
+    """Apply ``mutate(meta) -> meta`` to a bundle's YAML frontmatter, leaving
+    the body byte-for-byte unchanged; the previous file goes to ``.md.bak``."""
+    import yaml
+    text = md.read_text()
+    match = _FRONTMATTER_BLOCK_RE.match(text)
+    meta = (yaml.safe_load(match.group(1)) or {}) if match else {}
+    if not isinstance(meta, dict):
+        meta = {}
+    body = text[match.end():] if match else text
+    meta = mutate(dict(meta))
+    if meta:
+        fm = yaml.safe_dump(meta, default_flow_style=False, sort_keys=False,
+                            allow_unicode=True, width=10_000).strip()
+        new_text = f"---\n{fm}\n---\n{body}"
+    else:
+        new_text = body.lstrip("\n")
+    backup = md.with_name(md.name + ".bak")
+    atomic_write_text(backup, text)
+    atomic_write_text(md, new_text)
+    return {"status": "success", "path": str(md), "backup_path": str(backup), "meta": meta}
+
+
+def set_technique(domain: str, name: str, technique: List[str], *,
+                  root: Optional[Path] = None) -> Dict[str, Any]:
+    """Set (or clear) a persisted skill's ``technique`` routing list.
+
+    The selectors match the data's measurement technique against this list,
+    so it is the one frontmatter field worth editing on its own — an
+    auto-distilled skill that learned the wrong aliases, or none, is
+    unroutable until someone fixes it here."""
+    md = _bundle_path(domain, name, root=root)
+    if not md.exists():
+        raise FileNotFoundError(f"No skill bundle: {domain}/{name}")
+    cleaned: List[str] = []
+    seen = set()
+    for t in technique or []:
+        s = " ".join(str(t or "").split())[:60]
+        if s and s.lower() not in seen:
+            seen.add(s.lower())
+            cleaned.append(s)
+        if len(cleaned) >= 12:
+            break
+
+    def _mutate(meta):
+        if cleaned:
+            meta["technique"] = cleaned
+        else:
+            meta.pop("technique", None)
+        return meta
+    out = _rewrite_frontmatter(md, _mutate)
+    out.update({"name": name, "domain": domain, "technique": cleaned})
+    return out
+
+
+def restore_backup(domain: str, name: str, *, root: Optional[Path] = None) -> Dict[str, Any]:
+    """Swap a bundle's ``.md.bak`` back into place. The current file becomes
+    the new backup, so a restore is itself reversible with one more restore.
+    The backup must still be a valid skill (frontmatter and at least one
+    section) — a half-written backup is refused rather than installed."""
+    md = _bundle_path(domain, name, root=root)
+    backup = md.with_name(md.name + ".bak")
+    if not md.exists():
+        raise FileNotFoundError(f"No skill bundle: {domain}/{name}")
+    if not backup.is_file():
+        raise FileNotFoundError(f"No backup for {domain}/{name}.")
+    candidate = backup.read_text()
+    if "\n## " not in candidate and not candidate.startswith("## "):
+        raise ValueError("The backup has no '## section' heading; not restoring it.")
+    import tempfile
+    # The loader is the validator, and it only takes ``.md`` paths.
+    with tempfile.TemporaryDirectory() as tmp:
+        probe = Path(tmp) / f"{name}.md"
+        probe.write_text(candidate)
+        try:
+            load_skill(str(probe), domain=domain)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"The backup does not parse as a skill: {exc}")
+    current = md.read_text()
+    atomic_write_text(md, candidate)
+    atomic_write_text(backup, current)
+    return {"status": "success", "name": name, "domain": domain, "path": str(md),
+            "backup_path": str(backup), "word_count": len(candidate.split())}
 
 
 def show_memory(domain: str, name: str, *, root: Optional[Path] = None) -> str:
@@ -115,9 +210,9 @@ def promote_memory(
 ) -> Dict[str, Any]:
     """Promote a provisional skill so it routes normally.
 
-    Strips the ``provisional`` / ``provenance`` keys from the YAML
-    frontmatter (leaving the section bodies byte-for-byte unchanged) so
-    the skill re-enters the auto-routing menu. Optionally moves the bundle
+    Strips the ``provisional`` key from the YAML frontmatter (leaving the
+    section bodies byte-for-byte unchanged) so the skill re-enters the
+    auto-routing menu; ``provenance`` is kept as the record of origin. Optionally moves the bundle
     under a different (curated) domain.
     """
     root = root or graduated_skills_dir()
@@ -143,7 +238,9 @@ def promote_memory(
         meta = {}
     meta = dict(meta)  # copy; preserves insertion order
     meta.pop("provisional", None)
-    meta.pop("provenance", None)
+    # ``provenance`` stays: it says where the skill came from (consolidated
+    # from N examples, a hot win, a fork), which is still true once approved
+    # and is what the panel labels a skill with.
     body = text[match.end():]  # preserved byte-for-byte
 
     if meta:

@@ -25,7 +25,22 @@ def _clip(text: Any) -> str:
 def skill_catalog(agent: Any) -> Dict[str, Any]:
     """``{"builtin": [{domain, label, skills: [{name, description}]}],
     "custom": [{name, path}], "skills_supported": bool}``."""
-    from scilink.skills.loader import list_all_skills, load_skill
+    from scilink.skills.loader import list_all_skills, load_skill, _resolve_skill_path, _SKILLS_DIR, graduated_skills_dir
+
+    def _origin(domain: str, name: str) -> str:
+        """``builtin`` (shipped), ``fork`` (a store copy shadowing a shipped
+        skill), ``learned`` (graduated or distilled into the store)."""
+        try:
+            path = _resolve_skill_path(name, domain).resolve()
+        except Exception:  # noqa: BLE001
+            return "builtin"
+        try:
+            in_store = str(path).startswith(str(graduated_skills_dir().resolve()))
+        except Exception:  # noqa: BLE001
+            in_store = False
+        if not in_store:
+            return "builtin"
+        return "fork" if (_SKILLS_DIR / domain / name / f"{name}.md").is_file() else "learned"
 
     builtin: List[Dict[str, Any]] = []
     try:
@@ -35,12 +50,15 @@ def skill_catalog(agent: Any) -> Dict[str, Any]:
     for domain, names in domains.items():
         entries = []
         for name in names:
-            desc = ""
+            desc, meta = "", {}
             try:
-                desc = _clip((load_skill(name, domain).get("meta") or {}).get("description"))
+                meta = load_skill(name, domain).get("meta") or {}
+                desc = _clip(meta.get("description"))
             except Exception:  # noqa: BLE001 - one bad skill file degrades to no blurb
                 pass
-            entries.append({"name": name, "description": desc})
+            entries.append({"name": name, "description": desc,
+                            "origin": _origin(domain, name),
+                            "provisional": meta.get("provisional") is True})
         builtin.append({"domain": domain,
                         "label": domain.replace("_", " ").title(),
                         "skills": entries})

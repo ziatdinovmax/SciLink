@@ -45,6 +45,8 @@ from .schemas import (
     MemoryEditRequest,
     MemoryEnabledRequest,
     MemoryIdsRequest,
+    MemorySweepRequest,
+    MemoryTechniqueRequest,
     MemoryUpgradeRequest,
     PlanDirsRequest,
     RenameSessionRequest,
@@ -612,7 +614,7 @@ def create_app(session_root: Path, serve_frontend: bool = True,
     def memory_overview():
         """The switch, the pipeline strip, the bank, the inbox, the skills."""
         from .memory_api import memory_overview as _overview
-        return _overview()
+        return _overview(shared_server=bool(auth is not None and auth.multi_user))
 
     @app.post("/api/v1/memory/enabled")
     def memory_set_enabled(body: MemoryEnabledRequest):
@@ -643,12 +645,43 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         """promote · demote · prune · diff (a fork against its built-in) ·
         fork (copy a built-in into the store, shadowing it)."""
         _skill_ref(domain, name)
-        from .memory_api import fork_builtin, skill_action
+        from .memory_api import fork_builtin, skill_action, skill_restore_backup
         if action == "prune":
             _shared_store_guard("Deleting a skill")
         if action == "fork":
             return _mem(fork_builtin, domain, name)
+        if action == "restore-backup":
+            return _mem(skill_restore_backup, domain, name)
         return _mem(skill_action, domain, name, action)
+
+    @app.put("/api/v1/memory/skills/{domain}/{name}/technique")
+    def memory_skill_technique(domain: str, name: str, body: MemoryTechniqueRequest):
+        """Set the routing list the selectors match the data's technique against."""
+        from .memory_api import skill_set_technique
+        return _mem(skill_set_technique, domain, name, body.technique)
+
+    @app.get("/api/v1/memory/bank/archived")
+    def memory_bank_archived(domain: Optional[str] = None):
+        from .memory_api import bank_archived
+        return _mem(bank_archived, domain)
+
+    @app.post("/api/v1/memory/bank/sweep")
+    def memory_bank_sweep(body: MemorySweepRequest):
+        """Preview (dry run) or apply the aging rules; archiving is reversible."""
+        from .memory_api import bank_sweep
+        if not body.dry_run:
+            _shared_store_guard("Archiving bank records")
+        return _mem(bank_sweep, body.domain, body.days, body.dry_run)
+
+    @app.post("/api/v1/memory/bank/{domain}/{rid}/restore")
+    def memory_bank_restore(domain: str, rid: str):
+        from .memory_api import bank_restore
+        return _mem(bank_restore, domain, rid)
+
+    @app.get("/api/v1/memory/jobs")
+    def memory_jobs():
+        from .memory_api import list_jobs
+        return list_jobs()
 
     @app.get("/api/v1/memory/bank/{domain}/{rid}")
     def memory_bank_record(domain: str, rid: str):
@@ -978,11 +1011,19 @@ def create_app(session_root: Path, serve_frontend: bool = True,
                 async def get_response(self, path, scope):
                     from starlette.exceptions import HTTPException as SHTTP
                     try:
-                        return await super().get_response(path, scope)
+                        resp = await super().get_response(path, scope)
                     except SHTTP as exc:
-                        if exc.status_code == 404:
-                            return await super().get_response("index.html", scope)
-                        raise
+                        if exc.status_code != 404:
+                            raise
+                        resp = await super().get_response("index.html", scope)
+                        path = "index.html"
+                    # The entry page names the hashed bundle; a cached copy
+                    # after an upgrade shows the previous UI until a hard
+                    # reload (live: the new Memory tab was missing). Revalidate
+                    # it; the hashed assets stay cacheable.
+                    if path in ("", "index.html") or path.endswith("/index.html"):
+                        resp.headers["Cache-Control"] = "no-cache"
+                    return resp
 
             app.mount("/", _SPAStaticFiles(directory=str(dist), html=True),
                       name="webui")

@@ -209,11 +209,26 @@ export interface TelemetrySnapshot {
 
 
 /** Persistent memory (GET /memory and friends — scilink/server/memory_api.py). */
+export interface MemoryEvidence {
+  session: string | null; adapted: boolean; at: string | null;
+  data: Record<string, unknown> | null; model_type: string | null; cross_kind: boolean;
+}
 export interface MemoryBankRow {
   id: string; label: string; n_successes: number; n_retrievals: number;
   n_independent?: number | null; n_failures?: number | null;
   sessions: string[]; metric: unknown; created_at: string | null;
   proven: boolean; promoted_to_staging: string | null;
+  model_type?: string | null; data_kind?: string | null; data?: Record<string, unknown> | null;
+  provenance?: Record<string, unknown>; evidence?: MemoryEvidence[];
+}
+export interface MemoryArchivedRow {
+  domain: string; id: string; label: string; reason: string | null; archived_at: string | null;
+  n_successes: number | null; n_retrievals: number | null; n_failures: number | null;
+}
+export interface MemorySweepRow { domain: string; id: string; reason: string; label: string; idle_days: number | null }
+export interface MemoryJobRow {
+  id: string; kind: string; label: string; status: "running" | "done" | "error"; error: string | null;
+  skill_name: string | null; domain: string | null; target: string | null;
 }
 export interface MemoryVariantGroup {
   ids: string[]; min_similarity: number | null; suggested_technique: string | null; n_unpromoted: number;
@@ -229,9 +244,11 @@ export interface MemoryInboxGroup {
 export interface MemorySkill {
   name: string; domain: string; path: string; provisional: boolean; provenance: string | null;
   session: string | null; description: string; metric: string; shadows_builtin: boolean;
+  technique: string[]; n_examples: number | null; has_backup: boolean;
 }
 export interface MemoryOverview {
   enabled: boolean; env_override: string | null; home: string;
+  shared_server: boolean; can_delete: boolean; archived: MemoryArchivedRow[];
   consolidate_min_n: number; proven_n: number;
   pipeline: { bank_total: number; bank_proven: number; bank_archived?: number;
               inbox_total: number; inbox_ready: number;
@@ -349,7 +366,7 @@ export interface FolderCheck {
 }
 
 export interface SkillCatalog {
-  builtin: { domain: string; label: string; skills: { name: string; description: string }[] }[];
+  builtin: { domain: string; label: string; skills: { name: string; description: string; origin: "builtin" | "learned" | "fork"; provisional: boolean }[] }[];
   custom: { name: string; path: string }[];
   skills_supported: boolean;
 }
@@ -777,7 +794,18 @@ export const api = {
     req<{ status: string; backup_path: string }>(
       `/memory/skills/${encodeURIComponent(domain)}/${encodeURIComponent(name)}`,
       { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content }) }),
-  memorySkillAction: (domain: string, name: string, action: "promote" | "demote" | "prune" | "diff" | "fork") =>
+  memorySkillTechnique: (domain: string, name: string, technique: string[]) =>
+    req<{ technique: string[]; backup_path: string }>(`/memory/skills/${encodeURIComponent(domain)}/${encodeURIComponent(name)}/technique`,
+      { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ technique }) }),
+  memoryArchived: (domain?: string) =>
+    req<{ archived: MemoryArchivedRow[] }>(`/memory/bank/archived${domain ? `?domain=${encodeURIComponent(domain)}` : ""}`),
+  memoryBankRestore: (domain: string, id: string) =>
+    req<{ restored: number }>(`/memory/bank/${encodeURIComponent(domain)}/${encodeURIComponent(id)}/restore`, { method: "POST" }),
+  memoryBankSweep: (body: { domain?: string | null; days?: number | null; dry_run: boolean }) =>
+    req<{ dry_run: boolean; records: MemorySweepRow[] }>("/memory/bank/sweep",
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
+  memoryJobs: () => req<{ jobs: MemoryJobRow[] }>("/memory/jobs"),
+  memorySkillAction: (domain: string, name: string, action: "promote" | "demote" | "prune" | "diff" | "fork" | "restore-backup") =>
     req<Record<string, unknown>>(
       `/memory/skills/${encodeURIComponent(domain)}/${encodeURIComponent(name)}/${action}`, { method: "POST" }),
   memoryBankRecord: (domain: string, id: string) =>

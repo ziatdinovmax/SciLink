@@ -389,3 +389,109 @@ def test_destructive_memory_actions_are_refused_on_a_shared_server(tmp_path, mon
     assert alice.delete(f"/api/v1/memory/bank/curve_fitting/{ids['bank2']}").status_code == 403
     assert alice.delete(f"/api/v1/memory/inbox/curve_fitting/{ids['err']}").status_code == 403
     assert (tmp_path / "home" / "graduated_skills" / "curve_fitting" / "myskill").exists()
+
+
+# ── panel additions (memory tab): evidence, archive, backups, technique, jobs ──
+
+def test_overview_shows_evidence_and_flags_cross_kind(mem_client, tmp_path):
+    from scilink.skills._shared import _script_bank as sb
+    ids = _seed(tmp_path)
+    c = mem_client
+    sb.record_success("curve_fitting", ids["bank"], session="s4",
+                      fingerprint={"kind": "curve", "v": 1, "n_points": 400, "peaks": {"count": 1}},
+                      adapted=True, model_type="damped cosine ring-down")
+    ov = c.get("/api/v1/memory").json()
+    assert ov["can_delete"] is True and ov["shared_server"] is False and ov["archived"] == []
+    rec = next(r for d in ov["bank"] for r in d["records"] if r["id"] == ids["bank"])
+    assert rec["model_type"] == "two voigt"
+    ev = rec["evidence"]
+    assert ev and ev[-1]["session"] == "s4" and ev[-1]["adapted"] is True
+    assert ev[-1]["data"] == {"kind": "curve", "n_points": 400, "peaks": 1}
+    assert ev[-1]["cross_kind"] is True            # a peak record credited by oscillation data
+    skill = next(s for s in ov["skills"] if s["name"] == "myskill")
+    assert skill["technique"] == [] and skill["has_backup"] is False
+
+
+def test_archived_sweep_and_restore_endpoints(mem_client, tmp_path):
+    from scilink.skills._shared import _script_bank as sb
+    ids = _seed(tmp_path)
+    c = mem_client
+    # preview lists the never-used plain record; nothing moves
+    r = c.post("/api/v1/memory/bank/sweep", json={"days": 0, "dry_run": True})
+    assert r.status_code == 200 and r.json()["dry_run"] is True
+    assert ids["bank2"] in [x["id"] for x in r.json()["records"]]
+    assert ids["bank"] not in [x["id"] for x in r.json()["records"]]   # proven records are exempt
+    assert c.get("/api/v1/memory/bank/archived").json()["archived"] == []
+    # apply, list, restore
+    r = c.post("/api/v1/memory/bank/sweep", json={"days": 0, "dry_run": False})
+    assert ids["bank2"] in [x["id"] for x in r.json()["records"]]
+    arch = c.get("/api/v1/memory/bank/archived").json()["archived"]
+    assert [a["id"] for a in arch] == [ids["bank2"]] and arch[0]["reason"]
+    assert c.get("/api/v1/memory").json()["pipeline"]["bank_archived"] == 1
+    assert c.post(f"/api/v1/memory/bank/curve_fitting/{ids['bank2']}/restore").json()["restored"] == 1
+    assert c.post(f"/api/v1/memory/bank/curve_fitting/{ids['bank2']}/restore").status_code == 404
+    assert sb.get_record("curve_fitting", ids["bank2"]) is not None
+    assert c.post("/api/v1/memory/bank/sweep", json={"days": -1, "dry_run": True}).status_code == 400
+
+
+def test_skill_technique_and_backup_restore(mem_client, tmp_path):
+    _seed(tmp_path)
+    c = mem_client
+    base = "/api/v1/memory/skills/curve_fitting/myskill"
+    assert c.post(f"{base}/restore-backup").status_code == 404     # nothing to restore yet
+    r = c.put(f"{base}/technique", json={"technique": ["Raman spectroscopy", " raman  spectroscopy", "XRD"]})
+    assert r.status_code == 200 and r.json()["technique"] == ["Raman spectroscopy", "XRD"]
+    text = c.get(base).text
+    assert "technique:" in text and "- XRD" in text and "skill body" in text
+    ov = c.get("/api/v1/memory").json()
+    skill = next(s for s in ov["skills"] if s["name"] == "myskill")
+    assert skill["technique"] == ["Raman spectroscopy", "XRD"] and skill["has_backup"] is True
+    # restore swaps the backup in; the current version becomes the backup
+    r = c.post(f"{base}/restore-backup")
+    assert r.status_code == 200
+    assert "technique:" not in c.get(base).text
+    assert c.post(f"{base}/restore-backup").status_code == 200       # and back again
+    assert "- XRD" in c.get(base).text
+    # clearing the list drops the key
+    assert c.put(f"{base}/technique", json={"technique": []}).json()["technique"] == []
+    assert "technique:" not in c.get(base).text
+    assert c.put("/api/v1/memory/skills/curve_fitting/../x/technique", json={"technique": ["a"]}).status_code in (400, 404, 405, 422)
+
+
+def test_jobs_list_and_catalog_origins(mem_client, tmp_path):
+    from scilink.server import memory_api
+    ids = _seed(tmp_path)
+    c = mem_client
+    session = _session(c, tmp_path)
+    c.post("/api/v1/memory/enabled", json={"enabled": True})
+    memory_api._jobs.clear()
+    r = c.post("/api/v1/memory/inbox/curve_fitting/consolidate",
+               json={"ids": [ids["staged"], ids["err"]], "label": "listed", "session_id": session.id})
+    _wait_job(c, r.json()["job_id"])
+    jobs = c.get("/api/v1/memory/jobs").json()["jobs"]
+    assert jobs and jobs[0]["kind"] == "consolidate" and jobs[0]["status"] == "done"
+    assert jobs[0]["skill_name"] == "auto_listed" and jobs[0]["domain"] == "curve_fitting"
+    # the catalog labels what came from the store
+    cat = c.get(f"/api/v1/sessions/{session.id}/skills").json()
+    by = {s["name"]: s for d in cat["builtin"] if d["domain"] == "curve_fitting" for s in d["skills"]}
+    assert by["auto_listed"]["origin"] == "learned" and by["auto_listed"]["provisional"] is True
+    assert by["myskill"]["origin"] == "learned" and by["raman"]["origin"] == "builtin"
+    c.post("/api/v1/memory/skills/curve_fitting/raman/fork")
+    cat = c.get(f"/api/v1/sessions/{session.id}/skills").json()
+    by = {s["name"]: s for d in cat["builtin"] if d["domain"] == "curve_fitting" for s in d["skills"]}
+    assert by["raman"]["origin"] == "fork"
+
+
+def test_shared_server_flags_in_overview_and_sweep_guard(tmp_path, monkeypatch):
+    from scilink.server.auth import AuthConfig
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("SCILINK_MEMORY", raising=False)
+    _seed(tmp_path)
+    users = tmp_path / "users.json"
+    users.write_text(json.dumps({"alice": "a" * 32}))
+    app = create_app(tmp_path / "sessions", serve_frontend=False, auth=AuthConfig.from_users_file(users))
+    alice = TestClient(app, headers={"Authorization": f"Bearer {'a' * 32}"})
+    ov = alice.get("/api/v1/memory").json()
+    assert ov["shared_server"] is True and ov["can_delete"] is False
+    assert alice.post("/api/v1/memory/bank/sweep", json={"days": 0, "dry_run": True}).status_code == 200
+    assert alice.post("/api/v1/memory/bank/sweep", json={"days": 0, "dry_run": False}).status_code == 403

@@ -90,6 +90,16 @@ class MemoryIdsRequest(BaseModel):
     technique: Optional[str] = None
 
 
+class MemoryTechniqueRequest(BaseModel):
+    technique: List[str] = []
+
+
+class MemorySweepRequest(BaseModel):
+    domain: Optional[str] = None
+    days: Optional[int] = None
+    dry_run: bool = True
+
+
 class MemoryConsolidateRequest(BaseModel):
     ids: List[str]
     label: str
