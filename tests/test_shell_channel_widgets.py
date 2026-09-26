@@ -219,12 +219,12 @@ def test_reopen_gate_offers_adopt_with_changes():
         assert w.ask(q) == "keep"
 
 
-SUBJECT = {"title": "Proposed fitting plan — single spectrum", "blocks": [
+SUBJECT = {"title": "📋 Proposed fitting plan — single spectrum", "blocks": [
     {"type": "fields", "items": [{"label": "Physical model", "value": "2 Gaussians"},
                                  {"label": "R²", "value": 0.98, "flag": "ok"}]},
-    {"type": "text", "markdown": "**Approach.** Fit the doublet."},
-    {"type": "chips", "label": "Parameters", "items": ["width", "area"]},
-    {"type": "steps", "label": "Strategy", "items": ["Subtract baseline.", "Fit peaks."]},
+    {"type": "text", "label": "📊 Approach", "markdown": "Fit the doublet."},
+    {"type": "chips", "label": "🎯 Parameters", "items": ["width", "area"]},
+    {"type": "steps", "label": "⚙️ Strategy", "items": ["Subtract baseline.", "Fit peaks."]},
     {"type": "table", "columns": ["#", "Regime"], "rows": [[1, "low T"], [2, "high T"]],
      "caption": "Regimes"},
     {"type": "figure", "path": "results/fit.png", "file": "/tmp/s/results/fit.png",
@@ -250,8 +250,9 @@ def test_subject_blocks_are_rendered_and_console_text_is_behind_ctrl_o():
     with stack:
         assert w.ask(q) == ""
     out = buf.getvalue()
-    for needle in ("Proposed fitting plan — single spectrum", "Physical model", "2 Gaussians",
-                   "Fit the doublet", "Parameters:", "width · area", "1. Subtract baseline.",
+    for needle in ("📋 Proposed fitting plan — single spectrum", "Physical model", "2 Gaussians",
+                   "📊 Approach", "Fit the doublet", "🎯 Parameters", "width · area",
+                   "1. Subtract baseline.",
                    "Regimes", "low T", "figure: /tmp/s/results/fit.png", "Peak A splits",
                    "Impact: big", "Candidate 2 — Gaussian", "Judge's pick", "Judge: fewer params",
                    "⚠ seed near edge", "original", "user-guided", "Locked model",

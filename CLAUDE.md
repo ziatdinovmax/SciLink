@@ -682,7 +682,10 @@ now passes `subject=` to `request_human_feedback`: a title plus blocks from
 the fixed vocabulary in `scilink.hitl.SUBJECT_BLOCKS` (text, fields, chips,
 steps, table, figure, claims, candidates, compare, notice), built by a pure
 function next to the printer from the same dict (`fitting_plan_subject`,
-`analysis_result_subject`). The decision widget and its words come from the
+`analysis_result_subject`). Every block carries a `label` that keeps the
+console's section name and emoji ("🔍 Observations"); both surfaces render
+labeled blocks in one aligned label column, so a gate lists its sections
+the way its printout does and a short list is plain text, not chips. The decision widget and its words come from the
 gate's `kind` (`vocabulary.QUESTION_WIDGETS` / `QUESTION_LABELS`), never
 from the prompt text. Printing stays: it is the console, the verbose log and
 the record, and the surfaces keep it behind a "console output" disclosure.

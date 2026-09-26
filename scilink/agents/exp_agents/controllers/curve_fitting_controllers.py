@@ -2146,29 +2146,27 @@ def _numbered_steps(text: str) -> list:
 
 def fitting_plan_subject(state: dict) -> dict:
     """What the fitting-plan gate shows, as subject blocks (scilink.hitl):
-    the same fields ``_display_plan`` prints, read from the same state, so
-    the console and the structured surfaces cannot disagree."""
+    the same sections ``_display_plan`` prints, with its emoji, read from
+    the same state, so the console and the structured surfaces cannot
+    disagree."""
     from ....hitl import make_subject, subject_block as block
 
     is_single = state.get("is_single_spectrum", True)
     num = state.get("num_spectra", 1)
     mode = "single spectrum" if is_single else f"series of {num} spectra"
-    blocks = [
-        block("fields", items=[
-            {"label": "Mode", "value": mode},
-            {"label": "Physical model", "value": state.get("physical_model") or "N/A"},
-        ]),
-    ]
+    blocks = []
     if state.get("observations"):
-        blocks.append(block("text", markdown=f"**Observations.** {state['observations']}"))
-    if state.get("analysis_approach"):
-        blocks.append(block("text", markdown=f"**Approach.** {state['analysis_approach']}"))
+        blocks.append(block("text", label="🔍 Observations", markdown=str(state["observations"])))
+    blocks.append(block("text", label="📊 Approach",
+                        markdown=str(state.get("analysis_approach") or "N/A")))
+    blocks.append(block("text", label="📐 Physical model",
+                        markdown=str(state.get("physical_model") or "N/A")))
     params = [str(x) for x in state.get("parameters_to_extract") or []]
-    if params:
-        blocks.append(block("chips", label="Parameters to extract", items=params))
+    blocks.append(block("text", label="🎯 Parameters to extract",
+                        markdown=", ".join(params) if params else "N/A"))
     strategy = state.get("fitting_strategy")
     if strategy:
-        blocks.append(block("steps", label="Fitting strategy", items=_numbered_steps(strategy)))
+        blocks.append(block("steps", label="⚙️ Fitting strategy", items=_numbered_steps(strategy)))
 
     series_plan = state.get("series_analysis_plan") or {}
     regimes = series_plan.get("regimes") or []
@@ -2192,21 +2190,21 @@ def fitting_plan_subject(state: dict) -> dict:
                 ", ".join(regime.get("parameters_to_extract")
                           or series_plan.get("parameters_to_extract") or []),
             ])
-        blocks.append(block("table",
+        blocks.append(block("table", label=f"📦 Series fitting regimes ({len(regimes)})",
                             columns=["#", "Regime", "Spectra", "Model", "Parameters"],
-                            rows=rows,
-                            caption=f"Series fitting regimes ({len(regimes)}), locked per regime"))
+                            rows=rows, caption="The model is locked per regime"))
         if series_plan.get("rationale"):
-            blocks.append(block("text", markdown=f"**Rationale.** {series_plan['rationale']}"))
+            blocks.append(block("text", label="Rationale", markdown=str(series_plan["rationale"])))
         transitions = series_plan.get("transition_points") or []
         if transitions:
-            blocks.append(block("table", columns=["Between indices", "Transition"],
+            blocks.append(block("table", label="Transition points",
+                                columns=["Between indices", "Transition"],
                                 rows=[[str(t.get("between_indices", "?")),
                                        t.get("description", "N/A")] for t in transitions]))
     elif not is_single:
-        blocks.append(block("notice", title="Locked model",
+        blocks.append(block("notice", title="📦 Locked model",
                             lines=[f"This fitting model will be applied to all {num} spectra."]))
-    return make_subject(f"Proposed fitting plan — {mode}", blocks)
+    return make_subject(f"📋 Proposed fitting plan — {mode}", blocks)
 
 class CurveFittingPlanningController:
     """

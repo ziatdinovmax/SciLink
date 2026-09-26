@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type PresentedQuestion } from "../api";
 import { MarkdownBody } from "./MarkdownBody";
 import { SubjectBlocks } from "./SubjectBlocks";
@@ -26,6 +26,13 @@ export function FeedbackPanel({
     question.judge_pick ?? null,
   );
   const [sent, setSent] = useState(false);
+  // Enter answers a question the way it does at the console prompt, so
+  // the question takes the keyboard focus when it appears: the feedback
+  // box on the text widgets, the panel itself on the others.
+  const focusRef = useRef<HTMLTextAreaElement | HTMLDivElement>(null);
+  useEffect(() => {
+    focusRef.current?.focus({ preventScroll: true });
+  }, [question.request_id]);
 
   const respond = (response: string) => {
     if (sent) return;
@@ -90,9 +97,24 @@ export function FeedbackPanel({
   ) : null;
 
   const fanout = question.widget === "fanout_confirm" ? question.fanout : null;
+  // "📋 Proposed fitting plan — single spectrum": the part after the dash
+  // is the subtitle.
+  const [title, subtitle] = subject
+    ? (() => {
+        const i = subject.title.indexOf(" — ");
+        return i < 0
+          ? [subject.title, ""]
+          : [subject.title.slice(0, i), subject.title.slice(i + 3)];
+      })()
+    : ["", ""];
   const body = subject ? (
     <>
-      {subject.title && <h4>{subject.title}</h4>}
+      {title && (
+        <h4 className="qs-title">
+          {title}
+          {subtitle && <span className="qs-subtitle">{subtitle}</span>}
+        </h4>
+      )}
       <SubjectBlocks
         sessionId={sessionId}
         blocks={subject.blocks}
@@ -200,7 +222,10 @@ export function FeedbackPanel({
     const pick = question.judge_pick;
     decision = (
       <>
-        {subject && <p className="sb-label">{question.labels.select}</p>}
+        <p className="feedback-select">
+          {subject && <span>{question.labels.select}</span>}
+          {hint && <span className="caption">{hint}</span>}
+        </p>
         <div className="feedback-actions">
           <button
             className="primary"
@@ -217,7 +242,6 @@ export function FeedbackPanel({
           >
             {question.labels.accept}
           </button>
-          <span className="caption">{hint}</span>
         </div>
       </>
     );
@@ -237,7 +261,9 @@ export function FeedbackPanel({
                 respond(text.trim());
               }
             }}
+            placeholder={hint ? `${hint} · Shift+Enter for a new line` : undefined}
             rows={3}
+            ref={focusRef as React.RefObject<HTMLTextAreaElement>}
           />
         </label>
         <div className="feedback-actions">
@@ -256,7 +282,6 @@ export function FeedbackPanel({
               {question.labels.revert_repair}
             </button>
           )}
-          <span className="caption">{hint}</span>
         </div>
       </>
     );
@@ -265,6 +290,10 @@ export function FeedbackPanel({
   return (
     <div
       className="feedback-panel"
+      tabIndex={-1}
+      ref={isPicker || question.widget === "keep_revert" || question.widget === "confirm"
+        || question.widget === "fanout_confirm"
+        ? (focusRef as React.RefObject<HTMLDivElement>) : undefined}
       onKeyDown={(e) => {
         // Enter on a picker accepts the judge's pick (the console's Enter).
         if (isPicker && e.key === "Enter") {

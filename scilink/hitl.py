@@ -54,7 +54,9 @@ def _next_id() -> str:
 # ── the subject block vocabulary ─────────────────────────────────
 # What a question shows, as data the front-ends render. Fixed on purpose,
 # like the skill section vocabulary: a gate authors against these shapes
-# and both surfaces know what to do with each. Payload keys per type:
+# and both surfaces know what to do with each. Every block may carry a
+# ``label`` — its section heading, shown in an aligned label column (keep
+# the console's emoji on it: "🔍 Observations"). Payload keys per type:
 #   text        markdown
 #   fields      items: [{label, value, unit?, flag? (ok|warn|bad)}]
 #   chips       label, items: [str]

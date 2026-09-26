@@ -94,8 +94,9 @@ export interface ChatMessage {
 }
 
 /** What a question is about, as blocks (the Python vocabulary is
- * `scilink.hitl.SUBJECT_BLOCKS`; the shell renders the same shapes). */
-export type SubjectBlock =
+ * `scilink.hitl.SUBJECT_BLOCKS`; the shell renders the same shapes). Every
+ * block may carry a `label`, its section heading. */
+export type SubjectBlock = { label?: string } & (
   | { type: "text"; markdown: string }
   | {
       type: "fields";
@@ -106,8 +107,8 @@ export type SubjectBlock =
         flag?: "ok" | "warn" | "bad";
       }[];
     }
-  | { type: "chips"; label?: string; items: string[] }
-  | { type: "steps"; label?: string; items: string[] }
+  | { type: "chips"; items: string[] }
+  | { type: "steps"; items: string[] }
   | {
       type: "table";
       columns: string[];
@@ -144,7 +145,8 @@ export type SubjectBlock =
       left: { label: string; blocks: SubjectBlock[] };
       right: { label: string; blocks: SubjectBlock[] };
     }
-  | { type: "notice"; title: string; lines: string[]; tone?: "info" | "warn" };
+  | { type: "notice"; title: string; lines: string[]; tone?: "info" | "warn" }
+);
 
 export interface QuestionSubject {
   title: string;

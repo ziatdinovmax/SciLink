@@ -15,20 +15,20 @@ def analysis_result_subject(analysis_result: Dict[str, Any]) -> Dict[str, Any]:
     console printout comes from."""
     claims = analysis_result.get("scientific_claims") or []
     blocks = [
-        subject_block("text", markdown=str(
+        subject_block("text", label="📋 Detailed analysis", markdown=str(
             analysis_result.get("detailed_analysis") or "No analysis provided")),
     ]
     if claims:
-        blocks.append(subject_block("claims", items=[
+        blocks.append(subject_block("claims", label=f"🎯 Scientific claims ({len(claims)})", items=[
             {"claim": str(c.get("claim", "N/A")),
              "impact": c.get("scientific_impact"),
              "question": c.get("has_anyone_question"),
              "keywords": [str(k) for k in c.get("keywords") or []]}
             for c in claims]))
     else:
-        blocks.append(subject_block("notice", title="No claims were generated",
+        blocks.append(subject_block("notice", title="❌ No claims were generated",
                                     lines=[], tone="warn"))
-    return make_subject(f"Analysis results — {len(claims)} scientific claims", blocks)
+    return make_subject("🤖 Agent's analysis results", blocks)
 
 
 class SimpleFeedbackCollector:

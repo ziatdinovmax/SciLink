@@ -174,34 +174,46 @@ class Widgets:
 
     def _render_blocks(self, blocks) -> list:
         """rich renderables for a question's subject blocks — the shell's
-        twin of the web ``SubjectBlocks`` component, one per block type."""
+        twin of the web ``SubjectBlocks`` component. Labeled blocks go into
+        one two-column grid (label, content) so their headings align; an
+        unlabeled block spans the width."""
+        grid = None
         out = []
+
+        def emit(label, renderable):
+            nonlocal grid
+            if label:
+                if grid is None:
+                    grid = Table.grid(padding=(0, 2), expand=True)
+                    grid.add_column(style="bold", no_wrap=True, width=26)
+                    grid.add_column(ratio=1)
+                    out.append(grid)
+                grid.add_row(Text(str(label)), renderable)
+            else:
+                grid = None
+                out.append(renderable)
+
         for b in blocks or []:
             kind = b.get("type")
+            label = b.get("label")
             if kind == "text":
-                out.append(Markdown(str(b.get("markdown") or "")))
+                emit(label, Markdown(str(b.get("markdown") or "")))
             elif kind == "fields":
-                grid = Table.grid(padding=(0, 2))
-                grid.add_column(style="bold", no_wrap=True)
-                grid.add_column()
+                inner = Table.grid(padding=(0, 2))
+                inner.add_column(style="bold", no_wrap=True)
+                inner.add_column()
                 for item in b.get("items") or []:
                     value = "" if item.get("value") is None else str(item["value"])
                     if item.get("unit"):
                         value = f"{value} {item['unit']}"
-                    grid.add_row(str(item.get("label") or ""),
-                                 Text(value, style=self._FLAG_STYLE.get(item.get("flag"), "")))
-                out.append(grid)
+                    inner.add_row(str(item.get("label") or ""),
+                                  Text(value, style=self._FLAG_STYLE.get(item.get("flag"), "")))
+                emit(label, inner)
             elif kind == "chips":
-                items = " · ".join(str(x) for x in b.get("items") or [])
-                label = f"[bold]{b['label']}:[/] " if b.get("label") else ""
-                out.append(Text.from_markup(f"{label}{items}"))
+                emit(label, Text(" · ".join(str(x) for x in b.get("items") or [])))
             elif kind == "steps":
-                lines = []
-                if b.get("label"):
-                    lines.append(Text(str(b["label"]), style="bold"))
-                for n, step in enumerate(b.get("items") or [], 1):
-                    lines.append(Text(f"  {n}. {step}"))
-                out.append(Group(*lines))
+                emit(label, Group(*(Text(f"{n}. {step}")
+                                    for n, step in enumerate(b.get("items") or [], 1))))
             elif kind == "table":
                 table = Table(title=b.get("caption") or None, title_style="dim",
                               show_edge=False, pad_edge=False, box=None,
@@ -210,11 +222,11 @@ class Widgets:
                     table.add_column(str(col))
                 for row in b.get("rows") or []:
                     table.add_row(*("" if c is None else str(c) for c in row))
-                out.append(table)
+                emit(label, table)
             elif kind == "figure":
                 where = b.get("file") or b.get("path") or ""
                 cap = f" ({b['caption']})" if b.get("caption") else ""
-                out.append(Text.from_markup(f"  [dim]figure:[/] {where}{cap}"))
+                emit(label, Text.from_markup(f"[dim]figure:[/] {where}{cap}"))
             elif kind == "claims":
                 lines = []
                 for n, c in enumerate(b.get("items") or [], 1):
@@ -225,7 +237,7 @@ class Widgets:
                     if c.get("keywords"):
                         lines.append(Text("     Keywords: " + ", ".join(map(str, c["keywords"])),
                                           style="dim"))
-                out.append(Group(*lines))
+                emit(label, Group(*lines))
             elif kind == "candidates":
                 lines = []
                 pick = b.get("pick")
@@ -251,7 +263,7 @@ class Widgets:
                     lines.append(Text(f"Judge: {b['reasoning']}"))
                 for caveat in b.get("caveats") or []:
                     lines.append(Text(f"  ⚠ {caveat}", style="yellow"))
-                out.append(Group(*lines))
+                emit(label, Group(*lines))
             elif kind == "compare":
                 table = Table(show_edge=False, box=None, header_style="bold", expand=True)
                 left, right = b.get("left") or {}, b.get("right") or {}
@@ -259,11 +271,11 @@ class Widgets:
                 table.add_column(str(right.get("label") or ""))
                 table.add_row(Group(*self._render_blocks(left.get("blocks"))),
                               Group(*self._render_blocks(right.get("blocks"))))
-                out.append(table)
+                emit(label, table)
             elif kind == "notice":
                 body = Group(*(Text(f"• {line}") for line in b.get("lines") or []))
                 colour = "yellow" if b.get("tone") == "warn" else "magenta"
-                out.append(Panel(body, title=f"[bold {colour}]{b.get('title', '')}[/]",
+                emit(None, Panel(body, title=f"[bold {colour}]{b.get('title', '')}[/]",
                                  border_style=colour))
         return out
 

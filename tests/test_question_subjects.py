@@ -49,10 +49,12 @@ def test_fitting_plan_subject_single_and_series():
              "parameters_to_extract": ["center", "fwhm"],
              "fitting_strategy": "1. Subtract baseline. 2. Fit both peaks."}
     s = cfc.fitting_plan_subject(state)
-    assert s["title"] == "Proposed fitting plan — single spectrum"
-    types = [b["type"] for b in s["blocks"]]
-    assert types == ["fields", "text", "text", "chips", "steps"]
-    assert s["blocks"][0]["items"][1] == {"label": "Physical model", "value": "2 Lorentzians"}
+    assert s["title"] == "📋 Proposed fitting plan — single spectrum"
+    assert [(b["type"], b["label"]) for b in s["blocks"]] == [
+        ("text", "🔍 Observations"), ("text", "📊 Approach"), ("text", "📐 Physical model"),
+        ("text", "🎯 Parameters to extract"), ("steps", "⚙️ Fitting strategy")]
+    assert s["blocks"][2]["markdown"] == "2 Lorentzians"
+    assert s["blocks"][3]["markdown"] == "center, fwhm"
     assert s["blocks"][4]["items"] == ["Subtract baseline.", "Fit both peaks."]
 
     series = dict(state, is_single_spectrum=False, num_spectra=6,
@@ -69,6 +71,7 @@ def test_fitting_plan_subject_single_and_series():
                       "transition_points": [{"between_indices": [2, 3], "description": "split"}]})
     s = cfc.fitting_plan_subject(series)
     table = next(b for b in s["blocks"] if b["type"] == "table")
+    assert table["label"] == "📦 Series fitting regimes (2)"
     assert table["rows"][0] == [1, "low", "[0, 1, 2] (100–300 K)", "2 Lorentzians", "center, fwhm"]
     assert table["rows"][1][3] == "1 Lorentzian"
     assert [b["type"] for b in s["blocks"]][-3:] == ["table", "text", "table"]
@@ -83,7 +86,7 @@ def test_fitting_plan_gate_asks_with_the_subject(capsys):
     state = {"is_single_spectrum": True, "physical_model": "G"}
     out = cfc.CurveFittingPlanningController._get_human_feedback(owner, state)
     assert cap.req.kind == "review_plan" and cap.req.origin == {"stage": "fitting_plan"}
-    assert cap.req.subject["title"].startswith("Proposed fitting plan")
+    assert cap.req.subject["title"].startswith("📋 Proposed fitting plan")
     assert out["_refine_feedback"] == "use Voigt"
 
 
@@ -92,8 +95,10 @@ def test_analysis_result_subject_and_gate(capsys):
               "scientific_claims": [{"claim": "Peak A narrows", "scientific_impact": "strain",
                                      "has_anyone_question": "Has anyone…", "keywords": ["raman"]}]}
     s = analysis_result_subject(result)
-    assert s["title"] == "Analysis results — 1 scientific claims"
-    assert s["blocks"][0] == {"type": "text", "markdown": "The doublet narrows."}
+    assert s["title"] == "🤖 Agent's analysis results"
+    assert s["blocks"][0] == {"type": "text", "label": "📋 Detailed analysis",
+                              "markdown": "The doublet narrows."}
+    assert s["blocks"][1]["label"] == "🎯 Scientific claims (1)"
     assert s["blocks"][1]["items"][0]["keywords"] == ["raman"]
     assert analysis_result_subject({})["blocks"][1]["type"] == "notice"
 
