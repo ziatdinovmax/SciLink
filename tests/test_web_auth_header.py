@@ -64,3 +64,17 @@ def test_config_validation():
         AuthConfig.from_header("X-User", ["not-an-address"])
     cfg = AuthConfig.from_header("X-User", ["10.0.0.5", "192.168.0.0/16"])
     assert cfg.multi_user and cfg.users == {} and len(cfg.trusted_proxies) == 2
+
+
+def test_cli_reads_the_proxy_settings_from_the_environment(tmp_path, monkeypatch):
+    """A container is configured through env: the header mode has env forms."""
+    from scilink.server import cli
+    captured = {}
+    monkeypatch.setattr("uvicorn.run", lambda app, **kw: captured.setdefault("app", app))
+    monkeypatch.setenv("SCILINK_AUTH_HEADER", "X-Auth-Request-User")
+    monkeypatch.setenv("SCILINK_TRUSTED_PROXIES", "10.0.0.0/8, 192.168.1.5")
+    monkeypatch.delenv("SCILINK_WEB_TOKEN", raising=False)
+    rc = cli.main(["--host", "0.0.0.0", "--session-root", str(tmp_path), "--no-open"])
+    assert rc == 0
+    auth = captured["app"].state.auth
+    assert auth.header == "X-Auth-Request-User" and len(auth.trusted_proxies) == 2 and auth.multi_user

@@ -61,11 +61,13 @@ def main(argv=None) -> int:
                         help="Trust a proxy in front to authenticate: the user "
                              "is the value of this request header (e.g. "
                              "X-Auth-Request-User), per-user session roots as "
-                             "with --users. Only honoured from --trusted-proxy.")
+                             "with --users. Only honoured from --trusted-proxy. "
+                             "Env: SCILINK_AUTH_HEADER.")
     parser.add_argument("--trusted-proxy", action="append", default=[],
                         metavar="ADDR/CIDR",
                         help="Address or network the authenticating proxy "
-                             "connects from (repeatable; default: loopback).")
+                             "connects from (repeatable; default: loopback). "
+                             "Env: SCILINK_TRUSTED_PROXIES, comma separated.")
     parser.add_argument("--insecure-no-auth", action="store_true",
                         help="Allow a non-loopback --host WITHOUT any auth "
                              "(only behind a reverse proxy that "
@@ -73,6 +75,12 @@ def main(argv=None) -> int:
     add_tls_arguments(parser, "the web UI")
     args = parser.parse_args(argv)
     tls = tls_kwargs(args)
+    # A container is configured through its environment: the two proxy
+    # settings have env forms too (the token already has SCILINK_WEB_TOKEN).
+    import os
+    args.auth_header = args.auth_header or os.environ.get("SCILINK_AUTH_HEADER") or None
+    if not args.trusted_proxy and os.environ.get("SCILINK_TRUSTED_PROXIES"):
+        args.trusted_proxy = [x.strip() for x in os.environ["SCILINK_TRUSTED_PROXIES"].split(",") if x.strip()]
 
     try:
         import uvicorn
