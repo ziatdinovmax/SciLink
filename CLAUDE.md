@@ -673,6 +673,24 @@ shell shows it on its status row, and one fixture pins both readers.
 **When a chat-surface label or behaviour changes, change it in the
 vocabulary or the narration reader, not in one surface.**
 
+**A human-feedback gate declares what is under review; it does not print
+it for the surfaces to parse.** Every gate holds a structured object at ask
+time (a plan dict, a fit result and its review figure, a candidate list, a
+claims list) and used to print it and ask, so the web UI and the shell
+showed the captured console text and regex-parsed it into widgets. A gate
+now passes `subject=` to `request_human_feedback`: a title plus blocks from
+the fixed vocabulary in `scilink.hitl.SUBJECT_BLOCKS` (text, fields, chips,
+steps, table, figure, claims, candidates, compare, notice), built by a pure
+function next to the printer from the same dict (`fitting_plan_subject`,
+`analysis_result_subject`). The decision widget and its words come from the
+gate's `kind` (`vocabulary.QUESTION_WIDGETS` / `QUESTION_LABELS`), never
+from the prompt text. Printing stays: it is the console, the verbose log and
+the record, and the surfaces keep it behind a "console output" disclosure.
+A gate without a subject is presented from its printed text as before, so
+gates convert one at a time (`docs/proposals/structured-human-feedback.md`
+lists them); do not add a new regex to the presenter for a gate — give the
+gate a subject.
+
 ## Sequencing — hard features first, UI later
 
 Engineering philosophy on this codebase: implement load-bearing logic

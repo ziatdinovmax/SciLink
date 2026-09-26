@@ -125,6 +125,102 @@ def test_present_code_files_and_previews(tmp_path):
         "Candidate 2"
 
 
+# ── the subject path ─────────────────────────────────────────────
+
+def _subject(*blocks, title="Under review"):
+    return {"title": title, "blocks": list(blocks)}
+
+
+def test_present_subject_widget_and_words_come_from_the_kind(tmp_path):
+    """With a subject the widget and its labels come from the kind table,
+    the blocks travel, the console text stays for the disclosure, and the
+    preview sweep is skipped (a gate with a subject declares its figures)."""
+    (tmp_path / "spectrum_fit_review.png").write_bytes(b"png")
+    hreq = FeedbackRequest(prompt="Your feedback: ", kind="review_plan",
+                           origin={"stage": "fitting_plan"},
+                           subject=_subject({"type": "text", "markdown": "**Approach.** x"},
+                                            {"type": "chips", "items": ["w", "A"]}))
+    q = present_question(hreq, "=" * 30 + "\nPROPOSED PLAN\nApproach: x\n", str(tmp_path))
+    assert q["widget"] == "generic"
+    assert q["labels"]["accept"] == "Approve plan"
+    assert q["subject"]["title"] == "Under review"
+    assert [b["type"] for b in q["subject"]["blocks"]] == ["text", "chips"]
+    assert "PROPOSED PLAN" in q["context_display"]
+    assert q["preview_images"] == []
+    # every kind maps: the result review is a text widget with its own words
+    q = present_question(FeedbackRequest(prompt="", kind="review_result",
+                                         subject=_subject()), "", str(tmp_path))
+    assert q["widget"] == "generic" and q["labels"]["accept"] == "Accept result"
+    q = present_question(FeedbackRequest(prompt="", kind="confirm", subject=_subject(),
+                                         origin={"stage": "fanout_confirm"}), "", str(tmp_path))
+    assert q["widget"] == "confirm"
+    assert q["labels"]["confirm"].endswith("Launch parallel analysis")
+    q = present_question(FeedbackRequest(prompt="", kind="keep_or_revert", subject=_subject(),
+                                         origin={"stage": "plan_reopen", "reason": "r"}),
+                         "", str(tmp_path))
+    assert q["widget"] == "keep_revert" and q["labels"]["keep"] == "Adopt the revision"
+    assert q["notice"]["lines"] == ["Reason given: r"]
+
+
+def test_present_subject_figures_are_relative_and_unknown_blocks_dropped(tmp_path):
+    inside = tmp_path / "results" / "fit_review.png"
+    inside.parent.mkdir()
+    inside.write_bytes(b"png")
+    hreq = FeedbackRequest(prompt="", kind="review_fit", subject=_subject(
+        {"type": "figure", "path": str(inside), "caption": "fit"},
+        {"type": "figure", "path": "/elsewhere/other.png"},
+        {"type": "hologram", "x": 1},
+        {"type": "compare", "left": {"label": "old", "blocks": [
+            {"type": "figure", "path": str(inside)}, {"type": "bogus"}]},
+         "right": {"label": "new", "blocks": []}}))
+    q = present_question(hreq, "", str(tmp_path))
+    blocks = q["subject"]["blocks"]
+    assert [b["type"] for b in blocks] == ["figure", "figure", "compare"]
+    assert blocks[0]["path"] == "results/fit_review.png"
+    assert blocks[0]["file"] == str(inside) and blocks[0]["caption"] == "fit"
+    assert blocks[1]["path"] is None and blocks[1]["file"] == "/elsewhere/other.png"
+    assert blocks[2]["left"]["blocks"][0]["path"] == "results/fit_review.png"
+    assert len(blocks[2]["left"]["blocks"]) == 1
+
+
+def test_present_subject_candidates_feed_the_picker(tmp_path):
+    fig = tmp_path / "bestofn_candidate_02_review.png"
+    fig.write_bytes(b"png")
+    hreq = FeedbackRequest(prompt="accept candidate 2", kind="bestofn_select", subject=_subject(
+        {"type": "candidates", "pick": 2, "items": [
+            {"idx": 1, "name": "Voigt", "metric": "R²", "value": 0.991, "approved": True},
+            {"idx": 2, "name": "Gaussian", "metric": "R²", "value": 0.995, "approved": True,
+             "figure": str(fig), "judge_comment": "cleanest residual"}]}))
+    q = present_question(hreq, "", str(tmp_path))
+    assert q["widget"] == "bestofn" and q["judge_pick"] == 2
+    assert q["candidates"][0]["label"] == "Candidate 1 — Voigt · R²=0.991 · ✓ approved"
+    assert q["labels"]["accept"] == "Accept judge's pick (Candidate 2)"
+    cand = q["subject"]["blocks"][0]["items"][1]
+    assert cand["figure"] == "bestofn_candidate_02_review.png"
+    assert cand["figure_file"] == str(fig)
+    # a pick that names no candidate falls back to the first
+    hreq.subject["blocks"][0]["pick"] = 9
+    assert present_question(hreq, "", str(tmp_path))["judge_pick"] == 1
+    # a picker kind with no candidates block degrades to the text widget
+    hreq = FeedbackRequest(prompt="", kind="plan_candidate_select",
+                           subject=_subject({"type": "text", "markdown": "x"}))
+    q = present_question(hreq, "", str(tmp_path))
+    assert q["widget"] == "generic" and "candidates" not in q
+
+
+def test_present_subject_keeps_auto_repair_and_code_files(tmp_path):
+    review = tmp_path / "temp_code_review"
+    review.mkdir()
+    (review / "fit.py").write_text("print('hi')")
+    hreq = FeedbackRequest(prompt="", kind="approve_or_revise",
+                           origin={"stage": "plan_review", "auto_repair": ["950 C -> 850 C"]},
+                           subject=_subject({"type": "steps", "items": ["a", "b"]}))
+    q = present_question(hreq, "CODE REVIEW\nReview files in temp_code_review", str(tmp_path))
+    assert q["labels"]["revert_repair"] == "Revert auto-correction"
+    assert q["notice"]["title"] == "Auto-corrected before review"
+    assert q["code_files"][0]["name"] == "fit.py"
+
+
 # ── artifacts ────────────────────────────────────────────────────
 
 def test_artifact_tracker_sweep(tmp_path):

@@ -415,6 +415,13 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
   HTTP-parking channel; the server converts each `FeedbackRequest` into a
   structured "presented question" (widget type, labels, candidates, preview
   images, code files) so the frontend renders without prompt sniffing.
+  A gate that declares what is under review (`subject`: blocks from
+  `scilink.hitl.SUBJECT_BLOCKS`) is presented from that and from its
+  `kind` (widget and words from `vocabulary.QUESTION_WIDGETS` /
+  `QUESTION_LABELS`); `SubjectBlocks.tsx` renders the blocks and the
+  captured console text sits behind a "Console output" disclosure. A gate
+  without one is presented from the captured console text as before (see
+  `docs/proposals/structured-human-feedback.md` for the conversion plan).
 - Artifacts are per-turn filesystem sweeps with the same rules as Streamlit
   (HTML report suppresses raw images; deliverable manifest decides which
   markdown embeds; path+mtime identity).

@@ -355,7 +355,10 @@ def _pending_questions(state: dict, job_id: str = None) -> list:
         req = item["req"]
         out.append({"request_id": rid, "kind": req.kind,
                     "prompt": req.prompt, "options": req.options,
-                    "origin": req.origin, "job_id": item.get("job_id")})
+                    "origin": req.origin, "job_id": item.get("job_id"),
+                    # What is under review, as blocks (scilink.hitl
+                    # SUBJECT_BLOCKS), when the gate declared it.
+                    "subject": getattr(req, "subject", None)})
     return out
 
 

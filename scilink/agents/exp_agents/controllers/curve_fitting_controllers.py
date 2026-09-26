@@ -2130,6 +2130,84 @@ class GenerateCurveFittingReportController:
 # UNIFIED CONTROLLERS (for series analysis support)
 # ============================================================================
 
+
+def _numbered_steps(text: str) -> list:
+    """Split a strategy written as one paragraph of numbered steps into the
+    steps (the same rule ``_display_plan`` prints by: a step number only
+    after a sentence end, so "cm-1." or "8.7" are never split)."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    parts = re.split(r"(?:^|\. )(?=\d+\. )", text)
+    steps = [re.sub(r"^\d+\.\s*", "", p).strip() for p in parts if p.strip()]
+    steps = [st.rstrip(".") + "." if st and not st.endswith(".") else st for st in steps]
+    return steps if len(steps) > 1 else [text]
+
+
+def fitting_plan_subject(state: dict) -> dict:
+    """What the fitting-plan gate shows, as subject blocks (scilink.hitl):
+    the same fields ``_display_plan`` prints, read from the same state, so
+    the console and the structured surfaces cannot disagree."""
+    from ....hitl import make_subject, subject_block as block
+
+    is_single = state.get("is_single_spectrum", True)
+    num = state.get("num_spectra", 1)
+    mode = "single spectrum" if is_single else f"series of {num} spectra"
+    blocks = [
+        block("fields", items=[
+            {"label": "Mode", "value": mode},
+            {"label": "Physical model", "value": state.get("physical_model") or "N/A"},
+        ]),
+    ]
+    if state.get("observations"):
+        blocks.append(block("text", markdown=f"**Observations.** {state['observations']}"))
+    if state.get("analysis_approach"):
+        blocks.append(block("text", markdown=f"**Approach.** {state['analysis_approach']}"))
+    params = [str(x) for x in state.get("parameters_to_extract") or []]
+    if params:
+        blocks.append(block("chips", label="Parameters to extract", items=params))
+    strategy = state.get("fitting_strategy")
+    if strategy:
+        blocks.append(block("steps", label="Fitting strategy", items=_numbered_steps(strategy)))
+
+    series_plan = state.get("series_analysis_plan") or {}
+    regimes = series_plan.get("regimes") or []
+    if regimes and not is_single:
+        values = (state.get("series_metadata") or {}).get("values") or []
+        if isinstance(values, dict):
+            values = list(values.values())
+        unit = (state.get("series_metadata") or {}).get("unit", "")
+        rows = []
+        for i, regime in enumerate(regimes, 1):
+            indices = regime.get("spectrum_indices") or []
+            span = ""
+            if values and indices:
+                valid = [values[k] for k in indices if k < len(values)]
+                if valid:
+                    span = f" ({min(valid)}–{max(valid)} {unit})".rstrip()
+            rows.append([
+                i, regime.get("name", "Unnamed"),
+                f"{indices}{span}",
+                regime.get("physical_model") or series_plan.get("physical_model") or "N/A",
+                ", ".join(regime.get("parameters_to_extract")
+                          or series_plan.get("parameters_to_extract") or []),
+            ])
+        blocks.append(block("table",
+                            columns=["#", "Regime", "Spectra", "Model", "Parameters"],
+                            rows=rows,
+                            caption=f"Series fitting regimes ({len(regimes)}), locked per regime"))
+        if series_plan.get("rationale"):
+            blocks.append(block("text", markdown=f"**Rationale.** {series_plan['rationale']}"))
+        transitions = series_plan.get("transition_points") or []
+        if transitions:
+            blocks.append(block("table", columns=["Between indices", "Transition"],
+                                rows=[[str(t.get("between_indices", "?")),
+                                       t.get("description", "N/A")] for t in transitions]))
+    elif not is_single:
+        blocks.append(block("notice", title="Locked model",
+                            lines=[f"This fitting model will be applied to all {num} spectra."]))
+    return make_subject(f"Proposed fitting plan — {mode}", blocks)
+
 class CurveFittingPlanningController:
     """
     Plans the fitting analysis for the first spectrum: drafts the plan (one
@@ -2253,6 +2331,7 @@ class CurveFittingPlanningController:
             "\n🤔 Your feedback (or Enter to accept): ",
             kind="review_plan",
             origin={"stage": "fitting_plan"},
+            subject=fitting_plan_subject(state),
         ).strip()
         
         if feedback == "":

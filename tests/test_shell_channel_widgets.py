@@ -217,3 +217,69 @@ def test_reopen_gate_offers_adopt_with_changes():
     w, _, stack = _widgets("3\r")                        # chose it, typed nothing: adopt as-is
     with stack:
         assert w.ask(q) == "keep"
+
+
+SUBJECT = {"title": "Proposed fitting plan — single spectrum", "blocks": [
+    {"type": "fields", "items": [{"label": "Physical model", "value": "2 Gaussians"},
+                                 {"label": "R²", "value": 0.98, "flag": "ok"}]},
+    {"type": "text", "markdown": "**Approach.** Fit the doublet."},
+    {"type": "chips", "label": "Parameters", "items": ["width", "area"]},
+    {"type": "steps", "label": "Strategy", "items": ["Subtract baseline.", "Fit peaks."]},
+    {"type": "table", "columns": ["#", "Regime"], "rows": [[1, "low T"], [2, "high T"]],
+     "caption": "Regimes"},
+    {"type": "figure", "path": "results/fit.png", "file": "/tmp/s/results/fit.png",
+     "caption": "review"},
+    {"type": "claims", "items": [{"claim": "Peak A splits", "impact": "big",
+                                  "keywords": ["raman"]}]},
+    {"type": "candidates", "pick": 2, "items": [
+        {"idx": 1, "name": "Voigt", "metric": "R²", "value": 0.99, "approved": True},
+        {"idx": 2, "name": "Gaussian", "judge_comment": "cleanest"}], "reasoning": "fewer params",
+     "caveats": ["seed near edge"]},
+    {"type": "compare", "left": {"label": "original", "blocks": [
+        {"type": "fields", "items": [{"label": "R²", "value": 0.97}]}]},
+     "right": {"label": "user-guided", "blocks": [
+         {"type": "fields", "items": [{"label": "R²", "value": 0.95, "flag": "bad"}]}]}},
+    {"type": "notice", "title": "Locked model", "lines": ["applies to all 4 spectra"]},
+]}
+
+
+def test_subject_blocks_are_rendered_and_console_text_is_behind_ctrl_o():
+    q = dict(GENERIC, subject=SUBJECT, prompt="Your feedback:",
+             context_display="📋 PROPOSED FITTING PLAN\nApproach: Fit the doublet.")
+    w, buf, stack = _widgets("\r")
+    with stack:
+        assert w.ask(q) == ""
+    out = buf.getvalue()
+    for needle in ("Proposed fitting plan — single spectrum", "Physical model", "2 Gaussians",
+                   "Fit the doublet", "Parameters:", "width · area", "1. Subtract baseline.",
+                   "Regimes", "low T", "figure: /tmp/s/results/fit.png", "Peak A splits",
+                   "Impact: big", "Candidate 2 — Gaussian", "Judge's pick", "Judge: fewer params",
+                   "⚠ seed near edge", "original", "user-guided", "Locked model",
+                   "applies to all 4 spectra", "console output: Ctrl+O shows it"):
+        assert needle in out, needle
+    assert "PROPOSED FITTING PLAN" not in out          # the console text is not shown twice
+    assert out.index("Locked model") < out.index("Your feedback:")
+
+
+def test_ctrl_o_on_a_subject_question_shows_the_console_text():
+    q = dict(GENERIC, subject=SUBJECT, context_display="📋 PROPOSED FITTING PLAN\nline two")
+    w, buf, stack = _widgets("\x0f\r")
+    with stack:
+        assert w.ask(q) == ""
+    out = buf.getvalue()
+    assert "PROPOSED FITTING PLAN" in out and "line two" in out
+
+
+def test_confirm_widget():
+    q = {"widget": "confirm", "prompt": "", "labels": {"confirm": "🔀 Launch parallel analysis",
+                                                       "cancel": "Cancel"},
+         "subject": {"title": "Launch a 2-way fan-out?", "blocks": [
+             {"type": "steps", "label": "Branches", "items": ["XRD", "Raman"]}]},
+         "preview_images": [], "code_files": [], "candidate_captions": {}}
+    w, buf, stack = _widgets("\x1b[B\r")            # down to confirm, Enter
+    with stack:
+        assert w.ask(q) == "y"
+    assert "Launch a 2-way fan-out?" in buf.getvalue() and "2. Raman" in buf.getvalue()
+    w, _, stack = _widgets("\r")                     # the default is cancel
+    with stack:
+        assert w.ask(q) == "no"

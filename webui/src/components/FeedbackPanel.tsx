@@ -1,13 +1,17 @@
 import { useState } from "react";
 import { api, type PresentedQuestion } from "../api";
 import { MarkdownBody } from "./MarkdownBody";
+import { SubjectBlocks } from "./SubjectBlocks";
 import { fill } from "../narration";
 import { VOCAB } from "../vocabulary";
 
-/** Renders the parked HITL question — the React twin of the Streamlit
- * feedback branch (app.py:1053-1327). The response contracts are identical:
- * bare digit / "" for candidate selectors, "y"/"no" for fan-out, "keep"/""
- * for keep-revert, free text or "" elsewhere. */
+/** Renders the parked HITL question: what is under review (the body) and
+ * the decision (the row pinned under it). The body is the gate's `subject`
+ * blocks when it declared them, else the captured console text and the
+ * preview sweep (the legacy path, the React twin of the Streamlit feedback
+ * branch). The response contracts are identical on both paths: bare digit /
+ * "" for candidate selectors, "y"/"no" for confirm, "keep"/"" for
+ * keep-revert, free text or "" elsewhere. */
 export function FeedbackPanel({
   sessionId,
   question,
@@ -33,7 +37,11 @@ export function FeedbackPanel({
   const hint = question.labels.accept
     ? fill(VOCAB.enter_accepts_hint, { accept: question.labels.accept })
     : "";
+  const isPicker =
+    question.widget === "bestofn" || question.widget === "plan_candidates";
+  const subject = question.subject;
 
+  // ── the body: what is under review ──────────────────────────
   const previews = question.preview_images.map((p) => {
     const base = p.split("/").pop() ?? p;
     return (
@@ -59,10 +67,6 @@ export function FeedbackPanel({
     </details>
   ));
 
-  const contextBox = question.context_display ? (
-    <div className="context-box">{question.context_display}</div>
-  ) : null;
-
   const notice = question.notice ? (
     <div className="feedback-notice">
       <strong>{question.notice.title}</strong>
@@ -74,12 +78,83 @@ export function FeedbackPanel({
     </div>
   ) : null;
 
+  const consoleText = question.context_display ? (
+    subject ? (
+      <details className="feedback-console">
+        <summary>{VOCAB.names.console_output}</summary>
+        <div className="context-box">{question.context_display}</div>
+      </details>
+    ) : (
+      <div className="context-box">{question.context_display}</div>
+    )
+  ) : null;
+
+  const fanout = question.widget === "fanout_confirm" ? question.fanout : null;
+  const body = subject ? (
+    <>
+      {subject.title && <h4>{subject.title}</h4>}
+      <SubjectBlocks
+        sessionId={sessionId}
+        blocks={subject.blocks}
+        choice={isPicker ? choice : undefined}
+        onChoose={isPicker ? setChoice : undefined}
+      />
+      {codeFiles}
+      {notice}
+      {consoleText}
+    </>
+  ) : fanout !== null ? (
+    <>
+      <h4>🔀 Launch parallel multi-dataset analysis?</h4>
+      {fanout?.verdict && (
+        <MarkdownBody text={`**Complementarity:** ${fanout.verdict}`} />
+      )}
+      {fanout?.join_axis && <MarkdownBody text={`**Join axis:** ${fanout.join_axis}`} />}
+      {fanout && fanout.branches.length > 0 && (
+        <MarkdownBody
+          text={
+            "**Branches** — run concurrently, each seeing the others as auxiliary:\n" +
+            fanout.branches.map((b) => `- ${b}`).join("\n")
+          }
+        />
+      )}
+      {fanout?.rationale && <MarkdownBody text={`**Why:** ${fanout.rationale}`} />}
+      <p className="caption">
+        Branches run autonomously — no per-branch approval pauses.
+      </p>
+    </>
+  ) : (
+    <>
+      {previews}
+      {codeFiles}
+      {consoleText}
+      {notice}
+      {isPicker && (
+        <>
+          <p style={{ marginTop: 0 }}>{question.labels.select}</p>
+          <div className="radio-list">
+            {(question.candidates ?? []).map((c) => (
+              <label key={c.idx}>
+                <input
+                  type="radio"
+                  name="candidate"
+                  checked={choice === c.idx}
+                  onChange={() => setChoice(c.idx)}
+                />
+                {c.label}
+              </label>
+            ))}
+          </div>
+        </>
+      )}
+    </>
+  );
+
+  // ── the decision ────────────────────────────────────────────
+  let decision;
   if (question.widget === "keep_revert") {
-    return (
-      <div className="feedback-panel">
-        {previews}
-        {contextBox}
-        {notice}
+    decision = (
+      <>
         <div className="feedback-actions">
           <button className="primary" onClick={() => respond("keep")} disabled={sent}>
             {question.labels.keep}
@@ -108,72 +183,24 @@ export function FeedbackPanel({
             </div>
           </div>
         )}
+      </>
+    );
+  } else if (question.widget === "fanout_confirm" || question.widget === "confirm") {
+    decision = (
+      <div className="feedback-actions">
+        <button onClick={() => respond("no")} disabled={sent}>
+          {question.labels.cancel}
+        </button>
+        <button className="primary" onClick={() => respond("y")} disabled={sent}>
+          {question.labels.confirm}
+        </button>
       </div>
     );
-  }
-
-  if (question.widget === "fanout_confirm") {
-    const f = question.fanout;
-    return (
-      <div className="feedback-panel">
-        <h4>🔀 Launch parallel multi-dataset analysis?</h4>
-        {f?.verdict && (
-          <MarkdownBody text={`**Complementarity:** ${f.verdict}`} />
-        )}
-        {f?.join_axis && <MarkdownBody text={`**Join axis:** ${f.join_axis}`} />}
-        {f && f.branches.length > 0 && (
-          <MarkdownBody
-            text={
-              "**Branches** — run concurrently, each seeing the others as auxiliary:\n" +
-              f.branches.map((b) => `- ${b}`).join("\n")
-            }
-          />
-        )}
-        {f?.rationale && <MarkdownBody text={`**Why:** ${f.rationale}`} />}
-        <p className="caption">
-          Branches run autonomously — no per-branch approval pauses.
-        </p>
-        <div className="feedback-actions">
-          <button onClick={() => respond("no")} disabled={sent}>
-            {question.labels.cancel}
-          </button>
-          <button className="primary" onClick={() => respond("y")} disabled={sent}>
-            {question.labels.confirm}
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  if (question.widget === "bestofn" || question.widget === "plan_candidates") {
-    const cands = question.candidates ?? [];
+  } else if (isPicker) {
     const pick = question.judge_pick;
-    return (
-      <div
-        className="feedback-panel"
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            respond("");
-          }
-        }}
-      >
-        {previews}
-        {contextBox}
-        <p style={{ marginTop: 0 }}>{question.labels.select}</p>
-        <div className="radio-list">
-          {cands.map((c) => (
-            <label key={c.idx}>
-              <input
-                type="radio"
-                name="candidate"
-                checked={choice === c.idx}
-                onChange={() => setChoice(c.idx)}
-              />
-              {c.label}
-            </label>
-          ))}
-        </div>
+    decision = (
+      <>
+        {subject && <p className="sb-label">{question.labels.select}</p>}
         <div className="feedback-actions">
           <button
             className="primary"
@@ -186,56 +213,68 @@ export function FeedbackPanel({
             className="success"
             disabled={sent}
             onClick={() => respond("")}
-            title={`${hint} — Candidate ${pick}`}
+            title={`${hint} — ${VOCAB.names.candidate} ${pick}`}
           >
             {question.labels.accept}
           </button>
           <span className="caption">{hint}</span>
         </div>
-      </div>
+      </>
+    );
+  } else {
+    // generic / dataset_description / code_review
+    decision = (
+      <>
+        <label className="field">
+          <span>{question.labels.input}</span>
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              // Enter sends: text is the feedback, empty accepts as-is.
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                respond(text.trim());
+              }
+            }}
+            rows={3}
+          />
+        </label>
+        <div className="feedback-actions">
+          <button
+            className="primary"
+            disabled={sent || !text.trim()}
+            onClick={() => respond(text.trim())}
+          >
+            {question.labels.submit}
+          </button>
+          <button className="primary" disabled={sent} onClick={() => respond("")} title={hint}>
+            {question.labels.accept}
+          </button>
+          {question.labels.revert_repair && (
+            <button disabled={sent} onClick={() => respond("revert")}>
+              {question.labels.revert_repair}
+            </button>
+          )}
+          <span className="caption">{hint}</span>
+        </div>
+      </>
     );
   }
 
-  // generic / dataset_description / code_review
   return (
-    <div className="feedback-panel">
-      {previews}
-      {codeFiles}
-      {contextBox}
-      {notice}
-      <label className="field">
-        <span>{question.labels.input}</span>
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            // Enter sends: text is the feedback, empty accepts as-is.
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              respond(text.trim());
-            }
-          }}
-          rows={3}
-        />
-      </label>
-      <div className="feedback-actions">
-        <button
-          className="primary"
-          disabled={sent || !text.trim()}
-          onClick={() => respond(text.trim())}
-        >
-          {question.labels.submit}
-        </button>
-        <button className="primary" disabled={sent} onClick={() => respond("")} title={hint}>
-          {question.labels.accept}
-        </button>
-        {question.labels.revert_repair && (
-          <button disabled={sent} onClick={() => respond("revert")}>
-            {question.labels.revert_repair}
-          </button>
-        )}
-        <span className="caption">{hint}</span>
-      </div>
+    <div
+      className="feedback-panel"
+      onKeyDown={(e) => {
+        // Enter on a picker accepts the judge's pick (the console's Enter).
+        if (isPicker && e.key === "Enter") {
+          e.preventDefault();
+          respond("");
+        }
+      }}
+    >
+      <div className="feedback-body">{body}</div>
+      <div className="feedback-decision">{decision}</div>
     </div>
   );
 }

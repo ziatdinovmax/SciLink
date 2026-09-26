@@ -28,6 +28,9 @@ from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 __all__ = [
     "FeedbackRequest",
+    "SUBJECT_BLOCKS",
+    "subject_block",
+    "make_subject",
     "FeedbackChannel",
     "ConsoleChannel",
     "QueueChannel",
@@ -48,6 +51,39 @@ def _next_id() -> str:
     return f"q_{int(time.time())}_{next(_counter):04d}"
 
 
+# ── the subject block vocabulary ─────────────────────────────────
+# What a question shows, as data the front-ends render. Fixed on purpose,
+# like the skill section vocabulary: a gate authors against these shapes
+# and both surfaces know what to do with each. Payload keys per type:
+#   text        markdown
+#   fields      items: [{label, value, unit?, flag? (ok|warn|bad)}]
+#   chips       label, items: [str]
+#   steps       label, items: [str]
+#   table       columns: [str], rows: [[cell, ...]], caption?
+#   figure      path (absolute at the gate; presented relative to the
+#               session), caption?
+#   claims      items: [{claim, impact?, question?, keywords?: [str]}]
+#   candidates  items: [{idx, name, metric?, value?, approved?, figure?,
+#               judge_comment?}], pick, reasoning?, caveats?: [str]
+#   compare     left: {label, blocks}, right: {label, blocks}
+#   notice      title, lines: [str], tone? (info|warn)
+SUBJECT_BLOCKS = ("text", "fields", "chips", "steps", "table", "figure",
+                  "claims", "candidates", "compare", "notice")
+
+
+def subject_block(type_: str, **payload: Any) -> Dict[str, Any]:
+    """One subject block; ``type_`` must be in ``SUBJECT_BLOCKS``."""
+    if type_ not in SUBJECT_BLOCKS:
+        raise ValueError(f"unknown subject block {type_!r}; one of "
+                         f"{', '.join(SUBJECT_BLOCKS)}")
+    return {"type": type_, **payload}
+
+
+def make_subject(title: str, blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """A question's subject: a title and its blocks (empty blocks dropped)."""
+    return {"title": title, "blocks": [b for b in blocks if b]}
+
+
 @dataclass
 class FeedbackRequest:
     """A structured human-feedback question.
@@ -59,6 +95,14 @@ class FeedbackRequest:
     prompt that is the empty string (press Enter). ``origin`` carries
     routing metadata (agent label, pipeline stage, fan-out branch thread
     id) and must stay JSON-serializable.
+
+    ``subject`` is WHAT is under review, as data: ``{"title": str,
+    "blocks": [block, ...]}`` with each block one of ``SUBJECT_BLOCKS``
+    (see ``subject_block``). A gate that sets it still prints what it
+    always printed — the console, the verbose log and the record — but the
+    web UI and the terminal shell render the blocks instead of the captured
+    console text, and the decision widget comes from ``kind``. Gates
+    without a subject are presented from their printed text as before.
     """
 
     prompt: str
@@ -67,6 +111,7 @@ class FeedbackRequest:
     default: str = ""
     context: str = ""
     origin: Dict[str, Any] = field(default_factory=dict)
+    subject: Optional[Dict[str, Any]] = None
     id: str = field(default_factory=_next_id)
     created_at: float = field(default_factory=time.time)
 
@@ -229,7 +274,8 @@ def _write_pending(path, req: FeedbackRequest) -> None:
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump({"id": req.id, "kind": req.kind, "prompt": req.prompt,
-                       "origin": req.origin, "asked_at": req.created_at},
+                       "origin": req.origin, "subject": req.subject,
+                       "asked_at": req.created_at},
                       f, ensure_ascii=False, default=str)
     except Exception:  # noqa: BLE001
         pass
@@ -250,6 +296,7 @@ def request_human_feedback(
     default: str = "",
     context: str = "",
     origin: Optional[Dict[str, Any]] = None,
+    subject: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Ask the human a question through the active feedback channel.
 
@@ -266,6 +313,7 @@ def request_human_feedback(
         default=default,
         context=context,
         origin=origin or {},
+        subject=subject,
     )
     log = get_thread_feedback_log()
     pending = None
@@ -275,7 +323,8 @@ def request_human_feedback(
         _append_record(log, {"id": req.id, "event": "asked",
                              "kind": req.kind, "prompt": req.prompt,
                              "options": req.options, "default": req.default,
-                             "origin": req.origin, "t": req.created_at})
+                             "origin": req.origin, "subject": req.subject,
+                             "t": req.created_at})
         pending = _Path(log).parent / "pending_question.json"
         _write_pending(pending, req)
     try:

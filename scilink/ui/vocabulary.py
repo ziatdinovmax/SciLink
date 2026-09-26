@@ -112,6 +112,7 @@ NAMES = {
     "turn": "Turn",
     "verbose_section": "Verbose output",
     "verbose_toggle": "Show verbose output",
+    "console_output": "Console output",
     "stop": "Stop agent",
     "start_session": "Start Session",
     "resume_session": "Resume Session",
@@ -127,6 +128,70 @@ CONSENT_TEXT = ("I understand that the agent will execute generated "
 # How both surfaces tell the user that the empty answer accepts as-is:
 # ``{accept}`` is the presenter's accept label ("Approve plan", ...).
 ENTER_ACCEPTS_HINT = "Enter = {accept}"
+
+# ── Questions ────────────────────────────────────────────────────
+# A question that carries a ``subject`` (scilink.hitl) is presented from its
+# ``kind``: the widget that makes the decision, and the words on it. Keyed
+# by kind, with "<kind>/<origin.stage>" overriding for a gate whose words
+# differ. The reply contracts are the gates' own and do not change here:
+# free text or "" (accept) on the text widgets, "keep" / "" on keep_revert,
+# a candidate number or "" (the judge's pick) on the pickers, "y" / "no" on
+# confirm.
+QUESTION_WIDGETS = {
+    "free_text": "generic",
+    "review_plan": "generic",
+    "approve_or_revise": "generic",
+    "review_fit": "generic",
+    "review_result": "generic",
+    "review_metrics": "generic",
+    "code_review": "code_review",
+    "dataset_description": "dataset_description",
+    "keep_or_revert": "keep_revert",
+    "bestofn_select": "bestofn",
+    "plan_candidate_select": "plan_candidates",
+    "consensus_select": "bestofn",
+    "confirm": "confirm",
+}
+
+QUESTION_LABELS = {
+    "default": {"input": "Your feedback (optional):",
+                "submit": "Submit feedback", "accept": "Accept as-is"},
+    "review_plan": {"input": "Your plan feedback (optional):",
+                    "submit": "Request changes", "accept": "Approve plan"},
+    "approve_or_revise": {"input": "Your plan feedback (optional):",
+                          "submit": "Request changes", "accept": "Approve plan"},
+    "review_fit": {"input": "Your fit feedback (optional):",
+                   "submit": "Request changes", "accept": "Accept fit"},
+    "review_result": {"input": "Your feedback on the result (optional):",
+                      "submit": "Request changes", "accept": "Accept result"},
+    "review_metrics": {"input": "Your extraction feedback (optional):",
+                       "submit": "Request changes", "accept": "Approve extraction"},
+    "code_review": {"input": "Your code feedback (optional):",
+                    "submit": "Request changes", "accept": "Approve code"},
+    "dataset_description": {"input": "Describe your data (optional):",
+                            "submit": "Submit description",
+                            "accept": "Skip (let agent guess)"},
+    "keep_or_revert": {"keep": "Keep user-guided fit",
+                       "revert": "Revert to original fit"},
+    "keep_or_revert/plan_reopen": {"keep": "Adopt the revision",
+                                   "revert": "Keep my approved plan",
+                                   "input": "Adopt it with changes (optional):",
+                                   "submit": "Adopt with changes"},
+    "bestofn_select": {"select": "Select the candidate to lock:",
+                       "use": "Use selected",
+                       "accept": "Accept judge's pick (Candidate {pick})"},
+    "plan_candidate_select": {"select": "Select the plan candidate to proceed with:",
+                              "use": "Use selected plan",
+                              "accept": "Accept judge's pick (Candidate {pick})"},
+    "consensus_select": {"select": "Select the model to apply to every re-fitted unit:",
+                         "use": "Use selected",
+                         "accept": "Accept the agent's pick (Candidate {pick})"},
+    "confirm": {"confirm": "Confirm", "cancel": "Cancel"},
+    "confirm/fanout_confirm": {"confirm": "🔀 Launch parallel analysis",
+                               "cancel": "Cancel"},
+}
+# The one-click reply that restores an auto-corrected plan as authored.
+REVERT_REPAIR_LABEL = "Revert auto-correction"
 
 # Meta → specialist handoff banners (line prefixes in the narration).
 HANDOFF_PREFIXES = [
@@ -194,6 +259,21 @@ def session_prefixes(key: str) -> list:
     return [m["session_prefix"], *m["legacy_prefixes"]]
 
 
+def question_widget(kind: str) -> str:
+    """The decision widget for a question kind (unknown kinds: generic)."""
+    return QUESTION_WIDGETS.get(kind, "generic")
+
+
+def question_labels(kind: str, stage: str = "") -> dict:
+    """The words on a question's widget: the kind's set, overridden by the
+    gate's own ("<kind>/<stage>") when it has one; a kind without a set
+    gets the default text-widget words."""
+    labels = dict(QUESTION_LABELS.get(kind) or QUESTION_LABELS["default"])
+    if stage:
+        labels.update(QUESTION_LABELS.get(f"{kind}/{stage}") or {})
+    return labels
+
+
 def as_json() -> dict:
     """Everything the frontend needs, JSON-shaped (deep-copied)."""
     return copy.deepcopy({
@@ -204,6 +284,9 @@ def as_json() -> dict:
         "names": NAMES,
         "consent_text": CONSENT_TEXT,
         "enter_accepts_hint": ENTER_ACCEPTS_HINT,
+        "question_widgets": QUESTION_WIDGETS,
+        "question_labels": QUESTION_LABELS,
+        "revert_repair_label": REVERT_REPAIR_LABEL,
         "thought_mark": THOUGHT_MARK,
         "handoff_prefixes": HANDOFF_PREFIXES,
         "activity_labels": ACTIVITY_LABELS,

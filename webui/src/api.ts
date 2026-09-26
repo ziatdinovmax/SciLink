@@ -93,6 +93,64 @@ export interface ChatMessage {
   verbose?: string;
 }
 
+/** What a question is about, as blocks (the Python vocabulary is
+ * `scilink.hitl.SUBJECT_BLOCKS`; the shell renders the same shapes). */
+export type SubjectBlock =
+  | { type: "text"; markdown: string }
+  | {
+      type: "fields";
+      items: {
+        label: string;
+        value: string | number | null;
+        unit?: string;
+        flag?: "ok" | "warn" | "bad";
+      }[];
+    }
+  | { type: "chips"; label?: string; items: string[] }
+  | { type: "steps"; label?: string; items: string[] }
+  | {
+      type: "table";
+      columns: string[];
+      rows: (string | number | null)[][];
+      caption?: string;
+    }
+  | { type: "figure"; path: string | null; file?: string; caption?: string }
+  | {
+      type: "claims";
+      items: {
+        claim: string;
+        impact?: string;
+        question?: string;
+        keywords?: string[];
+      }[];
+    }
+  | {
+      type: "candidates";
+      items: {
+        idx: number;
+        name?: string;
+        metric?: string;
+        value?: string | number;
+        approved?: boolean;
+        figure?: string | null;
+        judge_comment?: string;
+      }[];
+      pick?: number;
+      reasoning?: string;
+      caveats?: string[];
+    }
+  | {
+      type: "compare";
+      left: { label: string; blocks: SubjectBlock[] };
+      right: { label: string; blocks: SubjectBlock[] };
+    }
+  | { type: "notice"; title: string; lines: string[]; tone?: "info" | "warn" };
+
+export interface QuestionSubject {
+  title: string;
+  blocks: SubjectBlock[];
+}
+
 export interface PresentedQuestion {
   request_id: string;
   kind: string;
@@ -103,7 +161,8 @@ export interface PresentedQuestion {
     | "keep_revert"
     | "bestofn"
     | "plan_candidates"
-    | "fanout_confirm";
+    | "fanout_confirm"
+    | "confirm";
   labels: Record<string, string>;
   prompt: string;
   context_display: string;
@@ -121,6 +180,9 @@ export interface PresentedQuestion {
   /** What the decision is about: the auto-correction a revert would undo,
    * or why an approved plan is being reopened. */
   notice?: { title: string; lines: string[] };
+  /** Present when the gate declared what is under review; the panel then
+   * renders these blocks and keeps `context_display` behind a disclosure. */
+  subject?: QuestionSubject;
   default: string;
 }
 

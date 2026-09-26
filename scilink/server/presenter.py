@@ -1,10 +1,18 @@
 """Convert a parked ``hitl.FeedbackRequest`` into a structured payload the
-React frontend renders without any prompt sniffing of its own.
+React frontend and the terminal shell render without any prompt sniffing of
+their own.
 
-The classifiers and parsers are verbatim ports of the Streamlit widget
-chooser (scilink/ui/app.py:1053-1327 and the module-level parse helpers).
-They are regex-over-captured-stdout by necessity; any parse miss degrades to
-``widget: "generic"`` exactly as the Streamlit UI falls back to its text box.
+Two paths. A request that carries a ``subject`` (what is under review, as
+blocks — ``scilink.hitl.SUBJECT_BLOCKS``) is presented from that and from
+its ``kind`` (the widget and its words, ``vocabulary.QUESTION_WIDGETS`` /
+``QUESTION_LABELS``); the captured console text still travels as
+``context_display`` for a "console output" disclosure. A request without one
+is presented from the captured console text: the classifiers and parsers
+below are verbatim ports of the Streamlit widget chooser
+(scilink/ui/app.py:1053-1327 and the module-level parse helpers), regex over
+captured stdout by necessity; any parse miss degrades to ``widget:
+"generic"`` exactly as the Streamlit UI falls back to its text box. Gates
+move from the second path to the first one at a time.
 
 Widget vocabulary (the ``widget`` field):
   generic | dataset_description | code_review | keep_revert | bestofn |
@@ -16,12 +24,19 @@ distinct widget names anyway so the frontend can attach extras (code files).
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from scilink.hitl import SUBJECT_BLOCKS
+from scilink.ui import vocabulary as V
+
 _IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg")
 _NOTICE_LINE_CHARS = 320      # one change, as shown in the gate's callout
+_CANDIDATE_WIDGETS = ("bestofn", "plan_candidates")
+
+logger = logging.getLogger(__name__)
 
 
 # ── parsers (ported from scilink/ui/app.py) ──────────────────────
@@ -172,14 +187,152 @@ def find_code_review_files(session_dir: str) -> List[Tuple[str, str]]:
 
 # ── the presenter ────────────────────────────────────────────────
 
+def _relpath(path: str, session_dir: str) -> Optional[str]:
+    """``path`` relative to the session dir (what ``/files`` serves), or
+    None when it lies outside it."""
+    try:
+        return str(Path(path).resolve().relative_to(Path(session_dir).resolve()))
+    except (ValueError, OSError):
+        return None
+
+
 def _relpaths(paths: List[str], session_dir: str) -> List[str]:
     out = []
     for p in paths:
-        try:
-            out.append(str(Path(p).resolve().relative_to(Path(session_dir).resolve())))
-        except ValueError:
-            continue
+        rel = _relpath(p, session_dir)
+        if rel is not None:
+            out.append(rel)
     return out
+
+
+def present_subject(subject: Dict[str, Any], session_dir: str) -> Dict[str, Any]:
+    """The subject as the front-ends receive it: blocks of an unknown type
+    are dropped (logged, never fatal — the console text is still there),
+    and every figure gets ``path`` relative to the session dir for the
+    ``/files`` endpoint beside ``file``, the absolute path the shell
+    prints (``path`` is None for a figure outside the session)."""
+    def _figure(path: Any) -> Tuple[Optional[str], Optional[str]]:
+        if not path:
+            return None, None
+        return _relpath(str(path), session_dir), str(path)
+
+    def _blocks(blocks: Any) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for block in blocks or []:
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if kind not in SUBJECT_BLOCKS:
+                logger.warning("subject block of unknown type %r dropped", kind)
+                continue
+            b = dict(block)
+            if kind == "figure":
+                b["path"], b["file"] = _figure(b.get("path"))
+            elif kind == "candidates":
+                items = []
+                for c in b.get("items") or []:
+                    c = dict(c)
+                    if c.get("figure"):
+                        c["figure"], c["figure_file"] = _figure(c["figure"])
+                    items.append(c)
+                b["items"] = items
+            elif kind == "compare":
+                for side in ("left", "right"):
+                    part = dict(b.get(side) or {})
+                    part["blocks"] = _blocks(part.get("blocks"))
+                    b[side] = part
+            out.append(b)
+        return out
+
+    return {"title": str(subject.get("title") or ""),
+            "blocks": _blocks(subject.get("blocks"))}
+
+
+def _candidate_rows(block: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The picker rows the shell and the legacy web widget read
+    (``candidates`` / ``judge_pick``), derived from a candidates block."""
+    rows = []
+    for c in block.get("items") or []:
+        idx = c.get("idx")
+        parts = [f"{V.NAMES['candidate']} {idx}"]
+        if c.get("name"):
+            parts.append(str(c["name"]))
+        if c.get("metric") is not None and c.get("value") is not None:
+            parts.append(f"{c['metric']}={c['value']}")
+        if c.get("approved") is not None:
+            parts.append("✓ approved" if c["approved"] else "✗ below gate")
+        rows.append({"idx": idx, "label": " — ".join(parts[:2]) + (
+            " · " + " · ".join(parts[2:]) if len(parts) > 2 else "")})
+    return rows
+
+
+def _notice(hreq) -> Optional[Dict[str, Any]]:
+    """What the decision is ABOUT, beside the buttons that make it: the
+    change a revert would undo, or why an approved plan is being reopened.
+    Read from the question, not the printed text: a real plan's caveats
+    push the repair notice far outside the context tail."""
+    if hreq.origin.get("stage") == "plan_review" and hreq.origin.get("auto_repair"):
+        changes = [str(c) for c in hreq.origin["auto_repair"]]
+        n = len(changes)
+        return {
+            "title": ("Auto-corrected before review"
+                      + (f" ({n} changes)" if n > 1 else "")),
+            # A note can quote a whole step. The callout is a reminder beside
+            # the button; the full text is in the review above and the report.
+            "lines": [c if len(c) <= _NOTICE_LINE_CHARS
+                      else c[:_NOTICE_LINE_CHARS].rstrip() + " … (full text above)"
+                      for c in changes]}
+    if hreq.origin.get("stage") == "plan_reopen":
+        return {"title": "The agent proposes to revise a plan you approved",
+                "lines": [f"Reason given: {hreq.origin.get('reason') or 'none'}"]}
+    return None
+
+
+def _present_from_subject(hreq, ctx: str, session_dir: str,
+                          code_files: List[Dict[str, str]]) -> Dict[str, Any]:
+    """The subject path: blocks from the gate, widget and words from the
+    kind. No preview sweep — a gate with a subject declares its figures."""
+    stage = str(hreq.origin.get("stage") or "")
+    widget = V.question_widget(hreq.kind)
+    labels = V.question_labels(hreq.kind, stage)
+    subject = present_subject(hreq.subject, session_dir)
+    payload: Dict[str, Any] = {
+        "request_id": hreq.id,
+        "kind": hreq.kind,
+        "widget": widget,
+        "labels": labels,
+        "prompt": hreq.prompt or "",
+        "context_display": clean_context(ctx),
+        "preview_images": [],
+        "candidate_captions": {},
+        "code_files": code_files,
+        "origin": dict(hreq.origin),
+        "default": hreq.default,
+        "subject": subject,
+    }
+    if widget in _CANDIDATE_WIDGETS:
+        block = next((b for b in subject["blocks"] if b["type"] == "candidates"), None)
+        rows = _candidate_rows(block) if block else []
+        if rows:
+            pick = block.get("pick")
+            if pick not in [r["idx"] for r in rows]:
+                pick = rows[0]["idx"]
+            payload["candidates"] = rows
+            payload["judge_pick"] = pick
+            labels["accept"] = labels["accept"].format(pick=pick)
+        else:
+            # A picker with nothing to pick from is unusable; the text
+            # widget still takes the number the gate's reply contract reads.
+            logger.warning("%s question without a candidates block: presented "
+                           "as text", hreq.kind)
+            payload["widget"] = "generic"
+            payload["labels"] = V.question_labels("free_text")
+    if hreq.origin.get("auto_repair"):
+        labels["revert_repair"] = V.REVERT_REPAIR_LABEL
+    notice = _notice(hreq)
+    if notice:
+        payload["notice"] = notice
+    return payload
 
 
 def present_question(hreq, context: str, session_dir: str) -> Dict[str, Any]:
@@ -207,6 +360,9 @@ def present_question(hreq, context: str, session_dir: str) -> Dict[str, Any]:
         code_files = [{"name": n, "content": c}
                       for n, c in find_code_review_files(session_dir)]
 
+    if hreq.subject:
+        return _present_from_subject(hreq, ctx, session_dir, code_files)
+
     is_fanout = (hreq.origin.get("stage") == "fanout_confirm"
                  or "parallel multi-dataset analysis" in ctx.lower())
     is_keep_revert = (
@@ -215,35 +371,27 @@ def present_question(hreq, context: str, session_dir: str) -> Dict[str, Any]:
     bestofn = parse_bestofn_review(ctx, prompt)
     plan_cands = parse_plan_candidate_review(ctx, prompt)
 
-    # Label sets — port of app.py:1165-1185.
+    # Label sets — port of app.py:1165-1185, words from the vocabulary.
     if (hreq.kind == "dataset_description"
             or "Context" in prompt or "MISSING METADATA" in ctx_tail):
         widget = "dataset_description"
-        labels = {"input": "Describe your data (optional):",
-                  "submit": "Submit description",
-                  "accept": "Skip (let agent guess)"}
+        labels = V.question_labels("dataset_description")
     elif "CODE REVIEW" in ctx_tail or "Review files in" in ctx_tail:
         widget = "code_review"
-        labels = {"input": "Your code feedback (optional):",
-                  "submit": "Request changes", "accept": "Approve code"}
+        labels = V.question_labels("code_review")
     elif "REQUESTING FEEDBACK" in ctx_tail or "Review the plan" in ctx_tail:
         widget = "generic"
-        labels = {"input": "Your plan feedback (optional):",
-                  "submit": "Request changes", "accept": "Approve plan"}
+        labels = V.question_labels("review_plan")
         if hreq.origin.get("auto_repair"):
             # The plan on screen was repaired automatically; one click
-            # restores it as authored (the console reply is "revert"). Read
-            # from the question, not the printed text: a real plan's caveats
-            # push the repair notice far outside the context tail.
-            labels["revert_repair"] = "Revert auto-correction"
+            # restores it as authored (the console reply is "revert").
+            labels["revert_repair"] = V.REVERT_REPAIR_LABEL
     elif hreq.kind == "review_metrics" or "SCALARIZER REVIEW" in ctx_tail:
         widget = "generic"
-        labels = {"input": "Your extraction feedback (optional):",
-                  "submit": "Request changes", "accept": "Approve extraction"}
+        labels = V.question_labels("review_metrics")
     else:
         widget = "generic"
-        labels = {"input": "Your feedback (optional):",
-                  "submit": "Submit feedback", "accept": "Accept as-is"}
+        labels = V.question_labels("free_text")
 
     # Specialized surfaces override the labeled-generic classification, in
     # the same precedence order the Streamlit render branch uses.
@@ -260,59 +408,34 @@ def present_question(hreq, context: str, session_dir: str) -> Dict[str, Any]:
         "origin": dict(hreq.origin),
         "default": hreq.default,
     }
-    # What the decision is ABOUT, beside the buttons that make it: the change
-    # a revert would undo, or why an approved plan is being reopened.
-    if hreq.origin.get("stage") == "plan_review" and hreq.origin.get("auto_repair"):
-        changes = [str(c) for c in hreq.origin["auto_repair"]]
-        n = len(changes)
-        payload["notice"] = {
-            "title": ("Auto-corrected before review"
-                      + (f" ({n} changes)" if n > 1 else "")),
-            # A note can quote a whole step. The callout is a reminder beside
-            # the button; the full text is in the review above and the report.
-            "lines": [c if len(c) <= _NOTICE_LINE_CHARS
-                      else c[:_NOTICE_LINE_CHARS].rstrip() + " … (full text above)"
-                      for c in changes]}
-    elif hreq.origin.get("stage") == "plan_reopen":
-        payload["notice"] = {
-            "title": "The agent proposes to revise a plan you approved",
-            "lines": [f"Reason given: {hreq.origin.get('reason') or 'none'}"]}
+    notice = _notice(hreq)
+    if notice:
+        payload["notice"] = notice
     if is_keep_revert:
         payload["widget"] = "keep_revert"
-        payload["labels"] = {"keep": "Keep user-guided fit",
-                             "revert": "Revert to original fit"}
-        if hreq.origin.get("stage") == "plan_reopen":
-            # Same two-way widget, the plan gate's words: the primary reply
-            # ("keep") adopts the agent's revision, the empty one keeps the
-            # plan the human already approved.
-            # "input"/"submit" add the third reply the console offers: adopt
-            # the revision with changes (any free text).
-            payload["labels"] = {"keep": "Adopt the revision",
-                                 "revert": "Keep my approved plan",
-                                 "input": "Adopt it with changes (optional):",
-                                 "submit": "Adopt with changes"}
+        # The reopen gate: same two-way widget, the plan gate's words — the
+        # primary reply ("keep") adopts the agent's revision, the empty one
+        # keeps the plan the human already approved; "input"/"submit" add
+        # the third reply the console offers (adopt with changes, any text).
+        payload["labels"] = V.question_labels(
+            "keep_or_revert", str(hreq.origin.get("stage") or ""))
     elif is_fanout:
         payload["widget"] = "fanout_confirm"
         payload["fanout"] = parse_fanout_confirm(ctx)
         # Response contract of _confirm_fanout: "y" launches, "no" cancels.
-        payload["labels"] = {"confirm": "🔀 Launch parallel analysis",
-                             "cancel": "Cancel"}
+        payload["labels"] = V.question_labels("confirm", "fanout_confirm")
     elif bestofn:
         cands, pick = bestofn
         payload["widget"] = "bestofn"
         payload["candidates"] = cands
         payload["judge_pick"] = pick
-        payload["labels"] = {
-            "select": "Select the candidate to lock:",
-            "use": "Use selected",
-            "accept": f"Accept judge's pick (Candidate {pick})"}
+        payload["labels"] = V.question_labels("bestofn_select")
+        payload["labels"]["accept"] = payload["labels"]["accept"].format(pick=pick)
     elif plan_cands:
         cands, pick = plan_cands
         payload["widget"] = "plan_candidates"
         payload["candidates"] = cands
         payload["judge_pick"] = pick
-        payload["labels"] = {
-            "select": "Select the plan candidate to proceed with:",
-            "use": "Use selected plan",
-            "accept": f"Accept judge's pick (Candidate {pick})"}
+        payload["labels"] = V.question_labels("plan_candidate_select")
+        payload["labels"]["accept"] = payload["labels"]["accept"].format(pick=pick)
     return payload

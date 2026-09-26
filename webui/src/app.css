@@ -358,8 +358,16 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
   border-radius: 10px;
   padding: 14px 16px;
   background: var(--bg-panel);
+  /* what is under review scrolls; the decision stays in view */
+  display: flex; flex-direction: column;
+  max-height: 72vh;
 }
+.feedback-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+.feedback-decision { flex: none; padding-top: 6px; }
 .feedback-panel h4 { margin: 0 0 10px; color: var(--accent); }
+.feedback-console { margin: 10px 0 4px; }
+.feedback-console > summary { cursor: pointer; color: var(--text-dim); font-size: 13px; }
+.feedback-console .context-box { margin-top: 8px; max-height: 260px; }
 .context-box {
   background: var(--code-bg); border: 1px solid var(--code-border);
   border-radius: 6px; padding: 12px 16px;
@@ -375,6 +383,62 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .radio-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
 .radio-list label { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 .radio-list input { width: auto; }
+
+/* ── subject blocks (what a question is about) ──────────────── */
+.sb-label { display: block; font-weight: 600; font-size: 13px; margin: 8px 0 4px; }
+.sb-text { margin: 4px 0 8px; }
+.sb-text > :first-child { margin-top: 0; }
+.sb-fields {
+  display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px;
+  margin: 6px 0 10px; font-size: 14px;
+}
+.sb-field { display: contents; }
+.sb-fields dt { font-weight: 600; color: var(--text-dim); white-space: nowrap; }
+.sb-fields dd { margin: 0; }
+.flag-ok { color: var(--green-accept); }
+.flag-warn { color: #d97706; }
+.flag-bad { color: var(--danger); }
+.sb-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0 10px; }
+.sb-chips .sb-label { margin: 0 4px 0 0; }
+.sb-chip {
+  display: inline-block; font-size: 12px; line-height: 18px; padding: 0 8px;
+  border-radius: 9px; border: 1px solid var(--border-strong); white-space: nowrap;
+}
+.sb-chip.flag-ok { border-color: var(--green-accept); }
+.sb-chip.flag-bad { border-color: var(--danger); }
+.sb-chip.sb-pick { background: var(--primary); border-color: var(--primary); color: #fff; }
+.sb-steps ol { margin: 4px 0 10px; padding-left: 22px; }
+.sb-steps li { margin: 2px 0; }
+.sb-table-wrap { overflow-x: auto; margin: 6px 0 10px; }
+.sb-table { border-collapse: collapse; font-size: 13.5px; width: 100%; }
+.sb-table caption { caption-side: top; text-align: left; font-size: 12px; color: var(--text-dim); padding: 0 0 4px; }
+.sb-table th, .sb-table td { border-bottom: 1px solid var(--border-strong); padding: 4px 8px; text-align: left; vertical-align: top; }
+.sb-table th { font-weight: 600; color: var(--text-dim); }
+.sb-figure { margin: 6px 0 10px; }
+.sb-figure img.preview { max-width: 100%; border-radius: 6px; }
+.sb-claims { margin: 4px 0 10px; padding-left: 22px; }
+.sb-claims summary { cursor: pointer; font-weight: 500; }
+.sb-claim-body { margin: 4px 0 6px 2px; font-size: 13.5px; }
+.sb-claim-body p { margin: 4px 0; }
+.sb-candidates { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 10px; }
+.sb-candidate {
+  border: 1px solid var(--border-strong); border-radius: 8px; padding: 8px 12px;
+  background: var(--bg-card);
+}
+.sb-candidate.selectable { cursor: pointer; }
+.sb-candidate.selectable:hover { border-color: var(--focus); }
+.sb-candidate.selected { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary) inset; }
+.sb-candidate-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.sb-candidate-head input { width: auto; margin: 0; }
+.sb-candidate-name { color: var(--text-dim); }
+.sb-candidate img.preview { max-width: 100%; border-radius: 6px; margin-top: 8px; }
+.sb-reasoning { margin: 4px 0; font-size: 13.5px; }
+.sb-caveats { margin: 4px 0; padding-left: 20px; color: #d97706; font-size: 13.5px; }
+.sb-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 6px 0 10px; }
+.sb-compare-side { border: 1px solid var(--border-strong); border-radius: 8px; padding: 8px 12px; min-width: 0; }
+.sb-compare-side > .sb-label { margin-top: 0; }
+@media (max-width: 720px) { .sb-compare { grid-template-columns: 1fr; } }
+.feedback-notice.warn { border-left-color: #d97706; background: rgba(217, 119, 6, 0.12); }
 
 /* ── chat input ─────────────────────────────────────────────── */
 

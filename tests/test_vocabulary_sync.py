@@ -36,3 +36,29 @@ def test_helpers():
     assert vocabulary.stop_message("plan") == "Planning stopped by user."
     assert vocabulary.stop_message("nonsense") == "Analysis stopped by user."
     assert vocabulary.autonomy_options("meta") == ["autopilot", "autonomous"]
+
+
+def test_every_gate_kind_has_a_widget():
+    """Every ``kind=`` a gate passes to request_human_feedback is presented
+    by the kind table once it carries a subject — a new kind must be added
+    there, not sniffed from its prompt."""
+    import re
+    kinds = set()
+    for path in (ROOT / "scilink").rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        for m in re.finditer(r"request_human_feedback\((?:.|\n){0,600}?\)", text):
+            kinds.update(re.findall(r'kind="([a-z_]+)"', m.group(0)))
+    assert kinds, "no gates found"
+    missing = kinds - set(vocabulary.QUESTION_WIDGETS)
+    assert not missing, f"gate kinds without a widget: {sorted(missing)}"
+
+
+def test_question_labels_layering():
+    base = vocabulary.question_labels("keep_or_revert")
+    assert base["keep"] == "Keep user-guided fit"
+    reopen = vocabulary.question_labels("keep_or_revert", "plan_reopen")
+    assert reopen["keep"] == "Adopt the revision" and reopen["submit"] == "Adopt with changes"
+    assert vocabulary.question_labels("nonsense") == vocabulary.QUESTION_LABELS["default"]
+    assert vocabulary.question_widget("nonsense") == "generic"
+    # the pickers' accept label names the pick once the presenter fills it
+    assert "{pick}" in vocabulary.question_labels("bestofn_select")["accept"]

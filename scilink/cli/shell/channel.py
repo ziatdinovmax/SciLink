@@ -15,8 +15,10 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.syntax import Syntax
+from rich.table import Table
 from prompt_toolkit.application import Application, run_in_terminal
 from prompt_toolkit.layout import Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
@@ -166,17 +168,128 @@ class Widgets:
 
     _CONTEXT_MAX_LINES = 120
 
+    # ── the subject blocks (scilink.hitl.SUBJECT_BLOCKS) ─────────
+
+    _FLAG_STYLE = {"ok": "green", "warn": "yellow", "bad": "red"}
+
+    def _render_blocks(self, blocks) -> list:
+        """rich renderables for a question's subject blocks — the shell's
+        twin of the web ``SubjectBlocks`` component, one per block type."""
+        out = []
+        for b in blocks or []:
+            kind = b.get("type")
+            if kind == "text":
+                out.append(Markdown(str(b.get("markdown") or "")))
+            elif kind == "fields":
+                grid = Table.grid(padding=(0, 2))
+                grid.add_column(style="bold", no_wrap=True)
+                grid.add_column()
+                for item in b.get("items") or []:
+                    value = "" if item.get("value") is None else str(item["value"])
+                    if item.get("unit"):
+                        value = f"{value} {item['unit']}"
+                    grid.add_row(str(item.get("label") or ""),
+                                 Text(value, style=self._FLAG_STYLE.get(item.get("flag"), "")))
+                out.append(grid)
+            elif kind == "chips":
+                items = " · ".join(str(x) for x in b.get("items") or [])
+                label = f"[bold]{b['label']}:[/] " if b.get("label") else ""
+                out.append(Text.from_markup(f"{label}{items}"))
+            elif kind == "steps":
+                lines = []
+                if b.get("label"):
+                    lines.append(Text(str(b["label"]), style="bold"))
+                for n, step in enumerate(b.get("items") or [], 1):
+                    lines.append(Text(f"  {n}. {step}"))
+                out.append(Group(*lines))
+            elif kind == "table":
+                table = Table(title=b.get("caption") or None, title_style="dim",
+                              show_edge=False, pad_edge=False, box=None,
+                              header_style="bold")
+                for col in b.get("columns") or []:
+                    table.add_column(str(col))
+                for row in b.get("rows") or []:
+                    table.add_row(*("" if c is None else str(c) for c in row))
+                out.append(table)
+            elif kind == "figure":
+                where = b.get("file") or b.get("path") or ""
+                cap = f" ({b['caption']})" if b.get("caption") else ""
+                out.append(Text.from_markup(f"  [dim]figure:[/] {where}{cap}"))
+            elif kind == "claims":
+                lines = []
+                for n, c in enumerate(b.get("items") or [], 1):
+                    lines.append(Text(f"{n}. {c.get('claim', '')}", style="bold"))
+                    for key, name in (("impact", "Impact"), ("question", "Question")):
+                        if c.get(key):
+                            lines.append(Text(f"     {name}: {c[key]}", style="dim"))
+                    if c.get("keywords"):
+                        lines.append(Text("     Keywords: " + ", ".join(map(str, c["keywords"])),
+                                          style="dim"))
+                out.append(Group(*lines))
+            elif kind == "candidates":
+                lines = []
+                pick = b.get("pick")
+                for c in b.get("items") or []:
+                    head = f"{V.NAMES['candidate']} {c.get('idx')}"
+                    if c.get("name"):
+                        head += f" — {c['name']}"
+                    bits = []
+                    if c.get("metric") is not None and c.get("value") is not None:
+                        bits.append(f"{c['metric']}={c['value']}")
+                    if c.get("approved") is not None:
+                        bits.append("✓ approved" if c["approved"] else "✗ below gate")
+                    mark = f"  ← {V.NAMES['judge_pick']}" if c.get("idx") == pick else ""
+                    lines.append(Text.from_markup(
+                        f"[bold]{head}[/]" + (f"  {' · '.join(bits)}" if bits else "")
+                        + f"[green]{mark}[/]"))
+                    if c.get("judge_comment"):
+                        lines.append(Text(f"     {c['judge_comment']}", style="dim"))
+                    if c.get("figure_file") or c.get("figure"):
+                        lines.append(Text(f"     figure: {c.get('figure_file') or c.get('figure')}",
+                                          style="dim"))
+                if b.get("reasoning"):
+                    lines.append(Text(f"Judge: {b['reasoning']}"))
+                for caveat in b.get("caveats") or []:
+                    lines.append(Text(f"  ⚠ {caveat}", style="yellow"))
+                out.append(Group(*lines))
+            elif kind == "compare":
+                table = Table(show_edge=False, box=None, header_style="bold", expand=True)
+                left, right = b.get("left") or {}, b.get("right") or {}
+                table.add_column(str(left.get("label") or ""))
+                table.add_column(str(right.get("label") or ""))
+                table.add_row(Group(*self._render_blocks(left.get("blocks"))),
+                              Group(*self._render_blocks(right.get("blocks"))))
+                out.append(table)
+            elif kind == "notice":
+                body = Group(*(Text(f"• {line}") for line in b.get("lines") or []))
+                colour = "yellow" if b.get("tone") == "warn" else "magenta"
+                out.append(Panel(body, title=f"[bold {colour}]{b.get('title', '')}[/]",
+                                 border_style=colour))
+        return out
+
     def _show_context(self, q: Dict[str, Any]) -> None:
-        # What is under review — the plan / result / code the agent printed
-        # before asking (the presenter's ``context_display``, the same block
-        # the web panel shows). Those lines are "plain" narration, hidden
-        # unless verbose, so the question must carry them. The agent's own
-        # prompt line follows.
+        # What is under review — the subject's blocks when the gate declared
+        # them, else the plan / result / code the agent printed before asking
+        # (the presenter's ``context_display``, the same block the web panel
+        # shows). Those lines are "plain" narration, hidden unless verbose,
+        # so the question must carry them. The agent's own prompt line
+        # follows.
         prompt = (q.get("prompt") or "").strip()
         context = (q.get("context_display") or "").strip()
+        subject = q.get("subject") or {}
         parts = []
         self._overflow.clear()
-        if context:
+        if subject.get("blocks") or subject.get("title"):
+            if subject.get("title"):
+                parts.append(Text(str(subject["title"]), style="bold"))
+            parts.extend(self._render_blocks(subject.get("blocks")))
+            if context:
+                # The console text is still there, behind Ctrl+O, as on the
+                # web panel's "console output" disclosure.
+                self._overflow.extend(context.split("\n"))
+                parts.append(Text(f"({V.NAMES['console_output'].lower()}: Ctrl+O shows it)",
+                                  style="dim"))
+        elif context:
             lines = context.split("\n")
             if len(lines) > self._CONTEXT_MAX_LINES:
                 self._overflow.extend(lines[:-self._CONTEXT_MAX_LINES])
@@ -248,6 +361,11 @@ class Widgets:
             self.console.print("  [dim]Branches run autonomously — no per-branch approval pauses.[/]")
             return self._choose([("no", labels.get("cancel", "Cancel"), ""),
                                  ("y", labels.get("confirm", "Launch"), "")], default=0)
+        if widget == "confirm":
+            # A gate with a subject and a yes/no decision (a fan-out launch,
+            # a costly step): "y" confirms, "no" cancels, as the console.
+            return self._choose([("no", labels.get("cancel", "Cancel"), ""),
+                                 ("y", labels.get("confirm", "Confirm"), "")], default=0)
         if widget in ("bestofn", "plan_candidates"):
             pick = q.get("judge_pick")
             cands = q.get("candidates") or []
