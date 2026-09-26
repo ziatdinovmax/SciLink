@@ -87,6 +87,26 @@ interference. The image is about 7 GB, so a cold start is a few minutes of
 image pull; keep active workspaces warm and scale dormant ones to zero.
 Model calls dominate the cost; the usage ledger is the meter.
 
+## Between platforms: MCP both ways, and a shared volume
+
+SciLink is an MCP client and an MCP server, and both directions work
+between tasks in one VPC over private addresses:
+
+- **As a client**, a session attaches another platform's MCP endpoint by
+  URL (SSE or streamable HTTP, with headers for that platform's token) or a
+  stdio command that runs inside SciLink's own container. The fan-out and
+  the meta's children inherit the attachment.
+- **As a server**, `scilink serve --transport sse --host 0.0.0.0` in a
+  second task of the same image exposes the `scilink_*` tools of one mode
+  (40 tools in `analyze`). The SSE transport has no authentication of its
+  own: keep it on the private network or behind an authenticating proxy,
+  and give it its own session directory on the workspace volume.
+- **A shared volume** mounted into both platforms' tasks makes file paths
+  a common vocabulary; name it in `SCILINK_FILE_ROOTS` so the fence admits
+  it. Verified on Fargate: a workspace read a spectrum at `/shared/...`
+  itself and through the remote SciLink's `scilink_examine_data` on the
+  same path, while a stdio instrument server answered in the same turn.
+
 ## What SciLink does not do
 
 Provision workspaces, route users to them, decide when to stop a task,
