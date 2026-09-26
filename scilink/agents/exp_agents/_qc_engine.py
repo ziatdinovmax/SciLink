@@ -404,6 +404,9 @@ def bump_bank_adapt_success(host, res, *, domain: str, ctx=None) -> None:
                 domain, bea["id"],
                 session=Path(str(getattr(host, "output_dir", "") or "")).name or None,
                 fingerprint=getattr(ctx, "bank_query_fingerprint", None),
+                data_summary=_script_bank.fingerprint_summary(
+                    getattr(ctx, "bank_query_fingerprint", None)),
+                model_type=res.get("model_type"),
                 # An adaptation with edits means the ADAPTED script passed,
                 # not the banked one: evidence that the record is a good
                 # starting point, not that it runs unchanged. An adaptation

@@ -859,9 +859,26 @@ def _mark_retrieved_unlocked(domain: str, rid: str, *, root: Optional[Path] = No
         pass
 
 
+def fingerprint_summary(fp: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The few fingerprint facts a person reads to know WHAT data a success
+    was earned on: the kind, its size, how many peaks, the axis range."""
+    if not isinstance(fp, dict) or not fp.get("kind"):
+        return None
+    out: Dict[str, Any] = {"kind": fp.get("kind")}
+    for k in ("n_points", "shape", "x_range", "x_units", "snr"):
+        if fp.get(k) is not None:
+            out[k] = fp[k]
+    peaks = fp.get("peaks")
+    if isinstance(peaks, dict) and peaks.get("count") is not None:
+        out["peaks"] = peaks.get("count")
+    return out
+
+
 def _record_success_unlocked(domain: str, rid: str, session: Optional[str] = None,
                    *, fingerprint: Optional[Dict[str, Any]] = None,
                    adapted: bool = False,
+                   data_summary: Optional[Dict[str, Any]] = None,
+                   model_type: Optional[str] = None,
                    root: Optional[Path] = None) -> None:
     """Bump a record's cross-session success stats without re-banking.
 
@@ -879,6 +896,21 @@ def _record_success_unlocked(domain: str, rid: str, session: Optional[str] = Non
         # Evidence: the new data's digest when the caller has it, else one
         # key per session (so a campaign counts once).
         _add_evidence(rec, fingerprint, session, adapted=adapted)
+        # And the readable side of the same ledger — which session, on what
+        # kind of data, under which model — so the panel can show evidence
+        # rather than a count (live: a peak record credited by oscillation
+        # data was invisible behind "2/3 datasets").
+        key = data_key(fingerprint) or (f"session:{session}" if session else None)
+        if key:
+            log = rec.setdefault("evidence_log", [])
+            if not any(e.get("key") == key for e in log if isinstance(e, dict)):
+                log.append({
+                    "key": key, "session": session, "adapted": bool(adapted),
+                    "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "data": data_summary or fingerprint_summary(fingerprint),
+                    "model_type": (str(model_type)[:160] if model_type else None),
+                })
+                del log[:-_MAX_EVIDENCE]
         if session:
             sessions = rec.setdefault("sessions", [])
             if session not in sessions:
@@ -1296,6 +1328,11 @@ def bank_summary(domain: Optional[str] = None, *,
             "created_at": rec.get("created_at"),
             "proven": independent_successes(rec) >= threshold,
             "promoted_to_staging": sid,
+            "model_type": (rec.get("technique_signals") or {}).get("model_type"),
+            "data_kind": (rec.get("data_fingerprint") or {}).get("kind"),
+            "data": fingerprint_summary(rec.get("data_fingerprint")),
+            "provenance": rec.get("provenance") or {},
+            "evidence_log": [e for e in (rec.get("evidence_log") or []) if isinstance(e, dict)],
         })
     rows.sort(key=lambda r: (-r["n_independent"], -r["n_successes"], -r["n_retrievals"],
                              -(_metric_value(r["metric"]) or 0.0), r["id"] or ""))

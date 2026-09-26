@@ -23,6 +23,7 @@ import { TelemetryDetails } from "./components/TelemetryDetails";
 import { LoginScreen } from "./components/LoginScreen";
 import { ToolsPanel } from "./components/ToolsPanel";
 import { SkillsPanel } from "./components/SkillsPanel";
+import { MemoryPanel } from "./components/MemoryPanel";
 import { LivePanel } from "./components/LivePanel";
 
 interface SessionState {
@@ -195,7 +196,7 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null); // init overlay text
   const [startError, setStartError] = useState<string | null>(null);
   const [serverStopped, setServerStopped] = useState(false);
-  const [tab, setTab] = useState<"chat" | "files" | "telemetry" | "tools" | "skills" | "live">("chat");
+  const [tab, setTab] = useState<"chat" | "files" | "telemetry" | "tools" | "skills" | "memory" | "live">("chat");
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   // Delegation the sidebar tree asked the Telemetry tab to expand.
   const [focusDelegation, setFocusDelegation] = useState<number | null>(null);
@@ -583,6 +584,13 @@ export default function App() {
                 Skills
               </button>
               <button
+                className={tab === "memory" ? "active" : ""}
+                onClick={() => setTab("memory")}
+                title="Persistent memory: the script bank, the review inbox, learned skills"
+              >
+                Memory
+              </button>
+              <button
                 className={tab === "tools" ? "active" : ""}
                 onClick={() => setTab("tools")}
                 title="Connect MCP servers; see what the agent can call"
@@ -609,7 +617,10 @@ export default function App() {
               />
             </div>
             <div className="tab-body" hidden={tab !== "skills"}>
-              <SkillsPanel sessionId={session.id} active={tab === "skills"} />
+              <SkillsPanel sessionId={session.id} active={tab === "skills"} onOpenMemory={() => setTab("memory")} />
+            </div>
+            <div className="tab-body" hidden={tab !== "memory"}>
+              <MemoryPanel sessionId={session.id} active={tab === "memory"} />
             </div>
             <div className="tab-body" hidden={tab !== "tools"}>
               <ToolsPanel
