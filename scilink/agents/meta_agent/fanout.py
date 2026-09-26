@@ -56,7 +56,8 @@ logger = logging.getLogger("meta_agent.fanout")
 # Concurrency + sizing. The complementary SET (post-gate) is what these bound,
 # not the raw input: the gate prunes first, so a 6-upload request with one
 # complementary pair runs a 2-way mesh, not a 6-way one.
-FANOUT_MAX_WORKERS = int(os.environ.get("SCILINK_FANOUT_MAX_WORKERS", "4"))
+from scilink.utils.workers import resolve_workers as _resolve_workers
+FANOUT_MAX_WORKERS = _resolve_workers(None, "SCILINK_FANOUT_MAX_WORKERS", 4)
 """Peak concurrent branches (rate-limit ceiling). Overridable via the
 SCILINK_FANOUT_MAX_WORKERS env var: two concurrent large-datacube branches
 (each holding float64 working copies plus a process-pool of fitters) can sum
