@@ -45,7 +45,7 @@ without errors, but sustained live loops on it are unmeasured.
 | `SCILINK_TOKEN_BUDGET` | soft cap on tokens in the current period; new turns get a 429 once spent |
 | `SCILINK_USAGE_FILE` | where the usage ledger lives (default `<session root>/usage.jsonl`) |
 | `SCILINK_WORKSPACE` | path of the manifest (`{"id", "name", ...}`) named by `/api/v1/ops/health` |
-| `SCILINK_HOME`, `SCILINK_MODELS` | the persistent store and the model cache |
+| `SCILINK_HOME`, `SCILINK_MODELS` | the persistent store and the model cache. Persistent memory (the script bank, learned skills) is OFF in a fresh store until switched on in the Memory panel or with `POST /api/v1/memory/enabled` |
 | `SCILINK_FILE_ROOTS` | extra directories an agent may read and write; on a non-loopback bind every path is already fenced to the workspace |
 | `SCILINK_MAX_WORKERS` | ceiling for every worker pool (`auto` = CPU count); size it to the task |
 | `SCILINK_SANDBOX_MEM_MB`, `SCILINK_SANDBOX_FILE_MB`, `SCILINK_SANDBOX_PROCS` | rlimits for generated scripts, off by default |
