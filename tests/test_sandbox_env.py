@@ -81,3 +81,11 @@ def test_no_limit_by_default_and_bad_values_are_ignored(tmp_path, monkeypatch):
     script = 'open("big.bin", "wb").write(b"x" * (3 << 20)); print("wrote")'
     res = ScriptExecutor(timeout=60).execute_script(script, str(tmp_path))
     assert res["status"] == "success", res
+
+
+def test_platform_essentials_pass_through():
+    """What an interpreter needs to start on each platform is never dropped."""
+    src = {"SYSTEMROOT": "C:\\Windows", "COMSPEC": "cmd.exe", "PATHEXT": ".EXE", "USERPROFILE": "C:\\U",
+           "LOCALAPPDATA": "C:\\L", "__CF_USER_TEXT_ENCODING": "0x1F5:0:0", "LD_LIBRARY_PATH": "/opt/lib",
+           "ASE_VASP_COMMAND": "vasp", "VASP_PP_PATH": "/pp", "SLURM_JOB_ID": "7"}
+    assert sandbox_env(source=src) == src
