@@ -41,7 +41,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy your application source code and project definition, with the
 # React bundle built above in the place the package ships it.
-COPY pyproject.toml .
+COPY pyproject.toml MANIFEST.in ./
 COPY scilink/ ./scilink/
 COPY --from=webui /webui/dist/ ./scilink/server/static/
 
