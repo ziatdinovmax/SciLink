@@ -131,3 +131,16 @@ def test_ops_token_alone_reaches_usage_and_the_period_reset(tmp_path, monkeypatc
     assert ctl.post("/api/v1/usage/period").status_code == 200
     assert TestClient(app).get("/api/v1/usage").status_code == 401           # still not open
     assert TestClient(app, headers={"X-Ops-Token": "wrong"}).post("/api/v1/usage/period").status_code == 401
+
+
+def test_telemetry_survives_nan_in_the_payload(tmp_path, monkeypatch):
+    """Live on Fargate: a meta session's telemetry returned 500 because a fit
+    error was NaN and JSON has no spelling for it. NaN and inf become null."""
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path / "home"))
+    app = create_app(tmp_path, serve_frontend=False)
+    s = _fake_session(app)
+    monkeypatch.setattr("scilink.agents.meta_agent.telemetry.collect_session_telemetry",
+                        lambda agent: {"ledger": [{"features": {"err": float("nan"), "inf": float("inf"), "ok": 1.5}}]})
+    r = TestClient(app).get(f"/api/v1/sessions/{s.id}/telemetry")
+    assert r.status_code == 200
+    assert r.json()["ledger"][0]["features"] == {"err": None, "inf": None, "ok": 1.5}

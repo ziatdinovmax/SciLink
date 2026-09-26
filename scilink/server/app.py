@@ -838,6 +838,18 @@ def create_app(session_root: Path, serve_frontend: bool = True,
             return {"delegations": [], "sub_agents": {}}
         return delegation_view(session.agent, session.session_dir)
 
+    def _json_safe(obj):
+        """Analysis payloads carry NaN and inf (a fit error that could not be
+        estimated); JSON has no spelling for them and the encoder raised a
+        500 on the telemetry of a real meta session. They become null."""
+        if isinstance(obj, float):
+            return obj if obj == obj and obj not in (float("inf"), float("-inf")) else None
+        if isinstance(obj, dict):
+            return {k: _json_safe(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [_json_safe(v) for v in obj]
+        return obj
+
     @app.get("/api/v1/sessions/{session_id}/telemetry")
     def get_telemetry(request: Request, session_id: str):
         """Full read-only telemetry snapshot (ledger, worker action
@@ -846,7 +858,7 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         UI's future Telemetry view."""
         session = _session_or_404(request, session_id)
         from scilink.agents.meta_agent.telemetry import collect_session_telemetry
-        return collect_session_telemetry(session.agent)
+        return _json_safe(collect_session_telemetry(session.agent))
 
     @app.get("/api/v1/sessions/{session_id}/provenance")
     def get_provenance(request: Request, session_id: str):
