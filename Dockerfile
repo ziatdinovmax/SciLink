@@ -103,15 +103,18 @@ ENV SCILINK_HOME=/workspace/home \
     SCILINK_MODELS=/models \
     SCILINK_WORKSPACE=/workspace/workspace.json \
     SCILINK_USAGE_FILE=/workspace/usage.jsonl
-RUN mkdir -p /workspace/sessions /workspace/home /workspace/data /models \
-    && chown -R scilinkuser:scilinkgroup /workspace /models /home/scilinkuser
+# A mounted /workspace starts EMPTY (the mount hides anything the image put
+# there), so the entrypoint creates the layout at start; see the script.
+COPY docker/web-entrypoint.sh /usr/local/bin/web-entrypoint
+RUN mkdir -p /workspace /models \
+    && chown -R scilinkuser:scilinkgroup /workspace /models /home/scilinkuser \
+    && chmod +x /usr/local/bin/web-entrypoint
 VOLUME ["/workspace", "/models"]
 EXPOSE 8422
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD python -c "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8422/api/v1/ops/health', timeout=4).status == 200 else 1)"
 USER scilinkuser
-ENTRYPOINT ["scilink-web"]
-CMD ["--host", "0.0.0.0", "--port", "8422", "--session-root", "/workspace/sessions", "--no-open"]
+ENTRYPOINT ["web-entrypoint"]
 
 
 # --- Stage 3b: the CLI (the default target) ---
