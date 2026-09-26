@@ -118,3 +118,16 @@ def test_workspace_env_override_and_absence(tmp_path, monkeypatch):
     h = TestClient(app).get("/api/v1/ops/health").json()
     assert h["ok"] and "workspace" not in h
     assert TestClient(app).get("/api/v1/workspace").json() == {"workspace": None}
+
+
+def test_ops_token_alone_reaches_usage_and_the_period_reset(tmp_path, monkeypatch):
+    """Live: the control plane's period reset got a 401 because /usage sat
+    behind the sign-in middleware while /ops/ did not; both are its routes."""
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("SCILINK_OPS_TOKEN", "ops-secret")
+    app = create_app(tmp_path, serve_frontend=False, auth=AuthConfig.single(TOK))
+    ctl = TestClient(app, headers={"X-Ops-Token": "ops-secret"})
+    assert ctl.get("/api/v1/usage").status_code == 200
+    assert ctl.post("/api/v1/usage/period").status_code == 200
+    assert TestClient(app).get("/api/v1/usage").status_code == 401           # still not open
+    assert TestClient(app, headers={"X-Ops-Token": "wrong"}).post("/api/v1/usage/period").status_code == 401

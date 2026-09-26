@@ -48,9 +48,9 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 COOKIE_NAME = "scilink_web"
 DEFAULT_USER = "default"
-# /ops/ carries its own check: health is open (a load balancer cannot sign
-# in), status and drain take the ops token or a signed-in user (see app.py).
-_PUBLIC_PREFIXES = ("/api/v1/auth/", "/api/v1/ops/")
+# /ops/ and /usage carry their own check: health is open (a load balancer
+# cannot sign in), the rest take the ops token or a signed-in user (see app.py).
+_PUBLIC_PREFIXES = ("/api/v1/auth/", "/api/v1/ops/", "/api/v1/usage")
 _USERNAME_OK = set("abcdefghijklmnopqrstuvwxyz0123456789_-.")
 
 
