@@ -127,11 +127,13 @@ FROM runtime AS cli
 # downloads it at run time). The web image leaves this out: it downloads
 # on first use into the shared /models volume, and a Google Drive fetch at
 # build time is not something a CI build should depend on.
+ARG DCNN_MODEL_URL=https://github.com/ziatdinovmax/SciLink/releases/download/models-dcnn-v1/dcnn_trained.zip
 ENV DCNN_MODEL_GDRIVE_ID=16LFMIEADO3XI8uNqiUoKKlrzWlc1_Q-p
 ENV DCNN_MODEL_DIR=dcnn_trained
-RUN apt-get update && apt-get install -y --no-install-recommends unzip \
+RUN apt-get update && apt-get install -y --no-install-recommends unzip curl \
     && rm -rf /var/lib/apt/lists/* \
-    && gdown ${DCNN_MODEL_GDRIVE_ID} -O ${DCNN_MODEL_DIR}.zip \
+    && (curl -fsSL "${DCNN_MODEL_URL}" -o ${DCNN_MODEL_DIR}.zip \
+        || gdown ${DCNN_MODEL_GDRIVE_ID} -O ${DCNN_MODEL_DIR}.zip) \
     && unzip -q ${DCNN_MODEL_DIR}.zip -d ${DCNN_MODEL_DIR} \
     && rm ${DCNN_MODEL_DIR}.zip
 
