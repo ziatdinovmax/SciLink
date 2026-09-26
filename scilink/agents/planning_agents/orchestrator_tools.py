@@ -9096,7 +9096,7 @@ class OrchestratorTools:
     def _dispatch_tool(self, tool_name: str, **kwargs) -> str:
         # A hosted server fences every path a tool is handed (see
         # scilink.utils.path_fence); on a laptop the fence is None.
-        fence = getattr(self.orch, "path_fence", None)
+        fence = getattr(getattr(self, "orch", None), "path_fence", None)
         if fence is not None:
             refused = fence.refuse_tool_args(kwargs, self.orch.base_dir)
             if refused:
