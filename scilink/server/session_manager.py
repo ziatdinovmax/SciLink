@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import json
+import time
 import os
 import threading
 from dataclasses import dataclass, field
@@ -222,6 +223,54 @@ class SessionManager:
     def _file_roots(self) -> Optional[List[str]]:
         return [str(self.session_root)] if self.fenced else None
 
+    # -- restarts ---------------------------------------------------------
+    INTERRUPTED = "interrupted.json"
+
+    def mark_interrupted(self) -> List[str]:
+        """Called at server shutdown: every session with a turn running gets
+        a marker in its directory, so the person sees on resume that the turn
+        was cut by a restart rather than finding it silently gone. Returns
+        the ids marked."""
+        marked: List[str] = []
+        for s in list(self._sessions.values()):
+            turn = s.turn
+            if turn is None or not turn.is_running:
+                continue
+            last_user = next((m.get("content") for m in reversed(s.chat_messages)
+                              if m.get("role") == "user"), None)
+            try:
+                (Path(s.session_dir) / self.INTERRUPTED).write_text(json.dumps({
+                    "at": time.time(), "turn_started_at": s.turn_started_at,
+                    "user_input": last_user}), encoding="utf-8")
+                marked.append(s.id)
+            except OSError:
+                pass
+        return marked
+
+    @classmethod
+    def _interrupted_note(cls, session_path: Path) -> Optional[Dict[str, Any]]:
+        """The restart note for a resumed session, consuming the marker."""
+        marker = session_path / cls.INTERRUPTED
+        if not marker.exists():
+            return None
+        try:
+            info = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            info = {}
+        try:
+            marker.unlink()
+        except OSError:
+            pass
+        when = info.get("at")
+        stamp = (datetime.fromtimestamp(when).strftime("%Y-%m-%d %H:%M") if when else "")
+        ask = info.get("user_input")
+        return {"role": "assistant",
+                "content": ("⚠️ The previous turn was interrupted by a server restart"
+                            + (f" at {stamp}" if stamp else "") + ". Work up to the "
+                            "last checkpoint is kept; re-send the request to continue."
+                            + (f"\n\nIt was: {str(ask)[:300]}" if ask else "")),
+                "interrupted": True}
+
     # -- lookup ---------------------------------------------------------
     def get(self, session_id: str) -> Optional[WebSession]:
         return self._sessions.get(session_id)
@@ -404,6 +453,10 @@ class SessionManager:
                 display_messages = convert_chat_history_for_display(raw)
             except Exception:
                 pass
+
+        note = self._interrupted_note(session_path)
+        if note is not None:
+            display_messages.append(note)
 
         # Re-embed the latest deliverable (chat attachments are not persisted).
         def _rel(p: str) -> str:

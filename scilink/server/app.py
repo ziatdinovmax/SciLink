@@ -149,6 +149,15 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         if mutating and auth.multi_user:
             raise HTTPException(403, "Draining a shared server needs the ops token.")
 
+    @app.on_event("shutdown")
+    def _mark_interrupted_turns() -> None:
+        # A redeploy or a stop mid-turn: say so in each session on resume.
+        for mgr in list(managers.values()):
+            try:
+                mgr.mark_interrupted()
+            except Exception:  # noqa: BLE001 - shutting down regardless
+                pass
+
     def _session_or_404(request: Request, session_id: str) -> WebSession:
         session = _mgr(request).get(session_id)
         if session is None:
