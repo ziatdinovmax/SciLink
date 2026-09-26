@@ -8,6 +8,7 @@ used for atomic-resolution microscopy analysis.
 import os
 import glob
 import logging
+from typing import Optional
 
 
 def get_or_download_atomistic_model(settings: dict, logger: logging.Logger = None) -> str | None:
@@ -41,7 +42,12 @@ def get_or_download_atomistic_model(settings: dict, logger: logging.Logger = Non
     if logger is None:
         logger = logging.getLogger(__name__)
     
-    # Default values
+    # Default values. The weights are a release asset of the SciLink
+    # repository (first choice: a plain HTTPS download that CI builds and
+    # containers can rely on); the Google Drive copy is the fallback.
+    DCNN_MODEL_URL = (settings.get('dcnn_model_url')
+                      or os.environ.get('SCILINK_DCNN_MODEL_URL')
+                      or DEFAULT_DCNN_MODEL_URL)
     DCNN_MODEL_GDRIVE_ID = settings.get('dcnn_model_gdrive_id', '16LFMIEADO3XI8uNqiUoKKlrzWlc1_Q-p')
     DEFAULT_MODEL_DIR = settings.get('default_model_dir', "dcnn_trained")
     
@@ -72,7 +78,8 @@ def get_or_download_atomistic_model(settings: dict, logger: logging.Logger = Non
         success = _download_and_extract_model(
             gdrive_id=DCNN_MODEL_GDRIVE_ID,
             output_dir=default_path,
-            logger=logger
+            logger=logger,
+            url=DCNN_MODEL_URL,
         )
         
         if not success:
@@ -100,15 +107,46 @@ def _persistent_model_dir(name: str) -> str:
     return str(home / name)
 
 
-def _download_and_extract_model(gdrive_id: str, output_dir: str, logger: logging.Logger) -> bool:
+DEFAULT_DCNN_MODEL_URL = ("https://github.com/ziatdinovmax/SciLink/releases/download/"
+                          "models-dcnn-v1/dcnn_trained.zip")
+
+
+def _download_url(url: str, dest: str, logger: logging.Logger) -> Optional[str]:
+    """Stream ``url`` to ``dest``; the path on success, ``None`` on any failure
+    (a partial file is removed). Plain HTTPS, no third-party client."""
+    import shutil
+    import urllib.request
+    tmp = dest + ".part"
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(dest)) or ".", exist_ok=True)
+        with urllib.request.urlopen(url, timeout=60) as resp, open(tmp, "wb") as fh:
+            shutil.copyfileobj(resp, fh, length=1 << 20)
+        os.replace(tmp, dest)
+        logger.info(f"Downloaded {os.path.getsize(dest) / 1e6:.0f} MB from {url}")
+        return dest
+    except Exception as exc:  # noqa: BLE001 - the caller falls back
+        logger.warning(f"Download from {url} failed: {exc}")
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return None
+
+
+def _download_and_extract_model(gdrive_id: str, output_dir: str, logger: logging.Logger,
+                                url: Optional[str] = None) -> bool:
     """
-    Download model from Google Drive and extract it.
-    
+    Download the model archive and extract it.
+
+    ``url`` (a plain HTTPS location, normally the SciLink release asset) is
+    tried first; the Google Drive file ``gdrive_id`` is the fallback.
+
     Args:
-        gdrive_id: Google Drive file ID
+        gdrive_id: Google Drive file ID (fallback source)
         output_dir: Directory to extract model files to
         logger: Logger instance
-        
+        url: HTTPS location of the same zip (first choice), or None
+
     Returns:
         bool: True if successful, False otherwise
     """
@@ -119,11 +157,16 @@ def _download_and_extract_model(gdrive_id: str, output_dir: str, logger: logging
     
     zip_filename = f"{output_dir}.zip"
     
-    # Download
-    logger.info(f"Downloading model from Google Drive (ID: {gdrive_id})...")
-    downloaded_zip_path = atomistic_tools.download_file_with_gdown(
-        gdrive_id, zip_filename, logger
-    )
+    # Download: the release asset first, Google Drive as the fallback
+    downloaded_zip_path = None
+    if url:
+        logger.info(f"Downloading model from {url} ...")
+        downloaded_zip_path = _download_url(url, zip_filename, logger)
+    if not downloaded_zip_path:
+        logger.info(f"Downloading model from Google Drive (ID: {gdrive_id})...")
+        downloaded_zip_path = atomistic_tools.download_file_with_gdown(
+            gdrive_id, zip_filename, logger
+        )
     
     if not downloaded_zip_path or not os.path.exists(downloaded_zip_path):
         logger.error("Failed to download the model.")

@@ -9,7 +9,9 @@ thread per open stream — fine for the local single-user posture).
 
 from __future__ import annotations
 
+import hmac
 import mimetypes
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -30,7 +32,7 @@ from scilink.ui.session_meta import save_session_name
 
 from . import files as files_mod
 from . import runner
-from .auth import COOKIE_NAME, DEFAULT_USER, AuthConfig, AuthMiddleware, user_root
+from .auth import _USERNAME_OK, COOKIE_NAME, DEFAULT_USER, AuthConfig, AuthMiddleware, user_root
 from .schemas import (
     CreateSessionRequest,
     FeedbackResponseRequest,
@@ -47,6 +49,7 @@ from .schemas import (
     PlanDirsRequest,
     RenameSessionRequest,
     SendMessageRequest,
+    DrainRequest,
 )
 from .session_manager import SessionError, SessionManager, WebSession
 
@@ -94,11 +97,14 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         user = getattr(request.state, "user", None)
         return user or DEFAULT_USER
 
+    confined = bool(auth is not None and auth.multi_user)
+
     def _mgr(request: Request) -> SessionManager:
         user = _user(request)
         mgr = managers.get(user)
         if mgr is None:
-            mgr = SessionManager(user_root(session_root, auth, user))
+            mgr = SessionManager(user_root(session_root, auth, user),
+                                 confined=confined, fenced=not local_files)
             managers[user] = mgr
         return mgr
     app.state.manager_for_user = lambda user: managers.get(user)
@@ -108,10 +114,49 @@ def create_app(session_root: Path, serve_frontend: bool = True,
     # Multi-user servers have none to single out.
     if auth is None or not auth.multi_user:
         managers[DEFAULT_USER] = SessionManager(
-            user_root(session_root, auth, DEFAULT_USER))
+            user_root(session_root, auth, DEFAULT_USER), fenced=not local_files)
         app.state.manager = managers[DEFAULT_USER]
     else:
         app.state.manager = None
+
+    from .ops import Workload
+    ops = Workload(session_root)
+    app.state.ops = ops
+    # Every LLM call in this process lands in one ledger: one server, one
+    # workspace. Sessions are tagged on their turn threads (runner, live).
+    from scilink import tracing
+    from scilink.usage import ledger_for
+    usage = ledger_for(session_root)
+    app.state.usage = usage
+    tracing.set_usage_sink(usage.record)
+    tracing.set_session_resolver(lambda: ops.sole_active_session(managers))
+
+    def _ops_allowed(request: Request, *, mutating: bool) -> None:
+        """Status and drain are for the control plane: the ops token
+        (``SCILINK_OPS_TOKEN``, sent as ``X-Ops-Token``) always works; a
+        signed-in user works on a single-user server, and for status on a
+        shared one. Drain on a shared server is the operator's alone, like
+        /quit."""
+        expected = os.environ.get("SCILINK_OPS_TOKEN")
+        given = request.headers.get("x-ops-token", "")
+        if expected and hmac.compare_digest(given, expected):
+            return
+        if auth is None:
+            return
+        user = auth.user_for_request(request)
+        if user is None:
+            raise HTTPException(401, "Not authenticated.")
+        if mutating and auth.multi_user:
+            raise HTTPException(403, "Draining a shared server needs the ops token.")
+
+    @app.on_event("shutdown")
+    def _mark_interrupted_turns() -> None:
+        # A redeploy or a stop mid-turn: say so in each session on resume.
+        for mgr in list(managers.values()):
+            try:
+                mgr.mark_interrupted()
+            except Exception:  # noqa: BLE001 - shutting down regardless
+                pass
 
     def _session_or_404(request: Request, session_id: str) -> WebSession:
         session = _mgr(request).get(session_id)
@@ -143,6 +188,9 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         browser needs (EventSource / <img> / downloads cannot send headers)."""
         if auth is None:
             return {"user": DEFAULT_USER}
+        if auth.header:
+            raise HTTPException(401, "This server is signed into through the proxy "
+                                     "in front of it, not with a token.")
         cookie = auth.login(body.token)
         if cookie is None:
             raise HTTPException(401, "Invalid access token.")
@@ -163,6 +211,47 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         return resp
 
     # ── config ───────────────────────────────────────────────────
+
+    # ── ops: what a control plane asks ───────────────────────────
+
+    @app.get("/api/v1/ops/health")
+    def ops_health():
+        """Up, version, workspace. Open: a load balancer cannot sign in."""
+        return ops.health()
+
+    @app.get("/api/v1/ops/status")
+    def ops_status(request: Request):
+        """Busy or idle, with the reasons, and for how long it has been
+        idle as seen by whoever polls this."""
+        _ops_allowed(request, mutating=False)
+        return ops.status(managers)
+
+    @app.post("/api/v1/ops/drain")
+    def ops_drain(request: Request, body: DrainRequest):
+        """Stop taking new turns, sessions and live runs (503 to those) so
+        running work can finish; ``{"drain": false}`` reopens."""
+        _ops_allowed(request, mutating=True)
+        ops.draining = bool(body.drain)
+        return ops.status(managers)
+
+    @app.get("/api/v1/usage")
+    def usage_summary(request: Request):
+        """LLM usage in the current period: totals, per model, per session
+        (best-effort), and the budget."""
+        _ops_allowed(request, mutating=False)
+        return usage.summary()
+
+    @app.post("/api/v1/usage/period")
+    def usage_new_period(request: Request):
+        """Start a new billing period (the control plane, after it read the
+        old one). The records stay on disk under a period marker."""
+        _ops_allowed(request, mutating=True)
+        return usage.new_period()
+
+    @app.get("/api/v1/workspace")
+    def workspace(request: Request):
+        """The workspace manifest this server serves, if one is present."""
+        return {"workspace": ops.workspace}
 
     @app.get("/api/v1/config")
     def get_config(request: Request, model: str = "", base_url: str = "",
@@ -232,6 +321,9 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         if not body.consent:
             raise HTTPException(400, "Consent to code execution is required "
                                      "to start a session.")
+        ops.refuse_if_draining()
+        ops.refuse_if_over_budget(usage)
+        ops.touch()
         mgr = _mgr(request)
         try:
             if body.resume_dir:
@@ -300,6 +392,9 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         content = body.content.strip()
         if not content:
             raise HTTPException(400, "Empty message.")
+        ops.refuse_if_draining()
+        ops.refuse_if_over_budget(usage)
+        ops.touch()
         with session.lock:
             if session.turn is not None and session.turn.is_running:
                 raise HTTPException(409, "A turn is already running.")
@@ -516,13 +611,22 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         from .memory_api import set_enabled
         return set_enabled(body.enabled)
 
+    def _skill_ref(domain: str, name: str) -> None:
+        """A skill is addressed by two names; neither may be a path."""
+        for part in (domain, name):
+            if not part or part in (".", "..") or set(part.lower()) - _USERNAME_OK:
+                raise HTTPException(400, f"Bad skill reference {part!r}: letters, "
+                                         "digits, '_', '-', '.' only")
+
     @app.get("/api/v1/memory/skills/{domain}/{name}")
     def memory_skill_text(domain: str, name: str):
+        _skill_ref(domain, name)
         from .memory_api import skill_text
         return PlainTextResponse(_mem(skill_text, domain, name), media_type="text/markdown; charset=utf-8")
 
     @app.put("/api/v1/memory/skills/{domain}/{name}")
     def memory_skill_edit(domain: str, name: str, body: MemoryEditRequest):
+        _skill_ref(domain, name)
         from .memory_api import skill_edit
         return _mem(skill_edit, domain, name, body.content)
 
@@ -530,6 +634,7 @@ def create_app(session_root: Path, serve_frontend: bool = True,
     def memory_skill_action(domain: str, name: str, action: str):
         """promote · demote · prune · diff (a fork against its built-in) ·
         fork (copy a built-in into the store, shadowing it)."""
+        _skill_ref(domain, name)
         from .memory_api import fork_builtin, skill_action
         if action == "fork":
             return _mem(fork_builtin, domain, name)
@@ -651,6 +756,9 @@ def create_app(session_root: Path, serve_frontend: bool = True,
     @app.post("/api/v1/sessions/{session_id}/live/start")
     async def live_start(request: Request, session_id: str):
         from .live_api import start
+        ops.refuse_if_draining()
+        ops.refuse_if_over_budget(usage)
+        ops.touch()
         body = await request.json()
         return _live(start, _session_or_404(request, session_id), body or {},
                      allow_custom=local_files)
@@ -730,6 +838,18 @@ def create_app(session_root: Path, serve_frontend: bool = True,
             return {"delegations": [], "sub_agents": {}}
         return delegation_view(session.agent, session.session_dir)
 
+    def _json_safe(obj):
+        """Analysis payloads carry NaN and inf (a fit error that could not be
+        estimated); JSON has no spelling for them and the encoder raised a
+        500 on the telemetry of a real meta session. They become null."""
+        if isinstance(obj, float):
+            return obj if obj == obj and obj not in (float("inf"), float("-inf")) else None
+        if isinstance(obj, dict):
+            return {k: _json_safe(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [_json_safe(v) for v in obj]
+        return obj
+
     @app.get("/api/v1/sessions/{session_id}/telemetry")
     def get_telemetry(request: Request, session_id: str):
         """Full read-only telemetry snapshot (ledger, worker action
@@ -738,7 +858,7 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         UI's future Telemetry view."""
         session = _session_or_404(request, session_id)
         from scilink.agents.meta_agent.telemetry import collect_session_telemetry
-        return collect_session_telemetry(session.agent)
+        return _json_safe(collect_session_telemetry(session.agent))
 
     @app.get("/api/v1/sessions/{session_id}/provenance")
     def get_provenance(request: Request, session_id: str):

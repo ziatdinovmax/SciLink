@@ -6,6 +6,7 @@ import re
 import pandas as pd
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+from scilink.utils.path_fence import PathFence
 from datetime import datetime
 from enum import Enum
 
@@ -635,6 +636,7 @@ class PlanningOrchestratorAgent:
         # Deprecated
         google_api_key: Optional[str] = None,
         local_model: Optional[str] = None,
+        file_roots: Optional[List[str]] = None,
     ):
         # Handle deprecated parameters
         api_key, base_url = normalize_params(
@@ -714,6 +716,10 @@ class PlanningOrchestratorAgent:
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
         self.analyzed_files_path = self.base_dir / "analyzed_files.json"
+        self.file_roots = list(file_roots) if file_roots else None
+        self.path_fence = PathFence.build(
+            self.base_dir, file_roots,
+            extra=[self.data_dir, self.knowledge_dir, self.code_dir])
         self.analyzed_files = {}
         
         if self.analyzed_files_path.exists():

@@ -12,3 +12,5 @@ venv/
 *.log
 *output*/
 dcnn_trained/
+webui/node_modules/
+webui/dist/

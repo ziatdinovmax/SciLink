@@ -1230,15 +1230,10 @@ def complete_locked_schema(row: Dict[str, Any], locked_columns: List[str],
 # ---------------------------------------------------------------------------
 
 def resolve_series_workers(value: Optional[int]) -> int:
-    """Explicit value > ``SCILINK_HS_SERIES_WORKERS`` env var > 1 (serial)."""
-    import os
-    if value is None:
-        env = os.environ.get("SCILINK_HS_SERIES_WORKERS")
-        try:
-            value = int(env) if env else 1
-        except ValueError:
-            value = 1
-    return max(int(value), 1)
+    """Explicit value > ``SCILINK_HS_SERIES_WORKERS`` > ``SCILINK_MAX_WORKERS``
+    > 1 (serial); the process-wide ceiling caps the result."""
+    from scilink.utils.workers import resolve_workers
+    return resolve_workers(value, "SCILINK_HS_SERIES_WORKERS", 1)
 
 
 def replay_worker(spec: Dict[str, Any]) -> Dict[str, Any]:

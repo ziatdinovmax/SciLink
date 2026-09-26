@@ -68,7 +68,8 @@ def get_or_create_sam_model(params: dict) -> Any:
     else:
         # Default to a stable location rather than CWD-relative ./checkpoints/
         model_type = params.get('model_type', 'vit_h')
-        default_dir = Path.home() / ".cache" / "scilink" / "checkpoints"
+        from .particle_analyzer import sam_checkpoint_dir
+        default_dir = Path(sam_checkpoint_dir())
         default_path = default_dir / f"sam_{model_type}.pth"
         # Also check legacy location
         legacy_path = Path("./checkpoints") / f"sam_{model_type}.pth"

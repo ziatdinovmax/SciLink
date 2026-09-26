@@ -79,6 +79,52 @@ What a shared server changes, and only a shared server:
   server for everyone);
 - cookie sessions live in memory, so a restart signs everyone out.
 
+### Behind an authenticating proxy
+
+When something in front of the server already knows who the user is — an
+OIDC / SSO proxy, a load balancer with authentication — let it say so
+instead of handing out tokens:
+
+```bash
+scilink-web --host 0.0.0.0 --auth-header X-Auth-Request-User \
+            --trusted-proxy 10.0.0.0/8
+```
+
+The user is the value of that header, honoured only on requests that arrive
+from a `--trusted-proxy` address or network (default: loopback, the
+reverse-proxy-on-the-same-host case). Each user gets an isolated session
+root under `<session-root>/users/<name>/`, exactly as with `--users`; the
+sign-in screen never appears, tokens and the login cookie are not accepted,
+and a restart signs nobody out because identity comes with every request.
+The proxy must strip that header from incoming requests before adding its
+own, or anyone could name themselves.
+
+### In a container, one per workspace
+
+The Dockerfile has a `web` target whose entrypoint is `scilink-web`:
+
+```bash
+docker build --target web -t scilink-web .
+docker run -p 8422:8422 -e SCILINK_WEB_TOKEN=<secret> \
+           -e AWS_BEARER_TOKEN_BEDROCK=... -e AWS_REGION_NAME=us-east-1 \
+           -v /srv/campaigns/perovskites:/workspace -v scilink-models:/models \
+           scilink-web
+```
+
+`/workspace` is the campaign's own volume: `sessions/` (the session root),
+`home/` (`SCILINK_HOME`: knowledge bases, banked scripts, graduated skills,
+instrument memory, the memory switch), `data/`, the usage ledger, and an
+optional `workspace.json` manifest that `/api/v1/ops/health` names.
+`/models` is the shared, read-only model cache. Everything one campaign
+learns or uploads stays on its volume, and vendor keys ride the container's
+environment and never reach generated scripts. The server binds all
+interfaces and therefore requires authentication: a token, or
+`--auth-header` behind an authenticating proxy. A control plane drives it
+through `/api/v1/ops/health`, `/api/v1/ops/status` (busy or idle, and for
+how long), `/api/v1/ops/drain` and `/api/v1/usage` (with the ops token,
+`SCILINK_OPS_TOKEN` as `X-Ops-Token`), and stops the container only after a
+drain reports idle.
+
 ### Embeddings
 
 Plan and Mission Control sessions ground on a knowledge base when one is

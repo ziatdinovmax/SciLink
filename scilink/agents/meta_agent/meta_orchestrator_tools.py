@@ -12,6 +12,7 @@ refactor".
 """
 
 import json
+from scilink.utils import path_fence as _path_fence
 import os
 import logging
 import sys
@@ -428,6 +429,13 @@ class MetaOrchestratorTools:
         return result
 
     def _dispatch_tool(self, tool_name: str, **kwargs) -> str:
+        # A hosted server fences every path a tool is handed (see
+        # scilink.utils.path_fence); on a laptop the fence is None.
+        fence = getattr(getattr(self, "orch", None), "path_fence", None)
+        if fence is not None:
+            refused = fence.refuse_tool_args(kwargs, self.orch.base_dir)
+            if refused:
+                return json.dumps({"status": "error", "tool": tool_name, "message": refused})
         if tool_name not in self.functions_map:
             return json.dumps({
                 "status": "error",
@@ -475,7 +483,11 @@ class MetaOrchestratorTools:
             })
 
         try:
-            return self.functions_map[tool_name](**kwargs)
+            with _path_fence.bound(fence):
+                try:
+                    return self.functions_map[tool_name](**kwargs)
+                except _path_fence.PathFenceError as e:
+                    return json.dumps({"status": "error", "tool": tool_name, "message": str(e)})
         except TypeError as e:
             if "unexpected keyword argument" in str(e):
                 import inspect as _inspect
@@ -1571,7 +1583,8 @@ class MetaOrchestratorTools:
                     continue
                 p = Path(fname)
                 cands = [p] if p.is_absolute() else (
-                    ([base / fname] if base is not None else []) + [Path.cwd() / fname])
+                    ([base / fname] if base is not None else [])
+                    + [Path(getattr(self.orch, "launch_dir", None) or Path.cwd()) / fname])
                 target = next((c for c in cands if c.is_file()), None)
                 if target is None:
                     unresolved.append(str(fname))

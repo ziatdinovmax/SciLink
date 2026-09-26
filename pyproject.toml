@@ -165,4 +165,8 @@ where = ["."]
 include = ["scilink*"]
 
 [tool.setuptools.package-data]
-"scilink" = ["agents/sim_agents/docs/*.txt", "agents/sim_agents/docs/*.md", "ui/.streamlit/*.toml", "ui/assets/*.svg", "server/static/*", "server/static/assets/*"]
+# The skill bundles are markdown plus the odd data file next to their .py
+# helpers; named here explicitly so a build without MANIFEST.in (a container,
+# a checkout without VCS metadata) still ships every skill.
+"scilink" = ["agents/sim_agents/docs/*.txt", "agents/sim_agents/docs/*.md", "ui/.streamlit/*.toml", "ui/assets/*.svg", "server/static/*", "server/static/assets/*",
+             "skills/*.md", "skills/*/*.md", "skills/*/*/*.md", "skills/*/*/*/*.md", "skills/*/*/*.offxml", "skills/*/*/*/*.offxml"]
