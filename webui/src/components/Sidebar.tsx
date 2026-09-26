@@ -1,4 +1,5 @@
 import { VOCAB } from "../vocabulary";
+import { WorkspacePanel } from "./WorkspacePanel";
 import { useEffect, useState } from "react";
 import {
   api,
@@ -640,6 +641,8 @@ export function Sidebar({
           </div>
         </div>
       )}
+
+      <WorkspacePanel />
 
       <div className="sidebar-section" style={{ marginTop: "auto" }}>
         <button

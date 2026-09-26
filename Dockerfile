@@ -1,3 +1,15 @@
+# --- Stage 0: the React bundle ---
+# scilink/server/static/ is not tracked; release wheels ship it and a
+# developer builds it with scripts/build_webui.sh. The image builds it here so
+# a CI build needs nothing but the tracked tree.
+FROM node:22-slim AS webui
+WORKDIR /webui
+COPY webui/package.json webui/package-lock.json ./
+RUN npm ci --silent
+COPY webui/ ./
+RUN npm run build
+
+
 # --- Stage 1: Builder ---
 # Use a slim Python base image for a smaller footprint.
 FROM python:3.12-slim AS builder
@@ -27,17 +39,11 @@ COPY requirements.txt .
 # This step is fast because no dependency resolution is needed.
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Download and unzip the DCNN model needed by AtomisticMicroscopyAnalysisAgent.
-# This avoids downloading it every time the container runs.
-ENV DCNN_MODEL_GDRIVE_ID=16LFMIEADO3XI8uNqiUoKKlrzWlc1_Q-p
-ENV DCNN_MODEL_DIR=dcnn_trained
-RUN gdown ${DCNN_MODEL_GDRIVE_ID} -O ${DCNN_MODEL_DIR}.zip && \
-    unzip ${DCNN_MODEL_DIR}.zip -d ${DCNN_MODEL_DIR} && \
-    rm ${DCNN_MODEL_DIR}.zip
-
-# Copy your application source code and project definition.
+# Copy your application source code and project definition, with the
+# React bundle built above in the place the package ships it.
 COPY pyproject.toml .
 COPY scilink/ ./scilink/
+COPY --from=webui /webui/dist/ ./scilink/server/static/
 
 # Install the scilink package itself (without reinstalling its dependencies).
 # This will also pick up the console_scripts entry point from pyproject.toml.
@@ -66,10 +72,6 @@ COPY --from=builder /usr/local/lib/python3.12/site-packages/ /usr/local/lib/pyth
 # Copy the installed command-line scripts from the builder stage.
 COPY --from=builder /usr/local/bin/scilink /usr/local/bin/scilink
 COPY --from=builder /usr/local/bin/scilink-web /usr/local/bin/scilink-web
-
-# Copy the pre-downloaded DCNN model from the builder stage.
-# The application looks for it in the current working directory.
-COPY --from=builder /app/dcnn_trained ./dcnn_trained
 
 # Document the required API keys. You MUST provide these at runtime.
 # Example: docker run -e GOOGLE_API_KEY="your-key" ...
@@ -119,6 +121,19 @@ ENTRYPOINT ["web-entrypoint"]
 
 # --- Stage 3b: the CLI (the default target) ---
 FROM runtime AS cli
+
+# The DCNN ensemble for atomistic image analysis, baked into the working
+# directory where the model manager looks FIRST (so a CLI container never
+# downloads it at run time). The web image leaves this out: it downloads
+# on first use into the shared /models volume, and a Google Drive fetch at
+# build time is not something a CI build should depend on.
+ENV DCNN_MODEL_GDRIVE_ID=16LFMIEADO3XI8uNqiUoKKlrzWlc1_Q-p
+ENV DCNN_MODEL_DIR=dcnn_trained
+RUN apt-get update && apt-get install -y --no-install-recommends unzip \
+    && rm -rf /var/lib/apt/lists/* \
+    && gdown ${DCNN_MODEL_GDRIVE_ID} -O ${DCNN_MODEL_DIR}.zip \
+    && unzip -q ${DCNN_MODEL_DIR}.zip -d ${DCNN_MODEL_DIR} \
+    && rm ${DCNN_MODEL_DIR}.zip
 
 # Persistent memory: graduated + auto-distilled skills live here. Declared as a
 # VOLUME so it is easy to persist across container restarts. WITHOUT a mounted
