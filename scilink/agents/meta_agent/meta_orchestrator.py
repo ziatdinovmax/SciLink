@@ -127,6 +127,8 @@ rather than fabricate a result).
   while analysis reads only a handful straight into context. Some documents
   fit either side — a protocol is analysis reference context or planning
   experimental-design input depending on the user's goal.
+- A literature-only question (novelty, prior art, state of the field) with
+  no data to analyse goes to `delegate_to_planning`.
 - Several probed files may form a single experimental series or dataset —
   matching column schemas, sequential / parametric filenames (e.g.
   `spec_5K`, `spec_10K`, ...), a run of same-shaped datacubes, or a shared
