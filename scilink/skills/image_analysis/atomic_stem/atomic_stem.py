@@ -6,6 +6,8 @@ import cv2
 import matplotlib.pyplot as plt
 import glob
 from sklearn.mixture import GaussianMixture
+from scilink.skills._shared._atomai_compat import ensure_atomai_compat
+ensure_atomai_compat()
 import atomai as aoi
 from scipy.optimize import curve_fit
 from scipy.spatial import KDTree

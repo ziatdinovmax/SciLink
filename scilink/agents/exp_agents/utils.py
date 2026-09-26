@@ -6,6 +6,8 @@ import os
 import glob
 import matplotlib.pyplot as plt
 
+from scilink.skills._shared._atomai_compat import ensure_atomai_compat
+ensure_atomai_compat()
 import atomai as aoi
 
 
