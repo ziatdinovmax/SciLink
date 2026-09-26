@@ -297,7 +297,18 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   labelled, never folded into the shipped count: `learned` (distilled or
   graduated into the store), `fork of built-in`, `provisional`; a shipped
   skill has a **fork into memory** button (copy-on-write; the fork shadows
-  it and can then be edited and upgraded on the Memory tab).
+  it and can then be edited and upgraded on the Memory tab). **Build a
+  skill** is a form for the parts of a skill — name, domain, the
+  description the agents route on, the technique list the selectors match,
+  and the five sections (Overview → Planning → Implementation →
+  Interpretation → Validation, each with a hint of what belongs there) —
+  with a live preview rendered by the server exactly as the loader will
+  read it (`POST /sessions/{id}/skills/compose`, `save: preview`). "Use in
+  this session" saves and registers it like an upload; "Save to persistent
+  memory" writes an approved, authored bundle into the store (refused
+  while memory is off, since it would not load); "Start from" loads an
+  existing skill's parts into the form to derive a new one; the file can
+  also be downloaded.
 - **Memory tab** (all modes): persistent memory over one store per server
   host (`$SCILINK_HOME` or `~/.scilink`, the same store `scilink memory`
   manages). The header holds the on/off switch (persisted to the store's
@@ -433,6 +444,7 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
 | GET | `/sessions/{id}/skills/{domain}/{name}` | a skill's markdown (`domain` = catalog domain or `custom`) |
 | POST | `/sessions/{id}/skills` | multipart `.md` uploads → `custom_skills/`, registered with the agent |
 | GET | `/memory` | the store: switch, `shared_server` / `can_delete`, pipeline counts, bank by domain (records with `evidence` rows and `model_type`, variant groups), the `archived` list, inbox by domain/technique, skills (with `technique`, `has_backup`, `n_examples`) |
+| POST | `/sessions/{id}/skills/compose` | the skill builder: `{name, domain, description, technique, sections, save}` → the rendered markdown; `save` is `preview` (render only), `session` (custom_skills/ + register) or `memory` (an approved bundle in the store, `provenance: authored`; 400 while memory is off, 409 if the name exists) |
 | GET | `/memory/jobs` | every distillation job this server process ran, newest first, with the skill or target it produced |
 | GET | `/memory/bank/archived` | archived bank records (`?domain=`) |
 | POST | `/memory/bank/sweep` | `{domain?, days?, dry_run}` → the records the aging rules would archive (preview) or did archive; applying is 403 on a shared server |

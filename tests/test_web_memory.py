@@ -495,3 +495,47 @@ def test_shared_server_flags_in_overview_and_sweep_guard(tmp_path, monkeypatch):
     assert ov["shared_server"] is True and ov["can_delete"] is False
     assert alice.post("/api/v1/memory/bank/sweep", json={"days": 0, "dry_run": True}).status_code == 200
     assert alice.post("/api/v1/memory/bank/sweep", json={"days": 0, "dry_run": False}).status_code == 403
+
+
+# ── skill builder ───────────────────────────────────────────────────
+
+def test_skill_builder_composes_previews_saves_and_registers(mem_client, tmp_path):
+    from scilink.skills.loader import _split_frontmatter
+    c = mem_client
+    session = _session(c, tmp_path)
+    registered = []
+    session.agent.register_skill = lambda p: registered.append(p) or "my_xrd"
+    base = f"/api/v1/sessions/{session.id}/skills/compose"
+    body = {"name": "my_xrd", "domain": "curve_fitting", "description": "Powder XRD peak fitting for phase fractions",
+            "technique": ["XRD", " powder XRD ", "xrd"], "sections": {"overview": "Fits Bragg peaks.", "validation": "Rwp below 10 %."}}
+    # validation
+    assert c.post(base, json={**body, "name": "Bad Name"}).status_code == 400
+    assert c.post(base, json={**body, "description": ""}).status_code == 400
+    assert c.post(base, json={**body, "sections": {}}).status_code == 400
+    # preview writes nothing
+    r = c.post(base, json={**body, "save": "preview"})
+    assert r.status_code == 200 and r.json()["saved"] == "preview"
+    md = r.json()["markdown"]
+    meta, rest = _split_frontmatter(md, source="t")
+    assert meta["technique"] == ["XRD", "powder XRD"] and "## overview" in md and "## validation" in md
+    assert "provenance" not in meta and registered == []
+    # session save: file under custom_skills, registered, catalog returned
+    r = c.post(base, json={**body, "save": "session"})
+    assert r.status_code == 200, r.text
+    assert (tmp_path / "sessions" / session.id / "custom_skills" / "my_xrd.md").read_text() == md
+    assert registered and r.json()["catalog"]["skills_supported"] is True
+    # memory save: refused while off, then an approved authored bundle
+    c.post("/api/v1/memory/enabled", json={"enabled": False})
+    assert c.post(base, json={**body, "save": "memory"}).status_code == 400
+    c.post("/api/v1/memory/enabled", json={"enabled": True})
+    r = c.post(base, json={**body, "save": "memory"})
+    assert r.status_code == 200, r.text
+    p = tmp_path / "home" / "graduated_skills" / "curve_fitting" / "my_xrd" / "my_xrd.md"
+    meta, _ = _split_frontmatter(p.read_text(), source="t")
+    assert meta["provenance"] == "authored" and "provisional" not in meta and meta["technique"] == ["XRD", "powder XRD"]
+    assert c.post(base, json={**body, "save": "memory"}).status_code == 409
+    ov = c.get("/api/v1/memory").json()
+    s = next(x for x in ov["skills"] if x["name"] == "my_xrd")
+    assert s["provisional"] is False and s["provenance"] == "authored"
+    cat = c.get(f"/api/v1/sessions/{session.id}/skills").json()
+    assert any(x["name"] == "my_xrd" and x["origin"] == "learned" for d in cat["builtin"] for x in d["skills"])

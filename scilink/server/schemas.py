@@ -90,6 +90,15 @@ class MemoryIdsRequest(BaseModel):
     technique: Optional[str] = None
 
 
+class ComposeSkillRequest(BaseModel):
+    name: str
+    domain: str = "curve_fitting"
+    description: str = ""
+    technique: List[str] = []
+    sections: Dict[str, str] = {}
+    save: str = "preview"           # preview | session | memory
+
+
 class MemoryTechniqueRequest(BaseModel):
     technique: List[str] = []
 

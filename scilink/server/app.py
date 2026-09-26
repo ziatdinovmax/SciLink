@@ -39,6 +39,7 @@ from .schemas import (
     FolderCheckRequest,
     LoginRequest,
     MCPConnectRequest,
+    ComposeSkillRequest,
     MemoryApplyRequest,
     MemoryCheckRequest,
     MemoryConsolidateRequest,
@@ -589,6 +590,19 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         except SkillError as exc:
             raise HTTPException(exc.status, str(exc))
 
+    @app.post("/api/v1/sessions/{session_id}/skills/compose")
+    def compose_skill_route(request: Request, session_id: str, body: ComposeSkillRequest):
+        """The skill builder: render a skill from its parts; keep it for this
+        session (custom_skills/ + register) or in persistent memory."""
+        from .skills_api import SkillError, compose_skill
+        session = _session_or_404(request, session_id)
+        try:
+            return compose_skill(session.agent, session.session_dir, name=body.name, domain=body.domain,
+                                 description=body.description, technique=body.technique,
+                                 sections=body.sections, save=body.save)
+        except SkillError as exc:
+            raise HTTPException(exc.status, str(exc))
+
     # ── persistent memory ────────────────────────────────────────
     # One store per server host ($SCILINK_HOME or ~/.scilink), shared by
     # every session and — on a multi-user server — every user: it is the
@@ -1016,12 +1030,12 @@ def create_app(session_root: Path, serve_frontend: bool = True,
                         if exc.status_code != 404:
                             raise
                         resp = await super().get_response("index.html", scope)
-                        path = "index.html"
                     # The entry page names the hashed bundle; a cached copy
                     # after an upgrade shows the previous UI until a hard
                     # reload (live: the new Memory tab was missing). Revalidate
-                    # it; the hashed assets stay cacheable.
-                    if path in ("", "index.html") or path.endswith("/index.html"):
+                    # it — whether asked for as "/", "/index.html" or as the
+                    # SPA fallback; the hashed assets stay cacheable.
+                    if str(getattr(resp, "path", "")).endswith("index.html"):
                         resp.headers["Cache-Control"] = "no-cache"
                     return resp
 

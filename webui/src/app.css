@@ -1092,3 +1092,16 @@ button.primary:disabled:hover { background: var(--border-strong); }
 .mem-fold:hover { color: var(--accent); }
 .mem-review-foot { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 8px; padding: 8px 10px; background: var(--bg-card); border: 1px solid var(--border-strong); border-radius: 6px; }
 .mem-review-warnings p { margin: 0; }
+
+/* ── Skill builder (Skills tab) ─────────────────────────────────── */
+.skill-builder h3 .skill-domain-head { font-size: 15px; }
+.sb-body { margin-top: 8px; }
+.sb-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; margin-bottom: 10px; }
+.sb-grid label, .sb-section { display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
+.sb-grid label > span:first-child, .sb-section > span:first-child { font-weight: 600; }
+.sb-wide { grid-column: 1 / -1; }
+.sb-section { margin: 8px 0; }
+.sb-section textarea { font-family: var(--mono, ui-monospace, monospace); font-size: 12px; line-height: 1.45; resize: vertical; }
+.sb-actions { margin-top: 10px; }
+.sb-preview { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; max-height: 480px; overflow: auto; font-size: 13px; }
+@media (max-width: 900px) { .sb-grid { grid-template-columns: 1fr; } }

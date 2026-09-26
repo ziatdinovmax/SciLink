@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type SkillCatalog } from "../api";
 import { Dropzone } from "./Dropzone";
 import { MarkdownBody } from "./MarkdownBody";
+import { SkillBuilder } from "./SkillBuilder";
 
 /** Skills tab — upload custom skills for this session and browse the
  * catalog: shipped bundles by domain plus what persistent memory adds
@@ -23,6 +24,7 @@ export function SkillsPanel({
   onOpenMemory?: () => void;
 }) {
   const [notice, setNotice] = useState<string | null>(null);
+  const [memoryOn, setMemoryOn] = useState<boolean | null>(null);
   const [cat, setCat] = useState<SkillCatalog | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notes, setNotes] = useState<string[]>([]);
@@ -35,7 +37,10 @@ export function SkillsPanel({
   }, [sessionId]);
 
   useEffect(() => {
-    if (active) refresh();
+    if (active) {
+      refresh();
+      api.memory().then((m) => setMemoryOn(m.enabled)).catch(() => setMemoryOn(null));
+    }
   }, [active, refresh]);
 
   const view = async (domain: string, name: string) => {
@@ -112,6 +117,14 @@ export function SkillsPanel({
           </div>
         ))}
       </section>
+
+      <SkillBuilder
+        sessionId={sessionId}
+        catalog={cat}
+        memoryOn={memoryOn}
+        onOpenMemory={onOpenMemory}
+        onSaved={(c, note) => { if (c) setCat(c); else refresh(); setNotice(note); setError(null); }}
+      />
 
       <section className="tools-section">
         <h3>

@@ -761,6 +761,10 @@ export const api = {
   telemetry: (id: string) => req<TelemetrySnapshot>(`/sessions/${id}/telemetry`),
 
   skills: (id: string) => req<SkillCatalog>(`/sessions/${id}/skills`),
+  composeSkill: (id: string, body: { name: string; domain: string; description: string; technique: string[];
+                                     sections: Record<string, string>; save: "preview" | "session" | "memory" }) =>
+    req<{ name: string; domain: string; markdown: string; saved: string; path?: string; catalog?: SkillCatalog }>(
+      `/sessions/${id}/skills/compose`, json(body)),
   skillMarkdown: async (id: string, domain: string, name: string) => {
     const r = await fetch(
       `${BASE}/sessions/${id}/skills/${encodeURIComponent(domain)}/${encodeURIComponent(name)}`,
