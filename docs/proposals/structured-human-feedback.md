@@ -1,6 +1,13 @@
 # Proposal: human feedback shows the decision, not the console
 
-Status: plan, drafted 2026-09-26. Nothing implemented yet.
+Status: plan, drafted 2026-09-26. Stage 1 is implemented (the contract,
+both renderers, the kind tables, two pilot gates) and was checked live on
+2026-09-26 in the browser and in the shell on a Raman-like spectrum
+(Bedrock Opus 4.8): the curve fitting plan gate renders from its subject on
+both surfaces and Enter approves it. Note for stage 3: the `analysis_review`
+gate (`SimpleFeedbackCollector`) is unreachable today — the mixin's
+`_apply_feedback_if_enabled` has no caller in any pipeline — so its subject
+builder exists and is unit-tested but has not been seen live.
 
 ## The problem
 
@@ -61,6 +68,9 @@ with each):
 
 Rules:
 
+- Every block may carry a `label`: the section name as the printout has
+  it, emoji included ("🔍 Observations"). Both renderers put labeled blocks
+  in one aligned label column; a short list is plain text, not chips.
 - A gate keeps printing exactly what it prints today. Printing is the
   console surface, the verbose log and the audit trail; nothing here
   removes it. The web and the shell stop *depending* on it.
