@@ -696,6 +696,7 @@ def create_app(session_root: Path, serve_frontend: bool = True,
     @app.put("/api/v1/memory/skills/{domain}/{name}/technique")
     def memory_skill_technique(domain: str, name: str, body: MemoryTechniqueRequest):
         """Set the routing list the selectors match the data's technique against."""
+        _skill_ref(domain, name)
         from .memory_api import skill_set_technique
         return _mem(skill_set_technique, domain, name, body.technique)
 
