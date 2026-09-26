@@ -41,7 +41,8 @@ COPY scilink/ ./scilink/
 
 # Install the scilink package itself (without reinstalling its dependencies).
 # This will also pick up the console_scripts entry point from pyproject.toml.
-RUN pip install --no-cache-dir --no-deps .
+# With dependencies: requirements.txt is the cache-friendly bulk, pyproject is the truth.
+RUN pip install --no-cache-dir .
 
 
 # --- Stage 2: Runtime base (shared by the CLI and the web images) ---
