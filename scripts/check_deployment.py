@@ -62,6 +62,8 @@ def main():
     ap.add_argument("--region", default="us-east-1")
     ap.add_argument("--data", default=str(Path(__file__).resolve().parent.parent / "examples" / "eels_identification_demo"))
     ap.add_argument("--timeout", type=int, default=1800)
+    ap.add_argument("--prompt", default=None,
+                    help="The turn to run; {path} is the uploaded data path. Default: a generic one-pass analysis.")
     a = ap.parse_args()
     base, tok = a.base.rstrip("/"), a.token
 
@@ -100,7 +102,8 @@ def main():
                 body, ctype = multipart({"category": "metadata"}, [(p.name, p)])
                 req(base, f"/sessions/{sid}/uploads", "POST", raw=(body, ctype), token=tok)
             path = next((p for p in (up or {}).get("paths", [])), "uploads/" + files[0][0])
-            msg = f"Analyze the data at {path} (metadata alongside it) in one pass and summarize the result."
+            msg = (a.prompt.format(path=path) if a.prompt else
+                   f"Analyze the data at {path} (metadata alongside it) in one pass and summarize the result.")
             st, _ = req(base, f"/sessions/{sid}/messages", "POST", {"content": msg}, token=tok)
             check("turn accepted", st == 202, str(st))
             t0 = time.time(); status = None
