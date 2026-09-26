@@ -16,6 +16,7 @@ Tools are constructed fresh per call (StructureGenerator's per-call
 
 import glob
 import json
+from scilink.utils import path_fence as _path_fence
 import logging
 import os
 import re
@@ -3464,13 +3465,24 @@ class SimulationOrchestratorTools:
         return result
 
     def _dispatch_tool(self, tool_name: str, **kwargs) -> str:
+        # A hosted server fences every path a tool is handed (see
+        # scilink.utils.path_fence); on a laptop the fence is None.
+        fence = getattr(getattr(self, "orch", None), "path_fence", None)
+        if fence is not None:
+            refused = fence.refuse_tool_args(kwargs, self.orch.base_dir)
+            if refused:
+                return json.dumps({"status": "error", "tool": tool_name, "message": refused})
         if tool_name not in self.functions_map:
             return json.dumps({
                 "status": "error",
                 "message": f"Tool '{tool_name}' not found",
             })
         try:
-            return self.functions_map[tool_name](**kwargs)
+            with _path_fence.bound(fence):
+                try:
+                    return self.functions_map[tool_name](**kwargs)
+                except _path_fence.PathFenceError as e:
+                    return json.dumps({"status": "error", "tool": tool_name, "message": str(e)})
         except Exception as e:
             self.logger.error(f"Tool execution error ({tool_name}): {e}", exc_info=True)
             return json.dumps({

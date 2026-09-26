@@ -45,6 +45,39 @@ export interface AppConfig {
   };
 }
 
+export interface OpsStatus {
+  ok: boolean;
+  version: string;
+  uptime_s: number;
+  workspace?: string;
+  state: "idle" | "busy" | "draining";
+  draining: boolean;
+  busy: string[];
+  idle_for_s: number;
+  sessions_live: number;
+}
+
+export interface UsageRow {
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+}
+
+export interface UsageSummary {
+  period_start: number;
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  llm_seconds: number;
+  by_model: Record<string, UsageRow>;
+  by_session: Record<string, UsageRow>;
+  budget_tokens: number | null;
+  remaining_tokens: number | null;
+  over_budget: boolean;
+  file: string;
+}
+
 export interface ReportRef {
   path: string;
   name: string;
@@ -624,6 +657,8 @@ const json = (body: unknown): RequestInit => ({
 
 export const api = {
   authMe: () => req<AuthInfo>(`/auth/me`),
+  opsStatus: () => req<OpsStatus>(`/ops/status`),
+  usage: () => req<UsageSummary>(`/usage`),
   login: (token: string) => req<{ user: string }>(`/auth/login`, json({ token })),
   logout: () => req<{ ok: boolean }>(`/auth/logout`, { method: "POST" }),
 

@@ -34,6 +34,7 @@ sibling helper to the orchestrator.
 """
 
 import glob
+from scilink.utils import path_fence as _path_fence
 import io
 import json
 import logging
@@ -55,7 +56,8 @@ logger = logging.getLogger("meta_agent.fanout")
 # Concurrency + sizing. The complementary SET (post-gate) is what these bound,
 # not the raw input: the gate prunes first, so a 6-upload request with one
 # complementary pair runs a 2-way mesh, not a 6-way one.
-FANOUT_MAX_WORKERS = int(os.environ.get("SCILINK_FANOUT_MAX_WORKERS", "4"))
+from scilink.utils.workers import resolve_workers as _resolve_workers
+FANOUT_MAX_WORKERS = _resolve_workers(None, "SCILINK_FANOUT_MAX_WORKERS", 4)
 """Peak concurrent branches (rate-limit ceiling). Overridable via the
 SCILINK_FANOUT_MAX_WORKERS env var: two concurrent large-datacube branches
 (each holding float64 working copies plus a process-pool of fitters) can sum
@@ -470,9 +472,12 @@ def _resolve_branch_files(data_path: str, pattern: Optional[str]) -> Optional[Li
     """
     if not pattern:
         return None
+    pat = (pattern if os.path.isabs(str(pattern))
+           else os.path.join(str(data_path), str(pattern)))
+    fence = _path_fence.current()
+    if fence is not None:
+        fence.check_pattern(pat)               # raises: a branch outside the workspace
     try:
-        pat = (pattern if os.path.isabs(str(pattern))
-               else os.path.join(str(data_path), str(pattern)))
         files = sorted(f for f in glob.glob(pat) if os.path.isfile(f))
     except Exception as e:  # noqa: BLE001 - a bad pattern must not kill the fan-out
         logger.warning(f"fan-out: could not resolve pattern {pattern!r}: {e}")
@@ -771,6 +776,12 @@ class _BranchChannel:
         return self._qch.ask(req)
 
 
+def _inherited_roots(orch):
+    """The parent's fence roots for a child (None keeps the child open)."""
+    fence = getattr(orch, "path_fence", None)
+    return [str(r) for r in fence.roots] if fence is not None else None
+
+
 def _make_ephemeral_analysis_child(orch, base_dir: Path, restore: bool = False):
     """Build an isolated, one-shot analysis orchestrator for one branch.
 
@@ -795,6 +806,7 @@ def _make_ephemeral_analysis_child(orch, base_dir: Path, restore: bool = False):
         futurehouse_api_key=orch.futurehouse_api_key,
         restore_checkpoint=restore,
         analysis_mode=AnalysisMode.AUTONOMOUS,
+        file_roots=_inherited_roots(orch),
     )
     child._agent_label = "Analysis branch"
     # Share skills / custom tools / MCP servers registered on the meta.

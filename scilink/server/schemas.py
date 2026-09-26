@@ -25,6 +25,10 @@ class CreateSessionRequest(BaseModel):
     resume_dir: Optional[str] = None  # session dir NAME to resume, not a path
 
 
+class DrainRequest(BaseModel):
+    drain: bool = True
+
+
 class SendMessageRequest(BaseModel):
     content: str
 

@@ -22,6 +22,7 @@ import time
 import threading
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+from scilink.utils.path_fence import PathFence
 from datetime import datetime
 from enum import Enum
 
@@ -452,8 +453,15 @@ class MetaOrchestratorAgent:
         meta_mode: MetaMode = MetaMode.AUTOPILOT,
         max_iterations: Optional[int] = None,
         knowledge_dir: Optional[str] = None,
+        launch_dir: Optional[str] = None,
+        file_roots: Optional[List[str]] = None,
     ):
         self.logger = logging.getLogger(self.__class__.__name__)
+        # The directory the user launched from — where a bare filename is
+        # looked for and where a standalone plan session's ./kb_storage
+        # would be. The CLI leaves it as the process cwd; a server passes
+        # the session root, because ITS cwd belongs to nobody in particular.
+        self.launch_dir = Path(launch_dir).expanduser().resolve() if launch_dir else Path.cwd()
 
         if base_url:
             if api_key is None:
@@ -508,7 +516,7 @@ class MetaOrchestratorAgent:
         # of a config surface; attach_knowledge_base performs the attachment.
         self._shared_kb_candidate: Optional[Path] = None
         if not self.knowledge_dir:
-            _cand = Path.cwd() / "kb_storage"
+            _cand = self.launch_dir / "kb_storage"
             if _cand.is_dir() and any(_cand.iterdir()):
                 self._shared_kb_candidate = _cand.resolve()
 
@@ -531,6 +539,10 @@ class MetaOrchestratorAgent:
         # from the persistent analysis/ and planning/ children. See fanout.py.
         self.fanout_dir = self.base_dir / "fanout"
         self.fusion_dir = self.base_dir / "fusion"
+        # Where this workspace may read and write; children inherit it.
+        self.file_roots = list(file_roots) if file_roots else None
+        self.path_fence = PathFence.build(self.base_dir, file_roots,
+                                          extra=[self.knowledge_dir])
 
         # Session state — kept shallow; children own their deep state.
         self._children: Dict[str, Any] = {}          # "analysis"/"planning" -> agent
@@ -760,6 +772,11 @@ class MetaOrchestratorAgent:
     # Child orchestrators (lazy, persistent, one per mode)
     # =========================================================================
 
+    def _child_roots(self):
+        """This workspace's fence roots for a child (None = open, as here)."""
+        return ([str(r) for r in self.path_fence.roots]
+                if getattr(self, "path_fence", None) is not None else None)
+
     def _get_analysis_child(self):
         """Lazily create (or restore) the persistent analysis child.
 
@@ -787,6 +804,7 @@ class MetaOrchestratorAgent:
                 futurehouse_api_key=self.futurehouse_api_key,
                 restore_checkpoint=restore,
                 analysis_mode=AnalysisMode.CO_PILOT,
+                file_roots=self._child_roots(),
             )
             # Label its answers as the specialist's — in the meta's verbose
             # stream a child's final answer is a delegated deliverable, not the
@@ -828,6 +846,7 @@ class MetaOrchestratorAgent:
                 restore_checkpoint=restore,
                 autonomy_level=AutonomyLevel.CO_PILOT,
                 data_dir=None,
+                file_roots=self._child_roots(),
                 # Explicit stable KB when the caller opted in (CLI
                 # --knowledge-dir / chat-approved attach_knowledge_base),
                 # else session-scoped. Without
@@ -879,6 +898,7 @@ class MetaOrchestratorAgent:
                 futurehouse_api_key=self.futurehouse_api_key,
                 restore_checkpoint=restore,
                 simulation_mode=SimulationMode.CO_PILOT,
+                file_roots=self._child_roots(),
                 # mp_api_key not threaded from the meta (its constructor has
                 # none); MPRester falls back to the MP_API_KEY env var when a
                 # crystal-from-Materials-Project structure is requested.

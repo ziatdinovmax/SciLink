@@ -584,18 +584,11 @@ def _resolve_parallel_workers(value: Optional[int]) -> int:
     """Resolve the effective non-anchor worker count.
 
     Precedence: explicit constructor value (when not None) > env var
-    ``SCILINK_CURVE_FIT_WORKERS`` > 1. Values <1 are clamped to 1.
+    ``SCILINK_CURVE_FIT_WORKERS`` > ``SCILINK_MAX_WORKERS`` > 1; the
+    process-wide ceiling caps the result. Values <1 are clamped to 1.
     """
-    if value is None:
-        env = os.environ.get("SCILINK_CURVE_FIT_WORKERS")
-        if env:
-            try:
-                value = int(env)
-            except ValueError:
-                value = 1
-        else:
-            value = 1
-    return max(int(value), 1)
+    from scilink.utils.workers import resolve_workers
+    return resolve_workers(value, "SCILINK_CURVE_FIT_WORKERS", 1)
 
 
 def build_verification_prompt_with_history(

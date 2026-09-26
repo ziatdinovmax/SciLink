@@ -104,7 +104,8 @@ def test_single_token_gate_bearer_and_cookie(tmp_path):
 
 # ── per-user tokens: isolation ────────────────────────────────────
 
-def test_multi_user_isolation(tmp_path):
+def test_multi_user_isolation(tmp_path, monkeypatch):
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path / "home"))
     auth = AuthConfig.from_users_file(_users_file(tmp_path))
     app = create_app(tmp_path, serve_frontend=False, auth=auth)
     assert app.state.manager is None            # nothing to single out
@@ -128,6 +129,22 @@ def test_multi_user_isolation(tmp_path):
     assert [x["id"] for x in bob.get("/api/v1/sessions?mode=analyze").json()["resumable"]] == \
         ["analysis_session_20260101_010101"]
     assert alice.get("/api/v1/sessions?mode=analyze").json()["resumable"] == []
+    # the central sessions index is one file per SCILINK_HOME, so a session
+    # bob CREATED (which registers it there) must still not reach alice's
+    # list or resolve for her resume — the manager is confined to its root
+    from scilink.sessions import register_session
+    from scilink.server.session_manager import SessionError
+    register_session(tmp_path / "users" / "bob" / "analysis_session_20260101_010101",
+                     "analyze", launcher_cwd=tmp_path / "users" / "bob")
+    assert alice.get("/api/v1/sessions?mode=analyze").json()["resumable"] == []
+    assert [x["id"] for x in bob.get("/api/v1/sessions?mode=analyze").json()["resumable"]] == \
+        ["analysis_session_20260101_010101"]
+    alice_mgr = app.state.manager_for_user("alice")
+    assert alice_mgr.confined
+    with pytest.raises(SessionError, match="No such session"):
+        alice_mgr.resume(resume_dir="analysis_session_20260101_010101", mode="analyze",
+                         model="m", autonomy="autonomous", api_key="k", base_url="",
+                         provider_fields={}, fh_api_key="", mp_api_key="")
     # shared server: quit is refused; config names the user
     assert alice.post("/api/v1/quit").status_code == 403
     # what the instruments remember belongs to the machine: read by all, deleted by none

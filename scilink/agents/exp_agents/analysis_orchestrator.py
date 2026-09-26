@@ -16,6 +16,7 @@ import os
 import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+from scilink.utils.path_fence import PathFence
 from datetime import datetime
 from enum import Enum
 
@@ -599,6 +600,7 @@ class AnalysisOrchestratorAgent:
         # Deprecated
         google_api_key: Optional[str] = None,
         local_model: Optional[str] = None,
+        file_roots: Optional[List[str]] = None,
     ):
         self.logger = logging.getLogger(self.__class__.__name__)
         
@@ -684,6 +686,10 @@ class AnalysisOrchestratorAgent:
         self.history_path = self.base_dir / "chat_history.json"
         self.checkpoint_path = self.base_dir / "checkpoint.json"
         self.results_dir = self.base_dir / "results"
+        # Where this session may read and write (None = anywhere, the laptop
+        # default); a hosted server passes its workspace roots.
+        self.file_roots = list(file_roots) if file_roots else None
+        self.path_fence = PathFence.build(self.base_dir, file_roots)
         self.results_dir.mkdir(parents=True, exist_ok=True)
         
         # Session state

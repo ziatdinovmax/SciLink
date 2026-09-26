@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import json
+import time
 import os
 import threading
 from dataclasses import dataclass, field
@@ -99,7 +100,7 @@ def _resolve_credentials(model: str, api_key: str, base_url: str,
 # ── agent factories (ports of sidebar.py:883-980) ────────────────
 
 def _init_analysis_agent(session_dir: Path, api_key, model, base_url,
-                         autonomy, fh_api_key):
+                         autonomy, fh_api_key, file_roots=None):
     from scilink.agents.exp_agents.analysis_orchestrator import (
         AnalysisMode, AnalysisOrchestratorAgent)
     mode_map = {"co-pilot": AnalysisMode.CO_PILOT,
@@ -108,13 +109,13 @@ def _init_analysis_agent(session_dir: Path, api_key, model, base_url,
     return AnalysisOrchestratorAgent(
         base_dir=str(session_dir), api_key=api_key, model_name=model,
         base_url=base_url or None, analysis_mode=mode_map[autonomy],
-        futurehouse_api_key=fh_api_key or None)
+        futurehouse_api_key=fh_api_key or None, file_roots=file_roots)
 
 
 def _init_planning_agent(session_dir: Path, api_key, model, base_url,
                          autonomy, fh_api_key, objective, session_root: Path,
                          embedding_model=None, embedding_api_key=None,
-                         embedding_base_url=None):
+                         embedding_base_url=None, file_roots=None):
     from scilink.agents.planning_agents.planning_orchestrator import (
         AutonomyLevel, PlanningOrchestratorAgent)
     mode_map = {"co-pilot": AutonomyLevel.CO_PILOT,
@@ -141,13 +142,13 @@ def _init_planning_agent(session_dir: Path, api_key, model, base_url,
         base_url=base_url or None, autonomy_level=mode_map[autonomy],
         futurehouse_api_key=fh_api_key or None,
         knowledge_dir=str(knowledge_dir), code_dir=str(code_dir),
-        data_dir=str(data_dir), **kwargs)
+        data_dir=str(data_dir), file_roots=file_roots, **kwargs)
 
 
 def _init_meta_agent(session_dir: Path, api_key, model, base_url,
                      autonomy, fh_api_key,
                      embedding_model=None, embedding_api_key=None,
-                         embedding_base_url=None):
+                         embedding_base_url=None, file_roots=None):
     from scilink.agents.meta_agent.meta_orchestrator import (
         MetaMode, MetaOrchestratorAgent)
     mode_map = {"autopilot": MetaMode.AUTOPILOT,
@@ -164,7 +165,10 @@ def _init_meta_agent(session_dir: Path, api_key, model, base_url,
     return MetaOrchestratorAgent(
         base_dir=str(session_dir), api_key=api_key, model_name=model,
         base_url=base_url or None, meta_mode=mode_map[autonomy],
-        futurehouse_api_key=fh_api_key or None, **kwargs)
+        futurehouse_api_key=fh_api_key or None,
+        # a bare filename or a shared ./kb_storage is looked for in the
+        # session root, never in the server process's own directory
+        launch_dir=str(session_dir.parent), file_roots=file_roots, **kwargs)
 
 
 # ── history / deliverable helpers (ports of sidebar.py:1032-1076) ─
@@ -195,10 +199,77 @@ def collect_restored_deliverables(session_path: Path) -> tuple:
 
 
 class SessionManager:
-    def __init__(self, session_root: Path) -> None:
+    def __init__(self, session_root: Path, *, confined: bool = False,
+                 fenced: bool = False) -> None:
+        """``confined`` keeps discovery and resume inside ``session_root``.
+        The central sessions index is one file per ``SCILINK_HOME``, shared
+        by every user root on a multi-user server, so there a manager may
+        only see and resume sessions under its own root. A single-user
+        server keeps the index's "resume from anywhere"."""
         self.session_root = session_root.resolve()
+        self.confined = confined
+        # ``fenced``: every path an agent of this manager is handed must lie
+        # under this root (or the persistent store); set on a remote server,
+        # where the machine's other files are not the user's.
+        self.fenced = fenced
         self._sessions: Dict[str, WebSession] = {}
         self._lock = threading.Lock()
+
+    @property
+    def _within(self) -> Optional[Path]:
+        return self.session_root if self.confined else None
+
+    @property
+    def _file_roots(self) -> Optional[List[str]]:
+        return [str(self.session_root)] if self.fenced else None
+
+    # -- restarts ---------------------------------------------------------
+    INTERRUPTED = "interrupted.json"
+
+    def mark_interrupted(self) -> List[str]:
+        """Called at server shutdown: every session with a turn running gets
+        a marker in its directory, so the person sees on resume that the turn
+        was cut by a restart rather than finding it silently gone. Returns
+        the ids marked."""
+        marked: List[str] = []
+        for s in list(self._sessions.values()):
+            turn = s.turn
+            if turn is None or not turn.is_running:
+                continue
+            last_user = next((m.get("content") for m in reversed(s.chat_messages)
+                              if m.get("role") == "user"), None)
+            try:
+                (Path(s.session_dir) / self.INTERRUPTED).write_text(json.dumps({
+                    "at": time.time(), "turn_started_at": s.turn_started_at,
+                    "user_input": last_user}), encoding="utf-8")
+                marked.append(s.id)
+            except OSError:
+                pass
+        return marked
+
+    @classmethod
+    def _interrupted_note(cls, session_path: Path) -> Optional[Dict[str, Any]]:
+        """The restart note for a resumed session, consuming the marker."""
+        marker = session_path / cls.INTERRUPTED
+        if not marker.exists():
+            return None
+        try:
+            info = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            info = {}
+        try:
+            marker.unlink()
+        except OSError:
+            pass
+        when = info.get("at")
+        stamp = (datetime.fromtimestamp(when).strftime("%Y-%m-%d %H:%M") if when else "")
+        ask = info.get("user_input")
+        return {"role": "assistant",
+                "content": ("⚠️ The previous turn was interrupted by a server restart"
+                            + (f" at {stamp}" if stamp else "") + ". Work up to the "
+                            "last checkpoint is kept; re-send the request to continue."
+                            + (f"\n\nIt was: {str(ask)[:300]}" if ask else "")),
+                "interrupted": True}
 
     # -- lookup ---------------------------------------------------------
     def get(self, session_id: str) -> Optional[WebSession]:
@@ -235,7 +306,8 @@ class SessionManager:
         (any folder) plus a scan of the root for sessions that predate it,
         minus the ones already live here. An entry from another folder
         carries that folder in its label."""
-        entries = list_sessions(mode, root=self.session_root, exclude=self._sessions)
+        entries = list_sessions(mode, root=self.session_root, exclude=self._sessions,
+                                within=self._within)
         for e in entries:
             if Path(e["folder"]).resolve() != self.session_root:
                 e["label"] = f"{e['label']} · {e['folder']}"
@@ -275,18 +347,18 @@ class SessionManager:
                     session_dir, resolved_key, model, base_url, autonomy,
                     fh_api_key, embedding_model=embedding_model,
                     embedding_api_key=embedding_api_key,
-                    embedding_base_url=embedding_base_url)
+                    embedding_base_url=embedding_base_url, file_roots=self._file_roots)
             elif mode == "plan":
                 agent = _init_planning_agent(
                     session_dir, resolved_key, model, base_url, autonomy,
                     fh_api_key, objective, self.session_root,
                     embedding_model=embedding_model,
                     embedding_api_key=embedding_api_key,
-                    embedding_base_url=embedding_base_url)
+                    embedding_base_url=embedding_base_url, file_roots=self._file_roots)
             else:
                 agent = _init_analysis_agent(
                     session_dir, resolved_key, model, base_url, autonomy,
-                    fh_api_key)
+                    fh_api_key, file_roots=self._file_roots)
         except Exception as exc:
             raise SessionError(f"Failed to initialize agent: {exc}") from exc
 
@@ -312,7 +384,8 @@ class SessionManager:
         if session_path.parent != self.session_root or not session_path.is_dir():
             # Not under the root: an id the central index knows (a session
             # from another folder, e.g. one the terminal shell created).
-            indexed = resolve_session(resume_dir, mode, root=self.session_root)
+            indexed = resolve_session(resume_dir, mode, root=self.session_root,
+                                      within=self._within)
             if indexed is None or not indexed.is_dir():
                 raise SessionError(f"No such session: {resume_dir}")
             session_path = indexed
@@ -380,6 +453,10 @@ class SessionManager:
                 display_messages = convert_chat_history_for_display(raw)
             except Exception:
                 pass
+
+        note = self._interrupted_note(session_path)
+        if note is not None:
+            display_messages.append(note)
 
         # Re-embed the latest deliverable (chat attachments are not persisted).
         def _rel(p: str) -> str:

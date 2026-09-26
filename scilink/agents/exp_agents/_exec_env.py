@@ -70,7 +70,20 @@ try:
     devices["mps"] = bool(mps is not None and mps.is_available())
 except Exception:  # noqa: BLE001
     pass
-ckpt_dir = os.path.join(os.path.expanduser("~"), ".cache", "scilink", "checkpoints")
+def _sam_dir():
+    # Same rule as scilink.skills._shared.particle_analyzer.sam_checkpoint_dir
+    # (inlined: this probe must not import scilink into the sandbox).
+    models = os.environ.get("SCILINK_MODELS")
+    if models:
+        base = os.path.expanduser(models)
+    else:
+        base = os.path.join(os.path.expanduser(os.environ.get("SCILINK_HOME") or "~/.scilink"), "models")
+    current = os.path.join(base, "sam")
+    legacy = os.path.join(os.path.expanduser("~"), ".cache", "scilink", "checkpoints")
+    if not glob.glob(os.path.join(current, "*.pth")) and glob.glob(os.path.join(legacy, "*.pth")):
+        return legacy
+    return current
+ckpt_dir = _sam_dir()
 checkpoints = sorted(os.path.basename(p) for p in glob.glob(os.path.join(ckpt_dir, "*.pth")))
 print("%(marker)s" + json.dumps({
     "python": sys.executable,

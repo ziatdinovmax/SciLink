@@ -204,7 +204,8 @@ def _record_trace(model: str, messages, response, latency_s: float) -> None:
         tracing.note_llm_call(
             latency_s=latency_s,
             prompt_tokens=getattr(u, "prompt_tokens", None),
-            completion_tokens=getattr(u, "completion_tokens", None))
+            completion_tokens=getattr(u, "completion_tokens", None),
+            model=model)
         if not tracing.is_enabled():
             return
         text, finish = "", None

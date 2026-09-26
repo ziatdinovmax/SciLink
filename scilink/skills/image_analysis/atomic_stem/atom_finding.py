@@ -790,6 +790,8 @@ def local_env_gmm(
         - ``classes``: (M,) cluster id (0-indexed) per surviving atom.
     """
     try:
+        from scilink.skills._shared._atomai_compat import ensure_atomai_compat
+        ensure_atomai_compat()
         import atomai as aoi
     except ImportError as exc:
         raise ImportError(

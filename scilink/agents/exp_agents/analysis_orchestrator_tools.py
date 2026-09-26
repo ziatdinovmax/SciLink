@@ -19,6 +19,7 @@ import fnmatch
 import glob
 import hashlib
 import json
+from scilink.utils import path_fence as _path_fence
 import logging
 import os
 import re
@@ -304,6 +305,9 @@ def _resolve_glob_files(pattern: str) -> tuple[list[Path], list[Path]]:
     typically does not match, e.g. ``series_*.txt``), so sidecar-based series
     metadata keeps working for a globbed subset of a directory.
     """
+    fence = _path_fence.current()
+    if fence is not None:
+        fence.check_pattern(pattern)
     matched = sorted((Path(f) for f in glob.glob(pattern) if os.path.isfile(f)),
                      key=lambda p: p.name)
     data_files = [
@@ -6691,6 +6695,13 @@ class AnalysisOrchestratorTools:
         return result
 
     def _dispatch_tool(self, tool_name: str, **kwargs) -> str:
+        # A hosted server fences every path a tool is handed (see
+        # scilink.utils.path_fence); on a laptop the fence is None.
+        fence = getattr(getattr(self, "orch", None), "path_fence", None)
+        if fence is not None:
+            refused = fence.refuse_tool_args(kwargs, self.orch.base_dir)
+            if refused:
+                return json.dumps({"status": "error", "tool": tool_name, "message": refused})
         if tool_name not in self.functions_map:
             return json.dumps({
                 "status": "error",
@@ -6698,7 +6709,11 @@ class AnalysisOrchestratorTools:
             })
         
         try:
-            return self.functions_map[tool_name](**kwargs)
+            with _path_fence.bound(fence):
+                try:
+                    return self.functions_map[tool_name](**kwargs)
+                except _path_fence.PathFenceError as e:
+                    return json.dumps({"status": "error", "tool": tool_name, "message": str(e)})
         except Exception as e:
             logging.error(f"Tool execution error ({tool_name}): {e}", exc_info=True)
             return json.dumps({

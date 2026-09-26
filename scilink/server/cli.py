@@ -57,6 +57,17 @@ def main(argv=None) -> int:
                         help='JSON {"name": "token", ...}: per-user tokens '
                              "with isolated session roots under "
                              "<session-root>/users/<name>/.")
+    parser.add_argument("--auth-header", default=None, metavar="NAME",
+                        help="Trust a proxy in front to authenticate: the user "
+                             "is the value of this request header (e.g. "
+                             "X-Auth-Request-User), per-user session roots as "
+                             "with --users. Only honoured from --trusted-proxy. "
+                             "Env: SCILINK_AUTH_HEADER.")
+    parser.add_argument("--trusted-proxy", action="append", default=[],
+                        metavar="ADDR/CIDR",
+                        help="Address or network the authenticating proxy "
+                             "connects from (repeatable; default: loopback). "
+                             "Env: SCILINK_TRUSTED_PROXIES, comma separated.")
     parser.add_argument("--insecure-no-auth", action="store_true",
                         help="Allow a non-loopback --host WITHOUT any auth "
                              "(only behind a reverse proxy that "
@@ -64,6 +75,12 @@ def main(argv=None) -> int:
     add_tls_arguments(parser, "the web UI")
     args = parser.parse_args(argv)
     tls = tls_kwargs(args)
+    # A container is configured through its environment: the two proxy
+    # settings have env forms too (the token already has SCILINK_WEB_TOKEN).
+    import os
+    args.auth_header = args.auth_header or os.environ.get("SCILINK_AUTH_HEADER") or None
+    if not args.trusted_proxy and os.environ.get("SCILINK_TRUSTED_PROXIES"):
+        args.trusted_proxy = [x.strip() for x in os.environ["SCILINK_TRUSTED_PROXIES"].split(",") if x.strip()]
 
     try:
         import uvicorn
@@ -83,11 +100,16 @@ def main(argv=None) -> int:
     loopback = args.host in ("127.0.0.1", "localhost", "::1")
     auth = None
     try:
-        if args.users and (args.token or os.environ.get("SCILINK_WEB_TOKEN")):
-            print("Use either --token / SCILINK_WEB_TOKEN or --users, not both.",
-                  file=sys.stderr)
+        chosen = [n for n, on in (("--token / SCILINK_WEB_TOKEN",
+                                   args.token or os.environ.get("SCILINK_WEB_TOKEN")),
+                                  ("--users", args.users),
+                                  ("--auth-header", args.auth_header)) if on]
+        if len(chosen) > 1:
+            print("Use one of " + ", ".join(chosen) + ", not several.", file=sys.stderr)
             return 2
-        if args.users:
+        if args.auth_header:
+            auth = AuthConfig.from_header(args.auth_header, args.trusted_proxy)
+        elif args.users:
             auth = AuthConfig.from_users_file(Path(args.users).expanduser())
         elif args.token or os.environ.get("SCILINK_WEB_TOKEN"):
             auth = AuthConfig.single(args.token or os.environ["SCILINK_WEB_TOKEN"])
@@ -121,10 +143,16 @@ def main(argv=None) -> int:
     print(f"SciLink web backend on {scheme}://{args.host}:{args.port} "
           f"(sessions in {session_root})")
     if auth is not None:
-        who = (f"{len(auth.users)} users, per-user session roots"
-               if auth.multi_user else "one shared token")
-        print(f"Authentication ON ({who}). Sign in with the token, or open "
-              f"{url}/?token=<your token> once.")
+        if auth.header:
+            print(f"Authentication by the proxy in front: user = header "
+                  f"{auth.header!r}, trusted from "
+                  + ", ".join(str(n) for n in auth.trusted_proxies)
+                  + "; per-user session roots.")
+        else:
+            who = (f"{len(auth.users)} users, per-user session roots"
+                   if auth.multi_user else "one shared token")
+            print(f"Authentication ON ({who}). Sign in with the token, or open "
+                  f"{url}/?token=<your token> once.")
     if not getattr(app.state, "frontend_dir", None):
         print("=" * 70, file=sys.stderr)
         print(NO_BUNDLE_MESSAGE.rstrip(), file=sys.stderr)

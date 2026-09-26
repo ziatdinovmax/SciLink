@@ -59,16 +59,19 @@ def resolve_user_path(file_path, base_dir) -> Path:
     (where a terminal user typed them). When neither exists the
     session-relative form is returned, so the error names the expected
     location. ``~`` is expanded."""
+    from .path_fence import current as _fence
+    fence = _fence()
     path = Path(str(file_path)).expanduser()
     if path.is_absolute():
-        return path
+        return fence.check(path) if fence is not None else path
     in_session = Path(base_dir) / path
     if in_session.exists():
-        return in_session
+        return fence.check(in_session) if fence is not None else in_session
     in_cwd = Path.cwd() / path
-    if in_cwd.exists():
+    # On a fenced server the process cwd belongs to nobody: not a fallback.
+    if in_cwd.exists() and (fence is None or fence.allows(in_cwd)):
         return in_cwd
-    return in_session
+    return fence.check(in_session) if fence is not None else in_session
 
 
 def _size_error(path: Path, cap_mb: float) -> Optional[Dict[str, Any]]:
