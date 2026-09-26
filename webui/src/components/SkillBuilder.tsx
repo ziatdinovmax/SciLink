@@ -94,6 +94,57 @@ export function SkillBuilder({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const previewTimer = useRef<number | null>(null);
+  // draft-with-the-model
+  const [notes, setNotes] = useState("");
+  const [kb, setKb] = useState("");
+  const [literature, setLiterature] = useState(false);
+  const [fill, setFill] = useState<"empty" | "all">("empty");
+  const [options, setOptions] = useState<{ knowledge_bases: { name: string; embedding_model: string | null; sources: string[] }[]; literature_available: boolean } | null>(null);
+  const [draftJob, setDraftJob] = useState<{ id: string; started: number } | null>(null);
+  const [draftInfo, setDraftInfo] = useState<{ grounding: Record<string, unknown>; warnings: string[]; targets: string[] } | null>(null);
+  const [, setTick] = useState(0);
+
+  useEffect(() => {
+    if (open && !options) api.draftOptions(sessionId).then(setOptions).catch(() => setOptions({ knowledge_bases: [], literature_available: false }));
+  }, [open, options, sessionId]);
+
+  // poll the draft job; on completion fill the sections it wrote (and the
+  // description / technique when they were empty)
+  useEffect(() => {
+    if (!draftJob) return;
+    const t = setInterval(async () => {
+      setTick((n) => n + 1);
+      try {
+        const j = await api.memoryJob(draftJob.id);
+        if (j.status === "running") return;
+        setDraftJob(null);
+        if (j.status === "error") { setError(`Draft failed: ${j.error}`); return; }
+        const r = j.result as { sections: Record<string, string>; description?: string; technique?: string[];
+                                grounding: Record<string, unknown>; warnings: string[]; targets: string[] };
+        setSections((m) => ({ ...m, ...r.sections }));
+        if (r.description && !description.trim()) setDescription(r.description);
+        if (r.technique?.length && !technique.trim()) setTechnique(r.technique.join(", "));
+        setDraftInfo({ grounding: r.grounding, warnings: r.warnings, targets: Object.keys(r.sections) });
+        setError(null);
+      } catch (e) {
+        setDraftJob(null);
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    }, 2000);
+    return () => clearInterval(t);
+  }, [draftJob, description, technique]);
+
+  const draft = async () => {
+    setError(null);
+    setDraftInfo(null);
+    try {
+      const j = await api.draftSkill(sessionId, { name: slug(name), domain, description, technique: technique.split(",").map((t) => t.trim()).filter(Boolean),
+        sections, notes, kb: kb || null, literature, fill });
+      setDraftJob({ id: j.job_id, started: Date.now() });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   const domains = useMemo(() => {
     const ds = (catalog?.builtin ?? []).map((d) => d.domain);
@@ -210,6 +261,52 @@ export function SkillBuilder({
               </select>
               <span className="caption">loads an existing skill's parts into the form to derive a new one</span>
             </label>
+          </div>
+
+          <div className="mem-card sb-draft">
+            <div><strong>Draft with the model</strong>
+              <span className="caption"> — fills the empty sections from your description, technique and notes; your own text stays and is used as context. Nothing is saved until you choose to.</span></div>
+            <label className="sb-section">
+              <span>Notes for the model</span>
+              <textarea rows={3} value={notes} placeholder="What the skill should cover, constraints, what you already know works — e.g. 'Cu Kα powder patterns of oxide mixtures; we care about phase fractions, not lattice parameters; instrument broadening ~0.08°'."
+                onChange={(e) => setNotes(e.target.value)} />
+            </label>
+            <div className="mem-row-actions">
+              <label className="caption">ground on a knowledge base{" "}
+                <select value={kb} onChange={(e) => setKb(e.target.value)}>
+                  <option value="">— none —</option>
+                  {(options?.knowledge_bases ?? []).map((k) => <option key={k.name} value={k.name}>{k.name}</option>)}
+                </select>
+              </label>
+              <label className="mem-check" title={options?.literature_available === false ? "This session has no FutureHouse key; start a session with one to search the literature." : "One literature search (FutureHouse); typically several minutes."}>
+                <input type="checkbox" checked={literature} disabled={options?.literature_available === false} onChange={(e) => setLiterature(e.target.checked)} />
+                <span>search the literature{options?.literature_available === false ? " (no key on this session)" : ""}</span>
+              </label>
+              <span className="mem-dest">
+                <label><input type="radio" checked={fill === "empty"} onChange={() => setFill("empty")} /> fill empty sections</label>
+                <label><input type="radio" checked={fill === "all"} onChange={() => setFill("all")} /> redraft all</label>
+              </span>
+              <button type="button" className="primary small" disabled={draftJob !== null || !(description.trim() || technique.trim() || notes.trim())}
+                title={description.trim() || technique.trim() || notes.trim() ? "One model call, plus the grounding you chose." : "Give the model a description, a technique or notes first."}
+                onClick={() => void draft()}>
+                {draftJob ? "drafting…" : "Draft"}
+              </button>
+            </div>
+            {draftJob && (
+              <p className="mem-job"><span className="spinner" /> drafting — {Math.round((Date.now() - draftJob.started) / 1000)}s so far{literature ? "; a literature search can take several minutes" : ""}. You can keep editing.</p>
+            )}
+            {draftInfo && (
+              <div className="caption sb-draft-info">
+                Drafted {draftInfo.targets.join(", ")}.
+                {" "}Grounding: {draftInfo.grounding.kb ? `knowledge base ${String(draftInfo.grounding.kb)} (${String(draftInfo.grounding.kb_chunks)} chunks)` : "no knowledge base"};
+                {" "}literature {String(draftInfo.grounding.literature)}.
+                {Array.isArray(draftInfo.grounding.sources) && (draftInfo.grounding.sources as string[]).length > 0 && (
+                  <ul className="mem-list">{(draftInfo.grounding.sources as string[]).slice(0, 12).map((u) => <li key={u}><a href={u} target="_blank" rel="noreferrer">{u}</a></li>)}</ul>
+                )}
+                {draftInfo.warnings.map((w, i) => <p key={i} className="caption warn">{w}</p>)}
+                <p className="caption">Read it before saving: a draft is a starting point, not a verified method.</p>
+              </div>
+            )}
           </div>
 
           {SECTIONS.map((s) => (

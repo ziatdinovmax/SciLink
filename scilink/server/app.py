@@ -40,6 +40,7 @@ from .schemas import (
     LoginRequest,
     MCPConnectRequest,
     ComposeSkillRequest,
+    DraftSkillRequest,
     MemoryApplyRequest,
     MemoryCheckRequest,
     MemoryConsolidateRequest,
@@ -602,6 +603,30 @@ def create_app(session_root: Path, serve_frontend: bool = True,
                                  sections=body.sections, save=body.save)
         except SkillError as exc:
             raise HTTPException(exc.status, str(exc))
+
+    @app.get("/api/v1/sessions/{session_id}/skills/draft-options")
+    def draft_options_route(request: Request, session_id: str):
+        """What the builder can ground a draft on: named knowledge bases and
+        whether this session can search the literature."""
+        from .skills_api import draft_options
+        return draft_options(_session_or_404(request, session_id).agent)
+
+    @app.post("/api/v1/sessions/{session_id}/skills/draft")
+    def draft_skill_route(request: Request, session_id: str, body: DraftSkillRequest):
+        """Draft the builder's empty (or all) sections with the session's
+        model, grounded on a knowledge base / the literature when asked.
+        Runs as a job; poll GET /memory/jobs/{id}."""
+        from .memory_api import MemoryError as _MemErr
+        from .skills_api import SkillError, start_draft
+        session = _session_or_404(request, session_id)
+        try:
+            return start_draft(session.agent, name=body.name, domain=body.domain, description=body.description,
+                               technique=body.technique, sections=body.sections, notes=body.notes,
+                               kb=body.kb or None, literature=body.literature, fill=body.fill)
+        except SkillError as exc:
+            raise HTTPException(exc.status, str(exc))
+        except _MemErr as exc:
+            raise HTTPException(exc.status, exc.message)
 
     # ── persistent memory ────────────────────────────────────────
     # One store per server host ($SCILINK_HOME or ~/.scilink), shared by

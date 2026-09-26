@@ -761,6 +761,13 @@ export const api = {
   telemetry: (id: string) => req<TelemetrySnapshot>(`/sessions/${id}/telemetry`),
 
   skills: (id: string) => req<SkillCatalog>(`/sessions/${id}/skills`),
+  draftOptions: (id: string) =>
+    req<{ knowledge_bases: { name: string; embedding_model: string | null; sources: string[] }[]; literature_available: boolean }>(
+      `/sessions/${id}/skills/draft-options`),
+  draftSkill: (id: string, body: { name: string; domain: string; description: string; technique: string[];
+                                   sections: Record<string, string>; notes: string; kb: string | null;
+                                   literature: boolean; fill: "empty" | "all" }) =>
+    req<{ job_id: string; label: string }>(`/sessions/${id}/skills/draft`, json(body)),
   composeSkill: (id: string, body: { name: string; domain: string; description: string; technique: string[];
                                      sections: Record<string, string>; save: "preview" | "session" | "memory" }) =>
     req<{ name: string; domain: string; markdown: string; saved: string; path?: string; catalog?: SkillCatalog }>(

@@ -1105,3 +1105,6 @@ button.primary:disabled:hover { background: var(--border-strong); }
 .sb-actions { margin-top: 10px; }
 .sb-preview { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; max-height: 480px; overflow: auto; font-size: 13px; }
 @media (max-width: 900px) { .sb-grid { grid-template-columns: 1fr; } }
+.sb-draft { margin: 8px 0 12px; }
+.sb-draft .sb-section { margin: 6px 0; }
+.sb-draft-info { margin-top: 6px; }

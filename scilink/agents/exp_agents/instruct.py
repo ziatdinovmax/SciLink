@@ -3187,6 +3187,42 @@ DELETE that section.
 
 Output ONLY the JSON object. Do not wrap in code blocks. Do not include any prose outside the JSON."""
 
+SKILL_DRAFT_INSTRUCTIONS = """You are an expert scientific data analyst writing a SKILL: a short markdown \
+document that a downstream analysis agent reads at fixed points of a run. A skill has a one-sentence \
+description (the agents route on it), a technique list (the selectors match the data's measurement \
+technique against it) and five sections, each read at its own stage:
+
+- overview: what the technique or method is, what data it fits, when to reach for it (and when not to)
+- planning: how to plan a use of it — model form or pipeline, parameter heuristics, what varies between \
+datasets and how to choose
+- implementation: how to write the code — the recipe a generated script should follow (libraries, steps, \
+the exact algorithm where it matters; a concrete code snippet is stronger than prose)
+- interpretation: how to read the output and judge plausibility — what the numbers mean, typical ranges, \
+what a bad result looks like
+- validation: how to verify it — quality criteria, sanity checks, failure indicators, tolerances
+
+**Skill so far (the author's text is authoritative; keep its facts and style):**
+{skill_json}
+
+**Author's notes on what the skill should cover:**
+{notes}
+
+**Grounding context** (numbered sources; cite them inline as [n] where you use them; if this block is \
+empty, write from general expertise and do not invent references):
+{grounding}
+
+**Write these sections:** {targets}
+
+Rules: be concrete and concise (the skill is read into the model's context every run); state real \
+parameter ranges, checks and pitfalls rather than generalities; never contradict the author's text; \
+if the author left the description empty, propose one sentence; if the technique list is empty, propose \
+the measurement technique names and common aliases as a list (or [] when the skill is not \
+technique-specific).
+
+Return ONLY a JSON object with the keys {target_keys} (markdown allowed inside values, no `##` \
+headings), plus "description" (a string, only if you propose one), "technique" (a list, only if you \
+propose one) and "sources_used" (the [n] numbers you cited). No prose outside the JSON."""
+
 BANK_EDIT_ADAPT_INSTRUCTIONS = """You are an expert scientific data analyst. A PROVEN {script_kind} script \
 from the script bank closely matches the current dataset. Adapt it with the SMALLEST possible set of \
 exact text edits — do NOT rewrite it. The proven structure is the value: a minimal-edit adaptation \

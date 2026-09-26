@@ -539,3 +539,43 @@ def test_skill_builder_composes_previews_saves_and_registers(mem_client, tmp_pat
     assert s["provisional"] is False and s["provenance"] == "authored"
     cat = c.get(f"/api/v1/sessions/{session.id}/skills").json()
     assert any(x["name"] == "my_xrd" and x["origin"] == "learned" for d in cat["builtin"] for x in d["skills"])
+
+
+def test_skill_builder_drafts_with_the_model_and_reports_grounding(mem_client, tmp_path, monkeypatch):
+    c = mem_client
+    session = _session(c, tmp_path)
+    prompts = []
+
+    def fake_generate(contents):
+        prompts.append(contents[0])
+        return SimpleNamespace(text=json.dumps({
+            "overview": "Bragg peaks from a powder pattern.", "planning": "Pseudo-Voigt per reflection.",
+            "implementation": "Use lmfit; seed positions from find_peaks.", "interpretation": "Rwp under 10 %.",
+            "validation": "Residuals flat.", "description": "Powder XRD peak fitting",
+            "technique": ["XRD", "powder diffraction"], "sources_used": []}))
+    session.agent.model.generate_content = fake_generate
+    monkeypatch.delenv("FUTUREHOUSE_API_KEY", raising=False)
+    base = f"/api/v1/sessions/{session.id}/skills"
+    opts = c.get(f"{base}/draft-options").json()
+    assert opts["literature_available"] is False and isinstance(opts["knowledge_bases"], list)
+    # only the empty sections are drafted; the author's text is context, not output
+    body = {"name": "my_xrd", "domain": "curve_fitting", "description": "", "technique": [],
+            "sections": {"validation": "Rwp below 8 %."}, "notes": "phase fractions from Rietveld-free peak areas",
+            "kb": None, "literature": True, "fill": "empty"}
+    r = c.post(f"{base}/draft", json=body)
+    assert r.status_code == 200, r.text
+    job = _wait_job(c, r.json()["job_id"])
+    assert job["status"] == "done", job
+    res = job["result"]
+    assert set(res["sections"]) == {"overview", "planning", "implementation", "interpretation"}
+    assert res["description"] == "Powder XRD peak fitting" and res["technique"] == ["XRD", "powder diffraction"]
+    assert res["grounding"]["literature"] == "unavailable" and any("FutureHouse" in w for w in res["warnings"])
+    assert "Rwp below 8 %." in prompts[-1] and '"validation"' not in prompts[-1].split("Write these sections")[1].split("Rules")[0]
+    # an unknown knowledge base degrades to a warning, the draft still happens
+    r = c.post(f"{base}/draft", json={**body, "literature": False, "kb": "no_such_kb", "fill": "all"})
+    job = _wait_job(c, r.json()["job_id"])
+    assert job["status"] == "done" and set(job["result"]["sections"]) == {"overview", "planning", "implementation", "interpretation", "validation"}
+    assert any("no_such_kb" in w for w in job["result"]["warnings"])
+    # nothing to draft is a 400 before any job starts
+    full = {k: "x" for k in ("overview", "planning", "implementation", "interpretation", "validation")}
+    assert c.post(f"{base}/draft", json={**body, "sections": full, "fill": "empty"}).status_code == 400

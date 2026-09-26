@@ -308,7 +308,15 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   memory" writes an approved, authored bundle into the store (refused
   while memory is off, since it would not load); "Start from" loads an
   existing skill's parts into the form to derive a new one; the file can
-  also be downloaded.
+  also be downloaded. **Draft with the model** fills the empty sections (or
+  redrafts all of them) from the description, the technique list and your
+  notes, with your own text kept as authoritative context; it can be
+  grounded on a named knowledge base (top chunks, dense or keyword
+  retrieval) and on one FutureHouse literature search (the session's key,
+  minutes) — the draft says what it was grounded on, lists the sources it
+  was given and any grounding that could not be used, and nothing is saved
+  until you choose to. It runs as a job (`POST
+  /sessions/{id}/skills/draft`, polled through `/memory/jobs/{id}`).
 - **Memory tab** (all modes): persistent memory over one store per server
   host (`$SCILINK_HOME` or `~/.scilink`, the same store `scilink memory`
   manages). The header holds the on/off switch (persisted to the store's
@@ -445,7 +453,9 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
 | POST | `/sessions/{id}/skills` | multipart `.md` uploads → `custom_skills/`, registered with the agent |
 | GET | `/memory` | the store: switch, `shared_server` / `can_delete`, pipeline counts, bank by domain (records with `evidence` rows and `model_type`, variant groups), the `archived` list, inbox by domain/technique, skills (with `technique`, `has_backup`, `n_examples`) |
 | POST | `/sessions/{id}/skills/compose` | the skill builder: `{name, domain, description, technique, sections, save}` → the rendered markdown; `save` is `preview` (render only), `session` (custom_skills/ + register) or `memory` (an approved bundle in the store, `provenance: authored`; 400 while memory is off, 409 if the name exists) |
-| GET | `/memory/jobs` | every distillation job this server process ran, newest first, with the skill or target it produced |
+| GET | `/sessions/{id}/skills/draft-options` | what a draft can be grounded on: the named knowledge bases, and whether the session can search the literature |
+| POST | `/sessions/{id}/skills/draft` | `{name, domain, description, technique, sections, notes, kb?, literature, fill}` → a job whose result is the drafted sections (plus a description / technique when they were empty), the grounding used and warnings; 400 when nothing is empty (with `fill: empty`) or nothing to go on |
+| GET | `/memory/jobs` | every distillation or draft job this server process ran, newest first, with the skill or target it produced |
 | GET | `/memory/bank/archived` | archived bank records (`?domain=`) |
 | POST | `/memory/bank/sweep` | `{domain?, days?, dry_run}` → the records the aging rules would archive (preview) or did archive; applying is 403 on a shared server |
 | POST | `/memory/bank/{domain}/{id}/restore` | bring an archived record back |

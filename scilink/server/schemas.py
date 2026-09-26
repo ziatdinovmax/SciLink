@@ -99,6 +99,18 @@ class ComposeSkillRequest(BaseModel):
     save: str = "preview"           # preview | session | memory
 
 
+class DraftSkillRequest(BaseModel):
+    name: str = ""
+    domain: str = "curve_fitting"
+    description: str = ""
+    technique: List[str] = []
+    sections: Dict[str, str] = {}
+    notes: str = ""
+    kb: Optional[str] = None
+    literature: bool = False
+    fill: str = "empty"             # empty | all
+
+
 class MemoryTechniqueRequest(BaseModel):
     technique: List[str] = []
 
