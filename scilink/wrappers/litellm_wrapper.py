@@ -259,6 +259,87 @@ def _scope_drop_params(model) -> None:
         litellm.drop_params = str(model or "").startswith("bedrock/")
 
 
+# ── Transient-error retries and per-attempt timeouts ────────────────────────
+# LiteLLM's own ``num_retries`` defaults to its "constant_retry" strategy: the
+# attempts follow each other with NO wait, and every openai.APIError is
+# retried, a 400 or 401 included. A throttled or briefly unavailable
+# provider is therefore hit again at once, by every concurrent caller in
+# step. SciLink retries itself instead, only what a retry can fix, with
+# exponential backoff and jitter (honouring Retry-After), and hands LiteLLM
+# ``num_retries=0``.
+
+LLM_RETRIES = 4           # retries after the first attempt, transient errors only
+LLM_TIMEOUT_S = 1200      # per attempt; the generative wrapper's long-standing default
+_BACKOFF_BASE_S = 2.0
+_BACKOFF_CAP_S = 60.0
+_TRANSIENT_STATUS = frozenset({408, 429, 500, 502, 503, 504, 529})
+
+_logger = logging.getLogger(__name__)
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """A provider error a later attempt can succeed on: throttling, overload,
+    a server fault, a timeout, a dropped connection. A bad request, bad
+    credentials or an unknown model are not retried."""
+    if litellm is not None:
+        transient = tuple(c for c in (
+            getattr(litellm, "RateLimitError", None),
+            getattr(litellm, "ServiceUnavailableError", None),
+            getattr(litellm, "InternalServerError", None),
+            getattr(litellm, "BadGatewayError", None),
+            getattr(litellm, "Timeout", None),
+            getattr(litellm, "APIConnectionError", None),
+        ) if isinstance(c, type))
+        if transient and isinstance(exc, transient):
+            return True
+    return getattr(exc, "status_code", None) in _TRANSIENT_STATUS
+
+
+def _retry_after_s(exc: BaseException) -> Optional[float]:
+    try:
+        value = exc.response.headers.get("retry-after")   # type: ignore[attr-defined]
+        return max(0.0, min(float(value), _BACKOFF_CAP_S)) if value is not None else None
+    except Exception:  # noqa: BLE001 - absent, or an HTTP date: back off normally
+        return None
+
+
+def _backoff_s(attempt: int) -> float:
+    """Exponential with equal jitter: half the step fixed, half random, so N
+    workers throttled together do not come back together."""
+    import random
+    step = min(_BACKOFF_CAP_S, _BACKOFF_BASE_S * (2 ** attempt))
+    return step / 2 + random.uniform(0, step / 2)
+
+
+def _completion_with_retries(retries: int, **kwargs):
+    """``litellm.completion`` with SciLink's retry policy (see above)."""
+    kwargs["num_retries"] = 0
+    timeouts = 0
+    for attempt in range(retries + 1):
+        try:
+            return litellm.completion(**kwargs)
+        except Exception as exc:
+            if attempt >= retries or not _is_transient(exc):
+                raise
+            # A timeout is a hung connection (a retry helps) or a generation
+            # longer than the timeout (it would only time out again): one
+            # retry, not the full budget.
+            timeout_cls = getattr(litellm, "Timeout", None)
+            if isinstance(timeout_cls, type) and isinstance(exc, timeout_cls):
+                timeouts += 1
+                if timeouts > 1:
+                    raise
+            delay = _retry_after_s(exc)
+            delay = _backoff_s(attempt) if delay is None else delay
+            # Logged before sleeping: a stopped turn's log write raises its
+            # stop here instead of after the wait.
+            _logger.warning(
+                f"LLM call failed ({type(exc).__name__}, status "
+                f"{getattr(exc, 'status_code', '?')}); retry {attempt + 1}/{retries} "
+                f"in {delay:.1f}s")
+            time.sleep(delay)
+
+
 def litellm_completion(*args, **kwargs):
     """``litellm.completion`` with Bedrock-scoped param dropping and the
     output ceiling #238 asks for.
@@ -295,18 +376,24 @@ def litellm_completion(*args, **kwargs):
         if _openai_tools_need_no_reasoning(model) and "reasoning_effort" not in kwargs:
             kwargs["reasoning_effort"] = "none"
     _scope_drop_params(model)
-    kwargs.setdefault("num_retries", 4)   # retry transient provider errors w/ backoff
+    retries = kwargs.pop("num_retries", LLM_RETRIES)
+    kwargs.setdefault("timeout", LLM_TIMEOUT_S)
     if ("max_tokens" not in kwargs
             and str(model or "").startswith(("bedrock/", "anthropic/"))):
         ceiling = _registered_max_output_tokens(model)
         if ceiling:
             kwargs["max_tokens"] = ceiling
+    if args:                                  # the model may be positional
+        kwargs.setdefault("model", args[0])
+        if len(args) > 1:
+            kwargs.setdefault("messages", args[1])
+        if len(args) > 2:
+            raise TypeError("litellm_completion takes at most model and messages positionally")
     _t0 = time.perf_counter()
-    response = litellm.completion(*args, **kwargs)
+    response = _completion_with_retries(retries, **kwargs)
     # Every orchestrator chat loop comes through here: count it (and
     # trace it when tracing is on) like the wrapper classes do.
-    _record_trace(model, kwargs.get("messages") or (args[1] if len(args) > 1 else None),
-                  response, time.perf_counter() - _t0)
+    _record_trace(model, kwargs.get("messages"), response, time.perf_counter() - _t0)
     return response
 
 
@@ -425,18 +512,18 @@ class LiteLLMGenerativeModel:
         try:
             _t0 = time.perf_counter()
             _scope_drop_params(self.model)
-            response = litellm.completion(
+            # Transient provider errors (throttling, overload, a server
+            # fault, a timeout) are retried with backoff, so a momentary
+            # hiccup during e.g. a verification call is not mistaken for a
+            # failed step (which would tag the iteration 0.0).
+            response = _completion_with_retries(
+                params.pop("num_retries", LLM_RETRIES),
                 model=self.model,
                 messages=messages,
                 api_key=self.api_key,
                 api_base=self.base_url,
                 stream=stream,
                 timeout=self.timeout,
-                # Retry transient provider errors (Bedrock ServiceUnavailable /
-                # InternalServer / RateLimit / Timeout) with LiteLLM's exponential
-                # backoff, so a momentary hiccup during e.g. a verification call is
-                # not mistaken for a failed step (which would tag the iteration 0.0).
-                num_retries=params.pop("num_retries", 4),
                 **params
             )
             
@@ -796,12 +883,14 @@ class LiteLLMChatSession:
         
         _t0 = time.perf_counter()
         _scope_drop_params(self._model.model)
-        response = litellm.completion(
+        response = _completion_with_retries(
+            params.pop("num_retries", LLM_RETRIES),
             model=self._model.model,
             messages=messages,
             api_key=self._model.api_key,
             api_base=self._model.base_url,
             stream=stream,
+            timeout=self._model.timeout,
             **params
         )
         
