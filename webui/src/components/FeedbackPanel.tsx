@@ -39,13 +39,25 @@ export function FeedbackPanel({
     setSent(true);
     onRespond(response);
   };
-  // The empty answer accepts as-is on every surface; the terminal shell
-  // shows the same hint next to its prompt.
-  const hint = question.labels.accept
-    ? fill(VOCAB.enter_accepts_hint, { accept: question.labels.accept })
-    : "";
   const isPicker =
     question.widget === "bestofn" || question.widget === "plan_candidates";
+  // On a picker the empty reply is the judge's pick, a number is a chosen
+  // candidate; Enter confirms whatever is selected, as the shell's picker
+  // confirms its highlighted row. The selection starts on the judge's pick,
+  // so Enter untouched is "accept the pick".
+  const pickerReply = () =>
+    choice === null || choice === question.judge_pick ? "" : String(choice);
+  // The empty answer accepts as-is on every surface; the terminal shell
+  // shows the same hint next to its prompt.
+  const hint = isPicker
+    ? pickerReply() === ""
+      ? question.labels.accept
+        ? fill(VOCAB.enter_accepts_hint, { accept: question.labels.accept })
+        : ""
+      : fill(VOCAB.enter_accepts_hint, { accept: question.labels.use ?? "" })
+    : question.labels.accept
+      ? fill(VOCAB.enter_accepts_hint, { accept: question.labels.accept })
+      : "";
   const subject = question.subject;
 
   // ── the body: what is under review ──────────────────────────
@@ -321,7 +333,7 @@ export function FeedbackPanel({
             && question.widget !== "keep_revert" && question.widget !== "confirm"
             && question.widget !== "fanout_confirm") {
           e.preventDefault();
-          respond("");
+          respond(isPicker ? pickerReply() : "");
         }
       }}
     >
