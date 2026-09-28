@@ -237,6 +237,25 @@ arrows inside prose cut a fitting strategy into numbered fragments (the
 arrow split is now for pure chains only), and the regime table repeated
 the series variable in every Datasets cell.
 
+## Live suite (2026-09-28, second pass)
+
+Real, through the web UI: Mission Control's fan-out confirm (two sibling
+Raman series, Launch → donor + replay + fusion), a single delegation whose
+child's fitting plan relayed through Mission Control, a co-pilot single-
+spectrum fitting plan, and a planning campaign end to end (best-of-3
+picker with "Open full plan" into the Files preview, plan review, a real
+667-line code review, highlighted). Synthetic, browser: three rapid Enters
+→ one reply; card body click selects; two tabs on one session both clear;
+light theme; Enter on the Files tab does not answer; Shift+Enter → a
+two-line reply; backend restart under a parked gate → idle resume, no stuck
+question. Shell: long-name picker rows truncate under the full card; Ctrl-C
+at a gate ends the turn and the next gate works; confirm's Enter default is
+Cancel like the console's `[y/N]`. Fixed: the launcher's centred session
+list overflowed above the viewport with three live sessions. Not testable:
+phone width. Observations: no Stop control while a gate is parked; slow
+first load of a report preview on a busy backend; a short panel body on a
+665-px window.
+
 ## Reachability audit (2026-09-27)
 
 Every gate traced to its callers and the condition at the call site, under
