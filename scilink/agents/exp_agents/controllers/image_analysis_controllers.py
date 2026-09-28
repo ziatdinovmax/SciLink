@@ -1142,62 +1142,6 @@ class SkillSuggestionController:
 
 
 
-def _fmt(v):
-    return f"{v:.4g}" if isinstance(v, float) else v
-
-
-def result_review_subject(state: dict, analysis_result: dict, quality_score: float,
-                          figure: "str | None") -> dict:
-    """What the result-review gate shows, as subject blocks (scilink.hitl):
-    the sections ``_get_user_feedback_on_result`` prints."""
-    from ....hitl import make_subject, subject_block as block
-
-    is_single = state.get("is_single_image", True)
-    num = state.get("num_images", 1)
-    blocks = []
-    if figure:
-        blocks.append(block("figure", path=str(figure), caption="Analysis visualization"))
-    blocks.append(block("fields", items=[
-        {"label": "Analysis", "value": analysis_result.get("analysis_type", "N/A")},
-        {"label": "Quality score", "value": f"{quality_score:.2f}"}]))
-    features = analysis_result.get("extracted_features") or {}
-    if features:
-        blocks.append(block("table", label="Extracted features", columns=["Feature", "Value"],
-                            rows=[[k, _fmt(v)] for k, v in features.items()]))
-    if not is_single:
-        regime = state.get("_current_regime_name")
-        blocks.append(block("notice", title="⚠️ Locked pipeline", lines=[
-            f"This analysis pipeline will be applied to all images in regime '{regime}'."
-            if regime else
-            f"This analysis pipeline will be applied to all {num} images in the series."]))
-    title = ("Analysis result — review before synthesis" if is_single
-             else "First image result — review before processing the series")
-    return make_subject(title, blocks)
-
-
-def poor_quality_subject(best_result: dict, all_attempts: list, figure: "str | None") -> dict:
-    """What the poor-quality gate shows, as subject blocks (scilink.hitl):
-    the ``HUMAN_FEEDBACK_PROMPT`` it prints, from the same attempts."""
-    from ....hitl import make_subject, subject_block as block
-
-    blocks = []
-    if figure:
-        blocks.append(block("figure", path=str(figure), caption="Best available result"))
-    blocks.append(block("text", label="Analysis quality issue",
-                        markdown="The automated image analysis could not achieve adequate quality."))
-    blocks.append(block("fields", items=[
-        {"label": "Best result", "value": f"Quality score = {best_result.get('_quality_score', 0.0):.2f}",
-         "flag": "bad"}]))
-    blocks.append(block("table", label="Pipelines tried", columns=["Pipeline", "Score"],
-                        rows=[[str(a.get("pipeline")), f"{a.get('score', 0):.2f}"]
-                              for a in all_attempts]))
-    blocks.append(block("text", label="Options", markdown=(
-        "1. Suggest a different analysis approach or pipeline\n"
-        "2. Accept the best available result (type \"accept\")\n"
-        "3. Provide specific guidance (e.g. \"use watershed segmentation\", \"threshold at 128\")")))
-    return make_subject("⚠️ Analysis quality below threshold", blocks)
-
-
 def analysis_plan_subject(state: dict) -> dict:
     """What the image analysis-plan gate shows, as subject blocks
     (scilink.hitl): the same sections ``_display_plan`` prints, with its
@@ -3505,10 +3449,6 @@ Return JSON with the refined analysis approach:
             "\nYour input: ",
             kind="review_result",
             origin={"stage": "poor_quality_review"},
-            subject=poor_quality_subject(
-                best_result, all_attempts,
-                str(self.output_dir / "quality_review_analysis.png")
-                if best_result.get("visualization_bytes") else None),
         ).strip()
 
         if not feedback:
@@ -3575,8 +3515,6 @@ Return JSON with the refined analysis approach:
             "\nYour feedback (or Enter to accept): ",
             kind="review_result",
             origin={"stage": "result_review"},
-            subject=result_review_subject(state, analysis_result, quality_score,
-                                          str(review_viz_path) if review_viz_path else None),
         ).strip()
 
         if review_viz_path and review_viz_path.exists():

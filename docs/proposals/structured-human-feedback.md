@@ -3,14 +3,11 @@
 Status: plan, drafted 2026-09-26. Stage 1 (the contract, both renderers,
 the kind tables, the curve fitting plan gate) and stage 2 (the other plan
 gates: image analysis plan, hyperspectral preprocessing targets, series
-regime plan, planning-mode plan review) and stage 3 (the fit and result
-gates: poor fit, image result review, poor quality) are implemented. The
-curve agent's first-spectrum fit review is not called by any pipeline (the
-series path runs through the QC engine) and the scalarizer's column
-confirmation has been off since #542 (every caller passes
-`enable_human_review=False`); both stay out, like the analysis review:
-beyond plan approval and the best-of-N choice, no human review of analysis
-results is expected. Checked live on
+regime plan, planning-mode plan review) are implemented. Stage 3 was
+written and then dropped: the reachability audit below showed that none of
+the fit and result gates fires under the orchestrator's defaults, which
+matches the expectation that beyond plan approval and the best-of-N choice
+there is no human review of analysis results. Checked live on
 Bedrock Opus 4.8: the curve fitting plan gate (browser and shell, a
 Raman-like spectrum), the image analysis plan gate (browser, the
 polycrystalline grains demo) and the planning plan review (shell, a small
@@ -152,17 +149,13 @@ server keep working while they are updated; `subject` is additive.
 | hyperspectral `series_regime_plan` | review_plan | table of regimes, text rationale, fields (change-point summary); replaces the `context=rendered` text |
 | exp `iteration_feedback` | review_plan | text (current result summary), fields |
 | planning `plan_review` | approve_or_revise | text (plan summary as the critic sees it: `summarize_plan_for_critic`), chips (equipment), steps, notice (auto-repair, caveats) |
-| curve `poor_fit_review`, image `poor_quality_review` | review_fit / review_result | figure, fields (best score), table (attempts tried, score) |
-| image `result_review` | review_result | figure, fields (analysis type, quality score), table (extracted features) |
 | planning `missing_metadata` | dataset_description | fields (file, columns seen) |
-| curve/image `user_guided_fit` / `user_guided_result` | keep_or_revert | compare (original vs user-guided: figure + R²/score) |
 | curve/image `consistency_result` | keep_or_revert | compare (both fits, with the consistency numbers) |
 | planning `plan_reopen` | keep_or_revert | notice (reason), compare (approved vs revision, changed fields only) |
 | curve/image `bestofn_join` | bestofn_select | candidates (metric, gate, iterations, figure, judge comment, reasoning) |
 | planning `plan_candidates` | plan_candidate_select | candidates (name, judge per-candidate comment, caveats on the pick, report path) |
 | curve/image `series_consensus` | consensus_select | candidates (model, spectra/images it covered, R²) |
 | meta `fanout_confirm` | confirm | fields (verdict, join axis), steps (branches), text (rationale, autonomy note, soft-cap warning) |
-| image `confirm` (agent-level) | confirm | fields |
 
 Fan-out branch questions need nothing: `QueueChannel.serve_pending` copies
 the request with `replace`, so `subject` travels with the branch label.
@@ -187,8 +180,8 @@ the web UI live-test notes).
 2. **Plan gates** (curve, image, preprocessing targets, hyperspectral
    regimes, iteration feedback). These are the gates a scientist sits at
    longest. Subject builders unit-tested against sample `state` dicts.
-3. **Fit and result gates** (poor fit / poor quality, image result
-   review). Adds `figure` and `table` in anger.
+3. ~~Fit and result gates~~ — dropped, see the audit: none fires under
+   the defaults.
 4. **Candidate and compare gates** (best-of-N ×2, plan candidates,
    consensus ×2, user-guided ×2, consistency ×2, plan reopen). Retires
    `parse_bestofn_review` and `parse_plan_candidate_review`.
@@ -199,6 +192,39 @@ the web UI live-test notes).
    ported Streamlit parsers and update the presenter tests to the fixture.
 
 Stages 2 to 5 can be reordered by whatever gets exercised live first.
+
+## Reachability audit (2026-09-27)
+
+Every gate traced to its callers and the condition at the call site, under
+the orchestrator's defaults (three candidates with escalation for image and
+curve, thorough profile, human feedback on). Only the first group gets a
+subject.
+
+**Fires under the defaults**
+
+| gate | when |
+|---|---|
+| curve fitting plan, image analysis plan | every co-pilot run (seen live) |
+| planning plan review, plan candidates picker, plan reopen | every co-pilot planning run (review seen live); the picker with best-of-N on; reopen only on an agent-initiated revision |
+| planning code review (same function, printed text) | co-pilot, when the plan carries implementation code |
+| hyperspectral preprocessing targets | once per cube at depth 0, hyperspectral pipeline only |
+| series regime plan | hyperspectral series in co-pilot or autopilot, not on a locked replay |
+| best-of-N join picker (curve, image) | when attempt 0 is weak and the run escalates (seen live) |
+| series consensus picker, consistency keep-or-revert (curve, image) | series adaptive refit, when refits disagree or a refit is worse |
+| fan-out confirm | meta fan-out, always |
+| missing-metadata description | planning, a data file without metadata the session did not write |
+
+**Cannot fire under the defaults.** Attempt 0 of a best-of-N run is a
+candidate job, and every candidate job sets `_suppress_human_feedback`, so
+these fire only when the candidate count resolves to one (an explicit
+`n_candidates=1`, the quick or extract profile, direct agent use): image
+result review, image poor quality, curve poor fit, and the two user-guided
+keep-or-revert gates that follow them. Judged dead in practice; no subject.
+
+**Never fires.** No caller, or switched off: analysis review, first-spectrum
+fit review, scalarizer confirmation, the mixin's iteration feedback, and the
+image tier-2 approval (needs `analysis_depth="auto"`; the orchestrator
+passes "basic"). No subject.
 
 ## Out of scope
 

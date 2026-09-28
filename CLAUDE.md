@@ -683,8 +683,7 @@ the fixed vocabulary in `scilink.hitl.SUBJECT_BLOCKS` (text, fields, chips,
 steps, table, figure, candidates, compare, notice), built by a pure
 function next to the printer from the same dict (`fitting_plan_subject`,
 `analysis_plan_subject`, `refinement_plan_subject`, `regime_plan_subject`,
-`plan_subject`, `poor_fit_subject`,
-`result_review_subject`, `poor_quality_subject`). Every block carries a `label` that keeps the
+`plan_subject`). Every block carries a `label` that keeps the
 console's section name and emoji ("🔍 Observations"); both surfaces render
 labeled blocks in one aligned label column, so a gate lists its sections
 the way its printout does and a short list is plain text, not chips. The decision widget and its words come from the
@@ -696,10 +695,15 @@ gates convert one at a time (`docs/proposals/structured-human-feedback.md`
 lists them); do not add a new regex to the presenter for a gate — give the
 gate a subject. This work improves how the existing gates are shown; it
 adds no gate and re-enables none. Beyond plan approval and the best-of-N
-candidate choice, no human review of analysis results is expected: the
-analysis-review gate, the curve agent's first-spectrum fit review and the
-scalarizer's column confirmation (off since #542) are not reachable and
-stay out.
+candidate choice, no human review of analysis results is expected, and the
+code agrees: attempt 0 of a best-of-N run is a candidate job, and every
+candidate job sets `_suppress_human_feedback`, so under the orchestrator's
+defaults the result-review, poor-fit, poor-quality and user-guided gates
+never fire; the analysis review, the first-spectrum fit review, the mixin's
+iteration feedback and the scalarizer's column confirmation (off since
+#542) have no live caller at all; the tier-2 approval needs
+`analysis_depth="auto"` while the orchestrator passes "basic". None of
+these gets a subject. The reachability table is in the proposal.
 
 ## Sequencing — hard features first, UI later
 
