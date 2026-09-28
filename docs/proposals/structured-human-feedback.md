@@ -1,10 +1,14 @@
 # Proposal: human feedback shows the decision, not the console
 
-Status: plan, drafted 2026-09-26. Stage 1 is implemented (the contract,
-both renderers, the kind tables, two pilot gates) and was checked live on
-2026-09-26 in the browser and in the shell on a Raman-like spectrum
-(Bedrock Opus 4.8): the curve fitting plan gate renders from its subject on
-both surfaces and Enter approves it. Scope rule: this work improves how the
+Status: plan, drafted 2026-09-26. Stage 1 (the contract, both renderers,
+the kind tables, the curve fitting plan gate) and stage 2 (the other plan
+gates: image analysis plan, hyperspectral preprocessing targets, series
+regime plan, planning-mode plan review) are implemented. Checked live on
+Bedrock Opus 4.8: the curve fitting plan gate (browser and shell, a
+Raman-like spectrum), the image analysis plan gate (browser, the
+polycrystalline grains demo) and the planning plan review (shell, a small
+annealing experiment); the two hyperspectral gates are unit-tested against
+their printers. Enter approves on both surfaces. Scope rule: this work improves how the
 existing gates are shown; it adds no gate and re-enables none. The
 `analysis_review` gate (`SimpleFeedbackCollector`) was judged impractical
 and is not wired into any pipeline, so it is not in the table below.

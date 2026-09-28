@@ -4,7 +4,7 @@ import re
 import textwrap
 from pathlib import Path
 
-from ...hitl import request_human_feedback
+from ...hitl import make_subject, request_human_feedback, subject_block
 
 DELIVERABLES_MANIFEST = "deliverables.json"
 
@@ -510,6 +510,125 @@ def display_plan_summary(result: Dict[str, Any],
     print("\n" + "="*80)
 
 
+def _program_items(steps: List[Any], numbered: bool) -> List[str]:
+    """The program/steps list as items, by ``_print_program``'s rules: blank
+    entries are spacing, a banner entry is a section divider, and a numbered
+    protocol drops the author's own numbering (the renderer numbers)."""
+    items = []
+    for step in steps or []:
+        raw = str(step).strip()
+        if not raw:
+            continue
+        if re.fullmatch(r"={3,}.*={3,}", raw):
+            items.append(f"▸ {raw.strip('=').strip()}")
+            continue
+        items.append(re.sub(r'^[\d\-\.\)\s]+', '', raw).strip() if numbered else raw)
+    return items
+
+
+def _concept_markdown(concepts: List[Any]) -> str:
+    """A ``concepts`` portfolio as markdown, one block per direction, the
+    fields ``_print_concepts`` prints (unknown keys included: authors add
+    the elements the objective asked for)."""
+    KNOWN = ("id", "tier", "title", "hypothesis", "rationale", "novelty", "details")
+    out = []
+    for n, c in enumerate(concepts, 1):
+        if not isinstance(c, dict):
+            out.append(f"- **{n}.** {str(c)[:200]}")
+            continue
+        label = c.get("id") or str(n)
+        tier = f" · tier {c['tier']}" if c.get("tier") else ""
+        lines = [f"**{label}: {concept_title(c, n)}**{tier}"]
+        for key in ("hypothesis", "rationale", "novelty"):
+            if c.get(key):
+                lines.append(f"*{key.capitalize()}.* {c[key]}")
+        details = c.get("details")
+        if isinstance(details, list) and details:
+            lines.append("*Details.*")
+            lines.extend(f"  - {d}" for d in details)
+        elif details:
+            lines.append(f"*Details.* {details}")
+        for key, val in c.items():
+            if key not in KNOWN and val:
+                if isinstance(val, list):
+                    lines.append(f"*{humanize_key(key)}.*")
+                    lines.extend(f"  - {item}" for item in val)
+                else:
+                    lines.append(f"*{humanize_key(key)}.* {val}")
+        out.append("\n".join(lines))
+    return "\n\n".join(out)
+
+
+def plan_subject(result: Dict[str, Any], ideation: bool = False,
+                 report_path: Optional[str] = None) -> Dict[str, Any]:
+    """What the plan-review gate shows, as subject blocks (scilink.hitl):
+    the sections ``display_plan_summary`` prints, in its two vocabularies,
+    from the same plan. The auto-repair notice is not here: it rides the
+    question's ``origin`` and the presenter renders it beside the buttons."""
+    experiments = result.get("proposed_experiments")
+    title = "✅ Proposed research directions" if ideation else "✅ Proposed experimental plan"
+    blocks: List[Dict[str, Any]] = []
+    if result.get("error"):
+        return make_subject(title, [subject_block(
+            "notice", title="❌ Agent finished with an error",
+            lines=[str(result["error"])], tone="warn")])
+    if not experiments or not isinstance(experiments, list):
+        return make_subject(title, [subject_block(
+            "notice", title="⚠️ No experiments were found in the result", lines=[], tone="warn")])
+    if report_path:
+        blocks.append(subject_block("text", label="📄 Full report",
+                                    markdown=f"`{report_path}`"))
+    multi = len(experiments) > 1
+    for i, exp in enumerate(experiments, 1):
+        head = ("💡 Research direction" if ideation else "🔬 Experiment") + (f" {i}" if multi else "")
+        name = exp.get("experiment_name", "Unnamed")
+        fields = _CARD_FIELDS_IDEATION if ideation else _CARD_FIELDS[:1]
+        card = "\n\n".join(f"{icon} **{label}.** {exp.get(key) or 'N/A'}"
+                             for icon, label, key in fields)
+        blocks.append(subject_block("text", label=f"{head}: {name}", markdown=card))
+        concepts = exp.get("concepts")
+        if isinstance(concepts, list) and concepts:
+            blocks.append(subject_block("text", label=f"🧠 Research directions ({len(concepts)})",
+                                        markdown=_concept_markdown(concepts)))
+        steps = exp.get("experimental_steps", [])
+        if steps or not concepts:
+            label = ("🧭 Shared protocol" if (ideation and concepts)
+                     else "🧭 Proposed program" if ideation else "🧪 Experimental steps")
+            items = _program_items(steps, numbered=not ideation)
+            if not items:
+                blocks.append(subject_block("text", label=label, markdown="Nothing listed."))
+            elif ideation:
+                blocks.append(subject_block("text", label=label,
+                                            markdown="\n".join(f"- {it}" for it in items)))
+            else:
+                blocks.append(subject_block("steps", label=label, items=items))
+        equipment = exp.get("required_equipment", [])
+        eq_label = "🛠️ Key capabilities" if ideation else "🛠️ Required equipment"
+        if not equipment:
+            eq_md = "None specified."
+        elif len(equipment) > 5:
+            eq_md = "\n".join(f"- {item}" for item in equipment)
+        else:
+            eq_md = ", ".join(str(item) for item in equipment)
+        blocks.append(subject_block("text", label=eq_label, markdown=eq_md))
+        if not ideation:
+            blocks.append(subject_block("text", label="📈 Expected outcome",
+                                        markdown=str(exp.get("expected_outcome") or "N/A")))
+            blocks.append(subject_block("text", label="💡 Justification",
+                                        markdown=str(exp.get("justification") or "N/A")))
+        sources = exp.get("source_documents", [])
+        blocks.append(subject_block("text", label="📄 Source documents", markdown=(
+            "\n".join(f"- {src}" for src in sources) if sources else "No sources listed.")))
+        if "implementation_code" in exp:
+            blocks.append(subject_block("text", label="💻 Implementation code",
+                                        markdown="Plan includes implementation script."))
+    caveats = format_caveats(result.get("critic_findings"))
+    if caveats:
+        blocks.append(subject_block("notice", title="⚠️ Caveats & potential limitations",
+                                    lines=caveats, tone="warn"))
+    return make_subject(title, blocks)
+
+
 def _wrap_field(text: Any, width: int = 78, indent: str = "   ") -> str:
     """Wrap a long plan field into an indented block.
 
@@ -629,11 +748,15 @@ def get_candidate_selection(n_candidates: int, judge_pick: int) -> int:
     return judge_pick
 
 
-def get_user_feedback(auto_repair: Optional[Dict[str, Any]] = None
-                      ) -> Optional[str]:
+def get_user_feedback(auto_repair: Optional[Dict[str, Any]] = None,
+                      subject: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """
     Pauses execution to get user input via the CLI. 
     Returns None if the user just presses ENTER (indicating approval).
+
+    ``subject`` is what is under review as blocks (``plan_subject``) for the
+    surfaces that render questions from data; the code-review callers pass
+    none and are presented from their printed text.
 
     ``auto_repair`` is the plan's repair record when the plan on screen was
     auto-corrected. Its change lines ride the question's ``origin`` so a
@@ -656,6 +779,7 @@ def get_user_feedback(auto_repair: Optional[Dict[str, Any]] = None
         "\n> Instruction: ",
         kind="approve_or_revise",
         origin={"stage": "plan_review", "auto_repair": changes},
+        subject=subject,
     ).strip()
     
     if not feedback:

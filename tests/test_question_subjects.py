@@ -6,7 +6,11 @@ from types import SimpleNamespace
 import pytest
 
 from scilink import hitl
+from scilink.agents.exp_agents.controllers import base_controllers as base
 from scilink.agents.exp_agents.controllers import curve_fitting_controllers as cfc
+from scilink.agents.exp_agents.controllers import hyperspectral_series as hs
+from scilink.agents.exp_agents.controllers import image_analysis_controllers as iac
+from scilink.agents.planning_agents import user_interface as ui
 
 
 @pytest.fixture(autouse=True)
@@ -35,10 +39,16 @@ def test_subject_block_vocabulary_is_checked():
 
 
 def test_numbered_steps_split_only_after_a_sentence_end():
-    assert cfc._numbered_steps("1. Baseline with 8.7 cm-1 window. 2. Fit two peaks") == \
+    assert base.numbered_steps("1. Baseline with 8.7 cm-1 window. 2. Fit two peaks") == \
         ["Baseline with 8.7 cm-1 window.", "Fit two peaks."]
-    assert cfc._numbered_steps("Fit one Gaussian.") == ["Fit one Gaussian."]
-    assert cfc._numbered_steps("") == []
+    assert base.numbered_steps("Fit one Gaussian.") == ["Fit one Gaussian."]
+    assert base.numbered_steps("") == []
+    # an arrow chain is a pipeline; a lone step is not a list
+    assert base.numbered_steps("Denoise (sigma~1) -> Sobel gradient -> watershed") == \
+        ["Denoise (sigma~1).", "Sobel gradient.", "watershed."]
+    assert base.steps_block("⚙️ Pipeline", "Threshold and label.") == \
+        {"type": "text", "label": "⚙️ Pipeline", "markdown": "Threshold and label."}
+    assert base.steps_block("⚙️ Pipeline", "1. a. 2. b")["type"] == "steps"
 
 
 def test_fitting_plan_subject_single_and_series():
@@ -86,3 +96,164 @@ def test_fitting_plan_gate_asks_with_the_subject(capsys):
     assert cap.req.kind == "review_plan" and cap.req.origin == {"stage": "fitting_plan"}
     assert cap.req.subject["title"].startswith("📋 Proposed fitting plan")
     assert out["_refine_feedback"] == "use Voigt"
+
+
+# ── stage 2: the other plan gates ────────────────────────────────
+
+def test_image_analysis_plan_subject_single_and_series():
+    state = {"is_single_image": True, "observations": "grains", "analysis_approach": "segment",
+             "processing_pipeline": "1. Flatten. 2. Threshold. 3. Label.",
+             "features_to_extract": ["grain_size", "count"], "quality_criteria": "no merged grains",
+             "expected_outputs": ["mask.png"]}
+    s = iac.analysis_plan_subject(state)
+    assert s["title"] == "📋 Proposed analysis plan — single image"
+    assert [(b["type"], b["label"]) for b in s["blocks"]] == [
+        ("text", "🔍 Observations"), ("text", "📊 Approach"), ("steps", "⚙️ Pipeline"),
+        ("text", "🎯 Features to extract"), ("text", "✅ Quality criteria"),
+        ("text", "📄 Expected outputs")]
+    assert s["blocks"][2]["items"] == ["Flatten.", "Threshold.", "Label."]
+    assert s["blocks"][3]["markdown"] == "grain_size, count"
+    series = dict(state, is_single_image=False, num_images=4,
+                  series_metadata={"values": [1, 2, 3, 4], "unit": "h"},
+                  series_analysis_plan={"regimes": [
+                      {"name": "early", "image_indices": [0, 1], "processing_pipeline": "p1",
+                       "features_to_extract": ["a"]},
+                      {"name": "late", "image_indices": [2, 3]}]})
+    table = next(b for b in iac.analysis_plan_subject(series)["blocks"] if b["type"] == "table")
+    assert table["label"] == "📦 Image analysis regimes (2)"
+    assert table["rows"][0] == [1, "early", "[0, 1] (1–2 h)", "p1", "a"]
+    assert table["rows"][1][3] == "N/A"
+    locked = iac.analysis_plan_subject(dict(state, is_single_image=False, num_images=3))
+    assert locked["blocks"][-1]["type"] == "notice"
+
+
+def test_image_plan_gate_asks_with_the_subject():
+    cap = Capture(answer="")
+    hitl.set_default_channel(cap)
+    owner = SimpleNamespace(_display_plan=lambda state: None)
+    out = iac.ImagePlanningController._get_human_feedback(owner, {"is_single_image": True})
+    assert cap.req.origin == {"stage": "analysis_plan"}
+    assert cap.req.subject["title"].startswith("📋 Proposed analysis plan")
+    assert "_refine_requested" not in out
+
+
+def test_refinement_plan_subject_and_gate():
+    state = {"skip_decomposition": True, "iteration_title": "Iteration 0",
+             "refinement_decision": {"refinement_needed": True, "reasoning": "two phases",
+                                     "targets": [{"type": "nmf", "value": 3, "description": "3 comps"},
+                                                 {"type": "custom_code", "value": None,
+                                                  "description": "mask the vacuum"}]}}
+    s = base.refinement_plan_subject(state)
+    assert s["title"] == "🎯 Analysis plan review — Iteration 0"
+    assert s["blocks"][0]["label"] == "Summary of current analysis"
+    assert "Skip-decomposition" in s["blocks"][0]["markdown"]
+    assert "Analysis plan ready = **True**" in s["blocks"][1]["markdown"]
+    table = s["blocks"][2]
+    assert table["label"] == "🎯 Targeted actions (2)"
+    assert table["rows"] == [[1, "nmf", "3", "3 comps"], [2, "custom_code", "", "mask the vacuum"]]
+    step = base.refinement_plan_subject({"result_json": {"detailed_analysis": "seen"},
+                                         "refinement_decision": {}})
+    assert step["title"] == "🎯 Analysis step review — Current Analysis"
+    assert step["blocks"][0]["markdown"] == "seen"
+    assert step["blocks"][-1]["markdown"] == "No specific targets were generated."
+
+    cap = Capture(answer="")
+    hitl.set_default_channel(cap)
+    ctrl = base.IterativeFeedbackController(None, SimpleNamespace(info=lambda *a, **k: None,
+                                                                    warning=lambda *a, **k: None),
+                                            None, None, parse_fn=None, settings={},
+                                            refinement_instruction="")
+    full = dict(state, settings={"enable_human_feedback": True}, current_depth=0)
+    assert ctrl.execute(full) is full
+    assert cap.req.origin == {"stage": "preprocess_plan"} and cap.req.subject == s
+
+
+def test_regime_plan_subject():
+    meta = {"values": [300, 400, 500], "variable": "T", "unit": "K"}
+    scout = {"reduction": {"change_point": 450.0, "change_sharpness": 0.8,
+                           "axis_coherence": {"coherent": False}}}
+    plan = {"rationale": "a phase change", "regimes": [
+        {"name": "low", "dataset_indices": [0, 1], "description": "one phase"},
+        {"name": "high", "dataset_indices": [2]}],
+        "transition_points": [{"between_indices": [1, 2], "description": "melt"}]}
+    s = hs.regime_plan_subject(plan, meta, scout, 3)
+    assert s["title"] == "📋 Proposed series regime plan"
+    assert [b["label"] for b in s["blocks"]] == ["🔎 Change detection", "💡 Rationale",
+                                                 "Regimes (2)", "↕ Transition points"]
+    assert "NOT coherent" in s["blocks"][0]["markdown"]
+    assert s["blocks"][2]["rows"][0] == ["low", "0 (T=300 K), 1 (T=400 K)", "dataset 0", "one phase"]
+    assert s["blocks"][3]["rows"] == [["[1, 2]", "melt"]]
+    one = hs.regime_plan_subject(None, meta, None, 3)
+    assert one["blocks"] == [{"type": "text", "label": "Regimes",
+                              "markdown": "1 regime — all 3 datasets share one locked script."}]
+
+
+def _experiment_plan():
+    return {"proposed_experiments": [{
+        "experiment_name": "Anneal series", "hypothesis": "grains grow",
+        "experimental_steps": ["1. Cut coupons", "", "2) Anneal 1 h", "=== DOMAIN 2 ===", "Image"],
+        "required_equipment": ["furnace", "SEM"], "expected_outcome": "bigger grains",
+        "justification": "Ostwald", "source_documents": ["paper.pdf"],
+        "implementation_code": "print(1)"}],
+        "critic_findings": [{"dimension": "safety", "issue": "no PPE", "severity": "minor"},
+                            {"dimension": "budget", "issue": "800 C > furnace max",
+                             "severity": "blocking"}]}
+
+
+def test_plan_subject_experiment():
+    s = ui.plan_subject(_experiment_plan(), report_path="/r/plan.html")
+    assert s["title"] == "✅ Proposed experimental plan"
+    labels = [b.get("label") or b.get("title") for b in s["blocks"]]
+    assert labels == ["📄 Full report", "🔬 Experiment: Anneal series", "🧪 Experimental steps",
+                      "🛠️ Required equipment", "📈 Expected outcome", "💡 Justification",
+                      "📄 Source documents", "💻 Implementation code",
+                      "⚠️ Caveats & potential limitations"]
+    assert s["blocks"][1]["markdown"] == "🎯 **Hypothesis.** grains grow"
+    assert s["blocks"][2] == {"type": "steps", "label": "🧪 Experimental steps",
+                              "items": ["Cut coupons", "Anneal 1 h", "▸ DOMAIN 2", "Image"]}
+    assert s["blocks"][3]["markdown"] == "furnace, SEM"
+    assert s["blocks"][6]["markdown"] == "- paper.pdf"
+    assert s["blocks"][8]["lines"] == ["Minor: [safety] no PPE", "BLOCKING: [budget] 800 C > furnace max"]
+    # two experiments are numbered; more than five pieces of equipment are a list
+    two = _experiment_plan()
+    two["proposed_experiments"].append(dict(two["proposed_experiments"][0],
+                                            experiment_name="B", required_equipment=list("abcdef")))
+    s = ui.plan_subject(two)
+    assert s["blocks"][0]["label"] == "🔬 Experiment 1: Anneal series"
+    assert next(b for b in s["blocks"] if b.get("label") == "🔬 Experiment 2: B")
+    assert [b for b in s["blocks"] if b.get("label") == "🛠️ Required equipment"][1]["markdown"] \
+        == "\n".join(f"- {c}" for c in "abcdef")
+
+
+def test_plan_subject_ideation_error_and_empty():
+    plan = {"proposed_experiments": [{
+        "experiment_name": "Portfolio", "hypothesis": "h", "expected_outcome": "o",
+        "justification": "j", "experimental_steps": ["PS-1 do x"],
+        "concepts": [{"id": "D1", "title": "Catch it", "tier": 1, "hypothesis": "hh",
+                      "details": ["d1", "d2"], "b_operando_only_question": "why"}],
+        "required_equipment": []}]}
+    s = ui.plan_subject(plan, ideation=True)
+    assert s["title"] == "✅ Proposed research directions"
+    labels = [b["label"] for b in s["blocks"]]
+    assert labels == ["💡 Research direction: Portfolio", "🧠 Research directions (1)",
+                      "🧭 Shared protocol", "🛠️ Key capabilities", "📄 Source documents"]
+    assert "📈 **Expected outcomes.** o" in s["blocks"][0]["markdown"]
+    md = s["blocks"][1]["markdown"]
+    assert md.startswith("**D1: Catch it** · tier 1") and "  - d1" in md
+    assert "*Operando only question.* why" in md
+    assert s["blocks"][2]["markdown"] == "- PS-1 do x"       # ideation keeps the author's labels
+    assert s["blocks"][3]["markdown"] == "None specified."
+    err = ui.plan_subject({"error": "boom"})
+    assert err["blocks"][0]["type"] == "notice" and err["blocks"][0]["lines"] == ["boom"]
+    assert ui.plan_subject({})["blocks"][0]["title"].startswith("⚠️ No experiments")
+
+
+def test_planning_review_gate_passes_the_subject(capsys):
+    cap = Capture(answer="")
+    hitl.set_default_channel(cap)
+    subject = ui.plan_subject(_experiment_plan())
+    assert ui.get_user_feedback(auto_repair={"status": "applied", "notes": [
+        {"was": "950 C", "now": "850 C", "why": "limit"}]}, subject=subject) is None
+    assert cap.req.kind == "approve_or_revise" and cap.req.subject == subject
+    assert cap.req.origin["auto_repair"] == ["950 C -> 850 C (limit)"]
+    assert ui.get_user_feedback() is None and cap.req.subject is None   # the code-review callers

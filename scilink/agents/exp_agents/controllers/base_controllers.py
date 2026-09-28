@@ -1,10 +1,75 @@
 import logging
 import os
+import re
 import textwrap
 from typing import Any, Callable, Optional
 import json
 
-from ....hitl import request_human_feedback
+from ....hitl import make_subject, request_human_feedback, subject_block
+
+
+def numbered_steps(text: str) -> list:
+    """Split a strategy or pipeline written as one paragraph into its steps:
+    numbered steps (the rule the plan printers use: a step number only after
+    a sentence end, so "cm-1." or "8.7" are never split), else a chain of
+    "->" arrows, which is how a pipeline is often written. One step comes
+    back as one item."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    parts = re.split(r"(?:^|\. )(?=\d+\. )", text)
+    steps = [re.sub(r"^\d+\.\s*", "", p).strip() for p in parts if p.strip()]
+    if len(steps) < 2 and " -> " in text:
+        steps = [p.strip() for p in re.split(r"\s*->\s*", text) if p.strip()]
+    steps = [st.rstrip(".") + "." if st and not st.endswith(".") else st for st in steps]
+    return steps if len(steps) > 1 else [text]
+
+
+def steps_block(label: str, text: str) -> dict:
+    """A ``steps`` block for a paragraph with several steps, a ``text``
+    block for one: a single step is not a numbered list."""
+    items = numbered_steps(text)
+    if len(items) > 1:
+        return subject_block("steps", label=label, items=items)
+    return subject_block("text", label=label, markdown=items[0] if items else "N/A")
+
+
+def refinement_plan_subject(state: dict) -> dict:
+    """What the hyperspectral targets gate shows, as subject blocks
+    (scilink.hitl): the sections ``IterativeFeedbackController`` prints,
+    from the same state."""
+    decision = state.get("refinement_decision") or {}
+    skip_mode = bool(state.get("skip_decomposition"))
+    title = state.get("iteration_title", "Current Analysis")
+    analysis_text = ((state.get("result_json") or {}).get("detailed_analysis") or "").strip()
+    targets = decision.get("targets") or []
+    blocks = []
+    if analysis_text:
+        blocks.append(subject_block("text", label="Summary of current analysis",
+                                    markdown=analysis_text))
+    elif skip_mode:
+        blocks.append(subject_block("text", label="Summary of current analysis", markdown=(
+            "Skip-decomposition mode — no iteration-stage analysis to summarize; the "
+            "synthesis stage will interpret after the dynamic-analysis step runs.")))
+    plan_label = "Analysis plan ready" if skip_mode else "Refinement needed"
+    blocks.append(subject_block("text", label="🧠 Proposed plan", markdown=(
+        f"{plan_label} = **{decision.get('refinement_needed', False)}**\n\n"
+        f"Reasoning: {decision.get('reasoning') or 'N/A'}")))
+    if targets:
+        rows = []
+        for i, t in enumerate(targets, 1):
+            # custom_code targets carry value=None by schema design — the
+            # description is the payload, so the cell stays empty.
+            value = t.get("value")
+            rows.append([i, t.get("type", "N/A"), "" if value is None else str(value),
+                         t.get("description", "No description provided.")])
+        blocks.append(subject_block("table", label=f"🎯 Targeted actions ({len(targets)})",
+                                    columns=["#", "Type", "Value", "Description"], rows=rows))
+    else:
+        blocks.append(subject_block("text", label="🎯 Targeted actions (0)",
+                                    markdown="No specific targets were generated."))
+    header = "Analysis plan review" if skip_mode else "Analysis step review"
+    return make_subject(f"🎯 {header} — {title}", blocks)
 
 
 def run_plan_refinement_gate(controller, state: dict, *,
@@ -347,6 +412,7 @@ class IterativeFeedbackController:
                 "\n🤔 Your feedback to adjust the targets/plan (or press Enter to accept): ",
                 kind="review_plan",
                 origin={"stage": "preprocess_plan"},
+                subject=refinement_plan_subject(state),
             ).strip()
         except KeyboardInterrupt:
             self.logger.warning("User interrupted feedback. Accepting original decision.")

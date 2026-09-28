@@ -290,8 +290,15 @@ export function FeedbackPanel({
         || question.widget === "fanout_confirm"
         ? (focusRef as React.RefObject<HTMLDivElement>) : undefined}
       onKeyDown={(e) => {
-        // Enter on a picker accepts the judge's pick (the console's Enter).
-        if (isPicker && e.key === "Enter") {
+        // Enter anywhere in the panel is the console's Enter: accept as-is
+        // (the judge's pick on a picker). A click on the plan to scroll it
+        // moves the focus off the feedback box, and Enter must still work.
+        // Buttons keep their own Enter (it clicks them); the box handles
+        // its own (text is the feedback), and Shift+Enter is a new line.
+        const tag = (e.target as HTMLElement).tagName;
+        if (e.key === "Enter" && !e.shiftKey && tag !== "BUTTON" && tag !== "TEXTAREA"
+            && question.widget !== "keep_revert" && question.widget !== "confirm"
+            && question.widget !== "fanout_confirm") {
           e.preventDefault();
           respond("");
         }

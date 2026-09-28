@@ -40,7 +40,7 @@ from .._locked_exec import (
     DATA_NAME, VIZ_NAME, CANDIDATES_DIR_NAME, atomic_np_save,
 )
 from .._qc_engine import CodegenQCEngine, QCEngineSpec, QCItemContext
-from .base_controllers import run_plan_refinement_gate
+from .base_controllers import run_plan_refinement_gate, steps_block
 from ....utils.codegen_parse import parse_codegen_response
 from ....utils.synthesis_parse import salvage_synthesis_from_response
 from ....hitl import request_human_feedback
@@ -1141,6 +1141,68 @@ class SkillSuggestionController:
         return state
 
 
+
+def analysis_plan_subject(state: dict) -> dict:
+    """What the image analysis-plan gate shows, as subject blocks
+    (scilink.hitl): the same sections ``_display_plan`` prints, with its
+    emoji, read from the same state."""
+    from ....hitl import make_subject, subject_block as block
+
+    is_single = state.get("is_single_image", True)
+    num = state.get("num_images", 1)
+    mode = "single image" if is_single else f"series of {num} images"
+    blocks = []
+    if state.get("observations"):
+        blocks.append(block("text", label="🔍 Observations", markdown=str(state["observations"])))
+    blocks.append(block("text", label="📊 Approach",
+                        markdown=str(state.get("analysis_approach") or "N/A")))
+    pipeline = state.get("processing_pipeline")
+    if pipeline:
+        blocks.append(steps_block("⚙️ Pipeline", str(pipeline)))
+    features = [str(x) for x in state.get("features_to_extract") or []]
+    blocks.append(block("text", label="🎯 Features to extract",
+                        markdown=", ".join(features) if features else "N/A"))
+    blocks.append(block("text", label="✅ Quality criteria",
+                        markdown=str(state.get("quality_criteria") or "N/A")))
+    outputs = [str(x) for x in state.get("expected_outputs") or []]
+    if outputs:
+        blocks.append(block("text", label="📄 Expected outputs", markdown=", ".join(outputs)))
+
+    series_plan = state.get("series_analysis_plan") or {}
+    regimes = series_plan.get("regimes") or []
+    if regimes and not is_single:
+        meta = state.get("series_metadata") or {}
+        values = meta.get("values") or []
+        if isinstance(values, dict):
+            values = list(values.values())
+        unit = meta.get("unit", "")
+        rows = []
+        for i, regime in enumerate(regimes, 1):
+            indices = regime.get("image_indices") or []
+            span = ""
+            if values and indices:
+                valid = [values[k] for k in indices if k < len(values)]
+                if valid:
+                    span = f" ({min(valid)}–{max(valid)} {unit})".rstrip()
+            rows.append([i, regime.get("name", "Unnamed"), f"{indices}{span}",
+                         regime.get("processing_pipeline") or "N/A",
+                         ", ".join(regime.get("features_to_extract") or [])])
+        blocks.append(block("table", label=f"📦 Image analysis regimes ({len(regimes)})",
+                            columns=["#", "Regime", "Images", "Pipeline", "Features"],
+                            rows=rows, caption="The pipeline is locked per regime"))
+        if series_plan.get("rationale"):
+            blocks.append(block("text", label="Rationale", markdown=str(series_plan["rationale"])))
+        transitions = series_plan.get("transition_points") or []
+        if transitions:
+            blocks.append(block("table", label="Transition points",
+                                columns=["Between indices", "Transition"],
+                                rows=[[str(t.get("between_indices", "?")),
+                                       t.get("description", "N/A")] for t in transitions]))
+    elif not is_single:
+        blocks.append(block("notice", title="📦 Locked pipeline",
+                            lines=[f"This analysis pipeline will be applied to all {num} images."]))
+    return make_subject(f"📋 Proposed analysis plan — {mode}", blocks)
+
 class ImagePlanningController:
     """
     Plan image analysis approach via LLM, with optional human feedback.
@@ -1253,6 +1315,7 @@ class ImagePlanningController:
             "\nYour feedback (or Enter to accept): ",
             kind="review_plan",
             origin={"stage": "analysis_plan"},
+            subject=analysis_plan_subject(state),
         ).strip()
 
         if feedback == "":

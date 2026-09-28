@@ -38,7 +38,7 @@ from .._locked_exec import (
     DATA_NAME, CANDIDATES_DIR_NAME, atomic_np_save,
 )
 from .._qc_engine import CodegenQCEngine, QCEngineSpec, QCItemContext
-from .base_controllers import run_plan_refinement_gate
+from .base_controllers import run_plan_refinement_gate, steps_block
 from ....utils.codegen_parse import parse_codegen_response
 from ....utils.synthesis_parse import salvage_synthesis_from_response
 from ....hitl import request_human_feedback
@@ -2131,19 +2131,6 @@ class GenerateCurveFittingReportController:
 # ============================================================================
 
 
-def _numbered_steps(text: str) -> list:
-    """Split a strategy written as one paragraph of numbered steps into the
-    steps (the same rule ``_display_plan`` prints by: a step number only
-    after a sentence end, so "cm-1." or "8.7" are never split)."""
-    text = (text or "").strip()
-    if not text:
-        return []
-    parts = re.split(r"(?:^|\. )(?=\d+\. )", text)
-    steps = [re.sub(r"^\d+\.\s*", "", p).strip() for p in parts if p.strip()]
-    steps = [st.rstrip(".") + "." if st and not st.endswith(".") else st for st in steps]
-    return steps if len(steps) > 1 else [text]
-
-
 def fitting_plan_subject(state: dict) -> dict:
     """What the fitting-plan gate shows, as subject blocks (scilink.hitl):
     the same sections ``_display_plan`` prints, with its emoji, read from
@@ -2166,7 +2153,7 @@ def fitting_plan_subject(state: dict) -> dict:
                         markdown=", ".join(params) if params else "N/A"))
     strategy = state.get("fitting_strategy")
     if strategy:
-        blocks.append(block("steps", label="⚙️ Fitting strategy", items=_numbered_steps(strategy)))
+        blocks.append(steps_block("⚙️ Fitting strategy", str(strategy)))
 
     series_plan = state.get("series_analysis_plan") or {}
     regimes = series_plan.get("regimes") or []
