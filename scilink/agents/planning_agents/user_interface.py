@@ -575,9 +575,6 @@ def plan_subject(result: Dict[str, Any], ideation: bool = False,
     if not experiments or not isinstance(experiments, list):
         return make_subject(title, [subject_block(
             "notice", title="⚠️ No experiments were found in the result", lines=[], tone="warn")])
-    if report_path:
-        blocks.append(subject_block("text", label="📄 Full report",
-                                    markdown=f"`{report_path}`"))
     multi = len(experiments) > 1
     for i, exp in enumerate(experiments, 1):
         head = ("💡 Research direction" if ideation else "🔬 Experiment") + (f" {i}" if multi else "")
@@ -626,7 +623,7 @@ def plan_subject(result: Dict[str, Any], ideation: bool = False,
     if caveats:
         blocks.append(subject_block("notice", title="⚠️ Caveats & potential limitations",
                                     lines=caveats, tone="warn"))
-    return make_subject(title, blocks)
+    return make_subject(title, blocks, report=report_path)
 
 
 def _wrap_field(text: Any, width: int = 78, indent: str = "   ") -> str:
@@ -730,8 +727,7 @@ def plan_candidates_subject(candidates: List[Dict[str, Any]], judge: Dict[str, A
         exp = (cand.get("proposed_experiments") or [{}])[0]
         body = "\n\n".join(f"{icon} **{label}.** {exp.get(key) or 'N/A'}"
                              for icon, label, key in _CARD_FIELDS)
-        if report_paths and i <= len(report_paths):
-            body += f"\n\n📄 Full plan: `{report_paths[i - 1]}`"
+        report = report_paths[i - 1] if report_paths and i <= len(report_paths) else None
         comment = None
         sc = scores_by_idx.get(i)
         if sc:
@@ -742,8 +738,11 @@ def plan_candidates_subject(candidates: List[Dict[str, Any]], judge: Dict[str, A
                        f"info-gain {sc.get('information_gain', '?')}/5")
             if sc.get("comment"):
                 comment += f" — {sc['comment']}"
-        items.append({"idx": i, "name": exp.get("experiment_name", "Unnamed"),
-                      "judge_comment": comment, "body": body})
+        item = {"idx": i, "name": exp.get("experiment_name", "Unnamed"),
+                "judge_comment": comment, "body": body}
+        if report:
+            item["report"] = str(report)
+        items.append(item)
     block = subject_block("candidates", items=items, pick=selected,
                           reasoning=judge.get("reasoning") or None,
                           caveats=list(pick_caveats or []) or None)

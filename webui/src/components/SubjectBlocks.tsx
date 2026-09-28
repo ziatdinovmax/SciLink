@@ -1,6 +1,37 @@
 import { api, type SubjectBlock } from "../api";
+import { resolveSessionPath } from "../filelink";
+import { useUIActions } from "../UIContext";
 import { MarkdownBody } from "./MarkdownBody";
 import { VOCAB } from "../vocabulary";
+
+/** A path in a block's prose (a candidate's full plan, the plan report)
+ * opens in the Files tab, as it does from a chat message. */
+function useFileClick(sessionId: string) {
+  const { openInFiles } = useUIActions();
+  return async (token: string) => {
+    const resolved = await resolveSessionPath(sessionId, token);
+    openInFiles(resolved ?? "");
+  };
+}
+
+/** "Open full plan" beside a candidate's name, "Open full report" beside a
+ * title: the report is a file in the session, shown in the Files tab. */
+export function OpenReport({ path, label }: { path?: string | null; label: string }) {
+  const { openInFiles } = useUIActions();
+  if (!path) return null;
+  return (
+    <button
+      type="button"
+      className="qs-open-report"
+      onClick={(e) => {
+        e.stopPropagation();
+        openInFiles(path);
+      }}
+    >
+      {label} ↗
+    </button>
+  );
+}
 
 /** Renders a question's subject — what is under review, as blocks — the
  * React twin of the shell's `Widgets._render_blocks`. One renderer per
@@ -52,12 +83,13 @@ function Block({
   choice?: number | null;
   onChoose?: (idx: number) => void;
 }) {
+  const onFileClick = useFileClick(sessionId);
   switch (block.type) {
     case "text":
       return (
         <div className="qs-text">
           {/* an agent's prose is full of "~303 cm^-1": never strikethrough */}
-          <MarkdownBody text={block.markdown} escapeTilde />
+          <MarkdownBody text={block.markdown} escapeTilde onFileClick={onFileClick} />
         </div>
       );
     case "fields":
@@ -181,11 +213,12 @@ function Block({
                     </span>
                   )}
                   {isPick && <span className="qs-chip qs-pick">{VOCAB.names.judge_pick}</span>}
+                  <OpenReport path={c.report} label="Open full plan" />
                 </div>
                 {c.judge_comment && <p className="caption">{c.judge_comment}</p>}
                 {c.body && (
                   <div className="qs-candidate-body">
-                    <MarkdownBody text={c.body} escapeTilde />
+                    <MarkdownBody text={c.body} escapeTilde onFileClick={onFileClick} />
                   </div>
                 )}
                 {c.figure && (

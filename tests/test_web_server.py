@@ -181,6 +181,14 @@ def test_present_subject_figures_are_relative_and_unknown_blocks_dropped(tmp_pat
     assert blocks[1]["path"] is None and blocks[1]["file"] == "/elsewhere/other.png"
     assert blocks[2]["left"]["blocks"][0]["path"] == "results/fit_review.png"
     assert len(blocks[2]["left"]["blocks"]) == 1
+    # a report on the subject and on a candidate is served like a figure
+    hreq = FeedbackRequest(prompt="", kind="plan_candidate_select", subject={
+        "title": "t", "report": str(tmp_path / "plan.html"),
+        "blocks": [{"type": "candidates", "pick": 1, "items": [
+            {"idx": 1, "name": "A", "report": str(tmp_path / "results" / "c1.html")}]}]})
+    q = present_question(hreq, "", str(tmp_path))
+    assert q["subject"]["report"] == "plan.html" and q["subject"]["report_file"].endswith("plan.html")
+    assert q["subject"]["blocks"][0]["items"][0]["report"] == "results/c1.html"
 
 
 def test_present_subject_candidates_feed_the_picker(tmp_path):

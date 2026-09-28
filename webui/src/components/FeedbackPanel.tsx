@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type PresentedQuestion } from "../api";
 import { MarkdownBody } from "./MarkdownBody";
-import { SubjectBlocks } from "./SubjectBlocks";
+import { OpenReport, SubjectBlocks } from "./SubjectBlocks";
 import { fill } from "../narration";
 import { VOCAB } from "../vocabulary";
 
@@ -131,6 +131,7 @@ export function FeedbackPanel({
         <h4 className="qs-title">
           {title}
           {subtitle && <span className="qs-subtitle">{subtitle}</span>}
+          <OpenReport path={subject.report} label="Open full report" />
         </h4>
       )}
       {/* What the decision is about leads: the reason a plan is reopened,

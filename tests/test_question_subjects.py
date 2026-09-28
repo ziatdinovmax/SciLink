@@ -202,18 +202,19 @@ def _experiment_plan():
 
 def test_plan_subject_experiment():
     s = ui.plan_subject(_experiment_plan(), report_path="/r/plan.html")
-    assert s["title"] == "✅ Proposed experimental plan"
+    assert s["title"] == "✅ Proposed experimental plan" and s["report"] == "/r/plan.html"
+    assert "report" not in ui.plan_subject(_experiment_plan())
     labels = [b.get("label") or b.get("title") for b in s["blocks"]]
-    assert labels == ["📄 Full report", "🔬 Experiment: Anneal series", "🧪 Experimental steps",
+    assert labels == ["🔬 Experiment: Anneal series", "🧪 Experimental steps",
                       "🛠️ Required equipment", "📈 Expected outcome", "💡 Justification",
                       "📄 Source documents", "💻 Implementation code",
                       "⚠️ Caveats & potential limitations"]
-    assert s["blocks"][1]["markdown"] == "🎯 **Hypothesis.** grains grow"
-    assert s["blocks"][2] == {"type": "steps", "label": "🧪 Experimental steps",
+    assert s["blocks"][0]["markdown"] == "🎯 **Hypothesis.** grains grow"
+    assert s["blocks"][1] == {"type": "steps", "label": "🧪 Experimental steps",
                               "items": ["Cut coupons", "Anneal 1 h", "▸ DOMAIN 2", "Image"]}
-    assert s["blocks"][3]["markdown"] == "furnace, SEM"
-    assert s["blocks"][6]["markdown"] == "- paper.pdf"
-    assert s["blocks"][8]["lines"] == ["Minor: [safety] no PPE", "BLOCKING: [budget] 800 C > furnace max"]
+    assert s["blocks"][2]["markdown"] == "furnace, SEM"
+    assert s["blocks"][5]["markdown"] == "- paper.pdf"
+    assert s["blocks"][7]["lines"] == ["Minor: [safety] no PPE", "BLOCKING: [budget] 800 C > furnace max"]
     # two experiments are numbered; more than five pieces of equipment are a list
     two = _experiment_plan()
     two["proposed_experiments"].append(dict(two["proposed_experiments"][0],
@@ -237,6 +238,7 @@ def test_plan_subject_ideation_error_and_empty():
     labels = [b["label"] for b in s["blocks"]]
     assert labels == ["💡 Research direction: Portfolio", "🧠 Research directions (1)",
                       "🧭 Shared protocol", "🛠️ Key capabilities", "📄 Source documents"]
+    assert "report" not in s
     assert "📈 **Expected outcomes.** o" in s["blocks"][0]["markdown"]
     md = s["blocks"][1]["markdown"]
     assert md.startswith("**D1: Catch it** · tier 1") and "  - d1" in md
@@ -368,7 +370,8 @@ def test_plan_candidates_subject_and_gates():
     assert first["idx"] == 1 and first["name"] == "Anneal series"
     assert first["judge_comment"].startswith("groundedness 4/5 · testability 3/5")
     assert first["judge_comment"].endswith("— weak gain")
-    assert "🎯 **Hypothesis.** h1" in first["body"] and "📄 Full plan: `/r/c1.html`" in first["body"]
+    assert "🎯 **Hypothesis.** h1" in first["body"] and first["report"] == "/r/c1.html"
+    assert "report" not in ui.plan_candidates_subject(cands, judge, 2)["blocks"][0]["items"][0]
     assert block["items"][1]["body"].count("N/A") == 2
 
     cap = Capture(answer="1")

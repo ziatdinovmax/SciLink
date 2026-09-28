@@ -238,6 +238,9 @@ class Widgets:
                         lines.append(Text(f"     {c['judge_comment']}", style="dim"))
                     if c.get("body"):
                         lines.append(Markdown(str(c["body"])))
+                    if c.get("report_file") or c.get("report"):
+                        lines.append(Text(f"     📄 full plan: {c.get('report_file') or c.get('report')}",
+                                          style="dim"))
                     if c.get("figure_file") or c.get("figure"):
                         lines.append(Text(f"     figure: {c.get('figure_file') or c.get('figure')}",
                                           style="dim"))
@@ -277,6 +280,9 @@ class Widgets:
             # The blocks ARE the printed text; it is not shown twice.
             if subject.get("title"):
                 parts.append(Text(str(subject["title"]), style="bold"))
+            if subject.get("report_file") or subject.get("report"):
+                parts.append(Text.from_markup(
+                    f"  [dim]📄 full report:[/] {subject.get('report_file') or subject.get('report')}"))
             parts.extend(self._render_blocks(subject.get("blocks")))
         elif context:
             lines = context.split("\n")

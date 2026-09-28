@@ -234,6 +234,8 @@ def present_subject(subject: Dict[str, Any], session_dir: str) -> Dict[str, Any]
                     c = dict(c)
                     if c.get("figure"):
                         c["figure"], c["figure_file"] = _figure(c["figure"])
+                    if c.get("report"):
+                        c["report"], c["report_file"] = _figure(c["report"])
                     items.append(c)
                 b["items"] = items
             elif kind == "compare":
@@ -244,8 +246,11 @@ def present_subject(subject: Dict[str, Any], session_dir: str) -> Dict[str, Any]
             out.append(b)
         return out
 
-    return {"title": str(subject.get("title") or ""),
-            "blocks": _blocks(subject.get("blocks"))}
+    out = {"title": str(subject.get("title") or ""),
+           "blocks": _blocks(subject.get("blocks"))}
+    if subject.get("report"):
+        out["report"], out["report_file"] = _figure(subject["report"])
+    return out
 
 
 def _candidate_rows(block: Dict[str, Any]) -> List[Dict[str, Any]]:

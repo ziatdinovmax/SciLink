@@ -65,7 +65,8 @@ def _next_id() -> str:
 #   figure      path (absolute at the gate; presented relative to the
 #               session), caption?
 #   candidates  items: [{idx, name, metric?, value?, approved?, figure?,
-#               judge_comment?, body? (markdown)}], pick (None when no
+#               judge_comment?, body? (markdown), report? (a file to open:
+#               the candidate's full plan)}], pick (None when no
 #               candidate is preferred), reasoning?, caveats?: [str],
 #               free_text?: {input, submit} — a typed reply the gate also
 #               takes (a model name, 'more'), shown as a box under the picker
@@ -83,9 +84,15 @@ def subject_block(type_: str, **payload: Any) -> Dict[str, Any]:
     return {"type": type_, **payload}
 
 
-def make_subject(title: str, blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """A question's subject: a title and its blocks (empty blocks dropped)."""
-    return {"title": title, "blocks": [b for b in blocks if b]}
+def make_subject(title: str, blocks: List[Dict[str, Any]],
+                 report: Optional[str] = None) -> Dict[str, Any]:
+    """A question's subject: a title and its blocks (empty blocks dropped);
+    ``report`` is a file the surfaces offer to open beside the title (the
+    plan's full report)."""
+    out: Dict[str, Any] = {"title": title, "blocks": [b for b in blocks if b]}
+    if report:
+        out["report"] = str(report)
+    return out
 
 
 @dataclass

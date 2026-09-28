@@ -128,6 +128,9 @@ export type SubjectBlock = { label?: string } & (
         judge_comment?: string;
         /** markdown under the card head (a plan candidate's fields) */
         body?: string;
+        /** a file to open in the Files tab (the candidate's full plan) */
+        report?: string | null;
+        report_file?: string;
       }[];
       /** null when no candidate is preferred (a consensus question) */
       pick?: number | null;
@@ -145,6 +148,9 @@ export type SubjectBlock = { label?: string } & (
 export interface QuestionSubject {
   title: string;
   blocks: SubjectBlock[];
+  /** a file to open in the Files tab beside the title (the plan's full report) */
+  report?: string | null;
+  report_file?: string;
 }
 
 export interface PresentedQuestion {
