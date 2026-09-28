@@ -193,7 +193,13 @@ the web UI live-test notes).
    the gate's own first `options` word ("keep", "consensus"), never a fixed
    "keep"; and a picker whose gate also takes a typed reply (a model name,
    'more') says so on its candidates block (`free_text`), which becomes a
-   box under the picker on both surfaces.
+   box under the picker on both surfaces. Live checks of every reply path
+   (2026-09-27, real browser against a launcher-only hook that parks
+   synthetic gates, plus one real three-candidate run) found and fixed:
+   Enter on a picker sending the judge's pick whatever card was selected;
+   the floating figure inset covering the Accept button (it now hides
+   while a question is pending); Enter in a secondary box inserting a
+   newline instead of sending.
 5. **Planning plan review, metadata, fan-out, image confirm.** Retires
    `parse_fanout_confirm`.
 6. **Retire the regex path.** `clean_context` and the classifier go;

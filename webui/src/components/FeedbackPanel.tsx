@@ -39,6 +39,16 @@ export function FeedbackPanel({
     setSent(true);
     onRespond(response);
   };
+  // A secondary text box (the picker's typed reply, the reopen gate's
+  // "adopt with changes"): Enter sends what was typed, Shift+Enter is a new
+  // line, and an empty box sends nothing — the buttons decide the empty case.
+  const sendOnEnter = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (text.trim()) respond(text.trim());
+    }
+  };
   const isPicker =
     question.widget === "bestofn" || question.widget === "plan_candidates";
   // On a picker the empty reply is the judge's pick, a number is a chosen
@@ -123,6 +133,9 @@ export function FeedbackPanel({
           {subtitle && <span className="qs-subtitle">{subtitle}</span>}
         </h4>
       )}
+      {/* What the decision is about leads: the reason a plan is reopened,
+          the auto-correction a revert would undo. */}
+      {notice}
       <SubjectBlocks
         sessionId={sessionId}
         blocks={subject.blocks}
@@ -130,7 +143,6 @@ export function FeedbackPanel({
         onChoose={isPicker ? setChoice : undefined}
       />
       {codeFiles}
-      {notice}
     </>
   ) : fanout !== null ? (
     <>
@@ -202,6 +214,7 @@ export function FeedbackPanel({
               <textarea
                 value={text}
                 onChange={(e) => setText(e.target.value)}
+                onKeyDown={(e) => sendOnEnter(e)}
                 rows={2}
               />
             </label>
@@ -260,7 +273,7 @@ export function FeedbackPanel({
               <textarea
                 value={text}
                 onChange={(e) => setText(e.target.value)}
-                onKeyDown={(e) => e.stopPropagation()}
+                onKeyDown={(e) => sendOnEnter(e)}
                 rows={2}
               />
             </label>
