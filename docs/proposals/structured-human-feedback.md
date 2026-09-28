@@ -3,9 +3,11 @@
 Status: plan, drafted 2026-09-26. Stage 1 (the contract, both renderers,
 the kind tables, the curve fitting plan gate) and stage 2 (the other plan
 gates: image analysis plan, hyperspectral preprocessing targets, series
-regime plan, planning-mode plan review) and stage 4 (the pickers and
+regime plan, planning-mode plan review), stage 4 (the pickers and
 comparisons: best-of-N join on curves and images, series consensus,
-consistency keep-or-revert, plan candidates, plan reopen) are implemented;
+consistency keep-or-revert, plan candidates, plan reopen), stage 5 (the
+missing-metadata description, the fan-out confirmation, the planning code
+review) and stage 6 (the console parsers retired) are implemented;
 the user-guided keep-or-revert gates are out with the result gates they
 follow. Stage 3 was
 written and then dropped: the reachability audit below showed that none of
@@ -208,9 +210,12 @@ the web UI live-test notes).
    one-entry shim is shown as the portfolio's thesis, not as a direction.
 5. **Planning plan review, metadata, fan-out, image confirm.** Retires
    `parse_fanout_confirm`.
-6. **Retire the regex path.** `clean_context` and the classifier go;
-   `context_display` remains only as the console disclosure. Delete the
-   ported Streamlit parsers and update the presenter tests to the fixture.
+6. **Retire the regex path.** Done: the classifier, the three console
+   parsers and the preview sweep are gone; the presenter has one path
+   (widget and words from the kind and stage, body from the subject);
+   `context_display` still travels and is the body of a question whose gate
+   declared no subject; the code-review scripts are read from the review
+   folder by stage.
 
 Stages 2 to 5 can be reordered by whatever gets exercised live first.
 

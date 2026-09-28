@@ -26,7 +26,7 @@ class FakeOrchestrator:
 
     def __init__(self, base_dir: str = ".", *, self_prints_answer: bool = False,
                  block_until_stopped: bool = False, raise_error: bool = False,
-                 question_kind: str = "confirm", ask: bool = True) -> None:
+                 question_kind: str = "review_plan", ask: bool = True) -> None:
         self.base_dir = base_dir
         self.self_prints_answer = self_prints_answer
         self.block_until_stopped = block_until_stopped
@@ -54,7 +54,7 @@ class FakeOrchestrator:
             raise RuntimeError("boom")
         if self.ask:
             print("=" * 40)
-            print("🙋 REQUESTING FEEDBACK")   # the banner the presenter keys on
+            print("🙋 REQUESTING FEEDBACK")   # the printed banner (the kind names the widget)
             answer = hitl.request_human_feedback(
                 "Review the plan and press Enter to approve:", kind=self.question_kind,
                 default="")

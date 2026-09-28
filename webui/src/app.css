@@ -383,9 +383,6 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .feedback-decision textarea::placeholder { color: var(--text-dim); opacity: 0.8; }
 .feedback-actions button { flex: 1; }
 .feedback-panel img.preview { max-width: 100%; border-radius: 6px; margin-bottom: 8px; }
-.radio-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
-.radio-list label { display: flex; gap: 8px; align-items: center; cursor: pointer; }
-.radio-list input { width: auto; }
 
 /* ── subject blocks (what a question is about) ──────────────── */
 /* One quiet system, the console printout's shape: the title, then each

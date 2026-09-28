@@ -160,22 +160,14 @@ export interface PresentedQuestion {
     | "keep_revert"
     | "bestofn"
     | "plan_candidates"
-    | "fanout_confirm"
     | "confirm";
   labels: Record<string, string>;
   prompt: string;
+  /** the captured console text: the body of a question whose gate declared no subject */
   context_display: string;
-  preview_images: string[];
-  candidate_captions: Record<string, string>;
   code_files: { name: string; content: string }[];
   candidates?: { idx: number; label: string }[];
-  judge_pick?: number;
-  fanout?: {
-    verdict: string | null;
-    join_axis: string | null;
-    rationale: string | null;
-    branches: string[];
-  };
+  judge_pick?: number | null;
   /** What the decision is about: the auto-correction a revert would undo,
    * or why an approved plan is being reopened. */
   notice?: { title: string; lines: string[] };

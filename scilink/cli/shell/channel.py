@@ -3,9 +3,9 @@
 ``ShellChannel`` is the web ``HTTPChannel``'s sibling: it parks the
 question on the turn (``turn.pending_question``) and blocks the agent
 thread; the shell's main loop notices, renders it with ``Widgets.ask`` and
-answers. The widgets follow the presenter's vocabulary — the same seven
-shapes and the same button labels the React FeedbackPanel shows — so a
-user who has seen one surface recognises the other. Every widget shows
+answers. The widgets follow the presenter's vocabulary — the same widget
+per question kind and the same button labels the React FeedbackPanel
+shows — so a user who has seen one surface recognises the other. Every widget shows
 the "Enter = <accept>" convention the web panel shows as a caption.
 """
 
@@ -304,11 +304,6 @@ class Widgets:
             body = Group(*(Text(f"• {line}") for line in notice.get("lines") or []))
             self.console.print(Panel(body, title=f"[bold magenta]{notice['title']}[/]",
                                      border_style="magenta"))
-        for rel in q.get("preview_images") or []:
-            cap = (q.get("candidate_captions") or {}).get(Path(rel).name)
-            label = f" ({cap})" if cap else ""
-            path = Path(self.session_dir, rel) if self.session_dir else Path(rel)
-            self.console.print(f"  [dim]figure:[/] {path}{label}")
         for f in q.get("code_files") or []:
             self.console.print(Panel(Syntax(f.get("content", ""), "python",
                                             line_numbers=False, word_wrap=True),
@@ -340,22 +335,6 @@ class Widgets:
                 self.console.print(f"[bold]{labels.get('input', 'Your changes:')}[/]")
                 return self._read("").strip() or primary
             return chosen
-        if widget == "fanout_confirm":
-            f = q.get("fanout") or {}
-            self.console.print("[bold]🔀 Launch parallel multi-dataset analysis?[/]")
-            if f.get("verdict"):
-                self.console.print(f"  [bold]Complementarity:[/] {f['verdict']}")
-            if f.get("join_axis"):
-                self.console.print(f"  [bold]Join axis:[/] {f['join_axis']}")
-            if f.get("branches"):
-                self.console.print("  [bold]Branches[/] — run concurrently, each seeing the others as auxiliary:")
-                for b in f["branches"]:
-                    self.console.print(f"    • {b}")
-            if f.get("rationale"):
-                self.console.print(f"  [bold]Why:[/] {f['rationale']}")
-            self.console.print("  [dim]Branches run autonomously — no per-branch approval pauses.[/]")
-            return self._choose([("no", labels.get("cancel", "Cancel"), ""),
-                                 ("y", labels.get("confirm", "Launch"), "")], default=0)
         if widget == "confirm":
             # A gate with a subject and a yes/no decision (a fan-out launch,
             # a costly step): "y" confirms, "no" cancels, as the console.

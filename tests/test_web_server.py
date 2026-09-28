@@ -23,64 +23,11 @@ from scilink.server import files as files_mod  # noqa: E402
 from scilink.server.app import create_app  # noqa: E402
 from scilink.server.artifacts import ArtifactTracker  # noqa: E402
 from scilink.server.events import EventBuffer  # noqa: E402
-from scilink.server.presenter import (  # noqa: E402
-    parse_bestofn_review,
-    parse_fanout_confirm,
-    parse_plan_candidate_review,
-    present_question,
-)
+from scilink.server.presenter import present_question  # noqa: E402
 from scilink.server.session_manager import SessionManager  # noqa: E402
 
 
 # ── presenter ────────────────────────────────────────────────────
-
-BESTOFN_CTX = """
-BEST-OF-N CANDIDATES
-Candidate 1: R²=0.912, approved=True, iterations=2
-Candidate 2: R²=0.947, approved=True, iterations=3  <- judge pick
-Candidate 3: R²=0.801, approved=False, iterations=5
-"""
-
-PLAN_CTX = """
-PLAN CANDIDATES
-── Candidate 1: Doped perovskite anneal sweep ──
-── Candidate 2: Solvent-ratio DoE ──  judge pick
-"""
-
-FANOUT_CTX = """
-parallel multi-dataset analysis
-Complementarity verdict : complementary modalities
-Join axis : temperature
-• XRD series (5 files)
-• Raman series (5 files)
-Rationale : The two series probe the same transition.
-"""
-
-
-def test_parse_bestofn_review():
-    cands, pick = parse_bestofn_review(BESTOFN_CTX, "accept candidate 2")
-    assert [c["idx"] for c in cands] == [1, 2, 3]
-    assert pick == 2
-    assert "✓ approved" in cands[1]["label"]
-    assert "✗ below gate" in cands[2]["label"]
-    # gated on the prompt — a stale review block must not hijack
-    assert parse_bestofn_review(BESTOFN_CTX, "Review the plan") is None
-    assert parse_bestofn_review("", "accept candidate 1") is None
-
-
-def test_parse_plan_candidate_review():
-    cands, pick = parse_plan_candidate_review(PLAN_CTX, "accept plan candidate 2")
-    assert len(cands) == 2 and pick == 2
-    assert "Solvent-ratio DoE" in cands[1]["label"]
-    assert parse_plan_candidate_review(PLAN_CTX, "accept candidate 2") is None
-
-
-def test_parse_fanout_confirm():
-    d = parse_fanout_confirm(FANOUT_CTX)
-    assert d["verdict"] == "complementary modalities"
-    assert d["join_axis"] == "temperature"
-    assert len(d["branches"]) == 2
-
 
 def _present(tmp_path, prompt="", kind="free_text", context="", origin=None,
              options=None):
@@ -89,40 +36,36 @@ def _present(tmp_path, prompt="", kind="free_text", context="", origin=None,
     return present_question(hreq, context, str(tmp_path))
 
 
-def test_present_widget_classification(tmp_path):
-    assert _present(tmp_path)["widget"] == "generic"
-    assert _present(tmp_path, kind="dataset_description")["widget"] == \
-        "dataset_description"
-    q = _present(tmp_path, context="x" * 10 + "\nCODE REVIEW\nfiles ready")
-    assert q["widget"] == "code_review"
+def test_present_widget_comes_from_the_kind(tmp_path):
+    """No prompt or console sniffing: the widget and its words follow the
+    kind (and the gate's stage); a gate without a subject shows its console
+    text as the body."""
+    q = _present(tmp_path, context="=" * 30 + "\nSOMETHING PRINTED\n")
+    assert q["widget"] == "generic" and "SOMETHING PRINTED" in q["context_display"]
+    assert "subject" not in q
+    assert _present(tmp_path, kind="dataset_description")["widget"] == "dataset_description"
     q = _present(tmp_path, kind="keep_or_revert", options=["keep", "revert"])
-    assert q["widget"] == "keep_revert"
-    q = _present(tmp_path, origin={"stage": "fanout_confirm"},
-                 context=FANOUT_CTX)
-    assert q["widget"] == "fanout_confirm"
-    assert q["fanout"]["join_axis"] == "temperature"
-    q = _present(tmp_path, prompt="accept candidate 2", context=BESTOFN_CTX)
-    assert q["widget"] == "bestofn" and q["judge_pick"] == 2
-    q = _present(tmp_path, prompt="accept plan candidate 2", context=PLAN_CTX)
-    assert q["widget"] == "plan_candidates" and q["judge_pick"] == 2
-    # label sets ride the generic surface
-    q = _present(tmp_path, context="REQUESTING FEEDBACK on the plan")
-    assert q["labels"]["accept"] == "Approve plan"
-    q = _present(tmp_path, kind="review_metrics")
-    assert q["labels"]["accept"] == "Approve extraction"
+    assert q["widget"] == "keep_revert" and q["options"] == ["keep", "revert"]
+    q = _present(tmp_path, kind="confirm", origin={"stage": "fanout_confirm"})
+    assert q["widget"] == "confirm" and q["labels"]["confirm"].endswith("Launch parallel analysis")
+    # a picker kind without a candidates block is presented as text
+    q = _present(tmp_path, kind="bestofn_select", prompt="accept candidate 2")
+    assert q["widget"] == "generic" and "candidates" not in q
+    assert _present(tmp_path, kind="review_plan")["labels"]["accept"] == "Approve plan"
+    assert _present(tmp_path, kind="review_metrics")["labels"]["accept"] == "Approve extraction"
+    q = _present(tmp_path, kind="approve_or_revise", origin={"stage": "code_review"})
+    assert q["widget"] == "code_review" and q["labels"]["accept"] == "Approve code"
 
 
-def test_present_code_files_and_previews(tmp_path):
+def test_present_code_files(tmp_path):
     review = tmp_path / "temp_code_review"
     review.mkdir()
     (review / "fitting_script.py").write_text("print('hi')")
-    (tmp_path / "spectrum_fit_review.png").write_bytes(b"png")
-    (tmp_path / "bestofn_candidate_2_review.png").write_bytes(b"png")
     q = _present(tmp_path, context="CODE REVIEW\nReview files in temp_code_review")
     assert q["code_files"][0]["name"] == "fitting_script.py"
-    assert "spectrum_fit_review.png" in q["preview_images"]
-    assert q["candidate_captions"]["bestofn_candidate_2_review.png"] == \
-        "Candidate 2"
+    assert _present(tmp_path, origin={"stage": "code_review"})["code_files"][0]["name"] == \
+        "fitting_script.py"
+    assert _present(tmp_path)["code_files"] == []
 
 
 # ── the subject path ─────────────────────────────────────────────
@@ -133,9 +76,7 @@ def _subject(*blocks, title="Under review"):
 
 def test_present_subject_widget_and_words_come_from_the_kind(tmp_path):
     """With a subject the widget and its labels come from the kind table,
-    the blocks travel, the console text stays for the disclosure, and the
-    preview sweep is skipped (a gate with a subject declares its figures)."""
-    (tmp_path / "spectrum_fit_review.png").write_bytes(b"png")
+    the blocks travel, and the console text still travels."""
     hreq = FeedbackRequest(prompt="Your feedback: ", kind="review_plan",
                            origin={"stage": "fitting_plan"},
                            subject=_subject({"type": "text", "markdown": "**Approach.** x"},
@@ -146,7 +87,6 @@ def test_present_subject_widget_and_words_come_from_the_kind(tmp_path):
     assert q["subject"]["title"] == "Under review"
     assert [b["type"] for b in q["subject"]["blocks"]] == ["text", "chips"]
     assert "PROPOSED PLAN" in q["context_display"]
-    assert q["preview_images"] == []
     # every kind maps: the result review is a text widget with its own words
     q = present_question(FeedbackRequest(prompt="", kind="review_result",
                                          subject=_subject()), "", str(tmp_path))

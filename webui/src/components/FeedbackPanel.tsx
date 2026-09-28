@@ -1,16 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type PresentedQuestion } from "../api";
-import { MarkdownBody } from "./MarkdownBody";
+import { type PresentedQuestion } from "../api";
 import { SubjectBlocks } from "./SubjectBlocks";
 import { fill } from "../narration";
 import { VOCAB } from "../vocabulary";
 
 /** Renders the parked HITL question: what is under review (the body) and
  * the decision (the row pinned under it). The body is the gate's `subject`
- * blocks when it declared them, else the captured console text and the
- * preview sweep (the legacy path, the React twin of the Streamlit feedback
- * branch). The response contracts are identical on both paths: bare digit /
- * "" for candidate selectors, "y"/"no" for confirm, "keep"/"" for
+ * blocks; a gate that declared none shows the captured console text. The
+ * reply contracts are the gates' own: bare digit / "" for candidate
+ * selectors, "y"/"no" for confirm, the gate's first option / "" for
  * keep-revert, free text or "" elsewhere. */
 export function FeedbackPanel({
   sessionId,
@@ -53,8 +51,7 @@ export function FeedbackPanel({
   const isPicker =
     question.widget === "bestofn" || question.widget === "plan_candidates";
   const enterAccepts =
-    question.widget !== "keep_revert" && question.widget !== "confirm"
-    && question.widget !== "fanout_confirm";
+    question.widget !== "keep_revert" && question.widget !== "confirm";
   // On a picker the empty reply is the judge's pick, a number is a chosen
   // candidate; Enter confirms whatever is selected, as the shell's picker
   // confirms its highlighted row. The selection starts on the judge's pick,
@@ -75,20 +72,6 @@ export function FeedbackPanel({
   const subject = question.subject;
 
   // ── the body: what is under review ──────────────────────────
-  const previews = question.preview_images.map((p) => {
-    const base = p.split("/").pop() ?? p;
-    return (
-      <figure key={p} style={{ margin: "0 0 8px" }}>
-        <img className="preview" src={api.fileUrl(sessionId, p)} alt={base} />
-        {question.candidate_captions[base] && (
-          <figcaption className="caption">
-            {question.candidate_captions[base]}
-          </figcaption>
-        )}
-      </figure>
-    );
-  });
-
   const codeFiles = question.code_files.map((f, i) => (
     <details className="card" key={f.name} open={question.code_files.length === 1 && i === 0}>
       <summary>📄 {f.name}</summary>
@@ -117,8 +100,6 @@ export function FeedbackPanel({
     question.context_display && !subject ? (
       <div className="context-box">{question.context_display}</div>
     ) : null;
-
-  const fanout = question.widget === "fanout_confirm" ? question.fanout : null;
   // "📋 Proposed fitting plan — single spectrum": the part after the dash
   // is the subtitle.
   const [title, subtitle] = subject
@@ -148,50 +129,11 @@ export function FeedbackPanel({
       />
       {codeFiles}
     </>
-  ) : fanout !== null ? (
-    <>
-      <h4>🔀 Launch parallel multi-dataset analysis?</h4>
-      {fanout?.verdict && (
-        <MarkdownBody text={`**Complementarity:** ${fanout.verdict}`} />
-      )}
-      {fanout?.join_axis && <MarkdownBody text={`**Join axis:** ${fanout.join_axis}`} />}
-      {fanout && fanout.branches.length > 0 && (
-        <MarkdownBody
-          text={
-            "**Branches** — run concurrently, each seeing the others as auxiliary:\n" +
-            fanout.branches.map((b) => `- ${b}`).join("\n")
-          }
-        />
-      )}
-      {fanout?.rationale && <MarkdownBody text={`**Why:** ${fanout.rationale}`} />}
-      <p className="caption">
-        Branches run autonomously — no per-branch approval pauses.
-      </p>
-    </>
   ) : (
     <>
-      {previews}
+      {notice}
       {codeFiles}
       {consoleText}
-      {notice}
-      {isPicker && (
-        <>
-          <p style={{ marginTop: 0 }}>{question.labels.select}</p>
-          <div className="radio-list">
-            {(question.candidates ?? []).map((c) => (
-              <label key={c.idx}>
-                <input
-                  type="radio"
-                  name="candidate"
-                  checked={choice === c.idx}
-                  onChange={() => setChoice(c.idx)}
-                />
-                {c.label}
-              </label>
-            ))}
-          </div>
-        </>
-      )}
     </>
   );
 
@@ -234,7 +176,7 @@ export function FeedbackPanel({
         )}
       </>
     );
-  } else if (question.widget === "fanout_confirm" || question.widget === "confirm") {
+  } else if (question.widget === "confirm") {
     decision = (
       <div className="feedback-actions">
         <button onClick={() => respond("no")} disabled={sent}>
@@ -359,8 +301,7 @@ export function FeedbackPanel({
       tabIndex={-1}
       ref={(el) => {
         panelRef.current = el;
-        if (isPicker || question.widget === "keep_revert" || question.widget === "confirm"
-            || question.widget === "fanout_confirm") {
+        if (isPicker || question.widget === "keep_revert" || question.widget === "confirm") {
           focusRef.current = el;
         }
       }}
@@ -372,8 +313,7 @@ export function FeedbackPanel({
         // its own (text is the feedback), and Shift+Enter is a new line.
         const tag = (e.target as HTMLElement).tagName;
         if (e.key === "Enter" && !e.shiftKey && tag !== "BUTTON" && tag !== "TEXTAREA"
-            && question.widget !== "keep_revert" && question.widget !== "confirm"
-            && question.widget !== "fanout_confirm") {
+            && enterAccepts) {
           e.preventDefault();
           respond(isPicker ? pickerReply() : "");
         }

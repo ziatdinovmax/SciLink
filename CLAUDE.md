@@ -691,10 +691,11 @@ the way its printout does and a short list is plain text, not chips. The decisio
 gate's `kind` (`vocabulary.QUESTION_WIDGETS` / `QUESTION_LABELS`), never
 from the prompt text. Printing stays: it is the console, the verbose log and
 the record; the surfaces show the blocks, not the captured text as well.
-A gate without a subject is presented from its printed text as before, so
-gates convert one at a time (`docs/proposals/structured-human-feedback.md`
-lists them); do not add a new regex to the presenter for a gate — give the
-gate a subject. This work improves how the existing gates are shown; it
+Every live gate declares one (the audit in
+`docs/proposals/structured-human-feedback.md` lists them); the presenter
+no longer parses console text, and a gate without a subject is shown as
+its kind's widget over the captured text. A new gate gets a subject, never
+a parser. This work improves how the existing gates are shown; it
 adds no gate and re-enables none. Beyond plan approval and the best-of-N
 candidate choice, no human review of analysis results is expected, and the
 code agrees: attempt 0 of a best-of-N run is a candidate job, and every
