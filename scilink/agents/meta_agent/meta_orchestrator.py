@@ -551,10 +551,12 @@ class MetaOrchestratorAgent:
         self._delegation_ledger: List[Dict[str, Any]] = []
         # Complementarity verdicts cached by frozenset of dataset paths, so the
         # standalone assess_complementarity tool and the internal gate in
-        # run_fanout share one LLM call. Serializes ledger preallocation and
-        # fusion-entry appends across fan-out worker threads.
+        # run_fanout share one LLM call.
         self._complementarity_cache: Dict[frozenset, Dict[str, Any]] = {}
-        self._fanout_lock = threading.Lock()
+        # Serializes ledger index allocation and appends: every
+        # _open_delegation, fan-out preallocation and fusion entry. Re-entrant
+        # because fan-out preallocation holds it while opening its entries.
+        self._fanout_lock = threading.RLock()
         # Serializes checkpoint writes: _close_delegation checkpoints on every
         # completion, and fan-out workers close their entries concurrently.
         self._checkpoint_lock = threading.Lock()
@@ -1500,7 +1502,14 @@ class MetaOrchestratorAgent:
 
         Finalized later by ``_close_delegation``. Having the entry present up
         front lets the UI delegation tree show the delegation while it runs.
+        The index is allocated and the entry appended under the ledger lock,
+        so concurrent delegations never share an index.
         """
+        with self._fanout_lock:
+            return self._open_delegation_locked(mode, task, context, context_from, label)
+
+    def _open_delegation_locked(self, mode, task, context, context_from,
+                                label=None) -> Dict[str, Any]:
         index = len(self._delegation_ledger) + 1
         # Normalize context_from to valid prior delegation indices (the LLM may
         # pass ints, strings, or "#n" forms; drop anything out of range).

@@ -29,6 +29,7 @@ persists or reloads model-generated prose should move here too.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import tempfile
@@ -72,6 +73,19 @@ def atomic_write_text(path: Any, text: str) -> Path:
             os.unlink(tmp)
         raise
     return p
+
+
+def atomic_write_json(path: Any, obj: Any, **dumps_kwargs: Any) -> Path:
+    """Serialize ``obj`` completely, then publish it with ``atomic_write_text``.
+
+    ``json.dump`` straight into an ``open(path, "w")`` truncates the file
+    first and writes as it goes, so a value that fails to serialize (a
+    circular reference, an object with no JSON form) destroys the previous
+    file as well as failing the write. Serializing to a string first means a
+    failure raises before anything on disk is touched, and the previous
+    content survives whole.
+    """
+    return atomic_write_text(path, json.dumps(obj, **dumps_kwargs))
 
 
 def write_text_utf8(path: Any, text: str, *, append: bool = False) -> Path:

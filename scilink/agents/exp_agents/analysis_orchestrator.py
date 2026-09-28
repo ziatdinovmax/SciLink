@@ -11,6 +11,7 @@ Follows the same design patterns as PlanningOrchestratorAgent for consistent UX.
 
 import inspect
 import json
+from scilink.utils.text_io import atomic_write_json
 import logging
 import os
 import time
@@ -1729,8 +1730,7 @@ class AnalysisOrchestratorAgent:
                 "graduated_skill_sources": self._graduated_skill_sources,
             }
 
-            with open(self.checkpoint_path, 'w', encoding="utf-8") as f:
-                json.dump(checkpoint_data, f, indent=2)
+            atomic_write_json(self.checkpoint_path, checkpoint_data, indent=2)
 
             if not quiet:
                 print(f"    ✅ Auto-checkpoint saved")
@@ -2069,8 +2069,7 @@ class AnalysisOrchestratorAgent:
             # Collapse any multimodal (image-bearing) tool messages back to plain
             # strings so chat_history.json keeps its shape and carries no base64.
             history_data = sanitize_history_images(history_data)
-            with open(self.history_path, 'w', encoding="utf-8") as f:
-                json.dump(history_data, f, indent=2)
+            atomic_write_json(self.history_path, history_data, indent=2)
         except Exception as e:
             logging.warning(f"Failed to save history: {e}")
 

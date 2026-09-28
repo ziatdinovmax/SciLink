@@ -4,6 +4,7 @@ context_from: a cited prior analysis id (same-series continuation), a
 finding threaded verbatim, and a task that sits at the point a planning
 delegation recommended (loop closure through a human courier)."""
 import json
+import threading
 
 from scilink.agents.meta_agent.meta_orchestrator import MetaOrchestratorAgent
 
@@ -12,6 +13,7 @@ def _meta():
     """An orchestrator shell: the provenance methods only touch the ledger."""
     m = MetaOrchestratorAgent.__new__(MetaOrchestratorAgent)
     m._delegation_ledger = []
+    m._fanout_lock = threading.RLock()
     m._auto_checkpoint = lambda verbose=True: None
     return m
 

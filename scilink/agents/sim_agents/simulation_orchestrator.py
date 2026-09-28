@@ -18,6 +18,7 @@ refactor".
 """
 
 import json
+from scilink.utils.text_io import atomic_write_json
 import logging
 import os
 import time
@@ -812,8 +813,7 @@ class SimulationOrchestratorAgent:
         """Persist conversation history to disk."""
         try:
             history_data = [m for m in self.messages if m["role"] != "system"]
-            with open(self.history_path, "w", encoding="utf-8") as f:
-                json.dump(history_data, f, indent=2)
+            atomic_write_json(self.history_path, history_data, indent=2)
         except Exception as e:
             self.logger.warning(f"Failed to save history: {e}")
 
@@ -848,8 +848,7 @@ class SimulationOrchestratorAgent:
                 "message_count": self.message_count,
                 "saved_at": datetime.now().isoformat(),
             }
-            with open(self.checkpoint_path, "w", encoding="utf-8") as f:
-                json.dump(ck, f, indent=2, default=str)
+            atomic_write_json(self.checkpoint_path, ck, indent=2, default=str)
             self.last_checkpoint_message_count = self.message_count
             if not quiet:
                 print(f"    ✅ Auto-checkpoint saved")
