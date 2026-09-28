@@ -93,6 +93,63 @@ export interface ChatMessage {
   verbose?: string;
 }
 
+/** What a question is about, as blocks (the Python vocabulary is
+ * `scilink.hitl.SUBJECT_BLOCKS`; the shell renders the same shapes). Every
+ * block may carry a `label`, its section heading. */
+export type SubjectBlock = { label?: string } & (
+  | { type: "text"; markdown: string }
+  | {
+      type: "fields";
+      items: {
+        label: string;
+        value: string | number | null;
+        unit?: string;
+        flag?: "ok" | "warn" | "bad";
+      }[];
+    }
+  | { type: "chips"; items: string[] }
+  | { type: "steps"; items: string[] }
+  | {
+      type: "table";
+      columns: string[];
+      rows: (string | number | null)[][];
+      caption?: string;
+    }
+  | { type: "figure"; path: string | null; file?: string; caption?: string }
+  | {
+      type: "candidates";
+      items: {
+        idx: number;
+        name?: string;
+        metric?: string;
+        value?: string | number;
+        approved?: boolean;
+        figure?: string | null;
+        judge_comment?: string;
+        /** markdown under the card head (a plan candidate's fields) */
+        body?: string;
+        /** a file to open in the Files tab (the candidate's full plan) */
+        report?: string | null;
+        report_file?: string;
+      }[];
+      /** null when no candidate is preferred (a consensus question) */
+      pick?: number | null;
+      reasoning?: string;
+      caveats?: string[];
+    }
+  | {
+      type: "compare";
+      left: { label: string; blocks: SubjectBlock[] };
+      right: { label: string; blocks: SubjectBlock[] };
+    }
+  | { type: "notice"; title: string; lines: string[]; tone?: "info" | "warn" }
+);
+
+export interface QuestionSubject {
+  title: string;
+  blocks: SubjectBlock[];
+}
+
 export interface PresentedQuestion {
   request_id: string;
   kind: string;
@@ -103,24 +160,23 @@ export interface PresentedQuestion {
     | "keep_revert"
     | "bestofn"
     | "plan_candidates"
-    | "fanout_confirm";
+    | "confirm";
   labels: Record<string, string>;
   prompt: string;
+  /** the captured console text: the body of a question whose gate declared no subject */
   context_display: string;
-  preview_images: string[];
-  candidate_captions: Record<string, string>;
   code_files: { name: string; content: string }[];
   candidates?: { idx: number; label: string }[];
-  judge_pick?: number;
-  fanout?: {
-    verdict: string | null;
-    join_axis: string | null;
-    rationale: string | null;
-    branches: string[];
-  };
+  judge_pick?: number | null;
   /** What the decision is about: the auto-correction a revert would undo,
    * or why an approved plan is being reopened. */
   notice?: { title: string; lines: string[] };
+  /** The gate's own reply words when it declared them: the first is the
+   * keep-or-revert primary ("keep", "consensus", ...). */
+  options?: string[] | null;
+  /** Present when the gate declared what is under review; the panel then
+   * renders these blocks and keeps `context_display` behind a disclosure. */
+  subject?: QuestionSubject;
   default: string;
 }
 

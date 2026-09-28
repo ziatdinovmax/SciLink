@@ -35,7 +35,7 @@ class PendingQuestion:
 class ParkingChannel:
     """One per turn. ``turn`` carries ``stopped`` and ``pending_question``;
     ``cap`` is the turn's capture (its buffer is the question's context);
-    ``session_dir`` locates preview images and code files."""
+    ``session_dir`` locates a subject's figures and the code-review files."""
 
     def __init__(self, turn, cap, session_dir: str) -> None:
         self._turn = turn

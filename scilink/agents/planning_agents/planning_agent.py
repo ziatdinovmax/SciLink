@@ -62,6 +62,9 @@ from scilink.parsers import ingest_files, extract_images
 
 from .user_interface import (
     display_plan_summary,
+    plan_subject,
+    plan_candidates_subject,
+    code_review_subject,
     get_user_feedback,
     display_plan_candidates,
     get_candidate_selection,
@@ -1428,18 +1431,21 @@ class PlanningAgent(BaseAgent):
         # critical finding never auto-switches the selection.
         if (bestofn_candidates and len(bestofn_candidates) > 1
                 and enable_human_feedback and not res.get("error")):
+            # The cards show the candidates as authored; if the pick was
+            # auto-corrected the reviewer must learn that here, not only at
+            # the plan gate after choosing.
+            pick_caveats = (
+                [f"Auto-repair: {c}" for c in
+                 format_auto_repair(res.get("auto_repair"))]
+                + format_caveats(res.get("critic_findings")))
             display_plan_candidates(
                 bestofn_candidates, bestofn_judge or {}, bestofn_selected,
-                report_paths=bestofn_reports,
-                # The cards show the candidates as authored; if the pick was
-                # auto-corrected the reviewer must learn that here, not only at
-                # the plan gate after choosing.
-                pick_caveats=(
-                    [f"Auto-repair: {c}" for c in
-                     format_auto_repair(res.get("auto_repair"))]
-                    + format_caveats(res.get("critic_findings"))),
-            )
-            choice = get_candidate_selection(len(bestofn_candidates), bestofn_selected)
+                report_paths=bestofn_reports, pick_caveats=pick_caveats)
+            choice = get_candidate_selection(
+                len(bestofn_candidates), bestofn_selected,
+                subject=plan_candidates_subject(
+                    bestofn_candidates, bestofn_judge or {}, bestofn_selected,
+                    report_paths=bestofn_reports, pick_caveats=pick_caveats))
             if choice != bestofn_selected:
                 print(f"  - 👤 Human override: Candidate {choice} "
                       f"(judge picked {bestofn_selected}).")
@@ -1466,9 +1472,11 @@ class PlanningAgent(BaseAgent):
         # Human feedback on strategy
         human_feedback = None
         if enable_human_feedback and res.get("proposed_experiments") and not res.get("error"):
-            display_plan_summary(res, ideation=self._is_ideation_campaign(),
-                                 report_path=self._review_preview_path())
-            human_feedback = get_user_feedback(auto_repair=res.get("auto_repair"))
+            ideation, report = self._is_ideation_campaign(), self._review_preview_path()
+            display_plan_summary(res, ideation=ideation, report_path=report)
+            human_feedback = get_user_feedback(
+                auto_repair=res.get("auto_repair"),
+                subject=plan_subject(res, ideation=ideation, report_path=report))
 
             if human_feedback and self._is_revert_request(human_feedback, res):
                 res = self._revert_auto_repair(res)
@@ -1664,7 +1672,9 @@ class PlanningAgent(BaseAgent):
                     print(f"2. Press ENTER to approve, or type feedback to refine")
                     print("-"*60)
                     
-                    code_feedback = get_user_feedback()
+                    code_feedback = get_user_feedback(
+                        subject=code_review_subject(temp_dir.resolve(), files),
+                        stage="code_review")
                     
                     if not code_feedback:
                         print("✅ Code accepted")
@@ -2059,11 +2069,13 @@ class PlanningAgent(BaseAgent):
         print("\n" + "=" * 60)
         print(header)
         print("=" * 60)
-        display_plan_summary(new_plan, ideation=self._is_ideation_campaign(),
-                             report_path=self._review_preview_path())
+        ideation, report = self._is_ideation_campaign(), self._review_preview_path()
+        display_plan_summary(new_plan, ideation=ideation, report_path=report)
 
         if reopen_reason:
-            decision, feedback = get_reopen_decision(reopen_reason)
+            decision, feedback = get_reopen_decision(
+                reopen_reason,
+                subject=plan_subject(new_plan, ideation=ideation, report_path=report))
             if decision == "keep":
                 # The revision never happened as far as the campaign goes:
                 # its snapshots leave the history, the record stays in the log.
@@ -2080,7 +2092,8 @@ class PlanningAgent(BaseAgent):
                 return approved_plan, None, True
             status = "adopted"
         else:
-            feedback = get_user_feedback()
+            feedback = get_user_feedback(
+                subject=plan_subject(new_plan, ideation=ideation, report_path=report))
             status = "accepted"
 
         if feedback:
@@ -2668,7 +2681,10 @@ Select the most appropriate strategy:
                     print(f"2. Inspect the {len(files)} new Python file(s).")
                     print("3. Press ENTER to approve, or type feedback to refine")
                     
-                    code_feedback = get_user_feedback()
+                    code_feedback = get_user_feedback(
+                        subject=code_review_subject(temp_dir.resolve(), files,
+                                                    iteration=next_plan_idx),
+                        stage="code_review")
                     
                     if not code_feedback:
                         print("✅ Code accepted.")

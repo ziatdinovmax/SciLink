@@ -1,13 +1,17 @@
-import { useState } from "react";
-import { api, type PresentedQuestion } from "../api";
-import { MarkdownBody } from "./MarkdownBody";
+import { useEffect, useRef, useState } from "react";
+import { type PresentedQuestion } from "../api";
+import { SubjectBlocks } from "./SubjectBlocks";
+import { CodeBlock } from "./CodeBlock";
+import { languageForExtension } from "../highlight";
 import { fill } from "../narration";
 import { VOCAB } from "../vocabulary";
 
-/** Renders the parked HITL question — the React twin of the Streamlit
- * feedback branch (app.py:1053-1327). The response contracts are identical:
- * bare digit / "" for candidate selectors, "y"/"no" for fan-out, "keep"/""
- * for keep-revert, free text or "" elsewhere. */
+/** Renders the parked HITL question: what is under review (the body) and
+ * the decision (the row pinned under it). The body is the gate's `subject`
+ * blocks; a gate that declared none shows the captured console text. The
+ * reply contracts are the gates' own: bare digit / "" for candidate
+ * selectors, "y"/"no" for confirm, the gate's first option / "" for
+ * keep-revert, free text or "" elsewhere. */
 export function FeedbackPanel({
   sessionId,
   question,
@@ -22,46 +26,62 @@ export function FeedbackPanel({
     question.judge_pick ?? null,
   );
   const [sent, setSent] = useState(false);
+  // Enter answers a question the way it does at the console prompt, so
+  // the question takes the keyboard focus when it appears: the feedback
+  // box on the text widgets, the panel itself on the others.
+  const focusRef = useRef<HTMLTextAreaElement | HTMLDivElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    focusRef.current?.focus({ preventScroll: true });
+  }, [question.request_id]);
 
   const respond = (response: string) => {
     if (sent) return;
     setSent(true);
     onRespond(response);
   };
+  // A secondary text box (the picker's typed reply, the reopen gate's
+  // "adopt with changes"): Enter sends what was typed, Shift+Enter is a new
+  // line, and an empty box sends nothing — the buttons decide the empty case.
+  const sendOnEnter = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (text.trim()) respond(text.trim());
+    }
+  };
+  const isPicker =
+    question.widget === "bestofn" || question.widget === "plan_candidates";
+  const enterAccepts =
+    question.widget !== "keep_revert" && question.widget !== "confirm";
+  // On a picker the empty reply is the judge's pick, a number is a chosen
+  // candidate; Enter confirms whatever is selected, as the shell's picker
+  // confirms its highlighted row. The selection starts on the judge's pick,
+  // so Enter untouched is "accept the pick".
+  const pickerReply = () =>
+    choice === null || choice === question.judge_pick ? "" : String(choice);
   // The empty answer accepts as-is on every surface; the terminal shell
   // shows the same hint next to its prompt.
-  const hint = question.labels.accept
-    ? fill(VOCAB.enter_accepts_hint, { accept: question.labels.accept })
-    : "";
+  const hint = isPicker
+    ? pickerReply() === ""
+      ? question.labels.accept
+        ? fill(VOCAB.enter_accepts_hint, { accept: question.labels.accept })
+        : ""
+      : fill(VOCAB.enter_accepts_hint, { accept: question.labels.use ?? "" })
+    : question.labels.accept
+      ? fill(VOCAB.enter_accepts_hint, { accept: question.labels.accept })
+      : "";
+  const subject = question.subject;
 
-  const previews = question.preview_images.map((p) => {
-    const base = p.split("/").pop() ?? p;
-    return (
-      <figure key={p} style={{ margin: "0 0 8px" }}>
-        <img className="preview" src={api.fileUrl(sessionId, p)} alt={base} />
-        {question.candidate_captions[base] && (
-          <figcaption className="caption">
-            {question.candidate_captions[base]}
-          </figcaption>
-        )}
-      </figure>
-    );
-  });
-
+  // ── the body: what is under review ──────────────────────────
   const codeFiles = question.code_files.map((f, i) => (
     <details className="card" key={f.name} open={question.code_files.length === 1 && i === 0}>
       <summary>📄 {f.name}</summary>
       <div className="card-body">
-        <pre style={{ margin: 0, overflowX: "auto" }}>
-          <code>{f.content}</code>
-        </pre>
+        <CodeBlock code={f.content} language={languageForExtension(f.name.split(".").pop() ?? "")} className="qs-code" />
       </div>
     </details>
   ));
-
-  const contextBox = question.context_display ? (
-    <div className="context-box">{question.context_display}</div>
-  ) : null;
 
   const notice = question.notice ? (
     <div className="feedback-notice">
@@ -74,14 +94,59 @@ export function FeedbackPanel({
     </div>
   ) : null;
 
+  // The captured console text is what a gate WITHOUT a subject shows; with
+  // one, the blocks are that text, so it is not shown twice.
+  const consoleText =
+    question.context_display && !subject ? (
+      <div className="context-box">{question.context_display}</div>
+    ) : null;
+  // "📋 Proposed fitting plan — single spectrum": the part after the dash
+  // is the subtitle.
+  const [title, subtitle] = subject
+    ? (() => {
+        const i = subject.title.indexOf(" — ");
+        return i < 0
+          ? [subject.title, ""]
+          : [subject.title.slice(0, i), subject.title.slice(i + 3)];
+      })()
+    : ["", ""];
+  const body = subject ? (
+    <>
+      {title && (
+        <h4 className="qs-title">
+          {title}
+          {subtitle && <span className="qs-subtitle">{subtitle}</span>}
+        </h4>
+      )}
+      {/* What the decision is about leads: the reason a plan is reopened,
+          the auto-correction a revert would undo. */}
+      {notice}
+      <SubjectBlocks
+        sessionId={sessionId}
+        blocks={subject.blocks}
+        choice={isPicker ? choice : undefined}
+        onChoose={isPicker ? setChoice : undefined}
+      />
+      {codeFiles}
+    </>
+  ) : (
+    <>
+      {notice}
+      {codeFiles}
+      {consoleText}
+    </>
+  );
+
+  // ── the decision ────────────────────────────────────────────
+  let decision;
   if (question.widget === "keep_revert") {
-    return (
-      <div className="feedback-panel">
-        {previews}
-        {contextBox}
-        {notice}
+    // The primary reply is the gate's own first option ("keep",
+    // "consensus", ...); the empty reply is the other.
+    const primary = question.options?.[0] || "keep";
+    decision = (
+      <>
         <div className="feedback-actions">
-          <button className="primary" onClick={() => respond("keep")} disabled={sent}>
+          <button className="primary" onClick={() => respond(primary)} disabled={sent}>
             {question.labels.keep}
           </button>
           <button className="primary" onClick={() => respond("")} disabled={sent}>
@@ -95,6 +160,7 @@ export function FeedbackPanel({
               <textarea
                 value={text}
                 onChange={(e) => setText(e.target.value)}
+                onKeyDown={(e) => sendOnEnter(e)}
                 rows={2}
               />
             </label>
@@ -108,72 +174,27 @@ export function FeedbackPanel({
             </div>
           </div>
         )}
+      </>
+    );
+  } else if (question.widget === "confirm") {
+    decision = (
+      <div className="feedback-actions">
+        <button onClick={() => respond("no")} disabled={sent}>
+          {question.labels.cancel}
+        </button>
+        <button className="primary" onClick={() => respond("y")} disabled={sent}>
+          {question.labels.confirm}
+        </button>
       </div>
     );
-  }
-
-  if (question.widget === "fanout_confirm") {
-    const f = question.fanout;
-    return (
-      <div className="feedback-panel">
-        <h4>🔀 Launch parallel multi-dataset analysis?</h4>
-        {f?.verdict && (
-          <MarkdownBody text={`**Complementarity:** ${f.verdict}`} />
-        )}
-        {f?.join_axis && <MarkdownBody text={`**Join axis:** ${f.join_axis}`} />}
-        {f && f.branches.length > 0 && (
-          <MarkdownBody
-            text={
-              "**Branches** — run concurrently, each seeing the others as auxiliary:\n" +
-              f.branches.map((b) => `- ${b}`).join("\n")
-            }
-          />
-        )}
-        {f?.rationale && <MarkdownBody text={`**Why:** ${f.rationale}`} />}
-        <p className="caption">
-          Branches run autonomously — no per-branch approval pauses.
-        </p>
-        <div className="feedback-actions">
-          <button onClick={() => respond("no")} disabled={sent}>
-            {question.labels.cancel}
-          </button>
-          <button className="primary" onClick={() => respond("y")} disabled={sent}>
-            {question.labels.confirm}
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  if (question.widget === "bestofn" || question.widget === "plan_candidates") {
-    const cands = question.candidates ?? [];
+  } else if (isPicker) {
     const pick = question.judge_pick;
-    return (
-      <div
-        className="feedback-panel"
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            respond("");
-          }
-        }}
-      >
-        {previews}
-        {contextBox}
-        <p style={{ marginTop: 0 }}>{question.labels.select}</p>
-        <div className="radio-list">
-          {cands.map((c) => (
-            <label key={c.idx}>
-              <input
-                type="radio"
-                name="candidate"
-                checked={choice === c.idx}
-                onChange={() => setChoice(c.idx)}
-              />
-              {c.label}
-            </label>
-          ))}
-        </div>
+    decision = (
+      <>
+        <p className="feedback-select">
+          {subject && <span>{question.labels.select}</span>}
+          {hint && <span className="caption">{hint}</span>}
+        </p>
         <div className="feedback-actions">
           <button
             className="primary"
@@ -186,56 +207,120 @@ export function FeedbackPanel({
             className="success"
             disabled={sent}
             onClick={() => respond("")}
-            title={`${hint} — Candidate ${pick}`}
+            title={pick == null ? hint : `${hint} — ${VOCAB.names.candidate} ${pick}`}
           >
             {question.labels.accept}
           </button>
-          <span className="caption">{hint}</span>
         </div>
-      </div>
+        {question.labels.input && (
+          <div className="feedback-followup">
+            <label className="field">
+              <span>{question.labels.input}</span>
+              <textarea
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                onKeyDown={(e) => sendOnEnter(e)}
+                rows={2}
+              />
+            </label>
+            <div className="feedback-actions">
+              <button disabled={sent || !text.trim()} onClick={() => respond(text.trim())}>
+                {question.labels.submit}
+              </button>
+            </div>
+          </div>
+        )}
+      </>
+    );
+  } else {
+    // generic / dataset_description / code_review
+    decision = (
+      <>
+        <label className="field">
+          <span>{question.labels.input}</span>
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              // Enter sends: text is the feedback, empty accepts as-is.
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                respond(text.trim());
+              }
+            }}
+            placeholder={hint ? `${hint} · Shift+Enter for a new line` : undefined}
+            rows={3}
+            ref={focusRef as React.RefObject<HTMLTextAreaElement>}
+          />
+        </label>
+        <div className="feedback-actions">
+          <button
+            className="primary"
+            disabled={sent || !text.trim()}
+            onClick={() => respond(text.trim())}
+          >
+            {question.labels.submit}
+          </button>
+          <button className="primary" disabled={sent} onClick={() => respond("")} title={hint}>
+            {question.labels.accept}
+          </button>
+          {question.labels.revert_repair && (
+            <button disabled={sent} onClick={() => respond("revert")}>
+              {question.labels.revert_repair}
+            </button>
+          )}
+        </div>
+      </>
     );
   }
 
-  // generic / dataset_description / code_review
+  // Enter anywhere on the page answers the question while it is pending
+  // (the console's Enter): a reload, a tab switch or a click elsewhere can
+  // leave the focus outside the panel, and the chat input is disabled
+  // meanwhile. Fields outside the panel keep their own Enter; the panel
+  // handles its own targets below.
+  useEffect(() => {
+    if (!enterAccepts) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Enter" || e.shiftKey || sent) return;
+      const target = e.target as HTMLElement | null;
+      if (target && panelRef.current?.contains(target)) return;
+      const tag = target?.tagName ?? "";
+      if (["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(tag)
+          || target?.isContentEditable) return;
+      e.preventDefault();
+      respond(isPicker ? pickerReply() : "");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
   return (
-    <div className="feedback-panel">
-      {previews}
-      {codeFiles}
-      {contextBox}
-      {notice}
-      <label className="field">
-        <span>{question.labels.input}</span>
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            // Enter sends: text is the feedback, empty accepts as-is.
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              respond(text.trim());
-            }
-          }}
-          rows={3}
-        />
-      </label>
-      <div className="feedback-actions">
-        <button
-          className="primary"
-          disabled={sent || !text.trim()}
-          onClick={() => respond(text.trim())}
-        >
-          {question.labels.submit}
-        </button>
-        <button className="primary" disabled={sent} onClick={() => respond("")} title={hint}>
-          {question.labels.accept}
-        </button>
-        {question.labels.revert_repair && (
-          <button disabled={sent} onClick={() => respond("revert")}>
-            {question.labels.revert_repair}
-          </button>
-        )}
-        <span className="caption">{hint}</span>
-      </div>
+    <div
+      className="feedback-panel"
+      tabIndex={-1}
+      ref={(el) => {
+        panelRef.current = el;
+        if (isPicker || question.widget === "keep_revert" || question.widget === "confirm") {
+          focusRef.current = el;
+        }
+      }}
+      onKeyDown={(e) => {
+        // Enter anywhere in the panel is the console's Enter: accept as-is
+        // (the judge's pick on a picker). A click on the plan to scroll it
+        // moves the focus off the feedback box, and Enter must still work.
+        // Buttons keep their own Enter (it clicks them); the box handles
+        // its own (text is the feedback), and Shift+Enter is a new line.
+        const tag = (e.target as HTMLElement).tagName;
+        if (e.key === "Enter" && !e.shiftKey && tag !== "BUTTON" && tag !== "TEXTAREA"
+            && enterAccepts) {
+          e.preventDefault();
+          respond(isPicker ? pickerReply() : "");
+        }
+      }}
+    >
+      <div className="feedback-body">{body}</div>
+      <div className="feedback-decision">{decision}</div>
     </div>
   );
 }

@@ -49,7 +49,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ...hitl import request_human_feedback
+from ...hitl import make_subject, request_human_feedback, subject_block
 
 logger = logging.getLogger("meta_agent.fanout")
 
@@ -637,6 +637,55 @@ def _operand_mesh(verdict: dict) -> bool:
     return (verdict.get("join_type") or "").strip().lower() == "co_registered"
 
 
+def fanout_confirm_subject(verdict: dict, fanout_set: List[str],
+                           branches_by_id: Dict[str, dict], mesh: bool, n_aux: int,
+                           branch_hitl: bool) -> dict:
+    """What the fan-out confirmation shows, as subject blocks (scilink.hitl):
+    the verdict, the join, the branches and the warnings ``_confirm_fanout``
+    prints, from the same verdict and plan."""
+    n = len(fanout_set)
+    blocks = [subject_block("fields", items=[
+        {"label": "Complementarity verdict",
+         "value": f"{verdict.get('verdict')} (confidence {verdict.get('confidence')})"},
+        {"label": "Join axis",
+         "value": f"{verdict.get('join_axis')} (join type: {verdict.get('join_type') or 'unspecified'})"},
+    ])]
+    if verdict.get("rationale"):
+        blocks.append(subject_block("text", label="Rationale", markdown=str(verdict["rationale"])))
+    intro = (f"{n} branches concurrently as an operand mesh (co-registered set; ~{n_aux} "
+             "auxiliary loads — results become jointly computed, flagged to fusion)"
+             if mesh else
+             f"{n} independent branches concurrently (no companion operands — fusion "
+             "reconciles their reduced results)")
+    rows = []
+    for bid in fanout_set:
+        b = branches_by_id.get(bid, {})
+        name = Path(b.get("data_path") or bid).name
+        rows.append(f"- {b.get('label') or _slug(name)}  ({name})")
+    blocks.append(subject_block("text", label=f"🔀 Branches ({n})",
+                                markdown=f"Will run {intro}:\n\n" + "\n".join(rows)))
+    pruned = []
+    if verdict.get("redundant_clusters"):
+        pruned.append({"label": "Pruned as redundant", "value": str(verdict["redundant_clusters"])})
+    if verdict.get("unrelated"):
+        pruned.append({"label": "Pruned as unrelated", "value": str(verdict["unrelated"])})
+    steered = [branches_by_id[bid].get("label") for bid in fanout_set
+               if branches_by_id.get(bid, {}).get("steer")]
+    if steered:
+        pruned.append({"label": "Steering opt-in",
+                       "value": f"{steered} — receives companion change-point hints (spends "
+                                "independence; fusion will discount the agreement)"})
+    if pruned:
+        blocks.append(subject_block("fields", items=pruned))
+    if n > FANOUT_SOFT_CAP:
+        blocks.append(subject_block("notice", title=f"⚠️ {n}-way mesh exceeds the soft cap ({FANOUT_SOFT_CAP})",
+                                    lines=["This is expensive."], tone="warn"))
+    blocks.append(subject_block("text", label="Branch approvals", markdown=(
+        "Branches will pause for approvals (served one at a time, labelled per branch)."
+        if branch_hitl else "Branches run autonomously (no per-branch approval pauses).")))
+    return make_subject("🔀 Parallel multi-dataset analysis — confirm before launching", blocks)
+
+
 def _confirm_fanout(orch, verdict: dict, fanout_set: List[str],
                     branches_by_id: Dict[str, dict],
                     harmonize: bool = False) -> tuple:
@@ -737,6 +786,8 @@ def _confirm_fanout(orch, verdict: dict, fanout_set: List[str],
             options=["y", "n"],
             default="n",
             origin={"stage": "fanout_confirm"},
+            subject=fanout_confirm_subject(verdict, fanout_set, branches_by_id, mesh, n_aux,
+                                           _branch_hitl_enabled(orch)),
         ).strip().lower()
     except (EOFError, KeyboardInterrupt):
         # No usable input channel in a mode that expects one → do not fire an

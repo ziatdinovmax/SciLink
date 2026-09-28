@@ -1398,6 +1398,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     kind="review_plan",
                     context=rendered,      # non-terminal channels can show the plan
                     origin={"stage": "series_regime_plan", "round": _round + 1},
+                    subject=_series.regime_plan_subject(plan, series_metadata, scout, n),
                 ).strip()
             except (EOFError, KeyboardInterrupt):
                 self.logger.info("  Regime plan gate: no answer — plan accepted as is.")

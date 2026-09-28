@@ -3,9 +3,9 @@
 ``ShellChannel`` is the web ``HTTPChannel``'s sibling: it parks the
 question on the turn (``turn.pending_question``) and blocks the agent
 thread; the shell's main loop notices, renders it with ``Widgets.ask`` and
-answers. The widgets follow the presenter's vocabulary — the same seven
-shapes and the same button labels the React FeedbackPanel shows — so a
-user who has seen one surface recognises the other. Every widget shows
+answers. The widgets follow the presenter's vocabulary — the same widget
+per question kind and the same button labels the React FeedbackPanel
+shows — so a user who has seen one surface recognises the other. Every widget shows
 the "Enter = <accept>" convention the web panel shows as a caption.
 """
 
@@ -15,8 +15,10 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.syntax import Syntax
+from rich.table import Table
 from prompt_toolkit.application import Application, run_in_terminal
 from prompt_toolkit.layout import Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
@@ -166,17 +168,120 @@ class Widgets:
 
     _CONTEXT_MAX_LINES = 120
 
+    # ── the subject blocks (scilink.hitl.SUBJECT_BLOCKS) ─────────
+
+    _FLAG_STYLE = {"ok": "green", "warn": "yellow", "bad": "red"}
+
+    def _render_blocks(self, blocks) -> list:
+        """rich renderables for a question's subject blocks — the shell's
+        twin of the web ``SubjectBlocks`` component, in the printout's
+        shape: a labeled block is its label on a heading line (the emoji
+        kept) and the whole content under it at full width."""
+        out = []
+
+        def emit(label, renderable):
+            if label:
+                out.append(Text(str(label), style="bold"))
+            out.append(renderable)
+
+        for b in blocks or []:
+            kind = b.get("type")
+            label = b.get("label")
+            if kind == "text":
+                emit(label, Markdown(str(b.get("markdown") or "")))
+            elif kind == "fields":
+                inner = Table.grid(padding=(0, 2))
+                inner.add_column(style="bold", no_wrap=True)
+                inner.add_column()
+                for item in b.get("items") or []:
+                    value = "" if item.get("value") is None else str(item["value"])
+                    if item.get("unit"):
+                        value = f"{value} {item['unit']}"
+                    inner.add_row(str(item.get("label") or ""),
+                                  Text(value, style=self._FLAG_STYLE.get(item.get("flag"), "")))
+                emit(label, inner)
+            elif kind == "chips":
+                emit(label, Text(" · ".join(str(x) for x in b.get("items") or [])))
+            elif kind == "steps":
+                emit(label, Group(*(Text(f"{n}. {step}")
+                                    for n, step in enumerate(b.get("items") or [], 1))))
+            elif kind == "table":
+                table = Table(title=b.get("caption") or None, title_style="dim",
+                              show_edge=False, pad_edge=False, box=None,
+                              header_style="bold")
+                for col in b.get("columns") or []:
+                    table.add_column(str(col))
+                for row in b.get("rows") or []:
+                    table.add_row(*("" if c is None else str(c) for c in row))
+                emit(label, table)
+            elif kind == "figure":
+                where = b.get("file") or b.get("path") or ""
+                cap = f" ({b['caption']})" if b.get("caption") else ""
+                emit(label, Text.from_markup(f"[dim]figure:[/] {where}{cap}"))
+            elif kind == "candidates":
+                lines = []
+                pick = b.get("pick")
+                for c in b.get("items") or []:
+                    head = f"{V.NAMES['candidate']} {c.get('idx')}"
+                    if c.get("name"):
+                        head += f" — {c['name']}"
+                    bits = []
+                    if c.get("metric") is not None and c.get("value") is not None:
+                        bits.append(f"{c['metric']}={c['value']}")
+                    if c.get("approved") is not None:
+                        bits.append("✓ approved" if c["approved"] else "✗ below gate")
+                    mark = f"  ← {V.NAMES['judge_pick']}" if c.get("idx") == pick else ""
+                    lines.append(Text.from_markup(
+                        f"[bold]{head}[/]" + (f"  {' · '.join(bits)}" if bits else "")
+                        + f"[green]{mark}[/]"))
+                    if c.get("judge_comment"):
+                        lines.append(Text(f"     {c['judge_comment']}", style="dim"))
+                    if c.get("body"):
+                        lines.append(Markdown(str(c["body"])))
+                    if c.get("report_file") or c.get("report"):
+                        lines.append(Text(f"     📄 full plan: {c.get('report_file') or c.get('report')}",
+                                          style="dim"))
+                    if c.get("figure_file") or c.get("figure"):
+                        lines.append(Text(f"     figure: {c.get('figure_file') or c.get('figure')}",
+                                          style="dim"))
+                if b.get("reasoning"):
+                    lines.append(Text(f"Judge: {b['reasoning']}"))
+                for caveat in b.get("caveats") or []:
+                    lines.append(Text(f"  ⚠ {caveat}", style="yellow"))
+                emit(label, Group(*lines))
+            elif kind == "compare":
+                table = Table(show_edge=False, box=None, header_style="bold", expand=True)
+                left, right = b.get("left") or {}, b.get("right") or {}
+                table.add_column(str(left.get("label") or ""))
+                table.add_column(str(right.get("label") or ""))
+                table.add_row(Group(*self._render_blocks(left.get("blocks"))),
+                              Group(*self._render_blocks(right.get("blocks"))))
+                emit(label, table)
+            elif kind == "notice":
+                body = Group(*(Text(f"• {line}") for line in b.get("lines") or []))
+                colour = "yellow" if b.get("tone") == "warn" else "magenta"
+                emit(None, Panel(body, title=f"[bold {colour}]{b.get('title', '')}[/]",
+                                 border_style=colour))
+        return out
+
     def _show_context(self, q: Dict[str, Any]) -> None:
-        # What is under review — the plan / result / code the agent printed
-        # before asking (the presenter's ``context_display``, the same block
-        # the web panel shows). Those lines are "plain" narration, hidden
-        # unless verbose, so the question must carry them. The agent's own
-        # prompt line follows.
+        # What is under review — the subject's blocks when the gate declared
+        # them, else the plan / result / code the agent printed before asking
+        # (the presenter's ``context_display``, the same block the web panel
+        # shows). Those lines are "plain" narration, hidden unless verbose,
+        # so the question must carry them. The agent's own prompt line
+        # follows.
         prompt = (q.get("prompt") or "").strip()
         context = (q.get("context_display") or "").strip()
+        subject = q.get("subject") or {}
         parts = []
         self._overflow.clear()
-        if context:
+        if subject.get("blocks") or subject.get("title"):
+            # The blocks ARE the printed text; it is not shown twice.
+            if subject.get("title"):
+                parts.append(Text(str(subject["title"]), style="bold"))
+            parts.extend(self._render_blocks(subject.get("blocks")))
+        elif context:
             lines = context.split("\n")
             if len(lines) > self._CONTEXT_MAX_LINES:
                 self._overflow.extend(lines[:-self._CONTEXT_MAX_LINES])
@@ -199,11 +304,6 @@ class Widgets:
             body = Group(*(Text(f"• {line}") for line in notice.get("lines") or []))
             self.console.print(Panel(body, title=f"[bold magenta]{notice['title']}[/]",
                                      border_style="magenta"))
-        for rel in q.get("preview_images") or []:
-            cap = (q.get("candidate_captions") or {}).get(Path(rel).name)
-            label = f" ({cap})" if cap else ""
-            path = Path(self.session_dir, rel) if self.session_dir else Path(rel)
-            self.console.print(f"  [dim]figure:[/] {path}{label}")
         for f in q.get("code_files") or []:
             self.console.print(Panel(Syntax(f.get("content", ""), "python",
                                             line_numbers=False, word_wrap=True),
@@ -221,7 +321,10 @@ class Widgets:
         labels = q.get("labels") or {}
         self._show_context(q)
         if widget == "keep_revert":
-            options = [("keep", labels.get("keep", "Keep"), ""),
+            # The primary reply is the gate's own first option ("keep",
+            # "consensus", ...); the empty reply is the other.
+            primary = (q.get("options") or ["keep"])[0] or "keep"
+            options = [(primary, labels.get("keep", "Keep"), ""),
                        ("", labels.get("revert", "Revert"), "")]
             if labels.get("submit"):
                 # The reopen gate's third reply: adopt the revision with
@@ -230,24 +333,13 @@ class Widgets:
             chosen = self._choose(options, default=1)
             if chosen == "__text__":
                 self.console.print(f"[bold]{labels.get('input', 'Your changes:')}[/]")
-                return self._read("").strip() or "keep"
+                return self._read("").strip() or primary
             return chosen
-        if widget == "fanout_confirm":
-            f = q.get("fanout") or {}
-            self.console.print("[bold]🔀 Launch parallel multi-dataset analysis?[/]")
-            if f.get("verdict"):
-                self.console.print(f"  [bold]Complementarity:[/] {f['verdict']}")
-            if f.get("join_axis"):
-                self.console.print(f"  [bold]Join axis:[/] {f['join_axis']}")
-            if f.get("branches"):
-                self.console.print("  [bold]Branches[/] — run concurrently, each seeing the others as auxiliary:")
-                for b in f["branches"]:
-                    self.console.print(f"    • {b}")
-            if f.get("rationale"):
-                self.console.print(f"  [bold]Why:[/] {f['rationale']}")
-            self.console.print("  [dim]Branches run autonomously — no per-branch approval pauses.[/]")
+        if widget == "confirm":
+            # A gate with a subject and a yes/no decision (a fan-out launch,
+            # a costly step): "y" confirms, "no" cancels, as the console.
             return self._choose([("no", labels.get("cancel", "Cancel"), ""),
-                                 ("y", labels.get("confirm", "Launch"), "")], default=0)
+                                 ("y", labels.get("confirm", "Confirm"), "")], default=0)
         if widget in ("bestofn", "plan_candidates"):
             pick = q.get("judge_pick")
             cands = q.get("candidates") or []
@@ -255,8 +347,18 @@ class Widgets:
             options = [(str(c.get("idx")), str(c.get("label")),
                         f"← {V.NAMES['judge_pick']}" if c.get("idx") == pick else "")
                        for c in cands]
-            default = next((n for n, c in enumerate(cands) if c.get("idx") == pick), 0)
+            if pick is None:
+                # No preferred candidate (a consensus question): the empty
+                # reply keeps things as they are and leads the list.
+                options.insert(0, ("", labels.get("accept", "Keep as-is"), ""))
+            if labels.get("input"):
+                # A typed reply the gate also takes (a model name, 'more').
+                options.append(("__text__", labels.get("submit", "Type a reply"), ""))
+            default = next((n for n, c in enumerate(options) if pick is not None and c[0] == str(pick)), 0)
             chosen = self._choose(options, default=default)
+            if chosen == "__text__":
+                self.console.print(f"[bold]{labels.get('input')}[/]")
+                return self._read("").strip()
             # The empty answer is "accept the judge's pick", as on the web.
             return "" if chosen == str(pick) else chosen
         # generic / dataset_description / code_review

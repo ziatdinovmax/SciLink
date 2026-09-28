@@ -201,7 +201,7 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
 - **Live turn**: agent-working spinner, stop button, and a colorized
   streaming narration pane (meta reasoning cyan, delegated-specialist amber,
   handoff banners gold — same scheme as the Streamlit verbose panel).
-- **Human-in-the-loop**: all the Streamlit approval surfaces — free-text
+- **Human-in-the-loop**: every approval surface — free-text
   feedback with context box, dataset-description prompt, code review with
   the generated scripts inline, keep/revert, best-of-N candidate selection
   (with preview images and the judge's pick), plan-candidate selection, and
@@ -412,9 +412,15 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
   stdout/logging teed through `OutputCapture`; a watcher emits incremental
   `log` SSE events.
 - HITL prompts route through `scilink.hitl.set_thread_channel` into an
-  HTTP-parking channel; the server converts each `FeedbackRequest` into a
-  structured "presented question" (widget type, labels, candidates, preview
-  images, code files) so the frontend renders without prompt sniffing.
+  HTTP-parking channel; the server presents each `FeedbackRequest` from
+  what the gate declared: its `subject` (blocks from
+  `scilink.hitl.SUBJECT_BLOCKS`, rendered by `SubjectBlocks.tsx` in the
+  printout's shape — emoji heading, full text under it) and its `kind`
+  (widget and words from `vocabulary.QUESTION_WIDGETS` /
+  `QUESTION_LABELS`, the gate's stage overriding the words). Nothing is
+  sniffed from a prompt or the console text; a gate that declared no
+  subject shows its kind's widget over the captured console text. See
+  `docs/proposals/structured-human-feedback.md`.
 - Artifacts are per-turn filesystem sweeps with the same rules as Streamlit
   (HTML report suppresses raw images; deliverable manifest decides which
   markdown embeds; path+mtime identity).

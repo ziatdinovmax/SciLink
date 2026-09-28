@@ -27,7 +27,7 @@ def _widgets(keys: str):
 GENERIC = {"widget": "generic", "prompt": "Review the plan.",
            "labels": {"input": "Your plan feedback (optional):",
                       "submit": "Request changes", "accept": "Approve plan"},
-           "preview_images": [], "code_files": [], "candidate_captions": {}}
+           "code_files": []}
 
 
 def test_generic_enter_accepts():
@@ -61,7 +61,7 @@ def test_code_review_shows_files():
 def test_keep_revert():
     q = {"widget": "keep_revert", "prompt": "", "labels": {"keep": "Keep user-guided fit",
                                                             "revert": "Revert to original fit"},
-         "preview_images": [], "code_files": [], "candidate_captions": {}}
+         "code_files": []}
     w, buf, stack = _widgets("\x1b[A\r")          # up from the default (revert) to keep
     with stack:
         assert w.ask(q) == "keep"
@@ -73,30 +73,13 @@ def test_keep_revert():
         assert w.ask(q) == "keep"
 
 
-def test_fanout_confirm():
-    q = {"widget": "fanout_confirm", "prompt": "",
-         "labels": {"confirm": "🔀 Launch parallel analysis", "cancel": "Cancel"},
-         "fanout": {"verdict": "complementary", "join_axis": "temperature",
-                    "rationale": "same sample", "branches": ["a.csv", "b.csv"]},
-         "preview_images": [], "code_files": [], "candidate_captions": {}}
-    w, buf, stack = _widgets("\x1b[B\r")          # down to "launch", Enter
-    with stack:
-        assert w.ask(q) == "y"
-    out = buf.getvalue()
-    assert "Complementarity" in out and "a.csv" in out
-    w, _, stack = _widgets("\r")                    # Enter = the default, cancel
-    with stack:
-        assert w.ask(q) == "no"
-
-
 def test_bestofn_pick_and_judge_default():
     q = {"widget": "bestofn", "prompt": "",
          "labels": {"select": "Select the candidate to lock:", "use": "Use selected",
                     "accept": "Accept judge's pick (Candidate 2)"},
          "candidates": [{"idx": 1, "label": "Candidate 1 — chi2=0.1"},
                         {"idx": 2, "label": "Candidate 2 — chi2=0.04"}],
-         "judge_pick": 2, "preview_images": ["figs/bestofn_candidate_1_review.png"],
-         "code_files": [], "candidate_captions": {"bestofn_candidate_1_review.png": "Candidate 1"}}
+         "judge_pick": 2, "code_files": []}
     w, buf, stack = _widgets("\x1b[A\r")          # highlight starts on the judge's pick (2); up -> 1
     with stack:
         assert w.ask(q) == "1"
@@ -112,7 +95,7 @@ def test_bestofn_pick_and_judge_default():
 def test_picker_escape_stops_the_turn():
     import pytest as _pytest
     q = {"widget": "keep_revert", "prompt": "", "labels": {"keep": "Keep", "revert": "Revert"},
-         "preview_images": [], "code_files": [], "candidate_captions": {}}
+         "code_files": []}
     w, _, stack = _widgets("\x1b")
     with stack, _pytest.raises(KeyboardInterrupt):
         w.ask(q)
@@ -174,7 +157,7 @@ def test_ctrl_o_at_a_picker_shows_earlier_lines_and_keeps_the_picker():
          "labels": {"select": "Select the candidate to lock:", "use": "Use selected",
                     "accept": "Accept judge's pick (Candidate 2)"},
          "candidates": [{"idx": 1, "label": "Candidate 1"}, {"idx": 2, "label": "Candidate 2"}],
-         "judge_pick": 2, "preview_images": [], "code_files": [], "candidate_captions": {},
+         "judge_pick": 2, "code_files": [],
          "context_display": "\n".join(f"line {i}" for i in range(150))}
     w, buf, stack = _widgets("\x0f\x1b[A\r")     # Ctrl+O, up, Enter
     with stack:
@@ -206,7 +189,7 @@ def test_reopen_gate_offers_adopt_with_changes():
                     "input": "Adopt it with changes (optional):", "submit": "Adopt with changes"},
          "notice": {"title": "The agent proposes to revise a plan you approved",
                     "lines": ["Reason given: the anneal step exceeds the furnace limit"]},
-         "preview_images": [], "code_files": [], "candidate_captions": {}}
+         "code_files": []}
     w, buf, stack = _widgets("\r")                       # Enter on the default: keep the approved plan
     with stack:
         assert w.ask(q) == ""
@@ -217,3 +200,100 @@ def test_reopen_gate_offers_adopt_with_changes():
     w, _, stack = _widgets("3\r")                        # chose it, typed nothing: adopt as-is
     with stack:
         assert w.ask(q) == "keep"
+
+
+SUBJECT = {"title": "📋 Proposed fitting plan — single spectrum", "blocks": [
+    {"type": "fields", "items": [{"label": "Physical model", "value": "2 Gaussians"},
+                                 {"label": "R²", "value": 0.98, "flag": "ok"}]},
+    {"type": "text", "label": "📊 Approach", "markdown": "Fit the doublet."},
+    {"type": "chips", "label": "🎯 Parameters", "items": ["width", "area"]},
+    {"type": "steps", "label": "⚙️ Strategy", "items": ["Subtract baseline.", "Fit peaks."]},
+    {"type": "table", "columns": ["#", "Regime"], "rows": [[1, "low T"], [2, "high T"]],
+     "caption": "Regimes"},
+    {"type": "figure", "path": "results/fit.png", "file": "/tmp/s/results/fit.png",
+     "caption": "review"},
+    {"type": "candidates", "pick": 2, "items": [
+        {"idx": 1, "name": "Voigt", "metric": "R²", "value": 0.99, "approved": True},
+        {"idx": 2, "name": "Gaussian", "judge_comment": "cleanest"}], "reasoning": "fewer params",
+     "caveats": ["seed near edge"]},
+    {"type": "compare", "left": {"label": "original", "blocks": [
+        {"type": "fields", "items": [{"label": "R²", "value": 0.97}]}]},
+     "right": {"label": "user-guided", "blocks": [
+         {"type": "fields", "items": [{"label": "R²", "value": 0.95, "flag": "bad"}]}]}},
+    {"type": "notice", "title": "Locked model", "lines": ["applies to all 4 spectra"]},
+]}
+
+
+def test_subject_blocks_are_rendered_and_console_text_is_not():
+    q = dict(GENERIC, subject=SUBJECT, prompt="Your feedback:",
+             context_display="📋 PROPOSED FITTING PLAN\nApproach: Fit the doublet.")
+    w, buf, stack = _widgets("\r")
+    with stack:
+        assert w.ask(q) == ""
+    out = buf.getvalue()
+    for needle in ("📋 Proposed fitting plan — single spectrum", "Physical model", "2 Gaussians",
+                   "📊 Approach", "Fit the doublet", "🎯 Parameters", "width · area",
+                   "1. Subtract baseline.",
+                   "Regimes", "low T", "figure: /tmp/s/results/fit.png", "Candidate 2 — Gaussian", "Judge's pick", "Judge: fewer params",
+                   "⚠ seed near edge", "original", "user-guided", "Locked model",
+                   "applies to all 4 spectra"):
+        assert needle in out, needle
+    assert "PROPOSED FITTING PLAN" not in out          # the blocks are the printed text
+    assert "Ctrl+O" not in out
+    assert out.index("Locked model") < out.index("Your feedback:")
+
+
+def test_ctrl_o_on_a_subject_question_has_nothing_to_show():
+    q = dict(GENERIC, subject=SUBJECT, context_display="📋 PROPOSED FITTING PLAN\nline two")
+    w, buf, stack = _widgets("\x0f\r")
+    with stack:
+        assert w.ask(q) == ""
+    out = buf.getvalue()
+    assert "PROPOSED FITTING PLAN" not in out and "nothing more to show" in out
+
+
+def test_confirm_widget():
+    q = {"widget": "confirm", "prompt": "", "labels": {"confirm": "🔀 Launch parallel analysis",
+                                                       "cancel": "Cancel"},
+         "subject": {"title": "Launch a 2-way fan-out?", "blocks": [
+             {"type": "steps", "label": "Branches", "items": ["XRD", "Raman"]}]},
+         "code_files": []}
+    w, buf, stack = _widgets("\x1b[B\r")            # down to confirm, Enter
+    with stack:
+        assert w.ask(q) == "y"
+    assert "Launch a 2-way fan-out?" in buf.getvalue() and "2. Raman" in buf.getvalue()
+    w, _, stack = _widgets("\r")                     # the default is cancel
+    with stack:
+        assert w.ask(q) == "no"
+
+
+def test_keep_revert_primary_is_the_gates_own_word():
+    q = {"widget": "keep_revert", "prompt": "", "options": ["consensus", ""],
+         "labels": {"keep": "Use the consensus result", "revert": "Keep the independent result"},
+         "code_files": []}
+    w, buf, stack = _widgets("\x1b[A\r")                # up from the default (revert) to keep
+    with stack:
+        assert w.ask(q) == "consensus"
+    w, _, stack = _widgets("\r")
+    with stack:
+        assert w.ask(q) == ""
+
+
+def test_picker_without_a_pick_and_with_a_typed_reply():
+    q = {"widget": "bestofn", "prompt": "", "judge_pick": None,
+         "labels": {"select": "Select the model to apply to every re-fitted unit:",
+                    "use": "Use selected for all", "accept": "Keep the independent results",
+                    "input": "Or suggest a different model:", "submit": "Use this model"},
+         "candidates": [{"idx": 1, "label": "Candidate 1 — Voigt"},
+                        {"idx": 2, "label": "Candidate 2 — Gaussian"}],
+         "code_files": []}
+    w, buf, stack = _widgets("\r")                       # the default leads: keep as-is
+    with stack:
+        assert w.ask(q) == ""                            # (the picker draws on its own output)
+    w, _, stack = _widgets("\x1b[B\r")                  # down once: candidate 1
+    with stack:
+        assert w.ask(q) == "1"
+    w, buf, stack = _widgets("\x1b[B\x1b[B\x1b[B\rLorentzian\r")   # the typed reply
+    with stack:
+        assert w.ask(q) == "Lorentzian"
+    assert "Or suggest a different model:" in buf.getvalue()

@@ -676,11 +676,17 @@ export default function App() {
                 />
               )}
             </div>
-            <AnalysisInset
-              sessionId={session.id}
-              images={state.liveImages}
-              running={state.status === "running"}
-            />
+            {/* The floating figure viewer sits over the right end of the
+                feedback panel's decision row and swallowed the Accept
+                click (seen live); a pending question shows its own
+                figures, so the inset steps aside until it is answered. */}
+            {state.status !== "awaiting_input" && (
+              <AnalysisInset
+                sessionId={session.id}
+                images={state.liveImages}
+                running={state.status === "running"}
+              />
+            )}
           </UIContext.Provider>
         )}
       </div>

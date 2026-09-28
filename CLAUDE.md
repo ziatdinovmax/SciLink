@@ -673,6 +673,40 @@ shell shows it on its status row, and one fixture pins both readers.
 **When a chat-surface label or behaviour changes, change it in the
 vocabulary or the narration reader, not in one surface.**
 
+**A human-feedback gate declares what is under review; it does not print
+it for the surfaces to parse.** Every gate holds a structured object at ask
+time (a plan dict, a fit result and its review figure, a candidate list)
+and used to print it and ask, so the web UI and the shell
+showed the captured console text and regex-parsed it into widgets. A gate
+now passes `subject=` to `request_human_feedback`: a title plus blocks from
+the fixed vocabulary in `scilink.hitl.SUBJECT_BLOCKS` (text, fields, chips,
+steps, table, figure, candidates, compare, notice), built by a pure
+function next to the printer from the same dict (`fitting_plan_subject`,
+`analysis_plan_subject`, `refinement_plan_subject`, `regime_plan_subject`,
+`plan_subject`, `plan_candidates_subject`, `bestofn_join_subject`,
+`consensus_subject`, `consistency_subject`). Every block carries a `label` that keeps the
+console's section name and emoji ("🔍 Observations"); both surfaces render
+labeled blocks in one aligned label column, so a gate lists its sections
+the way its printout does and a short list is plain text, not chips. The decision widget and its words come from the
+gate's `kind` (`vocabulary.QUESTION_WIDGETS` / `QUESTION_LABELS`), never
+from the prompt text. Printing stays: it is the console, the verbose log and
+the record; the surfaces show the blocks, not the captured text as well.
+Every live gate declares one (the audit in
+`docs/proposals/structured-human-feedback.md` lists them); the presenter
+no longer parses console text, and a gate without a subject is shown as
+its kind's widget over the captured text. A new gate gets a subject, never
+a parser. This work improves how the existing gates are shown; it
+adds no gate and re-enables none. Beyond plan approval and the best-of-N
+candidate choice, no human review of analysis results is expected, and the
+code agrees: attempt 0 of a best-of-N run is a candidate job, and every
+candidate job sets `_suppress_human_feedback`, so under the orchestrator's
+defaults the result-review, poor-fit, poor-quality and user-guided gates
+never fire; the analysis review, the first-spectrum fit review, the mixin's
+iteration feedback and the scalarizer's column confirmation (off since
+#542) have no live caller at all; the tier-2 approval needs
+`analysis_depth="auto"` while the orchestrator passes "basic". None of
+these gets a subject. The reachability table is in the proposal.
+
 ## Sequencing — hard features first, UI later
 
 Engineering philosophy on this codebase: implement load-bearing logic

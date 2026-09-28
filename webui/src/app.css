@@ -109,12 +109,19 @@ label.field > span { display: block; margin-bottom: 4px; }
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  /* Centred by auto margins, not justify-content: a flex-centred column
+     that outgrows its box overflows ABOVE the top, where it cannot be
+     scrolled to (live: three live sessions put the first card's Reattach
+     button off-screen). Auto margins centre while there is room and pin
+     to the top when there is not. */
+  justify-content: flex-start;
   gap: 18px;
   padding: 32px;
   text-align: center;
   overflow-y: auto; /* many live sessions must scroll, not clip */
 }
+.welcome > :first-child { margin-top: auto; }
+.welcome > :last-child { margin-bottom: auto; }
 .welcome .logo-big { width: 380px; }
 .welcome .mode-desc {
   font-size: 14px; color: var(--text-dim); margin: 0;
@@ -358,7 +365,16 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
   border-radius: 10px;
   padding: 14px 16px;
   background: var(--bg-panel);
+  /* what is under review scrolls; the decision stays in view */
+  display: flex; flex-direction: column;
+  max-height: 72vh;
 }
+.feedback-panel:focus { outline: none; }
+.feedback-body {
+  overflow-y: auto; flex: 1 1 auto; min-height: 0;
+  padding-right: 10px; scrollbar-width: thin;   /* the bar beside the content, not over it */
+}
+.feedback-decision { flex: none; padding-top: 6px; }
 .feedback-panel h4 { margin: 0 0 10px; color: var(--accent); }
 .context-box {
   background: var(--code-bg); border: 1px solid var(--code-border);
@@ -370,11 +386,82 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
   line-height: 1.5; margin-bottom: 12px;
 }
 .feedback-actions { display: flex; gap: 10px; margin-top: 10px; }
+.feedback-select { display: flex; justify-content: space-between; gap: 10px; margin: 6px 0 0; font-size: 13px; }
+.feedback-decision textarea::placeholder { color: var(--text-dim); opacity: 0.8; }
 .feedback-actions button { flex: 1; }
 .feedback-panel img.preview { max-width: 100%; border-radius: 6px; margin-bottom: 8px; }
-.radio-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
-.radio-list label { display: flex; gap: 8px; align-items: center; cursor: pointer; }
-.radio-list input { width: auto; }
+
+/* ── subject blocks (what a question is about) ──────────────── */
+/* One quiet system, the console printout's shape: the title, then each
+   section as a heading line with its emoji and the full text under it. */
+.qs-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; font-size: 15px; }
+.qs-subtitle { font-size: 13px; font-weight: 500; color: var(--text-dim); }
+.qs-sections { display: flex; flex-direction: column; font-size: 13.5px; line-height: 1.5; }
+.qs-section { padding: 8px 0; border-top: 1px solid var(--border); }
+.qs-section:first-child { border-top: 0; padding-top: 2px; }
+.qs-section-label { font-weight: 600; color: var(--text); margin-bottom: 3px; }
+.qs-section-body { min-width: 0; }
+.qs-text > :first-child { margin-top: 0; }
+.qs-text > :last-child { margin-bottom: 0; }
+.qs-text p { margin: 0 0 6px; }
+.qs-fields { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 12px; margin: 0; }
+.qs-field { display: contents; }
+.qs-fields dt { font-weight: 500; color: var(--text-dim); white-space: nowrap; }
+.qs-fields dd { margin: 0; }
+.flag-ok { color: var(--green-accept); }
+.flag-warn { color: #d97706; }
+.flag-bad { color: var(--danger); }
+.qs-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.qs-chip {
+  display: inline-block; font-size: 12px; line-height: 18px; padding: 0 8px;
+  border-radius: 9px; border: 1px solid var(--border-strong); white-space: nowrap;
+  color: var(--text);
+}
+.qs-chip.flag-ok { border-color: var(--green-accept); }
+.qs-chip.flag-bad { border-color: var(--danger); }
+.qs-chip.qs-pick { background: var(--primary); border-color: var(--primary); color: #fff; }
+.qs-steps { margin: 0; padding-left: 20px; }
+.qs-steps li { margin: 0 0 4px; }
+.qs-steps li::marker { color: var(--text-dim); }
+.qs-table-wrap { overflow-x: auto; }
+.qs-table { border-collapse: collapse; font-size: 13px; width: 100%; }
+.qs-table caption { caption-side: bottom; text-align: left; font-size: 12px; color: var(--text-dim); padding: 4px 0 0; }
+.qs-table th, .qs-table td { border-bottom: 1px solid var(--border); padding: 4px 8px; text-align: left; vertical-align: top; }
+.qs-table th { font-weight: 600; color: var(--text-dim); }
+.qs-figure { margin: 0; }
+.qs-figure img.preview { max-width: 100%; border-radius: 6px; }
+.qs-candidates { display: flex; flex-direction: column; gap: 8px; }
+.qs-candidate {
+  border: 1px solid var(--border-strong); border-radius: 8px; padding: 8px 12px;
+  background: var(--bg-card);
+}
+.qs-candidate.selectable { cursor: pointer; }
+.qs-candidate.selectable:hover { border-color: var(--focus); }
+.qs-candidate.selected { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary) inset; }
+.qs-candidate-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.qs-candidate-head input { width: auto; margin: 0; }
+.qs-candidate-name { color: var(--text-dim); }
+.qs-open-report {
+  margin-left: auto; padding: 1px 10px; font-size: 12.5px; border-radius: 9px;
+  border: 1px solid var(--border-strong); background: none; color: var(--accent);
+}
+.qs-open-report:hover:not(:disabled) { border-color: var(--accent); }
+.qs-candidate-body { margin-top: 6px; }
+.qs-candidate-body > :first-child { margin-top: 0; }
+.qs-candidate-body > :last-child { margin-bottom: 0; }
+/* a review figure per card: bounded, so three candidates fit a screen (the inset shows it full size) */
+.qs-candidate img.preview { max-width: 100%; max-height: 280px; width: auto; border-radius: 6px; margin-top: 8px; }
+.qs-reasoning { margin: 4px 0; }
+.qs-caveats { margin: 4px 0; padding-left: 20px; color: #d97706; }
+.qs-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.qs-compare-side { border: 1px solid var(--border-strong); border-radius: 8px; padding: 8px 12px; min-width: 0; }
+.qs-compare-label { font-weight: 600; color: var(--text-dim); margin-bottom: 4px; }
+@media (max-width: 720px) { .qs-compare { grid-template-columns: 1fr; } }
+/* Inside the panel body the whole body scrolls, so the callout must not
+   scroll on its own (a scrollbar inside a scrollbar). */
+.feedback-body .feedback-notice { margin: 8px 0 0; max-height: none; overflow: visible; }
+.feedback-body .feedback-notice ul { margin-top: 4px; }
+.feedback-notice.warn { border-left-color: #d97706; background: rgba(217, 119, 6, 0.07); }
 
 /* ── chat input ─────────────────────────────────────────────── */
 
@@ -477,6 +564,15 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
   border: 1px solid var(--code-border); border-radius: 6px;
   padding: 10px 12px; overflow: auto; font-size: 13px;
   max-height: calc(100vh - 220px); white-space: pre-wrap;
+}
+
+/* A script under review (code review gate): the file explorer's pane, but
+   it scrolls with the feedback body rather than inside the card. */
+.qs-code {
+  background: var(--code-bg); color: var(--code-text);
+  border: 1px solid var(--code-border); border-radius: 6px;
+  margin: 0; padding: 10px 12px; overflow-x: auto; font-size: 13px;
+  white-space: pre;
 }
 
 .table-scroll { overflow: auto; max-height: calc(100vh - 260px); }
