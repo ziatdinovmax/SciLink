@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { type PresentedQuestion } from "../api";
 import { SubjectBlocks } from "./SubjectBlocks";
+import { CodeBlock } from "./CodeBlock";
+import { languageForExtension } from "../highlight";
 import { fill } from "../narration";
 import { VOCAB } from "../vocabulary";
 
@@ -76,9 +78,7 @@ export function FeedbackPanel({
     <details className="card" key={f.name} open={question.code_files.length === 1 && i === 0}>
       <summary>📄 {f.name}</summary>
       <div className="card-body">
-        <pre style={{ margin: 0, overflowX: "auto" }}>
-          <code>{f.content}</code>
-        </pre>
+        <CodeBlock code={f.content} language={languageForExtension(f.name.split(".").pop() ?? "")} className="qs-code" />
       </div>
     </details>
   ));
