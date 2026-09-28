@@ -84,15 +84,9 @@ def subject_block(type_: str, **payload: Any) -> Dict[str, Any]:
     return {"type": type_, **payload}
 
 
-def make_subject(title: str, blocks: List[Dict[str, Any]],
-                 report: Optional[str] = None) -> Dict[str, Any]:
-    """A question's subject: a title and its blocks (empty blocks dropped);
-    ``report`` is a file the surfaces offer to open beside the title (the
-    plan's full report)."""
-    out: Dict[str, Any] = {"title": title, "blocks": [b for b in blocks if b]}
-    if report:
-        out["report"] = str(report)
-    return out
+def make_subject(title: str, blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """A question's subject: a title and its blocks (empty blocks dropped)."""
+    return {"title": title, "blocks": [b for b in blocks if b]}
 
 
 @dataclass

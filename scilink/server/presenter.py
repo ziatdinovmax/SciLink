@@ -246,11 +246,8 @@ def present_subject(subject: Dict[str, Any], session_dir: str) -> Dict[str, Any]
             out.append(b)
         return out
 
-    out = {"title": str(subject.get("title") or ""),
-           "blocks": _blocks(subject.get("blocks"))}
-    if subject.get("report"):
-        out["report"], out["report_file"] = _figure(subject["report"])
-    return out
+    return {"title": str(subject.get("title") or ""),
+            "blocks": _blocks(subject.get("blocks"))}
 
 
 def _candidate_rows(block: Dict[str, Any]) -> List[Dict[str, Any]]:

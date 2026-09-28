@@ -148,9 +148,6 @@ export type SubjectBlock = { label?: string } & (
 export interface QuestionSubject {
   title: string;
   blocks: SubjectBlock[];
-  /** a file to open in the Files tab beside the title (the plan's full report) */
-  report?: string | null;
-  report_file?: string;
 }
 
 export interface PresentedQuestion {

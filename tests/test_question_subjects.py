@@ -202,8 +202,7 @@ def _experiment_plan():
 
 def test_plan_subject_experiment():
     s = ui.plan_subject(_experiment_plan(), report_path="/r/plan.html")
-    assert s["title"] == "✅ Proposed experimental plan" and s["report"] == "/r/plan.html"
-    assert "report" not in ui.plan_subject(_experiment_plan())
+    assert s["title"] == "✅ Proposed experimental plan" and "report" not in s
     labels = [b.get("label") or b.get("title") for b in s["blocks"]]
     assert labels == ["🔬 Experiment: Anneal series", "🧪 Experimental steps",
                       "🛠️ Required equipment", "📈 Expected outcome", "💡 Justification",
@@ -236,10 +235,15 @@ def test_plan_subject_ideation_error_and_empty():
     s = ui.plan_subject(plan, ideation=True)
     assert s["title"] == "✅ Proposed research directions"
     labels = [b["label"] for b in s["blocks"]]
-    assert labels == ["💡 Research direction: Portfolio", "🧠 Research directions (1)",
+    assert labels == ["🧭 Portfolio: Portfolio", "🧠 Research directions (1)",
                       "🧭 Shared protocol", "🛠️ Key capabilities", "📄 Source documents"]
     assert "report" not in s
+    assert s["blocks"][0]["markdown"].startswith("🎯 **Thesis.** h")
     assert "📈 **Expected outcomes.** o" in s["blocks"][0]["markdown"]
+    # an ideation entry without concepts is a direction in its own right
+    lone = ui.plan_subject({"proposed_experiments": [{"experiment_name": "D", "hypothesis": "h"}]},
+                           ideation=True)
+    assert lone["blocks"][0]["label"] == "💡 Research direction: D"
     md = s["blocks"][1]["markdown"]
     assert md.startswith("**D1: Catch it** · tier 1") and "  - d1" in md
     assert "*Operando only question.* why" in md

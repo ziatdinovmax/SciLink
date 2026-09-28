@@ -363,7 +363,10 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
   max-height: 72vh;
 }
 .feedback-panel:focus { outline: none; }
-.feedback-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+.feedback-body {
+  overflow-y: auto; flex: 1 1 auto; min-height: 0;
+  padding-right: 10px; scrollbar-width: thin;   /* the bar beside the content, not over it */
+}
 .feedback-decision { flex: none; padding-top: 6px; }
 .feedback-panel h4 { margin: 0 0 10px; color: var(--accent); }
 .context-box {
@@ -439,7 +442,6 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
   border: 1px solid var(--border-strong); background: none; color: var(--accent);
 }
 .qs-open-report:hover:not(:disabled) { border-color: var(--accent); }
-.qs-title .qs-open-report { margin-left: auto; }
 .qs-candidate-body { margin-top: 6px; }
 .qs-candidate-body > :first-child { margin-top: 0; }
 .qs-candidate-body > :last-child { margin-bottom: 0; }
@@ -451,8 +453,11 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .qs-compare-side { border: 1px solid var(--border-strong); border-radius: 8px; padding: 8px 12px; min-width: 0; }
 .qs-compare-label { font-weight: 600; color: var(--text-dim); margin-bottom: 4px; }
 @media (max-width: 720px) { .qs-compare { grid-template-columns: 1fr; } }
-.feedback-body .feedback-notice { margin: 8px 0 0; }
-.feedback-notice.warn { border-left-color: #d97706; background: rgba(217, 119, 6, 0.12); }
+/* Inside the panel body the whole body scrolls, so the callout must not
+   scroll on its own (a scrollbar inside a scrollbar). */
+.feedback-body .feedback-notice { margin: 8px 0 0; max-height: none; overflow: visible; }
+.feedback-body .feedback-notice ul { margin-top: 4px; }
+.feedback-notice.warn { border-left-color: #d97706; background: rgba(217, 119, 6, 0.07); }
 
 /* ── chat input ─────────────────────────────────────────────── */
 

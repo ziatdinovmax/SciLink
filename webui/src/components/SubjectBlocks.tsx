@@ -14,9 +14,9 @@ function useFileClick(sessionId: string) {
   };
 }
 
-/** "Open full plan" beside a candidate's name, "Open full report" beside a
- * title: the report is a file in the session, shown in the Files tab. */
-export function OpenReport({ path, label }: { path?: string | null; label: string }) {
+/** "Open full plan" beside a candidate's name: the card omits the steps,
+ * and the plan's own report has them, in the Files tab. */
+function OpenReport({ path, label }: { path?: string | null; label: string }) {
   const { openInFiles } = useUIActions();
   if (!path) return null;
   return (

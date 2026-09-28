@@ -564,7 +564,10 @@ def plan_subject(result: Dict[str, Any], ideation: bool = False,
     """What the plan-review gate shows, as subject blocks (scilink.hitl):
     the sections ``display_plan_summary`` prints, in its two vocabularies,
     from the same plan. The auto-repair notice is not here: it rides the
-    question's ``origin`` and the presenter renders it beside the buttons."""
+    question's ``origin`` and the presenter renders it beside the buttons.
+    ``report_path`` is accepted for the printer's signature but not shown:
+    the card carries the whole plan, so the report adds nothing to decide on
+    (a candidate card, which omits the steps, does link its full plan)."""
     experiments = result.get("proposed_experiments")
     title = "✅ Proposed research directions" if ideation else "✅ Proposed experimental plan"
     blocks: List[Dict[str, Any]] = []
@@ -577,13 +580,22 @@ def plan_subject(result: Dict[str, Any], ideation: bool = False,
             "notice", title="⚠️ No experiments were found in the result", lines=[], tone="warn")])
     multi = len(experiments) > 1
     for i, exp in enumerate(experiments, 1):
-        head = ("💡 Research direction" if ideation else "🔬 Experiment") + (f" {i}" if multi else "")
+        concepts = exp.get("concepts")
         name = exp.get("experiment_name", "Unnamed")
-        fields = _CARD_FIELDS_IDEATION if ideation else _CARD_FIELDS[:1]
+        if ideation and isinstance(concepts, list) and concepts:
+            # The one entry carrying a portfolio is the portfolio's thesis
+            # (the transition shim, see parser_utils.plan_thesis), not one
+            # more direction: say so, or it reads as an eleventh direction.
+            head = "🧭 Portfolio"
+            fields = (("🎯", "Thesis", "hypothesis"),
+                      ("📈", "Expected outcomes", "expected_outcome"),
+                      ("💡", "Rationale", "justification"))
+        else:
+            head = ("💡 Research direction" if ideation else "🔬 Experiment") + (f" {i}" if multi else "")
+            fields = _CARD_FIELDS_IDEATION if ideation else _CARD_FIELDS[:1]
         card = "\n\n".join(f"{icon} **{label}.** {exp.get(key) or 'N/A'}"
                              for icon, label, key in fields)
         blocks.append(subject_block("text", label=f"{head}: {name}", markdown=card))
-        concepts = exp.get("concepts")
         if isinstance(concepts, list) and concepts:
             blocks.append(subject_block("text", label=f"🧠 Research directions ({len(concepts)})",
                                         markdown=_concept_markdown(concepts)))
@@ -623,7 +635,7 @@ def plan_subject(result: Dict[str, Any], ideation: bool = False,
     if caveats:
         blocks.append(subject_block("notice", title="⚠️ Caveats & potential limitations",
                                     lines=caveats, tone="warn"))
-    return make_subject(title, blocks, report=report_path)
+    return make_subject(title, blocks)
 
 
 def _wrap_field(text: Any, width: int = 78, indent: str = "   ") -> str:
