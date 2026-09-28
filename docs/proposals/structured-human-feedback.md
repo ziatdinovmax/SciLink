@@ -219,6 +219,24 @@ the web UI live-test notes).
 
 Stages 2 to 5 can be reordered by whatever gets exercised live first.
 
+## Series gates, live (2026-09-28)
+
+Through the web UI on Bedrock Opus 4.8. The hyperspectral regime-plan
+gate on `examples/eels_plasmons_demo/datacube.npy` cut into five positional
+tiles: change detection, rationale and the regimes table in round one; a
+typed revision ("split at the change point") came back as a two-regime
+plan with a transition-points table; Enter accepted; the two anchors' plan
+reviews followed and the series completed in 20 min. The curve series
+consensus gate on a six-spectrum Raman series with two off-recipe spectra
+(R² 0.65 and 0.87 under the locked model): two independent refits with
+different models, the two model cards with their spectra and R², select +
+Enter sent `1`. The consistency gate did not fire: the consensus re-fit
+landed within 1 % of the independent one (0.9959 vs 0.9974), which the
+code treats as consistent without asking. Two rendering defects fixed:
+arrows inside prose cut a fitting strategy into numbered fragments (the
+arrow split is now for pure chains only), and the regime table repeated
+the series variable in every Datasets cell.
+
 ## Reachability audit (2026-09-27)
 
 Every gate traced to its callers and the condition at the call site, under
