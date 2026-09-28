@@ -350,7 +350,9 @@ class CODBackend:
         if cached.is_file():
             return cached
         try:
-            urllib.request.urlretrieve(_COD_CIF_URL.format(cid=sid), cached)
+            # Published whole: two matchers fetching one id never share a file.
+            from scilink.utils.download import download_once
+            download_once(_COD_CIF_URL.format(cid=sid), cached, timeout=30)
             return cached
         except Exception as exc:
             _logger.debug("COD %s CIF fetch failed: %s", cid, exc)
