@@ -2135,33 +2135,6 @@ def _fmt(v):
     return f"{v:.4g}" if isinstance(v, float) else v
 
 
-def fit_review_subject(fit_result: dict, r2: float, r2_threshold: float,
-                       num_spectra: int, figure: "str | None") -> dict:
-    """What the first-spectrum fit-review gate shows, as subject blocks
-    (scilink.hitl): the sections ``_get_user_feedback_on_fit`` prints."""
-    from ....hitl import make_subject, subject_block as block
-
-    blocks = []
-    if figure:
-        blocks.append(block("figure", path=str(figure), caption="Fit of the first spectrum"))
-    blocks.append(block("fields", items=[
-        {"label": "📈 Model", "value": fit_result.get("model_type", "N/A")},
-        {"label": "📊 R²", "value": f"{r2:.4f} (threshold {r2_threshold})",
-         "flag": "ok" if r2 >= r2_threshold else "bad"}]))
-    rows = []
-    for comp, values in (fit_result.get("parameters") or {}).items():
-        if isinstance(values, dict):
-            for k, v in values.items():
-                if not k.endswith("_err"):
-                    rows.append([comp, k, _fmt(v)])
-    if rows:
-        blocks.append(block("table", label="📋 Fitted parameters",
-                            columns=["Component", "Parameter", "Value"], rows=rows))
-    blocks.append(block("notice", title="⚠️ Locked model", lines=[
-        f"This fitting model will be applied to all {num_spectra} spectra in the series."]))
-    return make_subject("📊 First spectrum fit result — review before processing the series", blocks)
-
-
 def poor_fit_subject(best_result: dict, all_attempts: list, r2_threshold: float,
                      example_threshold: float, figure: "str | None") -> dict:
     """What the poor-fit gate shows, as subject blocks (scilink.hitl): the
@@ -4949,8 +4922,6 @@ Return JSON with the refined fitting approach:
             "\n🤔 Your feedback (or Enter to accept): ",
             kind="review_fit",
             origin={"stage": "fit_review"},
-            subject=fit_review_subject(fit_result, r2, self.r2_threshold, num_spectra,
-                                       str(review_viz_path) if review_viz_path else None),
         ).strip()
 
         # Clean up the review file - it's only for user viewing during this step

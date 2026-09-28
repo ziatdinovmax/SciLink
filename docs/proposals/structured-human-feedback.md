@@ -4,8 +4,11 @@ Status: plan, drafted 2026-09-26. Stage 1 (the contract, both renderers,
 the kind tables, the curve fitting plan gate) and stage 2 (the other plan
 gates: image analysis plan, hyperspectral preprocessing targets, series
 regime plan, planning-mode plan review) and stage 3 (the fit and result
-gates: first-spectrum fit review, poor fit, image result review, poor
-quality, scalarizer extraction) are implemented. Checked live on
+gates: poor fit, image result review, poor quality, scalarizer extraction)
+are implemented. The curve agent's first-spectrum fit review is not called
+by any pipeline (the series path runs through the QC engine) and stays out,
+like the analysis review: beyond plan approval and the best-of-N choice, no
+human review of analysis results is expected. Checked live on
 Bedrock Opus 4.8: the curve fitting plan gate (browser and shell, a
 Raman-like spectrum), the image analysis plan gate (browser, the
 polycrystalline grains demo) and the planning plan review (shell, a small
@@ -147,7 +150,6 @@ server keep working while they are updated; `subject` is additive.
 | hyperspectral `series_regime_plan` | review_plan | table of regimes, text rationale, fields (change-point summary); replaces the `context=rendered` text |
 | exp `iteration_feedback` | review_plan | text (current result summary), fields |
 | planning `plan_review` | approve_or_revise | text (plan summary as the critic sees it: `summarize_plan_for_critic`), chips (equipment), steps, notice (auto-repair, caveats) |
-| curve `fit_review` | review_fit | figure (review PNG), fields (model, R² flagged vs threshold), table (component, parameter, value), text (series note) |
 | curve `poor_fit_review`, image `poor_quality_review` | review_fit / review_result | figure, fields (best score), table (attempts tried, score) |
 | image `result_review` | review_result | figure, fields (analysis type, quality score), table (extracted features) |
 | scalarizer `scalarizer_review` | review_metrics | table (columns × first rows), figure (plot) |

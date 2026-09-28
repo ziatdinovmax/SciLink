@@ -265,31 +265,6 @@ def _class_with(module, method):
     return next(c for c in vars(module).values() if isinstance(c, type) and method in vars(c))
 
 
-def test_fit_review_subject_and_gate(tmp_path):
-    fit = {"model_type": "2 Gaussians", "parameters": {
-        "peak_1": {"center": 302.0123, "fwhm": 14.0, "center_err": 0.03, "eta": "n/a"},
-        "baseline": "flat"}}
-    s = cfc.fit_review_subject(fit, 0.9912, 0.95, 5, "/s/first_spectrum_fit_review.png")
-    assert s["title"].startswith("📊 First spectrum fit result")
-    assert [b["type"] for b in s["blocks"]] == ["figure", "fields", "table", "notice"]
-    assert s["blocks"][1]["items"][1] == {"label": "📊 R²", "value": "0.9912 (threshold 0.95)",
-                                          "flag": "ok"}
-    assert s["blocks"][2]["rows"] == [["peak_1", "center", "302"], ["peak_1", "fwhm", "14"],
-                                      ["peak_1", "eta", "n/a"]]     # _err skipped, no dict skipped
-    assert "all 5 spectra" in s["blocks"][3]["lines"][0]
-    assert cfc.fit_review_subject(fit, 0.5, 0.95, 1, None)["blocks"][0]["type"] == "fields"
-    assert cfc.fit_review_subject(fit, 0.5, 0.95, 1, None)["blocks"][0]["items"][1]["flag"] == "bad"
-
-    cap = Capture(answer="")
-    hitl.set_default_channel(cap)
-    cls = _class_with(cfc, "_get_user_feedback_on_fit")
-    owner = SimpleNamespace(output_dir=tmp_path, r2_threshold=0.95)
-    fit["visualization_bytes"] = b"png"
-    assert cls._get_user_feedback_on_fit(owner, {"num_spectra": 3}, fit, 0.97) is None
-    assert cap.req.kind == "review_fit" and cap.req.origin == {"stage": "fit_review"}
-    assert cap.req.subject["blocks"][0]["path"] == str(tmp_path / "first_spectrum_fit_review.png")
-
-
 def test_poor_fit_subject_and_gate(tmp_path):
     best = {"fit_quality": {"r_squared": 0.81}, "visualization_bytes": b"png"}
     attempts = [{"model": "1 Gaussian", "r2": 0.7}, {"model": "2 Gaussians", "r2": 0.81}]
