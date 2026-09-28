@@ -22,7 +22,14 @@ def numbered_steps(text: str) -> list:
     parts = re.split(r"(?:^|\. )(?=\d+\. )", text)
     steps = [re.sub(r"^\d+\.\s*", "", p).strip() for p in parts if p.strip()]
     if len(steps) < 2 and " -> " in text:
-        steps = [p.strip() for p in re.split(r"\s*->\s*", text) if p.strip()]
+        # A chain only: "flatten -> segment -> measure". An arrow inside prose
+        # ("an S-shaped residual -> switch to asymmetric; ...") means
+        # "implies", and splitting there leaves dangling fragments (seen live
+        # on a fitting strategy), so a segment that holds a sentence end
+        # keeps the paragraph whole.
+        chain = [p.strip() for p in re.split(r"\s*->\s*", text) if p.strip()]
+        if all(". " not in p and len(p) <= 160 for p in chain):
+            steps = chain
     steps = [st.rstrip(".") + "." if st and not st.endswith(".") else st for st in steps]
     return steps if len(steps) > 1 else [text]
 

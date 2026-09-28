@@ -1123,7 +1123,8 @@ def regime_plan_subject(plan: Optional[dict], series_metadata: dict,
     var, unit = meta.get("variable") or "index", meta.get("unit") or ""
 
     def _lab(i):
-        return f"{i} ({var}={values[i]} {unit})".replace(" )", ")") if i < len(values) else str(i)
+        # "0 (300 K)": the variable is named once, in the column header
+        return f"{i} ({values[i]} {unit})".replace(" )", ")") if i < len(values) else str(i)
 
     blocks = []
     red = (scout or {}).get("reduction") or {}
@@ -1145,7 +1146,7 @@ def regime_plan_subject(plan: Optional[dict], series_metadata: dict,
         rows.append([r.get("name"), ", ".join(_lab(i) for i in idx),
                      f"dataset {idx[0]}" if idx else "?", r.get("description") or ""])
     blocks.append(block("table", label=f"Regimes ({len(rows)})",
-                        columns=["Regime", "Datasets", "Anchor", "Description"], rows=rows,
+                        columns=["Regime", f"Datasets ({var})", "Anchor", "Description"], rows=rows,
                         caption="The anchor gets the full analysis; its script is locked "
                                 "and replayed on the rest"))
     transitions = plan.get("transition_points") or []

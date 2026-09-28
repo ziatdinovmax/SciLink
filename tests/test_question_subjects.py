@@ -49,6 +49,12 @@ def test_numbered_steps_split_only_after_a_sentence_end():
     assert base.steps_block("⚙️ Pipeline", "Threshold and label.") == \
         {"type": "text", "label": "⚙️ Pipeline", "markdown": "Threshold and label."}
     assert base.steps_block("⚙️ Pipeline", "1. a. 2. b")["type"] == "steps"
+    # an arrow inside prose means "implies" (live: a fitting strategy split
+    # into a paragraph and two dangling fragments) — the paragraph stays whole
+    prose = ("TRF least-squares over the full range. Inspect residuals: an S-shaped "
+             "residual on the dominant band -> switch that band to an asymmetric "
+             "profile; a bimodal residual -> keep both components. Verify the areas.")
+    assert base.numbered_steps(prose) == [prose]
 
 
 def test_fitting_plan_subject_single_and_series():
@@ -181,7 +187,8 @@ def test_regime_plan_subject():
     assert [b["label"] for b in s["blocks"]] == ["🔎 Change detection", "💡 Rationale",
                                                  "Regimes (2)", "↕ Transition points"]
     assert "NOT coherent" in s["blocks"][0]["markdown"]
-    assert s["blocks"][2]["rows"][0] == ["low", "0 (T=300 K), 1 (T=400 K)", "dataset 0", "one phase"]
+    assert s["blocks"][2]["rows"][0] == ["low", "0 (300 K), 1 (400 K)", "dataset 0", "one phase"]
+    assert s["blocks"][2]["columns"][1] == "Datasets (T)"
     assert s["blocks"][3]["rows"] == [["[1, 2]", "melt"]]
     one = hs.regime_plan_subject(None, meta, None, 3)
     assert one["blocks"] == [{"type": "text", "label": "Regimes",
