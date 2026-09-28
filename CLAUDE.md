@@ -684,8 +684,7 @@ steps, table, figure, candidates, compare, notice), built by a pure
 function next to the printer from the same dict (`fitting_plan_subject`,
 `analysis_plan_subject`, `refinement_plan_subject`, `regime_plan_subject`,
 `plan_subject`, `poor_fit_subject`,
-`result_review_subject`, `poor_quality_subject`,
-`scalarizer_review_subject`). Every block carries a `label` that keeps the
+`result_review_subject`, `poor_quality_subject`). Every block carries a `label` that keeps the
 console's section name and emoji ("🔍 Observations"); both surfaces render
 labeled blocks in one aligned label column, so a gate lists its sections
 the way its printout does and a short list is plain text, not chips. The decision widget and its words come from the
@@ -698,8 +697,9 @@ lists them); do not add a new regex to the presenter for a gate — give the
 gate a subject. This work improves how the existing gates are shown; it
 adds no gate and re-enables none. Beyond plan approval and the best-of-N
 candidate choice, no human review of analysis results is expected: the
-analysis-review gate and the curve agent's first-spectrum fit review are
-not called by any pipeline and stay out.
+analysis-review gate, the curve agent's first-spectrum fit review and the
+scalarizer's column confirmation (off since #542) are not reachable and
+stay out.
 
 ## Sequencing — hard features first, UI later
 

@@ -4,11 +4,13 @@ Status: plan, drafted 2026-09-26. Stage 1 (the contract, both renderers,
 the kind tables, the curve fitting plan gate) and stage 2 (the other plan
 gates: image analysis plan, hyperspectral preprocessing targets, series
 regime plan, planning-mode plan review) and stage 3 (the fit and result
-gates: poor fit, image result review, poor quality, scalarizer extraction)
-are implemented. The curve agent's first-spectrum fit review is not called
-by any pipeline (the series path runs through the QC engine) and stays out,
-like the analysis review: beyond plan approval and the best-of-N choice, no
-human review of analysis results is expected. Checked live on
+gates: poor fit, image result review, poor quality) are implemented. The
+curve agent's first-spectrum fit review is not called by any pipeline (the
+series path runs through the QC engine) and the scalarizer's column
+confirmation has been off since #542 (every caller passes
+`enable_human_review=False`); both stay out, like the analysis review:
+beyond plan approval and the best-of-N choice, no human review of analysis
+results is expected. Checked live on
 Bedrock Opus 4.8: the curve fitting plan gate (browser and shell, a
 Raman-like spectrum), the image analysis plan gate (browser, the
 polycrystalline grains demo) and the planning plan review (shell, a small
@@ -152,7 +154,6 @@ server keep working while they are updated; `subject` is additive.
 | planning `plan_review` | approve_or_revise | text (plan summary as the critic sees it: `summarize_plan_for_critic`), chips (equipment), steps, notice (auto-repair, caveats) |
 | curve `poor_fit_review`, image `poor_quality_review` | review_fit / review_result | figure, fields (best score), table (attempts tried, score) |
 | image `result_review` | review_result | figure, fields (analysis type, quality score), table (extracted features) |
-| scalarizer `scalarizer_review` | review_metrics | table (columns × first rows), figure (plot) |
 | planning `missing_metadata` | dataset_description | fields (file, columns seen) |
 | curve/image `user_guided_fit` / `user_guided_result` | keep_or_revert | compare (original vs user-guided: figure + R²/score) |
 | curve/image `consistency_result` | keep_or_revert | compare (both fits, with the consistency numbers) |
@@ -186,8 +187,8 @@ the web UI live-test notes).
 2. **Plan gates** (curve, image, preprocessing targets, hyperspectral
    regimes, iteration feedback). These are the gates a scientist sits at
    longest. Subject builders unit-tested against sample `state` dicts.
-3. **Fit and result gates** (fit review, poor fit / poor quality, result
-   review, scalarizer). Adds `figure` and `table` in anger.
+3. **Fit and result gates** (poor fit / poor quality, image result
+   review). Adds `figure` and `table` in anger.
 4. **Candidate and compare gates** (best-of-N ×2, plan candidates,
    consensus ×2, user-guided ×2, consistency ×2, plan reopen). Retires
    `parse_bestofn_review` and `parse_plan_candidate_review`.

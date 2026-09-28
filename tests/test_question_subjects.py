@@ -329,16 +329,3 @@ def test_poor_quality_subject_and_gate(tmp_path):
     assert cls._get_human_feedback_for_poor_quality(owner, {}, best, attempts) is None
     assert cap.req.origin == {"stage": "poor_quality_review"}
     assert cap.req.subject["blocks"][0]["path"] == str(tmp_path / "quality_review_analysis.png")
-
-
-def test_scalarizer_review_subject():
-    from scilink.agents.planning_agents.scalarizer_agent import scalarizer_review_subject
-    rows = [{"yield": 0.5, "temp": 300}, {"yield": 0.6, "temp": 310},
-            {"yield": 0.7, "temp": 320}, {"yield": 0.8, "temp": 330}]
-    s = scalarizer_review_subject("results.csv", ["yield", "temp"], rows, "/s/plot.png")
-    assert s["title"] == "👀 Scalarizer review — results.csv"
-    assert s["blocks"][0]["markdown"] == "Extracted 2 column(s) from 4 data point(s); the first 3 shown."
-    assert s["blocks"][1]["rows"] == [["0.5", "300"], ["0.6", "310"], ["0.7", "320"]]
-    assert s["blocks"][2] == {"type": "figure", "path": "/s/plot.png", "caption": "Extraction plot"}
-    one = scalarizer_review_subject("r.csv", ["a"], [{"a": 1}], None)
-    assert one["blocks"][0]["markdown"].endswith("1 data point(s).") and len(one["blocks"]) == 2
