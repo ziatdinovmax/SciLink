@@ -199,7 +199,13 @@ the web UI live-test notes).
    Enter on a picker sending the judge's pick whatever card was selected;
    the floating figure inset covering the Accept button (it now hides
    while a question is pending); Enter in a secondary box inserting a
-   newline instead of sending.
+   newline instead of sending; Enter doing nothing after a reload left
+   the focus outside the panel (a page-level listener now answers). A
+   realistic planning run (the critical-materials demo, best-of-3, then an
+   ideation portfolio) settled two shapes: a candidate card links its full
+   plan ("Open full plan", the card omits the steps) while the review card
+   links nothing (it carries the whole plan), and an ideation result's
+   one-entry shim is shown as the portfolio's thesis, not as a direction.
 5. **Planning plan review, metadata, fan-out, image confirm.** Retires
    `parse_fanout_confirm`.
 6. **Retire the regex path.** `clean_context` and the classifier go;
