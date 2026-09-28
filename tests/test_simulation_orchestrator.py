@@ -674,8 +674,6 @@ def test_6_session_persistence(model_name: str):
             "structure_path": "/tmp/POSCAR",
         })
         orch.default_calc_params = {"ENCUT": 520, "kpoint_density": 30}
-        # Force a checkpoint write
-        orch.message_count = orch.CHECKPOINT_INTERVAL
         orch._auto_checkpoint()
 
         # Restore into a fresh instance

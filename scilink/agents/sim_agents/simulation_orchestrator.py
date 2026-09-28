@@ -520,7 +520,9 @@ class SimulationOrchestratorAgent:
         else:
             response = self._handle_litellm_chat(user_input)
         self.message_count += 1
-        self._auto_checkpoint()
+        if (self.message_count - self.last_checkpoint_message_count
+                >= self.CHECKPOINT_INTERVAL):
+            self._auto_checkpoint()
         self._save_history()
         return response
 
@@ -831,15 +833,14 @@ class SimulationOrchestratorAgent:
         except Exception as e:
             self.logger.warning(f"Failed to restore checkpoint: {e}")
 
-    def _auto_checkpoint(self, force: bool = False, quiet: bool = False) -> None:
-        """Save checkpoint periodically (every CHECKPOINT_INTERVAL messages).
+    def _auto_checkpoint(self, quiet: bool = False) -> None:
+        """Save the session checkpoint now.
 
-        ``force`` bypasses the message-interval gate (used by the per-tool
-        checkpoint, which throttles by wall clock instead).
+        Always writes: cadence is the caller's concern (``chat()`` saves every
+        CHECKPOINT_INTERVAL messages, the shell and web runner save per turn,
+        the per-tool checkpoint throttles by wall clock). Gating here made the
+        per-turn saves no-ops, so a short session restored a stale registry.
         """
-        if (not force and self.message_count - self.last_checkpoint_message_count
-                < self.CHECKPOINT_INTERVAL):
-            return
         try:
             ck = {
                 "generated_structures": self.generated_structures,
@@ -877,7 +878,7 @@ class SimulationOrchestratorAgent:
         self._last_tool_checkpoint_ts = now
         try:
             self._save_history()
-            self._auto_checkpoint(force=True, quiet=True)
+            self._auto_checkpoint(quiet=True)
         except Exception as e:  # noqa: BLE001 - persistence must not kill the turn
             self.logger.warning(f"Per-tool checkpoint failed: {e}")
 
