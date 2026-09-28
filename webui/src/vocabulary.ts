@@ -109,7 +109,6 @@ export const VOCAB = {
   "names": {
     "branch": "Branch",
     "candidate": "Candidate",
-    "console_output": "Console output",
     "delegation": "Delegation",
     "judge_pick": "Judge's pick",
     "meta": "Mission control",

@@ -6,7 +6,7 @@ Two paths. A request that carries a ``subject`` (what is under review, as
 blocks — ``scilink.hitl.SUBJECT_BLOCKS``) is presented from that and from
 its ``kind`` (the widget and its words, ``vocabulary.QUESTION_WIDGETS`` /
 ``QUESTION_LABELS``); the captured console text still travels as
-``context_display`` for a "console output" disclosure. A request without one
+``context_display`` but the surfaces show only the blocks. A request without one
 is presented from the captured console text: the classifiers and parsers
 below are verbatim ports of the Streamlit widget chooser
 (scilink/ui/app.py:1053-1327 and the module-level parse helpers), regex over

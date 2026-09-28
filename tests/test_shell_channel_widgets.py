@@ -241,7 +241,7 @@ SUBJECT = {"title": "📋 Proposed fitting plan — single spectrum", "blocks": 
 ]}
 
 
-def test_subject_blocks_are_rendered_and_console_text_is_behind_ctrl_o():
+def test_subject_blocks_are_rendered_and_console_text_is_not():
     q = dict(GENERIC, subject=SUBJECT, prompt="Your feedback:",
              context_display="📋 PROPOSED FITTING PLAN\nApproach: Fit the doublet.")
     w, buf, stack = _widgets("\r")
@@ -253,19 +253,20 @@ def test_subject_blocks_are_rendered_and_console_text_is_behind_ctrl_o():
                    "1. Subtract baseline.",
                    "Regimes", "low T", "figure: /tmp/s/results/fit.png", "Candidate 2 — Gaussian", "Judge's pick", "Judge: fewer params",
                    "⚠ seed near edge", "original", "user-guided", "Locked model",
-                   "applies to all 4 spectra", "console output: Ctrl+O shows it"):
+                   "applies to all 4 spectra"):
         assert needle in out, needle
-    assert "PROPOSED FITTING PLAN" not in out          # the console text is not shown twice
+    assert "PROPOSED FITTING PLAN" not in out          # the blocks are the printed text
+    assert "Ctrl+O" not in out
     assert out.index("Locked model") < out.index("Your feedback:")
 
 
-def test_ctrl_o_on_a_subject_question_shows_the_console_text():
+def test_ctrl_o_on_a_subject_question_has_nothing_to_show():
     q = dict(GENERIC, subject=SUBJECT, context_display="📋 PROPOSED FITTING PLAN\nline two")
     w, buf, stack = _widgets("\x0f\r")
     with stack:
         assert w.ask(q) == ""
     out = buf.getvalue()
-    assert "PROPOSED FITTING PLAN" in out and "line two" in out
+    assert "PROPOSED FITTING PLAN" not in out and "nothing more to show" in out
 
 
 def test_confirm_widget():

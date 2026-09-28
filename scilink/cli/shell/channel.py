@@ -272,15 +272,10 @@ class Widgets:
         parts = []
         self._overflow.clear()
         if subject.get("blocks") or subject.get("title"):
+            # The blocks ARE the printed text; it is not shown twice.
             if subject.get("title"):
                 parts.append(Text(str(subject["title"]), style="bold"))
             parts.extend(self._render_blocks(subject.get("blocks")))
-            if context:
-                # The console text is still there, behind Ctrl+O, as on the
-                # web panel's "console output" disclosure.
-                self._overflow.extend(context.split("\n"))
-                parts.append(Text(f"({V.NAMES['console_output'].lower()}: Ctrl+O shows it)",
-                                  style="dim"))
         elif context:
             lines = context.split("\n")
             if len(lines) > self._CONTEXT_MAX_LINES:

@@ -105,8 +105,8 @@ unchanged, so no gate's parsing of the answer changes.
 
 `present_question` gains two branches. If `hreq.subject` is set, the payload
 carries `subject` (paths relativised) and the widget from the kind table;
-`context_display` still carries the cleaned console text, but the front-ends
-show it behind a disclosure ("console output"). If `subject` is absent, the
+`context_display` still travels but the front-ends show only the blocks (they
+are the printed text; showing both was tried and dropped). If `subject` is absent, the
 current path runs unchanged. That keeps every unconverted gate and every
 existing presenter test working during the conversion and lets the gates
 convert one at a time.
@@ -123,7 +123,7 @@ server keep working while they are updated; `subject` is additive.
   decision. The action row is sticky at the bottom of the panel and the
   blocks scroll inside it, so a long plan never pushes the buttons below the
   fold (the reason the auto-repair notice was moved out of the printed text).
-  `context_display` renders under a `<details>` labelled "console output".
+  Nothing is clamped: a reviewer reads the whole plan before deciding.
 - **Shell.** `cli/shell/channel.py`'s `_show_context` renders blocks with
   rich (`Table`, `Panel`, `Markdown`, figure paths) and prints the console
   text only when there is no subject. The Ctrl+O overflow stays for long

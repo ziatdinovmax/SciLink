@@ -85,16 +85,12 @@ export function FeedbackPanel({
     </div>
   ) : null;
 
-  const consoleText = question.context_display ? (
-    subject ? (
-      <details className="feedback-console">
-        <summary>{VOCAB.names.console_output}</summary>
-        <div className="context-box">{question.context_display}</div>
-      </details>
-    ) : (
+  // The captured console text is what a gate WITHOUT a subject shows; with
+  // one, the blocks are that text, so it is not shown twice.
+  const consoleText =
+    question.context_display && !subject ? (
       <div className="context-box">{question.context_display}</div>
-    )
-  ) : null;
+    ) : null;
 
   const fanout = question.widget === "fanout_confirm" ? question.fanout : null;
   // "📋 Proposed fitting plan — single spectrum": the part after the dash
@@ -123,7 +119,6 @@ export function FeedbackPanel({
       />
       {codeFiles}
       {notice}
-      {consoleText}
     </>
   ) : fanout !== null ? (
     <>

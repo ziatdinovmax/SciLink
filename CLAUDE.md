@@ -688,7 +688,7 @@ labeled blocks in one aligned label column, so a gate lists its sections
 the way its printout does and a short list is plain text, not chips. The decision widget and its words come from the
 gate's `kind` (`vocabulary.QUESTION_WIDGETS` / `QUESTION_LABELS`), never
 from the prompt text. Printing stays: it is the console, the verbose log and
-the record, and the surfaces keep it behind a "console output" disclosure.
+the record; the surfaces show the blocks, not the captured text as well.
 A gate without a subject is presented from its printed text as before, so
 gates convert one at a time (`docs/proposals/structured-human-feedback.md`
 lists them); do not add a new regex to the presenter for a gate — give the

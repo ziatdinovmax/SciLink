@@ -112,7 +112,6 @@ NAMES = {
     "turn": "Turn",
     "verbose_section": "Verbose output",
     "verbose_toggle": "Show verbose output",
-    "console_output": "Console output",
     "stop": "Stop agent",
     "start_session": "Start Session",
     "resume_session": "Resume Session",
