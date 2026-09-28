@@ -395,7 +395,7 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .qs-sections { display: flex; flex-direction: column; font-size: 13.5px; line-height: 1.5; }
 .qs-section { padding: 8px 0; border-top: 1px solid var(--border); }
 .qs-section:first-child { border-top: 0; padding-top: 2px; }
-.qs-section-label { font-weight: 600; color: var(--text-dim); margin-bottom: 3px; }
+.qs-section-label { font-weight: 600; color: var(--text); margin-bottom: 3px; }
 .qs-section-body { min-width: 0; }
 .qs-text > :first-child { margin-top: 0; }
 .qs-text > :last-child { margin-bottom: 0; }

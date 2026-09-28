@@ -29,7 +29,8 @@ export function FeedbackPanel({
   // Enter answers a question the way it does at the console prompt, so
   // the question takes the keyboard focus when it appears: the feedback
   // box on the text widgets, the panel itself on the others.
-  const focusRef = useRef<HTMLTextAreaElement | HTMLDivElement>(null);
+  const focusRef = useRef<HTMLTextAreaElement | HTMLDivElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     focusRef.current?.focus({ preventScroll: true });
   }, [question.request_id]);
@@ -51,6 +52,9 @@ export function FeedbackPanel({
   };
   const isPicker =
     question.widget === "bestofn" || question.widget === "plan_candidates";
+  const enterAccepts =
+    question.widget !== "keep_revert" && question.widget !== "confirm"
+    && question.widget !== "fanout_confirm";
   // On a picker the empty reply is the judge's pick, a number is a chosen
   // candidate; Enter confirms whatever is selected, as the shell's picker
   // confirms its highlighted row. The selection starts on the judge's pick,
@@ -328,13 +332,38 @@ export function FeedbackPanel({
     );
   }
 
+  // Enter anywhere on the page answers the question while it is pending
+  // (the console's Enter): a reload, a tab switch or a click elsewhere can
+  // leave the focus outside the panel, and the chat input is disabled
+  // meanwhile. Fields outside the panel keep their own Enter; the panel
+  // handles its own targets below.
+  useEffect(() => {
+    if (!enterAccepts) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Enter" || e.shiftKey || sent) return;
+      const target = e.target as HTMLElement | null;
+      if (target && panelRef.current?.contains(target)) return;
+      const tag = target?.tagName ?? "";
+      if (["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(tag)
+          || target?.isContentEditable) return;
+      e.preventDefault();
+      respond(isPicker ? pickerReply() : "");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
   return (
     <div
       className="feedback-panel"
       tabIndex={-1}
-      ref={isPicker || question.widget === "keep_revert" || question.widget === "confirm"
-        || question.widget === "fanout_confirm"
-        ? (focusRef as React.RefObject<HTMLDivElement>) : undefined}
+      ref={(el) => {
+        panelRef.current = el;
+        if (isPicker || question.widget === "keep_revert" || question.widget === "confirm"
+            || question.widget === "fanout_confirm") {
+          focusRef.current = el;
+        }
+      }}
       onKeyDown={(e) => {
         // Enter anywhere in the panel is the console's Enter: accept as-is
         // (the judge's pick on a picker). A click on the plan to scroll it
