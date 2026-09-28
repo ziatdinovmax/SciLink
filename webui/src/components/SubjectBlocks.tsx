@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { api, type SubjectBlock } from "../api";
 import { MarkdownBody } from "./MarkdownBody";
 import { VOCAB } from "../vocabulary";
@@ -6,10 +5,11 @@ import { VOCAB } from "../vocabulary";
 /** Renders a question's subject — what is under review, as blocks — the
  * React twin of the shell's `Widgets._render_blocks`. One renderer per
  * block type of `scilink.hitl.SUBJECT_BLOCKS`. A labeled block is a
- * section: its label (with the console's emoji) sits in an aligned column
- * beside the content; an unlabeled block spans the width. A candidates
- * block becomes selectable cards when the panel passes `choice` /
- * `onChoose`. */
+ * section shaped like the console printout: its label (with the emoji) on
+ * a heading line, the whole content below it at full width — a reviewer
+ * reads all of it before deciding, so nothing is clamped or hidden. A
+ * candidates block becomes selectable cards when the panel passes
+ * `choice` / `onChoose`. */
 export function SubjectBlocks({
   sessionId,
   blocks,
@@ -34,31 +34,9 @@ export function SubjectBlocks({
 
 function Section({ label, children }: { label?: string; children: React.ReactNode }) {
   return (
-    <div className={"qs-section" + (label ? "" : " unlabeled")}>
+    <div className="qs-section">
       {label && <div className="qs-section-label">{label}</div>}
       <div className="qs-section-body">{children}</div>
-    </div>
-  );
-}
-
-/** Long prose is clamped to a few lines with a toggle, so one verbose
- * section does not bury the decision. */
-const CLAMP_CHARS = 420;
-
-function ClampedText({ text }: { text: string }) {
-  const [open, setOpen] = useState(false);
-  const long = text.length > CLAMP_CHARS;
-  return (
-    <div className={"qs-text" + (long && !open ? " clamped" : "")}>
-      <div className="qs-text-inner">
-        {/* an agent's prose is full of "~303 cm^-1": never strikethrough */}
-        <MarkdownBody text={text} escapeTilde />
-      </div>
-      {long && (
-        <button type="button" className="qs-more" onClick={() => setOpen(!open)}>
-          {open ? "Show less" : "Show more"}
-        </button>
-      )}
     </div>
   );
 }
@@ -76,7 +54,12 @@ function Block({
 }) {
   switch (block.type) {
     case "text":
-      return <ClampedText text={block.markdown} />;
+      return (
+        <div className="qs-text">
+          {/* an agent's prose is full of "~303 cm^-1": never strikethrough */}
+          <MarkdownBody text={block.markdown} escapeTilde />
+        </div>
+      );
     case "fields":
       return (
         <dl className="qs-fields">

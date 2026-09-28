@@ -174,24 +174,15 @@ class Widgets:
 
     def _render_blocks(self, blocks) -> list:
         """rich renderables for a question's subject blocks — the shell's
-        twin of the web ``SubjectBlocks`` component. Labeled blocks go into
-        one two-column grid (label, content) so their headings align; an
-        unlabeled block spans the width."""
-        grid = None
+        twin of the web ``SubjectBlocks`` component, in the printout's
+        shape: a labeled block is its label on a heading line (the emoji
+        kept) and the whole content under it at full width."""
         out = []
 
         def emit(label, renderable):
-            nonlocal grid
             if label:
-                if grid is None:
-                    grid = Table.grid(padding=(0, 2), expand=True)
-                    grid.add_column(style="bold", no_wrap=True, width=26)
-                    grid.add_column(ratio=1)
-                    out.append(grid)
-                grid.add_row(Text(str(label)), renderable)
-            else:
-                grid = None
-                out.append(renderable)
+                out.append(Text(str(label), style="bold"))
+            out.append(renderable)
 
         for b in blocks or []:
             kind = b.get("type")
