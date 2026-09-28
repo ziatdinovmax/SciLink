@@ -109,12 +109,19 @@ label.field > span { display: block; margin-bottom: 4px; }
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  /* Centred by auto margins, not justify-content: a flex-centred column
+     that outgrows its box overflows ABOVE the top, where it cannot be
+     scrolled to (live: three live sessions put the first card's Reattach
+     button off-screen). Auto margins centre while there is room and pin
+     to the top when there is not. */
+  justify-content: flex-start;
   gap: 18px;
   padding: 32px;
   text-align: center;
   overflow-y: auto; /* many live sessions must scroll, not clip */
 }
+.welcome > :first-child { margin-top: auto; }
+.welcome > :last-child { margin-bottom: auto; }
 .welcome .logo-big { width: 380px; }
 .welcome .mode-desc {
   font-size: 14px; color: var(--text-dim); margin: 0;
