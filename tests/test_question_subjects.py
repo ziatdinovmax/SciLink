@@ -257,3 +257,113 @@ def test_planning_review_gate_passes_the_subject(capsys):
     assert cap.req.kind == "approve_or_revise" and cap.req.subject == subject
     assert cap.req.origin["auto_repair"] == ["950 C -> 850 C (limit)"]
     assert ui.get_user_feedback() is None and cap.req.subject is None   # the code-review callers
+
+
+# ── stage 3: the fit and result gates ───────────────────────────
+
+def _class_with(module, method):
+    return next(c for c in vars(module).values() if isinstance(c, type) and method in vars(c))
+
+
+def test_fit_review_subject_and_gate(tmp_path):
+    fit = {"model_type": "2 Gaussians", "parameters": {
+        "peak_1": {"center": 302.0123, "fwhm": 14.0, "center_err": 0.03, "eta": "n/a"},
+        "baseline": "flat"}}
+    s = cfc.fit_review_subject(fit, 0.9912, 0.95, 5, "/s/first_spectrum_fit_review.png")
+    assert s["title"].startswith("📊 First spectrum fit result")
+    assert [b["type"] for b in s["blocks"]] == ["figure", "fields", "table", "notice"]
+    assert s["blocks"][1]["items"][1] == {"label": "📊 R²", "value": "0.9912 (threshold 0.95)",
+                                          "flag": "ok"}
+    assert s["blocks"][2]["rows"] == [["peak_1", "center", "302"], ["peak_1", "fwhm", "14"],
+                                      ["peak_1", "eta", "n/a"]]     # _err skipped, no dict skipped
+    assert "all 5 spectra" in s["blocks"][3]["lines"][0]
+    assert cfc.fit_review_subject(fit, 0.5, 0.95, 1, None)["blocks"][0]["type"] == "fields"
+    assert cfc.fit_review_subject(fit, 0.5, 0.95, 1, None)["blocks"][0]["items"][1]["flag"] == "bad"
+
+    cap = Capture(answer="")
+    hitl.set_default_channel(cap)
+    cls = _class_with(cfc, "_get_user_feedback_on_fit")
+    owner = SimpleNamespace(output_dir=tmp_path, r2_threshold=0.95)
+    fit["visualization_bytes"] = b"png"
+    assert cls._get_user_feedback_on_fit(owner, {"num_spectra": 3}, fit, 0.97) is None
+    assert cap.req.kind == "review_fit" and cap.req.origin == {"stage": "fit_review"}
+    assert cap.req.subject["blocks"][0]["path"] == str(tmp_path / "first_spectrum_fit_review.png")
+
+
+def test_poor_fit_subject_and_gate(tmp_path):
+    best = {"fit_quality": {"r_squared": 0.81}, "visualization_bytes": b"png"}
+    attempts = [{"model": "1 Gaussian", "r2": 0.7}, {"model": "2 Gaussians", "r2": 0.81}]
+    s = cfc.poor_fit_subject(best, attempts, 0.95, 0.9, "/s/quality_review_fit.png")
+    assert s["title"] == "⚠️ Fit quality below threshold"
+    assert [b["type"] for b in s["blocks"]] == ["figure", "text", "fields", "table", "text"]
+    assert s["blocks"][2]["items"][0]["value"] == "R² = 0.8100"
+    assert s["blocks"][3]["rows"] == [["1 Gaussian", "0.7000"], ["2 Gaussians", "0.8100"]]
+    assert 'threshold 0.90' in s["blocks"][4]["markdown"]
+
+    cap = Capture(answer="accept")
+    hitl.set_default_channel(cap)
+    cls = _class_with(cfc, "_get_human_feedback_for_poor_fit")
+    owner = SimpleNamespace(output_dir=tmp_path, r2_threshold=0.95, _r2_soft_margin=lambda t: 0.05,
+                            HUMAN_FEEDBACK_PROMPT=cls.HUMAN_FEEDBACK_PROMPT,
+                            logger=SimpleNamespace(warning=lambda *a, **k: None))
+    assert cls._get_human_feedback_for_poor_fit(owner, {}, best, attempts) is None
+    assert cap.req.origin == {"stage": "poor_fit_review"}
+    assert cap.req.subject["blocks"][0]["path"] == str(tmp_path / "quality_review_fit.png")
+
+
+def test_result_review_subject_and_gate(tmp_path):
+    result = {"analysis_type": "grain segmentation",
+              "extracted_features": {"grain_count": 42, "mean_diameter_um": 7.123456}}
+    s = iac.result_review_subject({"is_single_image": True}, result, 0.87, "/s/review.png")
+    assert s["title"] == "Analysis result — review before synthesis"
+    assert [b["type"] for b in s["blocks"]] == ["figure", "fields", "table"]
+    assert s["blocks"][1]["items"] == [{"label": "Analysis", "value": "grain segmentation"},
+                                       {"label": "Quality score", "value": "0.87"}]
+    assert s["blocks"][2]["rows"] == [["grain_count", 42], ["mean_diameter_um", "7.123"]]
+    series = iac.result_review_subject({"is_single_image": False, "num_images": 6,
+                                        "_current_regime_name": "late"}, result, 0.5, None)
+    assert series["title"].startswith("First image result")
+    assert series["blocks"][-1] == {"type": "notice", "title": "⚠️ Locked pipeline", "lines": [
+        "This analysis pipeline will be applied to all images in regime 'late'."]}
+
+    cap = Capture(answer="")
+    hitl.set_default_channel(cap)
+    cls = _class_with(iac, "_get_user_feedback_on_result")
+    owner = SimpleNamespace(output_dir=tmp_path)
+    result["visualization_bytes"] = b"png"
+    assert cls._get_user_feedback_on_result(owner, {"is_single_image": True}, result, 0.87) is None
+    assert cap.req.kind == "review_result" and cap.req.origin == {"stage": "result_review"}
+    assert cap.req.subject["blocks"][0]["path"] == str(tmp_path / "first_image_analysis_review.png")
+
+
+def test_poor_quality_subject_and_gate(tmp_path):
+    best = {"_quality_score": 0.42, "visualization_bytes": b"png"}
+    attempts = [{"pipeline": "threshold", "score": 0.3},
+                {"pipeline": "Verification 1", "score": 0.42}]
+    s = iac.poor_quality_subject(best, attempts, None)
+    assert s["title"] == "⚠️ Analysis quality below threshold"
+    assert [b["type"] for b in s["blocks"]] == ["text", "fields", "table", "text"]
+    assert s["blocks"][1]["items"][0]["value"] == "Quality score = 0.42"
+    assert s["blocks"][2]["rows"] == [["threshold", "0.30"], ["Verification 1", "0.42"]]
+
+    cap = Capture(answer="")
+    hitl.set_default_channel(cap)
+    cls = _class_with(iac, "_get_human_feedback_for_poor_quality")
+    owner = SimpleNamespace(output_dir=tmp_path, HUMAN_FEEDBACK_PROMPT=cls.HUMAN_FEEDBACK_PROMPT,
+                            logger=SimpleNamespace(warning=lambda *a, **k: None))
+    assert cls._get_human_feedback_for_poor_quality(owner, {}, best, attempts) is None
+    assert cap.req.origin == {"stage": "poor_quality_review"}
+    assert cap.req.subject["blocks"][0]["path"] == str(tmp_path / "quality_review_analysis.png")
+
+
+def test_scalarizer_review_subject():
+    from scilink.agents.planning_agents.scalarizer_agent import scalarizer_review_subject
+    rows = [{"yield": 0.5, "temp": 300}, {"yield": 0.6, "temp": 310},
+            {"yield": 0.7, "temp": 320}, {"yield": 0.8, "temp": 330}]
+    s = scalarizer_review_subject("results.csv", ["yield", "temp"], rows, "/s/plot.png")
+    assert s["title"] == "👀 Scalarizer review — results.csv"
+    assert s["blocks"][0]["markdown"] == "Extracted 2 column(s) from 4 data point(s); the first 3 shown."
+    assert s["blocks"][1]["rows"] == [["0.5", "300"], ["0.6", "310"], ["0.7", "320"]]
+    assert s["blocks"][2] == {"type": "figure", "path": "/s/plot.png", "caption": "Extraction plot"}
+    one = scalarizer_review_subject("r.csv", ["a"], [{"a": 1}], None)
+    assert one["blocks"][0]["markdown"].endswith("1 data point(s).") and len(one["blocks"]) == 2

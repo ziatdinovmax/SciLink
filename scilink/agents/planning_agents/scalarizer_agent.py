@@ -9,7 +9,25 @@ from typing import Dict, Any, Optional, List
 import PIL.Image as PIL_Image
 
 from ...auth import get_internal_proxy_key
-from ...hitl import request_human_feedback
+from ...hitl import make_subject, request_human_feedback, subject_block
+
+
+def scalarizer_review_subject(filename: str, columns: list, rows: list,
+                              plot_path: "str | None") -> dict:
+    """What the scalarizer review gate shows, as subject blocks
+    (scilink.hitl): the columns it printed with their first values, and
+    the plot."""
+    n_shown = min(len(rows), 3)
+    table_rows = [[str(r.get(c)) for c in columns] for r in rows[:n_shown]]
+    blocks = [subject_block("text", label="Extraction", markdown=(
+        f"Extracted {len(columns)} column(s) from {len(rows)} data point(s)"
+        + (f"; the first {n_shown} shown." if len(rows) > n_shown else ".")))]
+    if columns:
+        blocks.append(subject_block("table", label="Extracted metrics",
+                                    columns=[str(c) for c in columns], rows=table_rows))
+    if plot_path:
+        blocks.append(subject_block("figure", path=str(plot_path), caption="Extraction plot"))
+    return make_subject(f"👀 Scalarizer review — {filename}", blocks)
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from ...executors import require_sandbox_approval
@@ -701,6 +719,8 @@ class ScalarizerAgent(BaseAgent):
                     "> Press [ENTER] to confirm or type feedback: ",
                     kind="review_metrics",
                     origin={"stage": "scalarizer_review"},
+                    subject=scalarizer_review_subject(path_obj.name, columns, rows,
+                                                      exec_res.get("plot_path")),
                 ).strip()
                 
                 if user_fb:

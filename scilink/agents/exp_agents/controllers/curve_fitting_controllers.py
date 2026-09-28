@@ -2131,6 +2131,61 @@ class GenerateCurveFittingReportController:
 # ============================================================================
 
 
+def _fmt(v):
+    return f"{v:.4g}" if isinstance(v, float) else v
+
+
+def fit_review_subject(fit_result: dict, r2: float, r2_threshold: float,
+                       num_spectra: int, figure: "str | None") -> dict:
+    """What the first-spectrum fit-review gate shows, as subject blocks
+    (scilink.hitl): the sections ``_get_user_feedback_on_fit`` prints."""
+    from ....hitl import make_subject, subject_block as block
+
+    blocks = []
+    if figure:
+        blocks.append(block("figure", path=str(figure), caption="Fit of the first spectrum"))
+    blocks.append(block("fields", items=[
+        {"label": "📈 Model", "value": fit_result.get("model_type", "N/A")},
+        {"label": "📊 R²", "value": f"{r2:.4f} (threshold {r2_threshold})",
+         "flag": "ok" if r2 >= r2_threshold else "bad"}]))
+    rows = []
+    for comp, values in (fit_result.get("parameters") or {}).items():
+        if isinstance(values, dict):
+            for k, v in values.items():
+                if not k.endswith("_err"):
+                    rows.append([comp, k, _fmt(v)])
+    if rows:
+        blocks.append(block("table", label="📋 Fitted parameters",
+                            columns=["Component", "Parameter", "Value"], rows=rows))
+    blocks.append(block("notice", title="⚠️ Locked model", lines=[
+        f"This fitting model will be applied to all {num_spectra} spectra in the series."]))
+    return make_subject("📊 First spectrum fit result — review before processing the series", blocks)
+
+
+def poor_fit_subject(best_result: dict, all_attempts: list, r2_threshold: float,
+                     example_threshold: float, figure: "str | None") -> dict:
+    """What the poor-fit gate shows, as subject blocks (scilink.hitl): the
+    ``HUMAN_FEEDBACK_PROMPT`` it prints, from the same values."""
+    from ....hitl import make_subject, subject_block as block
+
+    best_r2 = (best_result.get("fit_quality") or {}).get("r_squared") or 0
+    blocks = []
+    if figure:
+        blocks.append(block("figure", path=str(figure), caption="Best available fit"))
+    blocks.append(block("text", label="Fit quality issue",
+                        markdown="The automated fitting could not achieve adequate fit quality."))
+    blocks.append(block("fields", items=[
+        {"label": "Best result", "value": f"R² = {best_r2:.4f}", "flag": "bad"},
+        {"label": "Threshold", "value": f"{r2_threshold}"}]))
+    blocks.append(block("table", label="Models tried", columns=["Model", "R²"],
+                        rows=[[a.get("model"), f"{a.get('r2', 0):.4f}"] for a in all_attempts]))
+    blocks.append(block("text", label="Options", markdown=(
+        "1. Suggest a different model or approach\n"
+        f"2. Adjust the R² threshold for this analysis (e.g. \"threshold {example_threshold:.2f}\")\n"
+        "3. Accept the best available fit (type \"accept\")")))
+    return make_subject("⚠️ Fit quality below threshold", blocks)
+
+
 def fitting_plan_subject(state: dict) -> dict:
     """What the fitting-plan gate shows, as subject blocks (scilink.hitl):
     the same sections ``_display_plan`` prints, with its emoji, read from
@@ -4818,6 +4873,11 @@ Return JSON with the refined fitting approach:
             "\nYour input: ",
             kind="review_fit",
             origin={"stage": "poor_fit_review"},
+            subject=poor_fit_subject(
+                best_result, all_attempts, self.r2_threshold,
+                self.r2_threshold - self._r2_soft_margin(self.r2_threshold),
+                str(self.output_dir / "quality_review_fit.png")
+                if best_result.get("visualization_bytes") else None),
         ).strip()
 
         if not feedback:
@@ -4889,6 +4949,8 @@ Return JSON with the refined fitting approach:
             "\n🤔 Your feedback (or Enter to accept): ",
             kind="review_fit",
             origin={"stage": "fit_review"},
+            subject=fit_review_subject(fit_result, r2, self.r2_threshold, num_spectra,
+                                       str(review_viz_path) if review_viz_path else None),
         ).strip()
 
         # Clean up the review file - it's only for user viewing during this step

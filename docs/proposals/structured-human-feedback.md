@@ -3,7 +3,9 @@
 Status: plan, drafted 2026-09-26. Stage 1 (the contract, both renderers,
 the kind tables, the curve fitting plan gate) and stage 2 (the other plan
 gates: image analysis plan, hyperspectral preprocessing targets, series
-regime plan, planning-mode plan review) are implemented. Checked live on
+regime plan, planning-mode plan review) and stage 3 (the fit and result
+gates: first-spectrum fit review, poor fit, image result review, poor
+quality, scalarizer extraction) are implemented. Checked live on
 Bedrock Opus 4.8: the curve fitting plan gate (browser and shell, a
 Raman-like spectrum), the image analysis plan gate (browser, the
 polycrystalline grains demo) and the planning plan review (shell, a small
