@@ -295,7 +295,7 @@ def _present_from_subject(hreq, ctx: str, session_dir: str,
     """The subject path: blocks from the gate, widget and words from the
     kind. No preview sweep — a gate with a subject declares its figures."""
     stage = str(hreq.origin.get("stage") or "")
-    widget = V.question_widget(hreq.kind)
+    widget = "code_review" if stage == "code_review" else V.question_widget(hreq.kind)
     labels = V.question_labels(hreq.kind, stage)
     subject = present_subject(hreq.subject, session_dir)
     payload: Dict[str, Any] = {
@@ -364,7 +364,8 @@ def present_question(hreq, context: str, session_dir: str) -> Dict[str, Any]:
             candidate_captions[str(Path(img).name)] = f"Candidate {int(m.group(1))}"
 
     code_files: List[Dict[str, str]] = []
-    if "CODE REVIEW" in ctx_tail or "Review files in" in ctx_tail:
+    if ("CODE REVIEW" in ctx_tail or "Review files in" in ctx_tail
+            or hreq.origin.get("stage") == "code_review"):
         code_files = [{"name": n, "content": c}
                       for n, c in find_code_review_files(session_dir)]
 

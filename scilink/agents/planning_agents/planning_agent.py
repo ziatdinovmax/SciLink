@@ -64,6 +64,7 @@ from .user_interface import (
     display_plan_summary,
     plan_subject,
     plan_candidates_subject,
+    code_review_subject,
     get_user_feedback,
     display_plan_candidates,
     get_candidate_selection,
@@ -1671,7 +1672,9 @@ class PlanningAgent(BaseAgent):
                     print(f"2. Press ENTER to approve, or type feedback to refine")
                     print("-"*60)
                     
-                    code_feedback = get_user_feedback()
+                    code_feedback = get_user_feedback(
+                        subject=code_review_subject(temp_dir.resolve(), files),
+                        stage="code_review")
                     
                     if not code_feedback:
                         print("✅ Code accepted")
@@ -2678,7 +2681,10 @@ Select the most appropriate strategy:
                     print(f"2. Inspect the {len(files)} new Python file(s).")
                     print("3. Press ENTER to approve, or type feedback to refine")
                     
-                    code_feedback = get_user_feedback()
+                    code_feedback = get_user_feedback(
+                        subject=code_review_subject(temp_dir.resolve(), files,
+                                                    iteration=next_plan_idx),
+                        stage="code_review")
                     
                     if not code_feedback:
                         print("✅ Code accepted.")

@@ -167,6 +167,8 @@ QUESTION_LABELS = {
                        "submit": "Request changes", "accept": "Approve extraction"},
     "code_review": {"input": "Your code feedback (optional):",
                     "submit": "Request changes", "accept": "Approve code"},
+    "approve_or_revise/code_review": {"input": "Your code feedback (optional):",
+                                      "submit": "Request changes", "accept": "Approve code"},
     "dataset_description": {"input": "Describe your data (optional):",
                             "submit": "Submit description",
                             "accept": "Skip (let agent guess)"},

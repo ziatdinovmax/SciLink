@@ -127,6 +127,11 @@ export const VOCAB = {
       "input": "Your plan feedback (optional):",
       "submit": "Request changes"
     },
+    "approve_or_revise/code_review": {
+      "accept": "Approve code",
+      "input": "Your code feedback (optional):",
+      "submit": "Request changes"
+    },
     "bestofn_select": {
       "accept": "Accept judge's pick (Candidate {pick})",
       "select": "Select the candidate to lock:",

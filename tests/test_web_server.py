@@ -243,6 +243,22 @@ def test_present_subject_options_free_text_and_no_pick(tmp_path):
     assert q["options"] == ["keep", "revert"]
 
 
+def test_present_subject_code_review_stage(tmp_path):
+    """The code-review gate: its own words, the code_review widget, and the
+    scripts read from the review folder without any console text."""
+    review = tmp_path / "temp_code_review"
+    review.mkdir()
+    (review / "exp_1.py").write_text("print('hi')")
+    hreq = FeedbackRequest(prompt="", kind="approve_or_revise",
+                           origin={"stage": "code_review", "auto_repair": []},
+                           subject=_subject({"type": "fields", "items": [
+                               {"label": "Folder", "value": str(review)}]}))
+    q = present_question(hreq, "", str(tmp_path))
+    assert q["widget"] == "code_review" and q["labels"]["accept"] == "Approve code"
+    assert q["code_files"][0]["name"] == "exp_1.py"
+    assert "revert_repair" not in q["labels"]
+
+
 def test_present_subject_keeps_auto_repair_and_code_files(tmp_path):
     review = tmp_path / "temp_code_review"
     review.mkdir()

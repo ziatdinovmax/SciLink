@@ -795,15 +795,42 @@ def get_candidate_selection(n_candidates: int, judge_pick: int,
     return judge_pick
 
 
+def code_review_subject(review_dir: Any, files: List[Any],
+                        iteration: Optional[int] = None) -> Dict[str, Any]:
+    """What the code-review gate shows, as subject blocks (scilink.hitl):
+    where the scripts were written and what to do. The scripts themselves
+    ride the question as ``code_files`` (the presenter reads them from the
+    review folder)."""
+    names = [Path(str(f)).name for f in files or []]
+    blocks = [subject_block("fields", items=[
+        {"label": "Folder", "value": str(review_dir)},
+        {"label": "Scripts", "value": ", ".join(names) if names else "none"}])]
+    blocks.append(subject_block("text", label="What to do", markdown=(
+        "Review the scripts below. Enter approves them; any text is feedback the "
+        "author refines them against.")))
+    title = "👀 Code review required" + (f" — iteration {iteration}" if iteration is not None else "")
+    return make_subject(title, blocks)
+
+
+def dataset_description_subject(filename: str) -> Dict[str, Any]:
+    """What the missing-metadata gate shows, as subject blocks (scilink.hitl)."""
+    return make_subject(f"⚠️ Missing metadata for {filename}", [
+        subject_block("text", label="Why", markdown=(
+            "The agent needs context to understand the columns and units in this file. "
+            "Enter skips (the agent guesses from the headers); a brief description "
+            "(e.g. 'Yield results from Suzuki coupling') is used instead."))])
+
+
 def get_user_feedback(auto_repair: Optional[Dict[str, Any]] = None,
-                      subject: Optional[Dict[str, Any]] = None) -> Optional[str]:
+                      subject: Optional[Dict[str, Any]] = None,
+                      stage: str = "plan_review") -> Optional[str]:
     """
     Pauses execution to get user input via the CLI. 
     Returns None if the user just presses ENTER (indicating approval).
 
-    ``subject`` is what is under review as blocks (``plan_subject``) for the
-    surfaces that render questions from data; the code-review callers pass
-    none and are presented from their printed text.
+    ``subject`` is what is under review as blocks (``plan_subject`` or
+    ``code_review_subject``); ``stage`` names the gate on the question's
+    origin ("plan_review" or "code_review"), which picks the widget's words.
 
     ``auto_repair`` is the plan's repair record when the plan on screen was
     auto-corrected. Its change lines ride the question's ``origin`` so a
@@ -825,7 +852,7 @@ def get_user_feedback(auto_repair: Optional[Dict[str, Any]] = None,
     feedback = request_human_feedback(
         "\n> Instruction: ",
         kind="approve_or_revise",
-        origin={"stage": "plan_review", "auto_repair": changes},
+        origin={"stage": stage, "auto_repair": changes},
         subject=subject,
     ).strip()
     
@@ -899,6 +926,7 @@ def get_dataset_description(filename: str) -> str:
             "\n> Context: ",
             kind="dataset_description",
             origin={"stage": "missing_metadata", "filename": str(filename)},
+            subject=dataset_description_subject(str(filename)),
         ).strip()
     except (EOFError, KeyboardInterrupt, OSError):
         print("  - ℹ️  No interactive session to answer; continuing without "

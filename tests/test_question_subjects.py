@@ -388,3 +388,63 @@ def test_plan_candidates_subject_and_gates():
     assert ui.get_reopen_decision("limit exceeded", subject=plan)[0] == "keep"
     assert cap.req.kind == "keep_or_revert" and cap.req.options == ["keep", "revert"]
     assert cap.req.subject == plan and cap.req.origin["reason"] == "limit exceeded"
+
+
+# ── stage 5: metadata, fan-out confirm, code review ─────────────
+
+def test_dataset_description_subject_and_gate(tmp_path):
+    from scilink.agents.planning_agents.user_interface import (
+        dataset_description_subject, get_dataset_description)
+    s = dataset_description_subject("yields.csv")
+    assert s["title"] == "⚠️ Missing metadata for yields.csv"
+    assert s["blocks"][0]["label"] == "Why" and "Enter skips" in s["blocks"][0]["markdown"]
+    cap = Capture(answer="Suzuki coupling yields")
+    hitl.set_default_channel(cap)
+    assert get_dataset_description("yields.csv") == "Suzuki coupling yields"
+    assert cap.req.kind == "dataset_description" and cap.req.subject == s
+    assert cap.req.origin["filename"] == "yields.csv"
+
+
+def test_code_review_subject_and_gate(tmp_path):
+    from scilink.agents.planning_agents.user_interface import code_review_subject
+    s = code_review_subject(tmp_path / "temp_code_review",
+                            [tmp_path / "temp_code_review" / "exp_1.py",
+                             tmp_path / "temp_code_review" / "exp_2.py"])
+    assert s["title"] == "👀 Code review required"
+    assert s["blocks"][0]["items"][1] == {"label": "Scripts", "value": "exp_1.py, exp_2.py"}
+    assert code_review_subject("/r", [], iteration=3)["title"].endswith("— iteration 3")
+    cap = Capture(answer="")
+    hitl.set_default_channel(cap)
+    assert ui.get_user_feedback(subject=s, stage="code_review") is None
+    assert cap.req.kind == "approve_or_revise" and cap.req.origin["stage"] == "code_review"
+    assert cap.req.subject == s
+
+
+def test_fanout_confirm_subject_and_gate(monkeypatch):
+    import scilink.agents.meta_agent.fanout as fo
+    verdict = {"verdict": "complementary", "confidence": 0.9, "join_axis": "temperature",
+               "join_type": "outer", "rationale": "same coupon", "unrelated": ["c"]}
+    branches = {"a": {"label": "XRD", "data_path": "/d/xrd.csv"},
+                "b": {"label": "Raman", "data_path": "/d/raman.csv", "steer": True}}
+    s = fo.fanout_confirm_subject(verdict, ["a", "b"], branches, True, 2, False)
+    assert s["title"].startswith("🔀 Parallel multi-dataset analysis")
+    assert [(b["type"], b.get("label")) for b in s["blocks"]] == [
+        ("fields", None), ("text", "Rationale"), ("text", "🔀 Branches (2)"),
+        ("fields", None), ("text", "Branch approvals")]
+    assert s["blocks"][0]["items"][0]["value"] == "complementary (confidence 0.9)"
+    assert "- XRD  (xrd.csv)" in s["blocks"][2]["markdown"] and "operand mesh" in s["blocks"][2]["markdown"]
+    assert [i["label"] for i in s["blocks"][3]["items"]] == ["Pruned as unrelated", "Steering opt-in"]
+    assert "autonomously" in s["blocks"][4]["markdown"]
+    big = fo.fanout_confirm_subject(verdict, list("abcdefg"), {}, False, 0, True)
+    assert big["blocks"][-2]["type"] == "notice" and "soft cap" in big["blocks"][-2]["title"]
+    assert "pause for approvals" in big["blocks"][-1]["markdown"]
+
+    seen = {}
+    def fake_ask(prompt, **kw):
+        seen.update(kw); return "y"
+    monkeypatch.setattr(fo, "request_human_feedback", fake_ask)
+    orch = SimpleNamespace(_enable_human_feedback=True, fanout_branch_hitl=False)
+    proceed, _ = fo._confirm_fanout(orch, verdict, ["a", "b"], branches)
+    assert proceed is True
+    assert seen["kind"] == "confirm" and seen["origin"] == {"stage": "fanout_confirm"}
+    assert seen["subject"]["blocks"][2]["label"] == "🔀 Branches (2)"
