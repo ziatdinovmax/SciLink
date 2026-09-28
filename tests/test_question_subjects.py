@@ -257,3 +257,127 @@ def test_planning_review_gate_passes_the_subject(capsys):
     assert cap.req.kind == "approve_or_revise" and cap.req.subject == subject
     assert cap.req.origin["auto_repair"] == ["950 C -> 850 C (limit)"]
     assert ui.get_user_feedback() is None and cap.req.subject is None   # the code-review callers
+
+
+# ── stage 4: the pickers and comparisons ────────────────────────
+
+def _class_with(module, method):
+    return next(c for c in vars(module).values() if isinstance(c, type) and method in vars(c))
+
+
+def _bestofn_candidates():
+    return [{"attempt": 0, "score": 0.9812, "approved": True, "iterations": 2, "success": True,
+             "result": {"visualization_bytes": b"png"}},
+            {"attempt": 1, "score": 0.9534, "approved": False, "iterations": 4, "success": True,
+             "result": {}}]
+
+
+def test_bestofn_join_subject_and_gates(tmp_path):
+    cands = _bestofn_candidates()
+    s = base.bestofn_join_subject(cands, cands[0], {"reasoning": "cleanest residual"}, True,
+                                  "R²", tmp_path)
+    assert s["title"].startswith("🏁 Best-of-N candidates")
+    block = s["blocks"][0]
+    assert block["pick"] == 0 and block["reasoning"] == "cleanest residual"
+    assert block["items"][0] == {"idx": 0, "name": "2 iterations", "metric": "R²", "value": "0.9812",
+                                 "approved": True,
+                                 "figure": str(tmp_path / "bestofn_candidate_00_review.png")}
+    assert block["items"][1]["figure"] is None and block["items"][1]["approved"] is False
+    assert block["free_text"]["input"].startswith("Or type 'more'")
+    image = base.bestofn_join_subject(cands, cands[1], {}, False, "score", tmp_path)
+    assert image["blocks"][0]["items"][0]["value"] == "0.98" and "free_text" not in image["blocks"][0]
+
+    for module, metric in ((cfc, "R²"), (iac, "score")):
+        cap = Capture(answer="1")
+        hitl.set_default_channel(cap)
+        cls = _class_with(module, "_get_bestofn_join_approval")
+        owner = SimpleNamespace(output_dir=tmp_path)
+        assert cls._get_bestofn_join_approval(owner, cands, cands[0], {"reasoning": "r"}, False) == 1
+        assert cap.req.kind == "bestofn_select" and cap.req.origin == {"stage": "bestofn_join"}
+        assert cap.req.subject["blocks"][0]["items"][0]["metric"] == metric
+
+
+def test_consensus_subject_and_gates():
+    improved = [{"index": 2, "new_model": "Voigt", "new_r2": 0.99},
+                {"index": 5, "new_model": "Gaussian", "new_r2": 0.97},
+                {"index": 7, "new_model": "Voigt", "new_r2": 0.985}]
+    counts = {"Gaussian": 1, "Voigt": 2}
+    s = base.consensus_subject(improved, counts, "spectra", "model", "new_model", "new_r2", "R²")
+    assert s["title"] == "🔄 Adaptive refit — no model consensus among the re-fitted spectra"
+    block = s["blocks"][0]
+    assert block["pick"] is None
+    assert block["items"] == [
+        {"idx": 1, "name": "Voigt", "judge_comment": "spectra [2, 7] · R²: 0.9900, 0.9850"},
+        {"idx": 2, "name": "Gaussian", "judge_comment": "spectra [5] · R²: 0.9700"}]
+    assert block["free_text"] == {"input": "Or suggest a different model:", "submit": "Use this model"}
+
+    cap = Capture(answer="1")
+    hitl.set_default_channel(cap)
+    cls = _class_with(cfc, "_ask_user_for_consensus")
+    assert cls._ask_user_for_consensus(SimpleNamespace(), improved, counts) == "Voigt"
+    assert cap.req.kind == "consensus_select" and cap.req.subject == s
+    cap = Capture(answer="")
+    hitl.set_default_channel(cap)
+    cls = _class_with(iac, "_ask_user_for_consensus")
+    imgs = [{"index": 1, "new_pipeline": "watershed", "new_score": 0.8}]
+    assert cls._ask_user_for_consensus(SimpleNamespace(), imgs, {"watershed": 1}) is None
+    assert cap.req.subject["blocks"][0]["items"][0]["judge_comment"] == "images [1] · score: 0.80"
+
+
+def test_consistency_subject_and_gates():
+    s = base.consistency_subject("spectrum", 3, "T400K.csv", "model", "Voigt", 0.95, "Gaussian",
+                                 0.98, "R²")
+    assert s["title"] == "⚠️ Spectrum [3] T400K.csv: the consensus model has a lower R²"
+    cmp = s["blocks"][0]
+    assert cmp["left"]["label"] == "Consensus" and cmp["right"]["label"] == "Independent"
+    assert cmp["left"]["blocks"][0]["items"] == [{"label": "Model", "value": "Voigt"},
+                                                 {"label": "R²", "value": "0.9500", "flag": "bad"}]
+    assert cmp["right"]["blocks"][0]["items"][1] == {"label": "R²", "value": "0.9800", "flag": "ok"}
+
+    cap = Capture(answer="consensus")
+    hitl.set_default_channel(cap)
+    cls = _class_with(cfc, "_ask_keep_consistency_result")
+    assert cls._ask_keep_consistency_result(SimpleNamespace(), "T400K.csv", 3, "Voigt", 0.95,
+                                            "Gaussian", 0.98) is True
+    assert cap.req.options == ["consensus", ""] and cap.req.subject == s
+    cap = Capture(answer="")
+    hitl.set_default_channel(cap)
+    cls = _class_with(iac, "_ask_keep_consistency_result")
+    assert cls._ask_keep_consistency_result(SimpleNamespace(), "img_02.npy", 2, "watershed", 0.7,
+                                            "threshold", 0.9) is False
+    assert cap.req.subject["blocks"][0]["left"]["blocks"][0]["items"][0] == \
+        {"label": "Pipeline", "value": "watershed"}
+
+
+def test_plan_candidates_subject_and_gates():
+    cands = [{"proposed_experiments": [{"experiment_name": "Anneal series", "hypothesis": "h1",
+                                        "expected_outcome": "o1", "justification": "j1"}]},
+             {"proposed_experiments": [{"experiment_name": "Quench series", "hypothesis": "h2"}]}]
+    judge = {"selected_candidate": 2, "reasoning": "quench isolates the variable",
+             "scores": [{"candidate": 1, "groundedness": 4, "testability": 3, "actionability": 4,
+                         "feasibility": 5, "information_gain": 2, "comment": "weak gain"},
+                        {"candidate": 2, "groundedness": 5, "testability": 5, "actionability": 4,
+                         "feasibility": 4, "information_gain": 4}]}
+    s = ui.plan_candidates_subject(cands, judge, 2, report_paths=["/r/c1.html", "/r/c2.html"],
+                                   pick_caveats=["Minor: [safety] no PPE"])
+    assert s["title"] == "🧭 Plan candidates — 2 distinct strategies"
+    block = s["blocks"][0]
+    assert block["pick"] == 2 and block["reasoning"] == "quench isolates the variable"
+    assert block["caveats"] == ["Minor: [safety] no PPE"]
+    first = block["items"][0]
+    assert first["idx"] == 1 and first["name"] == "Anneal series"
+    assert first["judge_comment"].startswith("groundedness 4/5 · testability 3/5")
+    assert first["judge_comment"].endswith("— weak gain")
+    assert "🎯 **Hypothesis.** h1" in first["body"] and "📄 Full plan: `/r/c1.html`" in first["body"]
+    assert block["items"][1]["body"].count("N/A") == 2
+
+    cap = Capture(answer="1")
+    hitl.set_default_channel(cap)
+    assert ui.get_candidate_selection(2, 2, subject=s) == 1
+    assert cap.req.kind == "plan_candidate_select" and cap.req.subject == s
+    cap = Capture(answer="")
+    hitl.set_default_channel(cap)
+    plan = ui.plan_subject(_experiment_plan())
+    assert ui.get_reopen_decision("limit exceeded", subject=plan)[0] == "keep"
+    assert cap.req.kind == "keep_or_revert" and cap.req.options == ["keep", "revert"]
+    assert cap.req.subject == plan and cap.req.origin["reason"] == "limit exceeded"

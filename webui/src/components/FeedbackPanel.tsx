@@ -170,10 +170,13 @@ export function FeedbackPanel({
   // ── the decision ────────────────────────────────────────────
   let decision;
   if (question.widget === "keep_revert") {
+    // The primary reply is the gate's own first option ("keep",
+    // "consensus", ...); the empty reply is the other.
+    const primary = question.options?.[0] || "keep";
     decision = (
       <>
         <div className="feedback-actions">
-          <button className="primary" onClick={() => respond("keep")} disabled={sent}>
+          <button className="primary" onClick={() => respond(primary)} disabled={sent}>
             {question.labels.keep}
           </button>
           <button className="primary" onClick={() => respond("")} disabled={sent}>
@@ -233,11 +236,29 @@ export function FeedbackPanel({
             className="success"
             disabled={sent}
             onClick={() => respond("")}
-            title={`${hint} — ${VOCAB.names.candidate} ${pick}`}
+            title={pick == null ? hint : `${hint} — ${VOCAB.names.candidate} ${pick}`}
           >
             {question.labels.accept}
           </button>
         </div>
+        {question.labels.input && (
+          <div className="feedback-followup">
+            <label className="field">
+              <span>{question.labels.input}</span>
+              <textarea
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                onKeyDown={(e) => e.stopPropagation()}
+                rows={2}
+              />
+            </label>
+            <div className="feedback-actions">
+              <button disabled={sent || !text.trim()} onClick={() => respond(text.trim())}>
+                {question.labels.submit}
+              </button>
+            </div>
+          </div>
+        )}
       </>
     );
   } else {

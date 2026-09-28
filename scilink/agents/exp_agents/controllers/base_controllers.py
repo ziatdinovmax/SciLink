@@ -5,6 +5,8 @@ import textwrap
 from typing import Any, Callable, Optional
 import json
 
+from pathlib import Path as pathlib_Path
+
 from ....hitl import make_subject, request_human_feedback, subject_block
 
 
@@ -32,6 +34,66 @@ def steps_block(label: str, text: str) -> dict:
     if len(items) > 1:
         return subject_block("steps", label=label, items=items)
     return subject_block("text", label=label, markdown=items[0] if items else "N/A")
+
+
+def bestofn_join_subject(candidates: list, winner: dict, judge_info: dict,
+                         allow_more: bool, metric: str, output_dir) -> dict:
+    """What the best-of-N join gate shows, as subject blocks (scilink.hitl):
+    one card per candidate with its review figure (the gate writes
+    ``bestofn_candidate_NN_review.png`` beside the question), its score and
+    gate verdict, the judge's pick and reasoning. ``metric`` is "R²" (curve)
+    or "score" (image)."""
+    digits = 4 if metric == "R²" else 2
+    items = []
+    for c in candidates:
+        figure = None
+        if c["result"].get("visualization_bytes"):
+            figure = str(pathlib_Path(output_dir) / f"bestofn_candidate_{c['attempt']:02d}_review.png")
+        items.append({"idx": c["attempt"], "name": f"{c['iterations']} iterations",
+                      "metric": metric, "value": f"{c['score']:.{digits}f}",
+                      "approved": bool(c["approved"]), "figure": figure})
+    block = subject_block("candidates", items=items, pick=winner["attempt"],
+                          reasoning=(judge_info.get("reasoning") or "")[:500] or None)
+    if allow_more:
+        block["free_text"] = {"input": "Or type 'more' to run the remaining candidates and compare:",
+                              "submit": "Send"}
+    return make_subject("🏁 Best-of-N candidates — review before locking the anchor", [block])
+
+
+def consensus_subject(improved: list, counts: dict, unit: str, kind: str,
+                      key_model: str, key_score: str, metric: str) -> dict:
+    """What the series consensus gate shows, as subject blocks
+    (scilink.hitl): the refitted units grouped by the model (or pipeline)
+    they chose, most common first — the rank is the reply."""
+    digits = 4 if metric == "R²" else 2
+    items = []
+    for i, (model, count) in enumerate(sorted(counts.items(), key=lambda x: -x[1]), 1):
+        idx = [str(r["index"]) for r in improved if r[key_model] == model]
+        scores = ", ".join(f"{r[key_score]:.{digits}f}" for r in improved if r[key_model] == model)
+        items.append({"idx": i, "name": str(model),
+                      "judge_comment": f"{unit} [{', '.join(idx)}] · {metric}: {scores}"})
+    block = subject_block("candidates", items=items, pick=None,
+                          free_text={"input": f"Or suggest a different {kind}:",
+                                     "submit": f"Use this {kind}"})
+    return make_subject(f"🔄 Adaptive refit — no {kind} consensus among the re-fitted {unit}",
+                        [block])
+
+
+def consistency_subject(unit: str, idx, name: str, kind: str, consensus: str,
+                        consensus_score: float, original: str, original_score: float,
+                        metric: str) -> dict:
+    """What the consistency keep-or-revert gate shows, as subject blocks
+    (scilink.hitl): the consensus result beside the independent one."""
+    digits = 4 if metric == "R²" else 2
+    def side(label, model, score, flag):
+        return {"label": label, "blocks": [subject_block("fields", items=[
+            {"label": kind.capitalize(), "value": model},
+            {"label": metric, "value": f"{score:.{digits}f}", "flag": flag}])]}
+    compare = subject_block("compare",
+                            left=side("Consensus", consensus, consensus_score, "bad"),
+                            right=side("Independent", original, original_score, "ok"))
+    return make_subject(f"⚠️ {unit.capitalize()} [{idx}] {name}: the consensus {kind} "
+                        f"has a lower {metric}", [compare])
 
 
 def refinement_plan_subject(state: dict) -> dict:

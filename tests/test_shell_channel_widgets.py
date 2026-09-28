@@ -282,3 +282,35 @@ def test_confirm_widget():
     w, _, stack = _widgets("\r")                     # the default is cancel
     with stack:
         assert w.ask(q) == "no"
+
+
+def test_keep_revert_primary_is_the_gates_own_word():
+    q = {"widget": "keep_revert", "prompt": "", "options": ["consensus", ""],
+         "labels": {"keep": "Use the consensus result", "revert": "Keep the independent result"},
+         "preview_images": [], "code_files": [], "candidate_captions": {}}
+    w, buf, stack = _widgets("\x1b[A\r")                # up from the default (revert) to keep
+    with stack:
+        assert w.ask(q) == "consensus"
+    w, _, stack = _widgets("\r")
+    with stack:
+        assert w.ask(q) == ""
+
+
+def test_picker_without_a_pick_and_with_a_typed_reply():
+    q = {"widget": "bestofn", "prompt": "", "judge_pick": None,
+         "labels": {"select": "Select the model to apply to every re-fitted unit:",
+                    "use": "Use selected for all", "accept": "Keep the independent results",
+                    "input": "Or suggest a different model:", "submit": "Use this model"},
+         "candidates": [{"idx": 1, "label": "Candidate 1 — Voigt"},
+                        {"idx": 2, "label": "Candidate 2 — Gaussian"}],
+         "preview_images": [], "code_files": [], "candidate_captions": {}}
+    w, buf, stack = _widgets("\r")                       # the default leads: keep as-is
+    with stack:
+        assert w.ask(q) == ""                            # (the picker draws on its own output)
+    w, _, stack = _widgets("\x1b[B\r")                  # down once: candidate 1
+    with stack:
+        assert w.ask(q) == "1"
+    w, buf, stack = _widgets("\x1b[B\x1b[B\x1b[B\rLorentzian\r")   # the typed reply
+    with stack:
+        assert w.ask(q) == "Lorentzian"
+    assert "Or suggest a different model:" in buf.getvalue()

@@ -146,9 +146,9 @@ export const VOCAB = {
       "confirm": "🔀 Launch parallel analysis"
     },
     "consensus_select": {
-      "accept": "Accept the agent's pick (Candidate {pick})",
+      "accept": "Keep the independent results",
       "select": "Select the model to apply to every re-fitted unit:",
-      "use": "Use selected"
+      "use": "Use selected for all"
     },
     "dataset_description": {
       "accept": "Skip (let agent guess)",
@@ -163,6 +163,10 @@ export const VOCAB = {
     "keep_or_revert": {
       "keep": "Keep user-guided fit",
       "revert": "Revert to original fit"
+    },
+    "keep_or_revert/consistency_result": {
+      "keep": "Use the consensus result",
+      "revert": "Keep the independent result"
     },
     "keep_or_revert/plan_reopen": {
       "input": "Adopt it with changes (optional):",

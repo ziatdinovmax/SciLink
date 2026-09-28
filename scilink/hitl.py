@@ -65,7 +65,10 @@ def _next_id() -> str:
 #   figure      path (absolute at the gate; presented relative to the
 #               session), caption?
 #   candidates  items: [{idx, name, metric?, value?, approved?, figure?,
-#               judge_comment?}], pick, reasoning?, caveats?: [str]
+#               judge_comment?, body? (markdown)}], pick (None when no
+#               candidate is preferred), reasoning?, caveats?: [str],
+#               free_text?: {input, submit} — a typed reply the gate also
+#               takes (a model name, 'more'), shown as a box under the picker
 #   compare     left: {label, blocks}, right: {label, blocks}
 #   notice      title, lines: [str], tone? (info|warn)
 SUBJECT_BLOCKS = ("text", "fields", "chips", "steps", "table", "figure",

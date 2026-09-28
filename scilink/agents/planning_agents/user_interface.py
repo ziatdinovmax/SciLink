@@ -716,7 +716,42 @@ def display_plan_candidates(candidates: List[Dict[str, Any]],
     print("\n" + "=" * 80)
 
 
-def get_candidate_selection(n_candidates: int, judge_pick: int) -> int:
+def plan_candidates_subject(candidates: List[Dict[str, Any]], judge: Dict[str, Any],
+                            selected: int, report_paths: Optional[List[str]] = None,
+                            pick_caveats: Optional[List[str]] = None) -> Dict[str, Any]:
+    """What the plan-candidate gate shows, as subject blocks (scilink.hitl):
+    the cards ``display_plan_candidates`` prints — name, the direction
+    fields, the judge's scores and comment, the report path — the judge's
+    reasoning and the caveats on the pick."""
+    scores_by_idx = {s.get("candidate"): s for s in judge.get("scores", [])
+                     if isinstance(s, dict)}
+    items = []
+    for i, cand in enumerate(candidates, 1):
+        exp = (cand.get("proposed_experiments") or [{}])[0]
+        body = "\n\n".join(f"{icon} **{label}.** {exp.get(key) or 'N/A'}"
+                             for icon, label, key in _CARD_FIELDS)
+        if report_paths and i <= len(report_paths):
+            body += f"\n\n📄 Full plan: `{report_paths[i - 1]}`"
+        comment = None
+        sc = scores_by_idx.get(i)
+        if sc:
+            comment = (f"groundedness {sc.get('groundedness', '?')}/5 · "
+                       f"testability {sc.get('testability', '?')}/5 · "
+                       f"actionability {sc.get('actionability', '?')}/5 · "
+                       f"feasibility {sc.get('feasibility', '?')}/5 · "
+                       f"info-gain {sc.get('information_gain', '?')}/5")
+            if sc.get("comment"):
+                comment += f" — {sc['comment']}"
+        items.append({"idx": i, "name": exp.get("experiment_name", "Unnamed"),
+                      "judge_comment": comment, "body": body})
+    block = subject_block("candidates", items=items, pick=selected,
+                          reasoning=judge.get("reasoning") or None,
+                          caveats=list(pick_caveats or []) or None)
+    return make_subject(f"🧭 Plan candidates — {len(candidates)} distinct strategies", [block])
+
+
+def get_candidate_selection(n_candidates: int, judge_pick: int,
+                            subject: Optional[Dict[str, Any]] = None) -> int:
     """
     Stage-1 selection prompt: accept the judge's pick (ENTER) or override by
     index. Selection only — free-text refinement belongs to the existing
@@ -738,6 +773,7 @@ def get_candidate_selection(n_candidates: int, judge_pick: int) -> int:
         f"\n> Selection (ENTER to accept plan candidate {judge_pick}): ",
         kind="plan_candidate_select",
         origin={"stage": "plan_candidates"},
+        subject=subject,
     ).strip()
 
     if reply.isdigit() and 1 <= int(reply) <= n_candidates:
@@ -793,7 +829,8 @@ def get_user_feedback(auto_repair: Optional[Dict[str, Any]] = None,
 _ADOPT_REPLIES = {"accept", "adopt", "keep", "y", "yes"}
 
 
-def get_reopen_decision(reason: str) -> Tuple[str, Optional[str]]:
+def get_reopen_decision(reason: str, subject: Optional[Dict[str, Any]] = None
+                        ) -> Tuple[str, Optional[str]]:
     """Gate for a revision of a plan the human ALREADY approved.
 
     The default is the opposite of ``get_user_feedback``: ENTER keeps the
@@ -813,6 +850,7 @@ def get_reopen_decision(reason: str) -> Tuple[str, Optional[str]]:
         "\n> Decision (ENTER keeps the approved plan): ",
         kind="keep_or_revert",
         options=["keep", "revert"],
+        subject=subject,
         origin={"stage": "plan_reopen", "reason": reason},
     ).strip()
 

@@ -3,7 +3,11 @@
 Status: plan, drafted 2026-09-26. Stage 1 (the contract, both renderers,
 the kind tables, the curve fitting plan gate) and stage 2 (the other plan
 gates: image analysis plan, hyperspectral preprocessing targets, series
-regime plan, planning-mode plan review) are implemented. Stage 3 was
+regime plan, planning-mode plan review) and stage 4 (the pickers and
+comparisons: best-of-N join on curves and images, series consensus,
+consistency keep-or-revert, plan candidates, plan reopen) are implemented;
+the user-guided keep-or-revert gates are out with the result gates they
+follow. Stage 3 was
 written and then dropped: the reachability audit below showed that none of
 the fit and result gates fires under the orchestrator's defaults, which
 matches the expectation that beyond plan approval and the best-of-N choice
@@ -183,8 +187,13 @@ the web UI live-test notes).
 3. ~~Fit and result gates~~ — dropped, see the audit: none fires under
    the defaults.
 4. **Candidate and compare gates** (best-of-N ×2, plan candidates,
-   consensus ×2, user-guided ×2, consistency ×2, plan reopen). Retires
-   `parse_bestofn_review` and `parse_plan_candidate_review`.
+   consensus ×2, consistency ×2, plan reopen). Done; `parse_bestofn_review`
+   and `parse_plan_candidate_review` retire with the regex path in stage 6.
+   Two contract points learned here: the keep-or-revert primary button sends
+   the gate's own first `options` word ("keep", "consensus"), never a fixed
+   "keep"; and a picker whose gate also takes a typed reply (a model name,
+   'more') says so on its candidates block (`free_text`), which becomes a
+   box under the picker on both surfaces.
 5. **Planning plan review, metadata, fan-out, image confirm.** Retires
    `parse_fanout_confirm`.
 6. **Retire the regex path.** `clean_context` and the classifier go;

@@ -236,6 +236,8 @@ class Widgets:
                         + f"[green]{mark}[/]"))
                     if c.get("judge_comment"):
                         lines.append(Text(f"     {c['judge_comment']}", style="dim"))
+                    if c.get("body"):
+                        lines.append(Markdown(str(c["body"])))
                     if c.get("figure_file") or c.get("figure"):
                         lines.append(Text(f"     figure: {c.get('figure_file') or c.get('figure')}",
                                           style="dim"))
@@ -321,7 +323,10 @@ class Widgets:
         labels = q.get("labels") or {}
         self._show_context(q)
         if widget == "keep_revert":
-            options = [("keep", labels.get("keep", "Keep"), ""),
+            # The primary reply is the gate's own first option ("keep",
+            # "consensus", ...); the empty reply is the other.
+            primary = (q.get("options") or ["keep"])[0] or "keep"
+            options = [(primary, labels.get("keep", "Keep"), ""),
                        ("", labels.get("revert", "Revert"), "")]
             if labels.get("submit"):
                 # The reopen gate's third reply: adopt the revision with
@@ -330,7 +335,7 @@ class Widgets:
             chosen = self._choose(options, default=1)
             if chosen == "__text__":
                 self.console.print(f"[bold]{labels.get('input', 'Your changes:')}[/]")
-                return self._read("").strip() or "keep"
+                return self._read("").strip() or primary
             return chosen
         if widget == "fanout_confirm":
             f = q.get("fanout") or {}
@@ -360,8 +365,18 @@ class Widgets:
             options = [(str(c.get("idx")), str(c.get("label")),
                         f"← {V.NAMES['judge_pick']}" if c.get("idx") == pick else "")
                        for c in cands]
-            default = next((n for n, c in enumerate(cands) if c.get("idx") == pick), 0)
+            if pick is None:
+                # No preferred candidate (a consensus question): the empty
+                # reply keeps things as they are and leads the list.
+                options.insert(0, ("", labels.get("accept", "Keep as-is"), ""))
+            if labels.get("input"):
+                # A typed reply the gate also takes (a model name, 'more').
+                options.append(("__text__", labels.get("submit", "Type a reply"), ""))
+            default = next((n for n, c in enumerate(options) if pick is not None and c[0] == str(pick)), 0)
             chosen = self._choose(options, default=default)
+            if chosen == "__text__":
+                self.console.print(f"[bold]{labels.get('input')}[/]")
+                return self._read("").strip()
             # The empty answer is "accept the judge's pick", as on the web.
             return "" if chosen == str(pick) else chosen
         # generic / dataset_description / code_review

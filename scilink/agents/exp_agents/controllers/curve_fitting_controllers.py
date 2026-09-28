@@ -38,7 +38,8 @@ from .._locked_exec import (
     DATA_NAME, CANDIDATES_DIR_NAME, atomic_np_save,
 )
 from .._qc_engine import CodegenQCEngine, QCEngineSpec, QCItemContext
-from .base_controllers import run_plan_refinement_gate, steps_block
+from .base_controllers import (bestofn_join_subject, consensus_subject, consistency_subject,
+                               run_plan_refinement_gate, steps_block)
 from ....utils.codegen_parse import parse_codegen_response
 from ....utils.synthesis_parse import salvage_synthesis_from_response
 from ....hitl import request_human_feedback
@@ -6369,12 +6370,15 @@ Return JSON with:
                 )
             print("-" * 60)
 
+            subject = bestofn_join_subject(candidates, winner, judge_info, allow_more,
+                                           "R²", self.output_dir)
             for _ in range(3):
                 response = request_human_feedback(
                     f"\nYour choice (Enter = accept candidate "
                     f"{winner['attempt']}): ",
                     kind="bestofn_select",
                     origin={"stage": "bestofn_join"},
+                    subject=subject,
                 ).strip()
 
                 if not response:
@@ -7818,6 +7822,8 @@ Return JSON: {{"script": "<the complete modified script>"}}
             "\n🤔 Your choice: ",
             kind="consensus_select",
             origin={"stage": "series_consensus"},
+            subject=consensus_subject(improved, model_counts, "spectra", "model",
+                                      "new_model", "new_r2", "R²"),
         ).strip()
         if not response:
             print("✅ Keeping independent refit results.")
@@ -7942,6 +7948,8 @@ Return JSON: {{"script": "<the complete modified script>"}}
             kind="keep_or_revert",
             options=["consensus", ""],
             origin={"stage": "consistency_result"},
+            subject=consistency_subject("spectrum", idx, name, "model", consensus_model,
+                                        consensus_r2, original_model, original_r2, "R²"),
         ).strip().lower()
         if response == "consensus":
             print(f"✅ Using consensus model for [{idx}] {name}")

@@ -307,6 +307,7 @@ def _present_from_subject(hreq, ctx: str, session_dir: str,
         "candidate_captions": {},
         "code_files": code_files,
         "origin": dict(hreq.origin),
+        "options": list(hreq.options) if hreq.options else None,
         "default": hreq.default,
         "subject": subject,
     }
@@ -314,12 +315,17 @@ def _present_from_subject(hreq, ctx: str, session_dir: str,
         block = next((b for b in subject["blocks"] if b["type"] == "candidates"), None)
         rows = _candidate_rows(block) if block else []
         if rows:
+            # ``pick`` None means no candidate is preferred (a consensus
+            # question): the picker starts unselected and Enter keeps as-is.
             pick = block.get("pick")
-            if pick not in [r["idx"] for r in rows]:
+            if pick is not None and pick not in [r["idx"] for r in rows]:
                 pick = rows[0]["idx"]
             payload["candidates"] = rows
             payload["judge_pick"] = pick
             labels["accept"] = labels["accept"].format(pick=pick)
+            if isinstance(block.get("free_text"), dict):
+                labels["input"] = str(block["free_text"].get("input") or "")
+                labels["submit"] = str(block["free_text"].get("submit") or "Send")
         else:
             # A picker with nothing to pick from is unusable; the text
             # widget still takes the number the gate's reply contract reads.
@@ -401,6 +407,7 @@ def present_question(hreq, context: str, session_dir: str) -> Dict[str, Any]:
         "widget": widget,
         "labels": labels,
         "prompt": prompt,
+        "options": list(hreq.options) if hreq.options else None,
         "context_display": "" if is_fanout else clean_context(ctx),
         "preview_images": _relpaths(preview_images, session_dir),
         "candidate_captions": candidate_captions,

@@ -62,3 +62,7 @@ def test_question_labels_layering():
     assert vocabulary.question_widget("nonsense") == "generic"
     # the pickers' accept label names the pick once the presenter fills it
     assert "{pick}" in vocabulary.question_labels("bestofn_select")["accept"]
+    # a consensus question prefers no candidate: its accept keeps things as-is
+    assert "{pick}" not in vocabulary.question_labels("consensus_select")["accept"]
+    assert vocabulary.question_labels("keep_or_revert", "consistency_result")["keep"] \
+        == "Use the consensus result"

@@ -63,6 +63,7 @@ from scilink.parsers import ingest_files, extract_images
 from .user_interface import (
     display_plan_summary,
     plan_subject,
+    plan_candidates_subject,
     get_user_feedback,
     display_plan_candidates,
     get_candidate_selection,
@@ -1429,18 +1430,21 @@ class PlanningAgent(BaseAgent):
         # critical finding never auto-switches the selection.
         if (bestofn_candidates and len(bestofn_candidates) > 1
                 and enable_human_feedback and not res.get("error")):
+            # The cards show the candidates as authored; if the pick was
+            # auto-corrected the reviewer must learn that here, not only at
+            # the plan gate after choosing.
+            pick_caveats = (
+                [f"Auto-repair: {c}" for c in
+                 format_auto_repair(res.get("auto_repair"))]
+                + format_caveats(res.get("critic_findings")))
             display_plan_candidates(
                 bestofn_candidates, bestofn_judge or {}, bestofn_selected,
-                report_paths=bestofn_reports,
-                # The cards show the candidates as authored; if the pick was
-                # auto-corrected the reviewer must learn that here, not only at
-                # the plan gate after choosing.
-                pick_caveats=(
-                    [f"Auto-repair: {c}" for c in
-                     format_auto_repair(res.get("auto_repair"))]
-                    + format_caveats(res.get("critic_findings"))),
-            )
-            choice = get_candidate_selection(len(bestofn_candidates), bestofn_selected)
+                report_paths=bestofn_reports, pick_caveats=pick_caveats)
+            choice = get_candidate_selection(
+                len(bestofn_candidates), bestofn_selected,
+                subject=plan_candidates_subject(
+                    bestofn_candidates, bestofn_judge or {}, bestofn_selected,
+                    report_paths=bestofn_reports, pick_caveats=pick_caveats))
             if choice != bestofn_selected:
                 print(f"  - 👤 Human override: Candidate {choice} "
                       f"(judge picked {bestofn_selected}).")
@@ -2066,7 +2070,9 @@ class PlanningAgent(BaseAgent):
         display_plan_summary(new_plan, ideation=ideation, report_path=report)
 
         if reopen_reason:
-            decision, feedback = get_reopen_decision(reopen_reason)
+            decision, feedback = get_reopen_decision(
+                reopen_reason,
+                subject=plan_subject(new_plan, ideation=ideation, report_path=report))
             if decision == "keep":
                 # The revision never happened as far as the campaign goes:
                 # its snapshots leave the history, the record stays in the log.

@@ -40,7 +40,8 @@ from .._locked_exec import (
     DATA_NAME, VIZ_NAME, CANDIDATES_DIR_NAME, atomic_np_save,
 )
 from .._qc_engine import CodegenQCEngine, QCEngineSpec, QCItemContext
-from .base_controllers import run_plan_refinement_gate, steps_block
+from .base_controllers import (bestofn_join_subject, consensus_subject, consistency_subject,
+                               run_plan_refinement_gate, steps_block)
 from ....utils.codegen_parse import parse_codegen_response
 from ....utils.synthesis_parse import salvage_synthesis_from_response
 from ....hitl import request_human_feedback
@@ -5009,12 +5010,15 @@ Return JSON with:
                 )
             print("-" * 60)
 
+            subject = bestofn_join_subject(candidates, winner, judge_info, allow_more,
+                                           "score", self.output_dir)
             for _ in range(3):
                 response = request_human_feedback(
                     f"\nYour choice (Enter = accept candidate "
                     f"{winner['attempt']}): ",
                     kind="bestofn_select",
                     origin={"stage": "bestofn_join"},
+                    subject=subject,
                 ).strip()
 
                 if not response:
@@ -6546,6 +6550,8 @@ class ImageAdaptiveRefitController:
             "\nYour choice: ",
             kind="consensus_select",
             origin={"stage": "series_consensus"},
+            subject=consensus_subject(improved, pipeline_counts, "images", "pipeline",
+                                      "new_pipeline", "new_score", "score"),
         ).strip()
         if not response:
             print("Keeping independent refit results.")
@@ -6716,6 +6722,9 @@ class ImageAdaptiveRefitController:
             kind="keep_or_revert",
             options=["consensus", ""],
             origin={"stage": "consistency_result"},
+            subject=consistency_subject("image", idx, name, "pipeline", consensus_pipeline,
+                                        consensus_score, original_pipeline, original_score,
+                                        "score"),
         ).strip().lower()
         if response == "consensus":
             print(f"Using consensus pipeline for [{idx}] {name}")

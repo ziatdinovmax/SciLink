@@ -126,8 +126,11 @@ export type SubjectBlock = { label?: string } & (
         approved?: boolean;
         figure?: string | null;
         judge_comment?: string;
+        /** markdown under the card head (a plan candidate's fields) */
+        body?: string;
       }[];
-      pick?: number;
+      /** null when no candidate is preferred (a consensus question) */
+      pick?: number | null;
       reasoning?: string;
       caveats?: string[];
     }
@@ -173,6 +176,9 @@ export interface PresentedQuestion {
   /** What the decision is about: the auto-correction a revert would undo,
    * or why an approved plan is being reopened. */
   notice?: { title: string; lines: string[] };
+  /** The gate's own reply words when it declared them: the first is the
+   * keep-or-revert primary ("keep", "consensus", ...). */
+  options?: string[] | null;
   /** Present when the gate declared what is under review; the panel then
    * renders these blocks and keeps `context_display` behind a disclosure. */
   subject?: QuestionSubject;

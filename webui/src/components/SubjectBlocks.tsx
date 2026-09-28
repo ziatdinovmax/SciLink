@@ -183,6 +183,11 @@ function Block({
                   {isPick && <span className="qs-chip qs-pick">{VOCAB.names.judge_pick}</span>}
                 </div>
                 {c.judge_comment && <p className="caption">{c.judge_comment}</p>}
+                {c.body && (
+                  <div className="qs-candidate-body">
+                    <MarkdownBody text={c.body} escapeTilde />
+                  </div>
+                )}
                 {c.figure && (
                   <img
                     className="preview"

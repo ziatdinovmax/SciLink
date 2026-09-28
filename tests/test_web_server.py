@@ -208,6 +208,34 @@ def test_present_subject_candidates_feed_the_picker(tmp_path):
     assert q["widget"] == "generic" and "candidates" not in q
 
 
+def test_present_subject_options_free_text_and_no_pick(tmp_path):
+    """The gate's reply words travel; a candidates block with no preferred
+    candidate leaves the picker unselected; a typed reply the gate takes
+    becomes the picker's box."""
+    hreq = FeedbackRequest(prompt="", kind="keep_or_revert", options=["consensus", ""],
+                           origin={"stage": "consistency_result"},
+                           subject=_subject({"type": "compare",
+                                             "left": {"label": "Consensus", "blocks": []},
+                                             "right": {"label": "Independent", "blocks": []}}))
+    q = present_question(hreq, "", str(tmp_path))
+    assert q["widget"] == "keep_revert" and q["options"] == ["consensus", ""]
+    assert q["labels"]["keep"] == "Use the consensus result"
+    hreq = FeedbackRequest(prompt="", kind="consensus_select", subject=_subject(
+        {"type": "candidates", "pick": None,
+         "items": [{"idx": 1, "name": "Voigt"}, {"idx": 2, "name": "Gaussian"}],
+         "free_text": {"input": "Or suggest a different model:", "submit": "Use this model"}}))
+    q = present_question(hreq, "", str(tmp_path))
+    assert q["widget"] == "bestofn" and q["judge_pick"] is None
+    assert q["labels"]["accept"] == "Keep the independent results"
+    assert q["labels"]["input"] == "Or suggest a different model:"
+    assert q["labels"]["submit"] == "Use this model"
+    assert q["candidates"][0]["label"] == "Candidate 1 — Voigt"
+    # the legacy path carries the options too
+    q = present_question(FeedbackRequest(prompt="", kind="keep_or_revert",
+                                         options=["keep", "revert"]), "", str(tmp_path))
+    assert q["options"] == ["keep", "revert"]
+
+
 def test_present_subject_keeps_auto_repair_and_code_files(tmp_path):
     review = tmp_path / "temp_code_review"
     review.mkdir()
