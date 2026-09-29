@@ -12,7 +12,9 @@ review-gated, two ways:
 
 Staging lives at ``scilink_home()/distill_staging/<domain>/<id>.json`` — a sibling
 of ``graduated_skills/`` so the skill loader never mistakes a staged record for a
-skill. The module is package-neutral (``ase``-free): stdlib + the ``_graduation``
+skill. Staging a record creates a new file and needs no lock; everything that
+changes or consumes records holds the domain's lock (``<domain>/.records.lock``),
+taken before a skill's lock (``_graduation.skill_lock``) whenever both are held. The module is package-neutral (``ase``-free): stdlib + the ``_graduation``
 helper + the loader, same as ``_memory``.
 """
 from __future__ import annotations
@@ -22,9 +24,11 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from ...utils.file_lock import path_lock
 from ...utils.text_io import atomic_write_text
 from ..loader import scilink_home, load_skill, list_skills, graduated_skills_dir
-from ._graduation import graduate_to_skill_file, safe_path_component, warn_if_ephemeral_store
+from ._graduation import (graduate_to_skill_file, safe_path_component, skill_lock,
+                          warn_if_ephemeral_store)
 
 
 # Friendly, jargon-free labels for record provenance (the stored values stay as
@@ -76,6 +80,13 @@ def consolidate_min_n() -> int:
 def _domain_dir(domain: str, *, root: Optional[Path] = None) -> Path:
     # domain is a filesystem component — sanitize to prevent path traversal.
     return (root or staging_dir()) / safe_path_component(domain, fallback="unknown_domain")
+
+
+def _domain_lock(domain: str, *, root: Optional[Path] = None):
+    """Held by everything that changes or consumes a domain's staged records.
+    Not reentrant: code already holding it calls the ``_unlocked`` helpers."""
+    return path_lock(_domain_dir(domain, root=root) / ".records",
+                     label=f"staged {domain} records")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -155,27 +166,35 @@ def relabel_staged(domain: str, sid: str, technique: str, *,
     The label is normalized the same way as assigned labels.
     """
     import re
-    rec = get_staged(domain, sid, root=root)
-    if rec is None:
-        return {"status": "error", "message": f"No staged record {domain}/{sid}."}
     label = re.sub(r"[^a-z0-9]+", "_", str(technique).lower()).strip("_")[:48]
     if not label:
         return {"status": "error", "message": "Empty technique label."}
-    rec["technique"] = label
-    atomic_write_text(_domain_dir(domain, root=root) / f"{sid}.json",
-                      json.dumps(rec, indent=2, default=str))
+    with _domain_lock(domain, root=root):
+        rec = get_staged(domain, sid, root=root)
+        if rec is None:
+            return {"status": "error", "message": f"No staged record {domain}/{sid}."}
+        rec["technique"] = label
+        atomic_write_text(_domain_dir(domain, root=root) / f"{sid}.json",
+                          json.dumps(rec, indent=2, default=str))
     return {"status": "success", "technique": label, "id": sid}
 
 
 def remove_staged(domain: str, ids: List[str], *, root: Optional[Path] = None) -> int:
     """Delete staged records by id; return count removed."""
+    with _domain_lock(domain, root=root):
+        return _remove_staged_unlocked(domain, ids, root=root)
+
+
+def _remove_staged_unlocked(domain: str, ids: List[str], *,
+                            root: Optional[Path] = None) -> int:
     d = _domain_dir(domain, root=root)
     n = 0
     for sid in ids:
-        f = d / f"{sid}.json"
-        if f.exists():
-            f.unlink()
+        try:
+            (d / f"{sid}.json").unlink()
             n += 1
+        except FileNotFoundError:
+            pass
     return n
 
 
@@ -537,6 +556,17 @@ def apply_skill_upgrade(
     staged records are removed.
     """
     target_md = _skill_md_path(target_domain, target_name, skills_root)
+    with _domain_lock(domain, root=root), skill_lock(target_md):
+        return _apply_skill_upgrade_unlocked(
+            domain, staged_ids, target_domain=target_domain, target_name=target_name,
+            proposed_content=proposed_content, root=root, skills_root=skills_root)
+
+
+def _apply_skill_upgrade_unlocked(domain: str, staged_ids: List[str], *, target_domain: str,
+                                  target_name: str, proposed_content: str,
+                                  root: Optional[Path], skills_root: Optional[Path]
+                                  ) -> Dict[str, Any]:
+    target_md = _skill_md_path(target_domain, target_name, skills_root)
     if not target_md.exists():
         return _missing_target_error(target_domain, target_name)
     # Back up the current version (single last-version undo; .bak is ignored by
@@ -545,7 +575,7 @@ def apply_skill_upgrade(
     atomic_write_text(backup, target_md.read_text())
     (target_md.parent / "__init__.py").touch()
     atomic_write_text(target_md, proposed_content)
-    removed = remove_staged(domain, staged_ids, root=root)
+    removed = _remove_staged_unlocked(domain, staged_ids, root=root)
     return {
         "status": "success",
         "method": "updated",
@@ -575,18 +605,22 @@ def upgrade_skill_from_staged(
 
     Interactive surfaces should call ``propose_skill_upgrade`` → show the diff →
     ``apply_skill_upgrade`` so a human reviews the merged content. This wrapper
-    still backs up the pre-upgrade file (via ``apply_skill_upgrade``).
+    still backs up the pre-upgrade file (via ``apply_skill_upgrade``). The
+    proposal and the write are made under one hold of the locks, so the skill
+    written is the one the proposal merged into.
     """
-    prop = propose_skill_upgrade(
-        domain, staged_ids, target_domain=target_domain, target_name=target_name,
-        llm_call=llm_call, fresh_template=fresh_template,
-        update_template=update_template, root=root, skills_root=skills_root)
-    if prop.get("status") != "success":
-        return prop
-    return apply_skill_upgrade(
-        domain, prop["staged_ids"], target_domain=target_domain,
-        target_name=target_name, proposed_content=prop["proposed_content"],
-        root=root, skills_root=skills_root)
+    target_md = _skill_md_path(target_domain, target_name, skills_root)
+    with _domain_lock(domain, root=root), skill_lock(target_md):
+        prop = propose_skill_upgrade(
+            domain, staged_ids, target_domain=target_domain, target_name=target_name,
+            llm_call=llm_call, fresh_template=fresh_template,
+            update_template=update_template, root=root, skills_root=skills_root)
+        if prop.get("status") != "success":
+            return prop
+        return _apply_skill_upgrade_unlocked(
+            domain, prop["staged_ids"], target_domain=target_domain,
+            target_name=target_name, proposed_content=prop["proposed_content"],
+            root=root, skills_root=skills_root)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -613,41 +647,44 @@ def consolidate_technique(
     and reusable); the consumed staging records are deleted, so a script survives
     only where its bank record still holds it.
     """
-    recs = list_staged(domain, technique, root=root)
-    if not recs:
-        return {"status": "error", "message": f"No staged solutions for {domain}/{technique}."}
+    # Held from reading the records to consuming them: a second consolidation
+    # of the same technique waits, then finds nothing left to consolidate.
+    with _domain_lock(domain, root=root):
+        recs = list_staged(domain, technique, root=root)
+        if not recs:
+            return {"status": "error", "message": f"No staged solutions for {domain}/{technique}."}
 
-    knowledge_entry = {
-        "technique": technique,
-        "n_examples": len(recs),
-        "examples": [_record_for_prompt(r) for r in recs],
-    }
-    # The measurement techniques the examples were recorded under become
-    # the skill's routing key (built-ins carry ``technique:`` in their
-    # frontmatter; the selectors read it).
-    measured = []
-    for r in recs:
-        for src in (r.get("measurement_context"), r.get("system_info")):
-            if isinstance(src, dict) and src.get("technique"):
-                measured.append(src["technique"])
-    skill_name = f"auto_{technique}"
-    result = graduate_to_skill_file(
-        knowledge_entry=knowledge_entry,
-        skill_name=skill_name,
-        domain=domain,
-        llm_call=llm_call,
-        fresh_template=consolidation_template,
-        update_template=update_template,
-        skills_root=skills_root,
-        extra_meta={
-            "technique": measured or None,
-            "provisional": True,
-            "provenance": "t2_consolidated",
+        knowledge_entry = {
+            "technique": technique,
             "n_examples": len(recs),
-        },
-    )
-    if result.get("status") == "success":
-        remove_staged(domain, [r["id"] for r in recs if r.get("id")], root=root)
-        result["consumed_staged"] = [r.get("id") for r in recs]
-        result["n_examples"] = len(recs)
-    return result
+            "examples": [_record_for_prompt(r) for r in recs],
+        }
+        # The measurement techniques the examples were recorded under become
+        # the skill's routing key (built-ins carry ``technique:`` in their
+        # frontmatter; the selectors read it).
+        measured = []
+        for r in recs:
+            for src in (r.get("measurement_context"), r.get("system_info")):
+                if isinstance(src, dict) and src.get("technique"):
+                    measured.append(src["technique"])
+        skill_name = f"auto_{technique}"
+        result = graduate_to_skill_file(
+            knowledge_entry=knowledge_entry,
+            skill_name=skill_name,
+            domain=domain,
+            llm_call=llm_call,
+            fresh_template=consolidation_template,
+            update_template=update_template,
+            skills_root=skills_root,
+            extra_meta={
+                "technique": measured or None,
+                "provisional": True,
+                "provenance": "t2_consolidated",
+                "n_examples": len(recs),
+            },
+        )
+        if result.get("status") == "success":
+            _remove_staged_unlocked(domain, [r["id"] for r in recs if r.get("id")], root=root)
+            result["consumed_staged"] = [r.get("id") for r in recs]
+            result["n_examples"] = len(recs)
+        return result
