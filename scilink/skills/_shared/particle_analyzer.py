@@ -7,7 +7,6 @@ to SAM without the lossy gray-to-RGB triplication.
 """
 
 import os
-import urllib.request
 import logging
 from typing import Optional, Dict, Any, List
 
@@ -126,9 +125,11 @@ class ParticleAnalyzer:
             url = cls._MODEL_URLS.get(model_type)
             if url is None:
                 raise ValueError(f"Unknown model type: '{model_type}'. Cannot download.")
-            logger.info(f"Downloading SAM checkpoint for '{model_type}' ...")
-            urllib.request.urlretrieve(url, checkpoint_path)
-            logger.info(f"Saved to '{checkpoint_path}'.")
+            # Locked and published whole: concurrent analyses on a fresh
+            # machine download once and never load a half-written .pth.
+            from scilink.utils.download import download_once
+            logger.info(f"Fetching SAM checkpoint for '{model_type}' ...")
+            download_once(url, checkpoint_path, logger=logger)
 
         return checkpoint_path
 

@@ -71,20 +71,27 @@ def get_or_download_atomistic_model(settings: dict, logger: logging.Logger = Non
     if not os.path.isabs(default_path) and not os.path.isdir(default_path):
         default_path = _persistent_model_dir(default_path)
 
-    if not os.path.isdir(default_path) or not _locate_model_files(default_path, logging.getLogger("quiet")):
-        logger.warning(f"Default model directory '{default_path}' not found. Downloading...")
-        
-        # Download the model
-        success = _download_and_extract_model(
-            gdrive_id=DCNN_MODEL_GDRIVE_ID,
-            output_dir=default_path,
-            logger=logger,
-            url=DCNN_MODEL_URL,
-        )
-        
-        if not success:
-            logger.error("Failed to download and extract the model.")
-            return None
+    def _ready() -> bool:
+        return os.path.isdir(default_path) and bool(
+            _locate_model_files(default_path, logging.getLogger("quiet")))
+
+    if not _ready():
+        # Several analyses can reach a missing ensemble at once (fan-out
+        # branches, best-of-N candidates, spawned series replays). The lock
+        # makes one of them download; the others wait and then find it.
+        from scilink.utils.file_lock import path_lock
+        with path_lock(default_path, label="the DCNN ensemble"):
+            if not _ready():
+                logger.warning(f"Default model directory '{default_path}' not found. Downloading...")
+                success = _download_and_extract_model(
+                    gdrive_id=DCNN_MODEL_GDRIVE_ID,
+                    output_dir=default_path,
+                    logger=logger,
+                    url=DCNN_MODEL_URL,
+                )
+                if not success:
+                    logger.error("Failed to download and extract the model.")
+                    return None
     
     # 3. Locate model files
     model_path = _locate_model_files(default_path, logger)
@@ -113,23 +120,15 @@ DEFAULT_DCNN_MODEL_URL = ("https://github.com/ziatdinovmax/SciLink/releases/down
 
 def _download_url(url: str, dest: str, logger: logging.Logger) -> Optional[str]:
     """Stream ``url`` to ``dest``; the path on success, ``None`` on any failure
-    (a partial file is removed). Plain HTTPS, no third-party client."""
-    import shutil
-    import urllib.request
-    tmp = dest + ".part"
+    (a partial file is removed, and a short transfer is a failure). Plain
+    HTTPS, no third-party client."""
+    from scilink.utils.download import fetch_to
     try:
-        os.makedirs(os.path.dirname(os.path.abspath(dest)) or ".", exist_ok=True)
-        with urllib.request.urlopen(url, timeout=60) as resp, open(tmp, "wb") as fh:
-            shutil.copyfileobj(resp, fh, length=1 << 20)
-        os.replace(tmp, dest)
+        fetch_to(url, dest)
         logger.info(f"Downloaded {os.path.getsize(dest) / 1e6:.0f} MB from {url}")
         return dest
     except Exception as exc:  # noqa: BLE001 - the caller falls back
         logger.warning(f"Download from {url} failed: {exc}")
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
         return None
 
 
@@ -155,35 +154,61 @@ def _download_and_extract_model(gdrive_id: str, output_dir: str, logger: logging
     # call sites below stable.
     from scilink.skills.image_analysis.atomic_stem import atomic_stem as atomistic_tools
     
-    zip_filename = f"{output_dir}.zip"
-    
-    # Download: the release asset first, Google Drive as the fallback
-    downloaded_zip_path = None
-    if url:
-        logger.info(f"Downloading model from {url} ...")
-        downloaded_zip_path = _download_url(url, zip_filename, logger)
-    if not downloaded_zip_path:
-        logger.info(f"Downloading model from Google Drive (ID: {gdrive_id})...")
-        downloaded_zip_path = atomistic_tools.download_file_with_gdown(
-            gdrive_id, zip_filename, logger
-        )
-    
-    if not downloaded_zip_path or not os.path.exists(downloaded_zip_path):
-        logger.error("Failed to download the model.")
-        return False
-    
-    # Extract
-    logger.info(f"Extracting model to {output_dir}...")
-    unzip_success = atomistic_tools.unzip_file(downloaded_zip_path, output_dir, logger)
-    
-    # Cleanup zip file
+    import shutil
+    from scilink.utils.download import unique_sibling
+
+    # Every intermediate is uniquely named beside the destination (created
+    # with the umask applied by the kernel), and the extracted folder is
+    # published with one rename: a concurrent reader sees no ensemble or the
+    # whole ensemble, never some of its members.
+    out = os.path.abspath(output_dir)
+    parent, name = os.path.dirname(out), os.path.basename(out)
+    zip_filename = str(unique_sibling(parent, f".{name}.", ".zip"))
+    staging = str(unique_sibling(parent, f".{name}.", ".extract", directory=True))
     try:
-        os.remove(downloaded_zip_path)
-        logger.info(f"Cleaned up downloaded zip file: {downloaded_zip_path}")
-    except OSError as e:
-        logger.warning(f"Could not remove zip file {downloaded_zip_path}: {e}")
-    
-    return unzip_success
+        # Download: the release asset first, Google Drive as the fallback
+        downloaded_zip_path = None
+        if url:
+            logger.info(f"Downloading model from {url} ...")
+            downloaded_zip_path = _download_url(url, zip_filename, logger)
+        if not downloaded_zip_path:
+            logger.info(f"Downloading model from Google Drive (ID: {gdrive_id})...")
+            downloaded_zip_path = atomistic_tools.download_file_with_gdown(
+                gdrive_id, zip_filename, logger
+            )
+
+        if (not downloaded_zip_path or not os.path.exists(downloaded_zip_path)
+                or os.path.getsize(downloaded_zip_path) == 0):
+            logger.error("Failed to download the model.")
+            return False
+
+        logger.info(f"Extracting model to {output_dir}...")
+        if not atomistic_tools.unzip_file(downloaded_zip_path, staging, logger):
+            return False
+
+        if os.path.exists(out):
+            if _locate_model_files(out, logging.getLogger("quiet")):
+                # Published by another process while this one downloaded
+                # (possible where locking is unavailable): keep theirs.
+                return True
+            # An incomplete folder from an earlier interrupted run is moved
+            # aside, not deleted: it may hold something the user put there.
+            aside = str(unique_sibling(parent, f".{name}.", ".stale", directory=True))
+            os.rename(out, os.path.join(aside, name))
+            logger.warning(f"Moved the incomplete '{output_dir}' aside to '{aside}'.")
+        try:
+            os.rename(staging, out)
+        except OSError:
+            if _locate_model_files(out, logging.getLogger("quiet")):
+                return True             # lost a publish race to a complete copy
+            raise
+        return True
+    finally:
+        try:
+            os.remove(zip_filename)
+        except OSError:
+            pass
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def _locate_model_files(search_dir: str, logger: logging.Logger) -> str | None:
