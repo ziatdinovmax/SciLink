@@ -1376,6 +1376,7 @@ class PlanningOrchestratorAgent:
         self.message_count += 1
         self._last_chat_hit_iter_cap = False
         self._last_chat_error = None
+        self._refresh_store_kb()
 
         # AUTO-CHECKPOINT: Every 10 messages
         if self.message_count - self.last_checkpoint_message_count >= 10:
@@ -1660,6 +1661,35 @@ class PlanningOrchestratorAgent:
                 new_total = sum(len(m.get("content", "") or "") for m in self.messages)
                 print(f"  📦 Compressed {compressed} large tool result(s) in history "
                       f"({total_chars:,} → {new_total:,} chars)")
+
+    def _refresh_store_kb(self) -> bool:
+        """Re-copy an attached store KB when it was published again since
+        this session copied it (a ``scilink kb add`` from another process,
+        another session's addition). Checked at the start of every turn;
+        costs a manifest read when nothing changed.
+
+        Documents this session embedded into its own copy are dropped by the
+        refresh; the planner re-embeds any it is given again (it embeds what
+        its KB lacks), so nothing is lost but the time.
+        """
+        if self._kb_store_manifest is None or not self.knowledge_dir:
+            return False
+        from ...knowledge.kb_store import read_manifest, snapshot_is_current, snapshot_kb
+        cache = self.base_dir / "kb_cache"
+        if snapshot_is_current(self.knowledge_dir, cache):
+            return False
+        try:
+            snapshot_kb(self.knowledge_dir, cache)
+        except (FileNotFoundError, RuntimeError) as exc:
+            logging.warning(f"Knowledge base changed but could not be re-copied ({exc}); "
+                            "keeping this session's copy.")
+            return False
+        self._kb_store_manifest = read_manifest(self.knowledge_dir) or self._kb_store_manifest
+        self.planner.rebind_kb(str(cache / "default_kb"))
+        n = len((self._kb_store_manifest or {}).get("sources") or [])
+        print(f"  📚 Knowledge base '{self.knowledge_dir.name}' was updated since this session "
+              f"copied it; refreshed ({n} sources).")
+        return True
 
     def _auto_checkpoint(self, quiet: bool = False):
         """Internal auto-checkpoint without LLM interaction."""
