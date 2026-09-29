@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..skills.loader import scilink_home
+from ..utils.file_lock import path_lock
 from ..utils.text_io import atomic_write_text
 
 _logger = logging.getLogger(__name__)
@@ -191,6 +192,30 @@ def embedding_compat_warning(manifest: Optional[Dict[str, Any]],
     return None
 
 
+def _serialized_per_kb(fn):
+    """Run a store mutation under a lock on the KB's name.
+
+    Two builds of one KB used to share ``.staging_<name>``, and each began by
+    deleting it, so they destroyed each other's work; two concurrent
+    ``add_to_kb`` calls would each copy the live KB, add their documents and
+    swap in, and the first addition was silently lost. Under the lock (held
+    across threads and processes) a second caller waits, then works on what
+    the first one published, and the fixed staging and backup names are safe:
+    only the lock holder can be building this KB, so a staging directory it
+    finds is a dead build's.
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(name, *args, **kwargs):
+        _validate_name(name)
+        store = kb_store_dir()
+        store.mkdir(parents=True, exist_ok=True)
+        with path_lock(store / f".{name}"):
+            return fn(name, *args, **kwargs)
+    return wrapper
+
+
 def _swap_into_place(staging: Path, final: Path) -> None:
     """Publish `staging` at `final` without the KB ever being absent.
 
@@ -294,6 +319,7 @@ def _build_index_into(target: Path, embedding_model: str,
     return len(chunks), int(kb.index.ntotal) if kb.index else 0
 
 
+@_serialized_per_kb
 def create_kb(name: str,
               source_paths: List[str],
               embedding_model: str = "gemini-embedding-001",
@@ -360,6 +386,7 @@ def create_kb(name: str,
     return read_manifest(final)
 
 
+@_serialized_per_kb
 def import_kb(name: str,
               from_dir: str,
               embedding_model: str = "unknown",
@@ -432,6 +459,7 @@ def import_kb(name: str,
     return read_manifest(final)
 
 
+@_serialized_per_kb
 def add_to_kb(name: str,
               source_paths: List[str],
               api_key: Optional[str] = None,
@@ -560,6 +588,7 @@ def _append_index_into(target: Path, new_doc_paths: List[str],
     return len(chunks), (int(kb.index.ntotal) if kb.index else 0) - before
 
 
+@_serialized_per_kb
 def rebuild_kb(name: str,
                embedding_model: str,
                api_key: Optional[str] = None,
@@ -607,6 +636,7 @@ def rebuild_kb(name: str,
     return read_manifest(final)
 
 
+@_serialized_per_kb
 def delete_kb(name: str) -> None:
     """Remove a named KB from the store."""
     final = kb_path(name)

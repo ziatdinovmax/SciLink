@@ -15,18 +15,35 @@ where directories are.
 
 from __future__ import annotations
 
+import contextlib
 import json
-import os
-import threading
 import time
 from pathlib import Path
 from typing import Any, Collection, Dict, List, Optional
 
 from scilink.skills.loader import scilink_home
+from scilink.utils.file_lock import path_lock
+from scilink.utils.text_io import atomic_write_text
 from scilink.ui.session_meta import load_session_name, session_label
 from scilink.ui.vocabulary import session_prefixes
 
-_lock = threading.Lock()
+
+@contextlib.contextmanager
+def _index_lock():
+    """The sessions index is rewritten whole on every change, by every
+    SciLink process on the machine; the lock is held across threads and
+    processes around each read-modify-write. A home that cannot hold the
+    lock file runs unlocked: the index is a convenience."""
+    lock = path_lock(index_path())
+    try:
+        lock.__enter__()
+    except OSError:
+        yield
+        return
+    try:
+        yield
+    finally:
+        lock.__exit__(None, None, None)
 
 
 # ── the index ────────────────────────────────────────────────────
@@ -59,11 +76,8 @@ def _write_index(records: Dict[str, Dict[str, Any]]) -> None:
     path = index_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".jsonl.tmp")
-        with open(tmp, "w", encoding="utf-8") as fh:
-            for rec in records.values():
-                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        os.replace(tmp, path)
+        atomic_write_text(path, "".join(json.dumps(rec, ensure_ascii=False) + "\n"
+                                        for rec in records.values()))
     except OSError:
         pass   # the index is a convenience; never break a session over it
 
@@ -72,7 +86,7 @@ def register_session(session_dir, mode: str, *, launcher_cwd=None) -> Dict[str, 
     """Record (or refresh) a session in the index. Idempotent per path."""
     sd = Path(session_dir).resolve()
     now = time.time()
-    with _lock:
+    with _index_lock():
         records = _read_index()
         rec = records.get(str(sd)) or {"created": now}
         rec.update({
@@ -94,7 +108,7 @@ def touch_session(session_dir) -> None:
     """Refresh a session's ``updated`` time and display name (no-op if the
     session was never registered)."""
     sd = str(Path(session_dir).resolve())
-    with _lock:
+    with _index_lock():
         records = _read_index()
         rec = records.get(sd)
         if rec is None:
@@ -173,7 +187,7 @@ def list_sessions(mode: str, *, root=None,
     roots it holds every user's sessions, and a user's list must not."""
     excluded = set(exclude)
     entries: Dict[str, Dict[str, Any]] = {}
-    with _lock:
+    with _index_lock():
         records = _read_index()
         stale = [p for p in records if not Path(p).is_dir()]
         if stale:
@@ -207,7 +221,7 @@ def resolve_session(ref: str, mode: Optional[str] = None, *, root=None,
     local = Path(root or Path.cwd()) / ref
     if local.is_dir():
         return local.resolve() if _under(local, within) else None
-    with _lock:
+    with _index_lock():
         records = _read_index()
     matches = [Path(r["path"]) for r in records.values()
                if r.get("id") == ref and (mode is None or r.get("mode") == mode)
