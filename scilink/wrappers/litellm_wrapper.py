@@ -277,30 +277,134 @@ _TRANSIENT_STATUS = frozenset({408, 429, 500, 502, 503, 504, 529})
 _logger = logging.getLogger(__name__)
 
 
-def _is_transient(exc: BaseException) -> bool:
-    """A provider error a later attempt can succeed on: throttling, overload,
-    a server fault, a timeout, a dropped connection. A bad request, bad
-    credentials or an unknown model are not retried."""
+def llm_retries() -> int:
+    """Retries after the first attempt (``SCILINK_LLM_RETRIES`` overrides)."""
+    try:
+        return max(0, int(os.environ.get("SCILINK_LLM_RETRIES", LLM_RETRIES)))
+    except ValueError:
+        return LLM_RETRIES
+
+
+def llm_timeout_s() -> float:
+    """Per-attempt timeout (``SCILINK_LLM_TIMEOUT_S`` overrides: a local
+    model or a slow proxy may need more)."""
+    try:
+        return float(os.environ.get("SCILINK_LLM_TIMEOUT_S", LLM_TIMEOUT_S))
+    except ValueError:
+        return float(LLM_TIMEOUT_S)
+
+
+def _chain(exc: BaseException):
+    """The exception and everything it was raised from, outermost first."""
+    seen, cur = set(), exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        yield cur
+        cur = cur.__cause__ or cur.__context__
+
+
+def _http_status(e: BaseException) -> Optional[int]:
+    for attr in ("status_code", "status"):
+        v = getattr(e, attr, None)
+        if isinstance(v, int) and 100 <= v < 600:
+            return v
+    resp = getattr(e, "response", None)
+    v = getattr(resp, "status_code", None)
+    return v if isinstance(v, int) and 100 <= v < 600 else None
+
+
+def _is_transport_error(e: BaseException) -> bool:
+    """A network-level failure (refused, reset, dropped, timed out) that
+    carries no HTTP status of its own."""
+    try:
+        import httpx
+        if isinstance(e, httpx.TransportError):
+            return True
+    except ImportError:  # pragma: no cover
+        pass
+    return isinstance(e, (ConnectionError, TimeoutError))
+
+
+def _retry_class(exc: BaseException) -> Optional[str]:
+    """How a provider error may be retried: ``"full"`` (throttling, overload,
+    a server fault, a dropped connection), ``"once"`` (a timeout, or an error
+    LiteLLM could not classify), or ``None`` (a bad request, bad credentials,
+    an unknown model: no retry can fix those).
+
+    LiteLLM wraps whatever it cannot map in ``APIConnectionError`` with status
+    500, so the status the provider actually sent is looked for down the
+    ``__cause__`` chain first: on Bedrock a malformed or wrong API key arrives
+    as ``APIConnectionError`` 500 whose cause is a 403.
+    """
+    inner = [_http_status(e) for e in list(_chain(exc))[1:]]
+    for status in inner:
+        if status is not None:
+            if 400 <= status < 500 and status not in (408, 429):
+                return None
+            break
     if litellm is not None:
-        transient = tuple(c for c in (
+        timeout_cls = getattr(litellm, "Timeout", None)
+        if isinstance(timeout_cls, type) and isinstance(exc, timeout_cls):
+            return "once"
+        conn_cls = getattr(litellm, "APIConnectionError", None)
+        if isinstance(conn_cls, type) and isinstance(exc, conn_cls):
+            # LiteLLM's catch-all: a real transport failure keeps the full
+            # budget, anything else gets one retry.
+            if any(_is_transport_error(e) for e in _chain(exc)):
+                return "full"
+            if any(s in _TRANSIENT_STATUS for s in inner if s is not None):
+                return "full"
+            return "once"
+        full = tuple(c for c in (
             getattr(litellm, "RateLimitError", None),
             getattr(litellm, "ServiceUnavailableError", None),
             getattr(litellm, "InternalServerError", None),
             getattr(litellm, "BadGatewayError", None),
-            getattr(litellm, "Timeout", None),
-            getattr(litellm, "APIConnectionError", None),
         ) if isinstance(c, type))
-        if transient and isinstance(exc, transient):
-            return True
-    return getattr(exc, "status_code", None) in _TRANSIENT_STATUS
+        if full and isinstance(exc, full):
+            return "full"
+    if _http_status(exc) in _TRANSIENT_STATUS:
+        return "full"
+    return None
+
+
+def _is_transient(exc: BaseException) -> bool:
+    return _retry_class(exc) is not None
+
+
+def _response_headers(exc: BaseException):
+    """The provider's real response headers. LiteLLM puts them on
+    ``litellm_response_headers``; ``exc.response`` is a placeholder it builds
+    with empty headers."""
+    for e in _chain(exc):
+        h = getattr(e, "litellm_response_headers", None)
+        if h:
+            return h
+        resp = getattr(e, "response", None)
+        h = getattr(resp, "headers", None)
+        if h:
+            return h
+    return None
 
 
 def _retry_after_s(exc: BaseException) -> Optional[float]:
-    try:
-        value = exc.response.headers.get("retry-after")   # type: ignore[attr-defined]
-        return max(0.0, min(float(value), _BACKOFF_CAP_S)) if value is not None else None
-    except Exception:  # noqa: BLE001 - absent, or an HTTP date: back off normally
+    """The server's requested wait (``retry-after-ms`` or ``retry-after`` in
+    seconds), capped at the backoff ceiling; None when absent or an HTTP
+    date."""
+    headers = _response_headers(exc)
+    if not headers:
         return None
+    try:
+        get = headers.get
+        ms = get("retry-after-ms") or get("Retry-After-Ms")
+        if ms is not None:
+            return max(0.0, min(float(ms) / 1000.0, _BACKOFF_CAP_S))
+        sec = get("retry-after") or get("Retry-After")
+        if sec is not None:
+            return max(0.0, min(float(sec), _BACKOFF_CAP_S))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return None
 
 
 def _backoff_s(attempt: int) -> float:
@@ -311,33 +415,46 @@ def _backoff_s(attempt: int) -> float:
     return step / 2 + random.uniform(0, step / 2)
 
 
-def _completion_with_retries(retries: int, **kwargs):
-    """``litellm.completion`` with SciLink's retry policy (see above)."""
+def _jitter_retry_after(retry_after: float, attempt: int) -> float:
+    """Every worker throttled together gets the same Retry-After; a little
+    jitter on top keeps them from coming back in step."""
+    import random
+    step = min(_BACKOFF_CAP_S, _BACKOFF_BASE_S * (2 ** attempt))
+    return retry_after + random.uniform(0, min(retry_after, step / 2))
+
+
+def _completion_with_retries(retries: Optional[int], **kwargs):
+    """``litellm.completion`` with SciLink's retry policy (see above).
+
+    Only creating a stream is retried; an error while iterating one is the
+    caller's (no SciLink caller streams today).
+    """
+    retries = llm_retries() if retries is None else max(0, int(retries))
     kwargs["num_retries"] = 0
-    timeouts = 0
+    once_used = False
     for attempt in range(retries + 1):
         try:
             return litellm.completion(**kwargs)
         except Exception as exc:
-            if attempt >= retries or not _is_transient(exc):
+            kind = _retry_class(exc)
+            if attempt >= retries or kind is None:
                 raise
-            # A timeout is a hung connection (a retry helps) or a generation
-            # longer than the timeout (it would only time out again): one
-            # retry, not the full budget.
-            timeout_cls = getattr(litellm, "Timeout", None)
-            if isinstance(timeout_cls, type) and isinstance(exc, timeout_cls):
-                timeouts += 1
-                if timeouts > 1:
+            if kind == "once":
+                if once_used:
                     raise
-            delay = _retry_after_s(exc)
-            delay = _backoff_s(attempt) if delay is None else delay
-            # Logged before sleeping: a stopped turn's log write raises its
-            # stop here instead of after the wait.
+                once_used = True
+            retry_after = _retry_after_s(exc)
+            delay = (_backoff_s(attempt) if retry_after is None
+                     else _jitter_retry_after(retry_after, attempt))
+            # Logged before sleeping and again after: under a turn's log
+            # handler a requested Stop raises on the next record, so it lands
+            # before the next attempt instead of after another provider call.
             _logger.warning(
                 f"LLM call failed ({type(exc).__name__}, status "
                 f"{getattr(exc, 'status_code', '?')}); retry {attempt + 1}/{retries} "
                 f"in {delay:.1f}s")
             time.sleep(delay)
+            _logger.info(f"Retrying the LLM call (attempt {attempt + 2} of {retries + 1}).")
 
 
 def litellm_completion(*args, **kwargs):
@@ -376,8 +493,9 @@ def litellm_completion(*args, **kwargs):
         if _openai_tools_need_no_reasoning(model) and "reasoning_effort" not in kwargs:
             kwargs["reasoning_effort"] = "none"
     _scope_drop_params(model)
-    retries = kwargs.pop("num_retries", LLM_RETRIES)
-    kwargs.setdefault("timeout", LLM_TIMEOUT_S)
+    retries = kwargs.pop("num_retries", None)
+    if kwargs.get("timeout") is None:
+        kwargs["timeout"] = llm_timeout_s()
     if ("max_tokens" not in kwargs
             and str(model or "").startswith(("bedrock/", "anthropic/"))):
         ceiling = _registered_max_output_tokens(model)
@@ -452,7 +570,7 @@ class LiteLLMGenerativeModel:
         base_url: Optional[str] = None,
         system_instruction: Optional[str] = None,
         tools: Optional[List] = None,
-        timeout: Optional[int] = 1200,
+        timeout: Optional[int] = None,
     ):
         """
         Initialize the LiteLLM model.
@@ -463,7 +581,8 @@ class LiteLLMGenerativeModel:
             base_url: Optional custom API base URL
             system_instruction: Default system message
             tools: Default tools for function calling
-            timeout: Request timeout in seconds (default: 1200)
+            timeout: Request timeout in seconds (default: ``llm_timeout_s()``,
+                1200 unless ``SCILINK_LLM_TIMEOUT_S`` says otherwise)
         """
         _check_litellm()
 
@@ -472,7 +591,7 @@ class LiteLLMGenerativeModel:
         self.base_url = base_url
         self.system_instruction = system_instruction
         self.tools = tools
-        self.timeout = timeout
+        self.timeout = timeout if timeout is not None else llm_timeout_s()
     
     def generate_content(
         self,
@@ -517,7 +636,7 @@ class LiteLLMGenerativeModel:
             # hiccup during e.g. a verification call is not mistaken for a
             # failed step (which would tag the iteration 0.0).
             response = _completion_with_retries(
-                params.pop("num_retries", LLM_RETRIES),
+                params.pop("num_retries", None),
                 model=self.model,
                 messages=messages,
                 api_key=self.api_key,
@@ -884,7 +1003,7 @@ class LiteLLMChatSession:
         _t0 = time.perf_counter()
         _scope_drop_params(self._model.model)
         response = _completion_with_retries(
-            params.pop("num_retries", LLM_RETRIES),
+            params.pop("num_retries", None),
             model=self._model.model,
             messages=messages,
             api_key=self._model.api_key,

@@ -2301,6 +2301,7 @@ class MetaOrchestratorAgent:
                         messages=self.messages,
                         tools=self.tools_for_model,
                         tool_choice="none",
+                        timeout=120,   # a brief summary, not a long generation
                     )
                     text = followup.choices[0].message.content or ""
                 self.messages.append({"role": "assistant", "content": text})
@@ -2469,6 +2470,7 @@ class MetaOrchestratorAgent:
                         messages=self.messages,
                         tools=self.tools_for_model,
                         tool_choice="none",
+                        timeout=120,   # a brief summary, not a long generation
                     )
                     content = getattr(followup.choices[0].message, "content", None) or ""
                 self.messages.append({"role": "assistant", "content": content or ""})

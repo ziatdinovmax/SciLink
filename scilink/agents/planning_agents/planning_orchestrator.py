@@ -2008,7 +2008,12 @@ class PlanningOrchestratorAgent:
                 tools=self.tools_for_model,
                 tool_choice="auto",
                 api_key=self.model.api_key,
-                api_base=self.model.base_url
+                api_base=self.model.base_url,
+                # A chat turn (a tool call or a reply), not a long generation:
+                # a hung connection must not hold the turn for the 1200 s
+                # default. Longer than the other loops' 120 s because a final
+                # reply here can be long and there is no outer retry loop.
+                timeout=300,
             )
             
             message = response.choices[0].message
