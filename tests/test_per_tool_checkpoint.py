@@ -171,16 +171,49 @@ def test_checkpoint_after_tool_is_quiet(mode, tmp_path, capsys):
         f"{mode}: per-tool cadence must not spam the console")
 
 
-def test_sim_interval_gate_still_holds_without_force(tmp_path):
-    """The simulate orchestrator's N-message auto-checkpoint cadence is
-    unchanged: a plain _auto_checkpoint() inside the interval still skips."""
-    orch = _make("simulate", tmp_path)
+@pytest.mark.parametrize("mode", ["analysis", "planning", "simulate", "meta"])
+def test_plain_auto_checkpoint_saves_in_a_short_session(mode, tmp_path):
+    """The shell and web runner save per turn with a bare _auto_checkpoint();
+    it must write even when fewer than CHECKPOINT_INTERVAL messages have
+    passed, or a short session is unresumable (#662)."""
+    orch = _make(mode, tmp_path)
     if orch.checkpoint_path.exists():
         orch.checkpoint_path.unlink()
-    orch.message_count = orch.last_checkpoint_message_count  # inside interval
     orch._auto_checkpoint()
+    assert orch.checkpoint_path.exists(), f"{mode}: short session not saved"
+
+
+def test_sim_short_session_restores_its_structures(tmp_path):
+    """#662 end to end: a 3-turn simulate session saved the way the shell
+    saves it restores the structure registry."""
+    from scilink.cli.shell.turn import save_checkpoint_quietly
+    from scilink.agents.sim_agents.simulation_orchestrator import (
+        SimulationOrchestratorAgent)
+    orch = _make("simulate", tmp_path)
+    orch.message_count = 3
+    orch.generated_structures.append(
+        {"slug": "si_001", "structure_path": "/tmp/POSCAR"})
+    save_checkpoint_quietly(orch)
+
+    restored = SimulationOrchestratorAgent.restore_from_checkpoint(
+        base_dir=str(tmp_path / "si"), api_key="sk-dummy")
+    assert [s["slug"] for s in restored.generated_structures] == ["si_001"]
+    assert restored.message_count == 3
+
+
+def test_sim_chat_keeps_the_message_interval_cadence(tmp_path, monkeypatch):
+    """chat() itself still checkpoints only every CHECKPOINT_INTERVAL
+    messages; the interval now lives at that call site."""
+    orch = _make("simulate", tmp_path)
+    orch.use_openai = False
+    monkeypatch.setattr(orch, "_handle_litellm_chat", lambda text: "ok")
+    if orch.checkpoint_path.exists():
+        orch.checkpoint_path.unlink()
+
+    for _ in range(orch.CHECKPOINT_INTERVAL - 1):
+        orch.chat("hi")
     assert not orch.checkpoint_path.exists()
-    orch._auto_checkpoint(force=True, quiet=True)
+    orch.chat("hi")
     assert orch.checkpoint_path.exists()
 
 
