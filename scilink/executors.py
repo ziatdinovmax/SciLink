@@ -8,6 +8,7 @@ import tempfile
 import logging
 import signal
 import threading
+from typing import Optional
 
 from .auth import get_api_key
 
@@ -59,11 +60,124 @@ def _unregister_subprocess(proc: subprocess.Popen) -> None:
 _NEW_SESSION = os.name == "posix"
 
 
+_WINDOWS_JOBS = os.name == "nt"
+
+
+class _WindowsJob:
+    """A Win32 Job object holding one script and everything it starts: the
+    Windows counterpart of a POSIX process group.
+
+    Created with ``JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE``: terminating the job
+    ends the whole tree, and if SciLink itself dies its handle closes and
+    Windows ends the tree too (the job does on its own what the POSIX side
+    needs signal handlers for). A process is assigned right after it starts;
+    a child it creates in the first instants of interpreter startup, before
+    the assignment, would escape, but a generated script starts nothing that
+    early. Any failure (no ctypes, an older Windows refusing a nested job)
+    leaves the process unassigned and the caller falls back to killing the
+    process alone, the behaviour before jobs.
+
+    Not run on real Windows in this repository's tests: they drive it
+    through a fake ``kernel32`` and check the structure layout against the
+    Win32 x64 sizes.
+    """
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+    JobObjectExtendedLimitInformation = 9
+    _kernel32 = None            # tests inject a fake
+
+    def __init__(self, handle):
+        self.handle = handle
+
+    @classmethod
+    def _k32(cls):
+        if cls._kernel32 is None:
+            import ctypes
+            from ctypes import wintypes
+            k = ctypes.WinDLL("kernel32", use_last_error=True)
+            # Declared, or ctypes passes and returns a HANDLE as a 32-bit int.
+            k.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+            k.CreateJobObjectW.restype = wintypes.HANDLE
+            k.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int,
+                                                  ctypes.c_void_p, wintypes.DWORD]
+            k.SetInformationJobObject.restype = wintypes.BOOL
+            k.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+            k.AssignProcessToJobObject.restype = wintypes.BOOL
+            k.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+            k.TerminateJobObject.restype = wintypes.BOOL
+            k.CloseHandle.argtypes = [wintypes.HANDLE]
+            k.CloseHandle.restype = wintypes.BOOL
+            cls._kernel32 = k
+        return cls._kernel32
+
+    @staticmethod
+    def _limit_info_type():
+        import ctypes
+        from ctypes import c_int64, c_size_t, c_uint32, c_ulonglong
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [(n, c_ulonglong) for n in (
+                "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [("PerProcessUserTimeLimit", c_int64), ("PerJobUserTimeLimit", c_int64),
+                        ("LimitFlags", c_uint32), ("MinimumWorkingSetSize", c_size_t),
+                        ("MaximumWorkingSetSize", c_size_t), ("ActiveProcessLimit", c_uint32),
+                        ("Affinity", c_size_t), ("PriorityClass", c_uint32),
+                        ("SchedulingClass", c_uint32)]
+
+        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                        ("IoInfo", IO_COUNTERS), ("ProcessMemoryLimit", c_size_t),
+                        ("JobMemoryLimit", c_size_t), ("PeakProcessMemoryUsed", c_size_t),
+                        ("PeakJobMemoryUsed", c_size_t)]
+        return JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+
+    @classmethod
+    def attach(cls, proc: subprocess.Popen) -> "Optional[_WindowsJob]":
+        import ctypes
+        try:
+            k = cls._k32()
+            handle = k.CreateJobObjectW(None, None)
+            if not handle:
+                return None
+            info = cls._limit_info_type()()
+            info.BasicLimitInformation.LimitFlags = cls.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if (not k.SetInformationJobObject(handle, cls.JobObjectExtendedLimitInformation,
+                                              ctypes.byref(info), ctypes.sizeof(info))
+                    or not k.AssignProcessToJobObject(handle, int(proc._handle))):
+                k.CloseHandle(handle)
+                return None
+        except Exception:  # noqa: BLE001 - containment is best effort
+            return None
+        job = cls(handle)
+        proc._scilink_job = job              # type: ignore[attr-defined]
+        return job
+
+    def terminate(self) -> None:
+        if self.handle:
+            try:
+                self._k32().TerminateJobObject(self.handle, 1)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def close(self) -> None:
+        if self.handle:
+            try:
+                self._k32().CloseHandle(self.handle)
+            except Exception:  # noqa: BLE001
+                pass
+            self.handle = None
+
+
 def _mark_own_group(proc: subprocess.Popen) -> subprocess.Popen:
-    """Record that ``proc`` was started in a new session by us, so its
-    process group id is its pid by construction."""
+    """Contain ``proc`` and everything it starts: on POSIX record that it was
+    started in a new session by us (its process group id is its pid by
+    construction); on Windows assign it to a Job object."""
     if _NEW_SESSION:
         proc._scilink_own_group = True       # type: ignore[attr-defined]
+    elif _WINDOWS_JOBS:
+        _WindowsJob.attach(proc)
     return proc
 
 
@@ -94,6 +208,11 @@ def _end_leftover_group(proc: subprocess.Popen) -> None:
     """After a script exited on its own: end anything it left running in its
     group (a detached helper that does not hold its pipes). A generated
     script has no business leaving a daemon behind."""
+    job = getattr(proc, "_scilink_job", None)
+    if job is not None:
+        job.terminate()
+        job.close()
+        return
     if _NEW_SESSION and getattr(proc, "_scilink_own_group", False):
         try:
             os.killpg(proc.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
@@ -109,6 +228,17 @@ def _kill_process_tree(proc: subprocess.Popen, grace: float = 2.0) -> None:
     otherwise, and off POSIX, only the process itself is signalled, so a
     caller's own group is never hit.
     """
+    job = getattr(proc, "_scilink_job", None)
+    if job is not None:
+        # Windows: the job ends the whole tree at once (TerminateProcess has
+        # no graceful form to wait on).
+        job.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        job.close()
+        return
     group = _group_of(proc)
 
     def send(sig):
@@ -702,6 +832,7 @@ class WarmScriptExecutor(ScriptExecutor):
                     proc.wait(timeout=2)
                 except Exception:  # noqa: BLE001
                     _kill_process_tree(proc, grace=0.5)
+            _end_leftover_group(proc)        # anything a replayed script left; the Windows job
         except Exception:  # noqa: BLE001
             pass
 
