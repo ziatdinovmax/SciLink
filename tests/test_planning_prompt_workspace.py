@@ -1,0 +1,62 @@
+"""A planning agent keeps its workspace paths when its autonomy level changes.
+
+``set_autonomy_level`` rebuilt the system prompt from ``get_system_prompt``
+alone and dropped the workspace block (data, knowledge and code directories)
+that the constructor and ``_rebuild_system_prompt`` append. ``run_task``
+switches the level on every call, and the meta builds its planning child in
+CO_PILOT, so a delegated planning run never saw its knowledge directory: live,
+the agent answered that no knowledge base was accessible although its planner
+had loaded one.
+"""
+
+from pathlib import Path
+
+import pytest
+
+from scilink.agents.planning_agents.planning_orchestrator import (
+    AutonomyLevel, PlanningOrchestratorAgent, get_system_prompt)
+
+
+def _agent(tmp_path, level=AutonomyLevel.CO_PILOT):
+    a = PlanningOrchestratorAgent.__new__(PlanningOrchestratorAgent)
+    a.autonomy_level = level
+    a._external_tools = None
+    a.objective = "check phase purity of batch A7"
+    a.data_dir = tmp_path / "data"
+    a.knowledge_dir = tmp_path / "knowledge"
+    a.code_dir = tmp_path / "code"
+    a.messages = [{"role": "system", "content": "stale"}]
+    return a
+
+
+@pytest.mark.parametrize("target", [AutonomyLevel.AUTOPILOT, AutonomyLevel.AUTONOMOUS])
+def test_switching_up_from_copilot_names_the_workspace(tmp_path, target):
+    a = _agent(tmp_path)
+    a.set_autonomy_level(target)
+    prompt = a.messages[0]["content"]
+    for d in (a.data_dir, a.knowledge_dir, a.code_dir):
+        assert str(d) in prompt
+    assert prompt == a._system_prompt
+
+
+def test_a_switch_between_non_copilot_levels_keeps_the_workspace(tmp_path):
+    a = _agent(tmp_path, AutonomyLevel.AUTOPILOT)
+    a._rebuild_system_prompt()                      # what the constructor produces
+    assert str(a.knowledge_dir) in a.messages[0]["content"]
+    a.set_autonomy_level(AutonomyLevel.AUTONOMOUS)  # what run_task does
+    assert str(a.knowledge_dir) in a.messages[0]["content"]
+
+
+def test_copilot_still_leaves_the_workspace_to_the_human(tmp_path):
+    a = _agent(tmp_path, AutonomyLevel.AUTONOMOUS)
+    a.set_autonomy_level(AutonomyLevel.CO_PILOT)
+    assert str(a.knowledge_dir) not in a.messages[0]["content"]
+    assert a.messages[0]["content"] == get_system_prompt(AutonomyLevel.CO_PILOT, None)
+
+
+def test_human_feedback_still_follows_the_level(tmp_path):
+    a = _agent(tmp_path)
+    a.set_autonomy_level(AutonomyLevel.AUTONOMOUS)
+    assert a._enable_human_feedback is False
+    a.set_autonomy_level(AutonomyLevel.AUTOPILOT)
+    assert a._enable_human_feedback is True

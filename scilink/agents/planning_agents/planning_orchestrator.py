@@ -947,16 +947,12 @@ class PlanningOrchestratorAgent:
         old_level = self.autonomy_level
         self.autonomy_level = level
         self._enable_human_feedback = self._should_enable_human_feedback()
-        
-        # Update system prompt
-        new_system_prompt = get_system_prompt(
-            level, self._external_tools or None
-        )
-        self._system_prompt = new_system_prompt
 
-        # Update system message in messages list (works for both OpenAI and LiteLLM now)
-        if self.messages and self.messages[0]["role"] == "system":
-            self.messages[0]["content"] = new_system_prompt
+        # The same rebuild as the constructor's, workspace paths included:
+        # run_task switches the level on every call, and a prompt rebuilt
+        # without them left a delegated planner unaware of its knowledge,
+        # data and code directories.
+        self._rebuild_system_prompt()
         
         logging.info(f"🔄 Autonomy level changed: {old_level.value} → {level.value}")
         logging.info(f"   Human feedback enabled: {self._enable_human_feedback}")
