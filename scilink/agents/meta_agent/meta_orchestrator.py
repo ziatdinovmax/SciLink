@@ -647,12 +647,15 @@ class MetaOrchestratorAgent:
         self.meta_mode = mode
         self._enable_human_feedback = self._should_enable_human_feedback()
 
-        new_system_prompt = get_system_prompt(mode) + self._kb_note()
-        self._system_prompt = new_system_prompt
-        if self.messages and self.messages[0]["role"] == "system":
-            self.messages[0]["content"] = new_system_prompt
-
+        self._refresh_system_prompt()
         logging.info(f"🔄 Meta mode changed: {old_mode.value} → {mode.value}")
+
+    def _refresh_system_prompt(self) -> None:
+        """Rebuild the system prompt (the mode's prompt plus the knowledge
+        base note) and put it in the message history."""
+        self._system_prompt = get_system_prompt(self.meta_mode) + self._kb_note()
+        if self.messages and self.messages[0]["role"] == "system":
+            self.messages[0]["content"] = self._system_prompt
 
     @staticmethod
     def _kb_source_names(kb_dir: Path) -> list:
@@ -803,7 +806,7 @@ class MetaOrchestratorAgent:
                 child.planner.rebind_kb(str(target / "default_kb"))
 
         # The detached-KB note no longer applies — refresh the system prompt.
-        self.set_meta_mode(self.meta_mode)
+        self._refresh_system_prompt()
         self._auto_checkpoint()
         logging.info(f"📚 Knowledge base attached: {target}")
         return str(target)
@@ -1154,7 +1157,7 @@ class MetaOrchestratorAgent:
             child.planner.rebind_kb(str(cache / "default_kb"))
         # The attached-KB note lists the sources: refresh it, or the model
         # routes on a list without the document it just added.
-        self.set_meta_mode(self.meta_mode)
+        self._refresh_system_prompt()
         return updated
 
     def register_skill(self, skill_path: str) -> str:
