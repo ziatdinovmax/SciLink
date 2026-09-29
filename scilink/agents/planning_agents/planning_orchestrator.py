@@ -1692,6 +1692,14 @@ class PlanningOrchestratorAgent:
                 print(f"  📦 Compressed {compressed} large tool result(s) in history "
                       f"({total_chars:,} → {new_total:,} chars)")
 
+    def _bo_data_points(self) -> int:
+        """Rows in the BO data file; 0 when it is absent or unreadable (an
+        unreadable CSV must not cost the whole checkpoint)."""
+        try:
+            return len(pd.read_csv(self.bo_data_path)) if self.bo_data_path.exists() else 0
+        except Exception:  # noqa: BLE001 - a count, not state the restore depends on
+            return 0
+
     def _auto_checkpoint(self, quiet: bool = False):
         """Internal auto-checkpoint without LLM interaction."""
         try:
@@ -1708,7 +1716,7 @@ class PlanningOrchestratorAgent:
                     {k: list(v) for k, v in self.input_bounds_override.items()}
                     if self.input_bounds_override else None),
                 "fidelity_spec": self.fidelity_spec,
-                "data_points_collected": len(pd.read_csv(self.bo_data_path)) if self.bo_data_path.exists() else 0,
+                "data_points_collected": self._bo_data_points(),
                 "planner_state": compact_planner_state(self.planner.state),
                 "message_count": self.message_count,
                 "latest_tea_results": self.latest_tea_results,

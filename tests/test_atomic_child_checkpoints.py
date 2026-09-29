@@ -252,3 +252,30 @@ def test_a_meta_is_built_with_a_reentrant_ledger_lock(tmp_path, monkeypatch):
     m = MetaOrchestratorAgent(base_dir=str(tmp_path / "meta"), model_name="anthropic/claude-sonnet-4-5",
                               meta_mode=MetaMode.AUTONOMOUS, launch_dir=str(tmp_path))
     assert isinstance(m._fanout_lock, type(_threading.RLock()))
+
+
+def test_atomic_writes_never_touch_the_process_umask(tmp_path, monkeypatch):
+    """Reading the umask (umask(0) then restore) changes it for the whole
+    process; fan-out threads write checkpoints while others create files."""
+    import os
+    calls = []
+    real = os.umask
+    monkeypatch.setattr(os, "umask", lambda m: calls.append(m) or real(m))
+    new = tmp_path / "new.json"
+    atomic_write_json(new, {"a": 1})
+    existing = tmp_path / "existing.json"
+    existing.write_text("{}")
+    existing.chmod(0o640)
+    atomic_write_json(existing, {"b": 2})
+    assert calls == []
+    u = real(0o022)
+    real(u)
+    assert new.stat().st_mode & 0o777 == 0o666 & ~u          # what a plain write gives a new file
+    assert existing.stat().st_mode & 0o777 == 0o640           # an existing file keeps its mode
+
+
+def test_an_unreadable_bo_file_does_not_cost_the_planning_checkpoint(tmp_path):
+    o, _ = _planning(tmp_path)
+    o.bo_data_path.write_bytes(b"\x00\xff not a csv \x00\n,,,\n\x01")
+    o._auto_checkpoint(quiet=True)
+    assert json.loads(o.checkpoint_path.read_text())["data_points_collected"] >= 0

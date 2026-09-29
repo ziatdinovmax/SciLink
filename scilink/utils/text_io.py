@@ -32,7 +32,6 @@ import contextlib
 import json
 import logging
 import os
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +51,22 @@ def _replace(src: str, dst: Path) -> None:
         except PermissionError:
             time.sleep(delay)
     os.replace(src, dst)
+
+
+def _exclusive_temp(p: Path):
+    """A new, uniquely named temp file beside ``p``, opened for writing:
+    ``(fd, path)``. Created with ``O_EXCL`` at mode ``0o666`` so the kernel
+    applies the umask (``mkstemp`` would create it ``0600``)."""
+    import secrets
+    for _ in range(100):
+        tmp = str(p.parent / f".{p.name}.{secrets.token_hex(6)}.tmp")
+        try:
+            fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                         | getattr(os, "O_BINARY", 0), 0o666)
+            return fd, tmp
+        except FileExistsError:
+            continue
+    raise FileExistsError(f"could not create a temp file beside {p}")
 
 
 def atomic_write_text(path: Any, text: str) -> Path:
@@ -75,21 +90,20 @@ def atomic_write_text(path: Any, text: str) -> Path:
     indexer), so it is retried briefly before giving up.
     """
     p = Path(path)
-    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=f".{p.name}.",
-                               suffix=".tmp")
+    fd, tmp = _exclusive_temp(p)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        # mkstemp creates 0600 and os.replace carries that mode onto the
-        # destination; match what a plain write_text would have produced —
-        # keep an existing file's mode, honor the umask for a new one.
+        # os.replace carries the temp file's mode onto the destination. The
+        # temp was created at 0o666 with the umask applied by the kernel,
+        # which is what a plain write_text gives a new file; an existing
+        # file keeps its own mode. The umask is never read: reading it
+        # (umask(0) then restore) briefly changes it for the whole process,
+        # and a file another thread creates in that window comes out 0666.
         try:
-            mode = os.stat(p).st_mode & 0o777
-        except OSError:
-            umask = os.umask(0)
-            os.umask(umask)
-            mode = 0o666 & ~umask
-        os.chmod(tmp, mode)
+            os.chmod(tmp, os.stat(p).st_mode & 0o777)
+        except FileNotFoundError:
+            pass
         _replace(tmp, p)
     except BaseException:
         with contextlib.suppress(OSError):
