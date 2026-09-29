@@ -15,6 +15,7 @@ this development stage — see CLAUDE.md "Why no BaseChatOrchestrator refactor".
 """
 
 import json
+from scilink.utils.text_io import atomic_write_json
 import re
 import logging
 import os
@@ -2011,10 +2012,8 @@ class MetaOrchestratorAgent:
                     "delegation_ledger": self._delegation_ledger,
                     "knowledge_dir": str(self.knowledge_dir) if self.knowledge_dir else None,
                 }
-                tmp_path = self.checkpoint_path.with_suffix(".json.tmp")
-                with open(tmp_path, 'w', encoding="utf-8") as f:
-                    json.dump(checkpoint_data, f, indent=2, default=str)
-                os.replace(tmp_path, self.checkpoint_path)
+                atomic_write_json(self.checkpoint_path, checkpoint_data,
+                                  indent=2, default=str)
             if verbose:
                 print(f"    ✅ Auto-checkpoint saved")
             return True
@@ -2132,8 +2131,7 @@ class MetaOrchestratorAgent:
         try:
             history_data = [m for m in self.messages if m["role"] != "system"]
             history_data = sanitize_history_images(history_data)
-            with open(self.history_path, 'w', encoding="utf-8") as f:
-                json.dump(history_data, f, indent=2)
+            atomic_write_json(self.history_path, history_data, indent=2)
         except Exception as e:
             logging.warning(f"Failed to save history: {e}")
 

@@ -1722,13 +1722,21 @@ class PlanningOrchestratorAgent:
                 "custom_skills": self._custom_skills,
             }
             
-            atomic_write_json(self.checkpoint_path, checkpoint_data, indent=2)
+            # default=str as in the meta and simulation: a stray numpy
+            # scalar or Path must not freeze every later checkpoint.
+            atomic_write_json(self.checkpoint_path, checkpoint_data, indent=2, default=str)
+            self._checkpoint_error = None
 
             if not quiet:
                 print(f"    ✅ Auto-checkpoint saved")
+            return True
 
         except Exception as e:
+            self._checkpoint_error = str(e)
             logging.warning(f"Auto-checkpoint failed: {e}")
+            if not quiet:
+                print(f"    ⚠️ Auto-checkpoint failed ({e}); the previous checkpoint is kept")
+            return False
 
     # Wall-clock throttle for the per-tool-call checkpoint: a burst of cheap
     # tool calls must not thrash the disk, while an expensive call (a whole

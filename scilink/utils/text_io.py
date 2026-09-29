@@ -37,6 +37,23 @@ from pathlib import Path
 from typing import Any
 
 
+_WINDOWS = os.name == "nt"
+
+
+def _replace(src: str, dst: Path) -> None:
+    """``os.replace``, retried a few times on Windows when the destination is
+    held open by another process."""
+    import time
+    delays = (0.05, 0.1, 0.2) if _WINDOWS else ()
+    for delay in delays:
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            time.sleep(delay)
+    os.replace(src, dst)
+
+
 def atomic_write_text(path: Any, text: str) -> Path:
     """Write ``text`` to ``path`` as UTF-8 via a same-directory temp file
     published with ``os.replace``.
@@ -49,7 +66,13 @@ def atomic_write_text(path: Any, text: str) -> Path:
     shared ``~/.scilink`` store.
 
     The temp file lives in the destination directory so the ``os.replace``
-    is a same-filesystem rename (atomic on POSIX and Windows).
+    is a same-filesystem rename (atomic on POSIX and Windows). There is no
+    ``fsync``: a killed process leaves the old or the new file, whole, but a
+    power loss or an OS crash can still lose the last write.
+
+    On Windows ``os.replace`` fails with ``PermissionError`` while another
+    process holds the destination open (a reader, an antivirus scan, an
+    indexer), so it is retried briefly before giving up.
     """
     p = Path(path)
     fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=f".{p.name}.",
@@ -67,7 +90,7 @@ def atomic_write_text(path: Any, text: str) -> Path:
             os.umask(umask)
             mode = 0o666 & ~umask
         os.chmod(tmp, mode)
-        os.replace(tmp, p)
+        _replace(tmp, p)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)

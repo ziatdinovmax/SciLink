@@ -6502,25 +6502,14 @@ class OrchestratorTools:
                 except Exception:
                     message_count = 0
             
-            state = {
-                "timestamp": datetime.now().isoformat(),
-                "objective": self.orch.objective,
-                "active_scalarizer_script": self.orch.active_scalarizer_script,
-                "expected_input_columns": self.orch.expected_input_columns,
-                "expected_target_columns": self.orch.expected_target_columns,
-                "data_points_collected": data_points,
-                "message_count": message_count,
-                "planner_state": self.orch.planner.state if hasattr(self.orch.planner, 'state') else None,
-                "latest_tea_results": self.orch.latest_tea_results,
-                "autonomy_level": self.orch.autonomy_level.value if hasattr(self.orch, 'autonomy_level') and self.orch.autonomy_level else None,
-                "data_dir": str(self.orch.data_dir) if self.orch.data_dir else None,
-                "knowledge_dir": str(self.orch.knowledge_dir) if self.orch.knowledge_dir else None,
-                "code_dir": str(self.orch.code_dir) if self.orch.code_dir else None,
-            }
-            
             try:
-                with open(checkpoint_path, 'w', encoding="utf-8") as f:
-                    json.dump(state, f, indent=2)
+                # The orchestrator's own writer: the full schema
+                # (delegation_counter, compacted planner state, ...) that
+                # restore reads, written atomically. A second, smaller
+                # schema here restarted the delegation counter on resume.
+                if not self.orch._auto_checkpoint(quiet=True):
+                    raise RuntimeError(getattr(self.orch, "_checkpoint_error", None)
+                                       or "checkpoint not written")
                 
                 print(f"    💾 Checkpoint saved: {checkpoint_path}")
                 
@@ -6529,7 +6518,7 @@ class OrchestratorTools:
                     "checkpoint_path": str(checkpoint_path),
                     "data_points": data_points,
                     "message_count": message_count,
-                    "timestamp": state["timestamp"]
+                    "timestamp": datetime.now().isoformat()
                 }
 
                 # Check if knowledge synthesis might be valuable

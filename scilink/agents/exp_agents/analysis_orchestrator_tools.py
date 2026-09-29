@@ -4108,28 +4108,18 @@ class AnalysisOrchestratorTools:
             print(f"  ⚡ Tool: Saving checkpoint...")
             
             try:
-                checkpoint_data = {
-                    "timestamp": datetime.now().isoformat(),
-                    "current_metadata": self.orch.current_metadata,
-                    "current_metadata_owner": self.orch.current_metadata_owner,
-                    "current_data_path": self.orch.current_data_path,
-                    "current_data_type": self.orch.current_data_type,
-                    "selected_agent_id": self.orch.selected_agent_id,
-                    "analysis_results": self.orch.analysis_results,
-                    "analysis_run_counter": self.orch._analysis_run_counter,
-                    "message_count": self.orch.message_count,
-                    "analysis_mode": self.orch.analysis_mode.value,
-                    "active_knowledge": self.orch.active_knowledge,
-                    "graduated_skill_sources": self.orch._graduated_skill_sources,
-                }
-
-                with open(self.orch.checkpoint_path, 'w', encoding="utf-8") as f:
-                    json.dump(checkpoint_data, f, indent=2)
-
+                # The orchestrator's own writer: one schema and one atomic
+                # write for every checkpoint of this session.
+                if not self.orch._auto_checkpoint(quiet=True):
+                    return json.dumps({
+                        "status": "error",
+                        "message": ("Checkpoint not written; the previous one is kept: "
+                                    f"{getattr(self.orch, '_checkpoint_error', None)}"),
+                    })
                 return json.dumps({
                     "status": "success",
                     "checkpoint_path": str(self.orch.checkpoint_path),
-                    "timestamp": checkpoint_data["timestamp"],
+                    "timestamp": datetime.now().isoformat(),
                     "analyses_saved": len(self.orch.analysis_results)
                 })
                 

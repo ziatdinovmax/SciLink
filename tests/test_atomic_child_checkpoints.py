@@ -160,8 +160,95 @@ def test_the_ledger_lock_is_reentrant_for_fanout_preallocation():
     assert [e["index"] for e in m._delegation_ledger] == [1, 2]
 
 
-def test_a_real_meta_has_a_reentrant_ledger_lock():
-    import inspect
-    from scilink.agents.meta_agent import meta_orchestrator as mo
-    src = inspect.getsource(mo.MetaOrchestratorAgent.__init__)
-    assert "self._fanout_lock = threading.RLock()" in src
+# ── review follow-ups ─────────────────────────────────────────────────────
+
+def test_a_failed_replace_keeps_the_previous_file_and_leaves_no_temp(tmp_path, monkeypatch):
+    """The earlier failure test fails inside json.dumps, before any temp file
+    exists; this one fails at the publish step itself."""
+    from scilink.utils import text_io
+    p = tmp_path / "state.json"
+    atomic_write_json(p, {"good": 1})
+
+    def boom(src, dst):
+        raise OSError("disk went away")
+
+    monkeypatch.setattr(text_io, "_replace", boom)
+    with pytest.raises(OSError):
+        atomic_write_json(p, {"new": 2})
+    assert json.loads(p.read_text()) == {"good": 1}
+    assert [f.name for f in tmp_path.iterdir()] == ["state.json"]
+
+
+def test_windows_retries_a_replace_blocked_by_an_open_reader(tmp_path, monkeypatch):
+    from scilink.utils import text_io
+    p = tmp_path / "chat_history.json"
+    real = text_io.os.replace
+    blocked = [2]
+
+    def held_open(src, dst):
+        if blocked[0]:
+            blocked[0] -= 1
+            raise PermissionError("in use by another process")
+        return real(src, dst)
+
+    monkeypatch.setattr(text_io, "_WINDOWS", True)
+    monkeypatch.setattr(text_io.os, "replace", held_open)
+    atomic_write_json(p, {"ok": True})
+    assert json.loads(p.read_text()) == {"ok": True} and blocked[0] == 0
+
+
+@pytest.mark.parametrize("make", [_analysis, _planning, _simulation],
+                         ids=["analysis", "planning", "simulation"])
+def test_a_failed_history_save_leaves_no_temp_file(make, tmp_path):
+    o, _ = make(tmp_path)
+    o._save_history()
+    loop = {}
+    loop["self"] = loop
+    o.messages = o.messages + [{"role": "assistant", "content": "x", "tool_calls": loop}]
+    o._save_history()
+    assert sorted(f.name for f in tmp_path.iterdir()) == ["chat_history.json"]
+
+
+def test_the_analysis_save_checkpoint_tool_uses_the_one_writer(tmp_path):
+    from scilink.agents.exp_agents.analysis_orchestrator_tools import AnalysisOrchestratorTools
+    o, _ = _analysis(tmp_path)
+    o.analysis_results = [{"analysis_id": "a1"}]
+    tools = AnalysisOrchestratorTools(o)
+    out = json.loads(tools.functions_map["save_checkpoint"]())
+    assert out["status"] == "success" and out["analyses_saved"] == 1
+    good = json.loads(o.checkpoint_path.read_text())
+    assert good["analysis_results"] == [{"analysis_id": "a1"}]
+    o.analysis_results = _circular()
+    out = json.loads(tools.functions_map["save_checkpoint"]())
+    assert out["status"] == "error" and "previous one is kept" in out["message"]
+    assert json.loads(o.checkpoint_path.read_text()) == good
+
+
+def test_the_planning_save_checkpoint_tool_keeps_the_delegation_counter(tmp_path):
+    """The tool wrote a second, smaller schema without delegation_counter, so
+    a restore restarted the counter and the next delegation reused
+    delegations/01_<slug>/."""
+    from scilink.agents.planning_agents.orchestrator_tools import OrchestratorTools
+    o, _ = _planning(tmp_path)
+    o.base_dir = tmp_path
+    o.use_openai = True
+    o.active_knowledge = []
+    o._delegation_counter = 3
+    o.target_directions = {"y": "maximize"}
+    tools = OrchestratorTools(o)
+    out = json.loads(tools.functions_map["save_checkpoint"]())
+    assert out["status"] == "success"
+    saved = json.loads(o.checkpoint_path.read_text())
+    assert saved["delegation_counter"] == 3
+    assert saved["target_directions"] == {"y": "maximize"}
+    assert "custom_skills" in saved and "graduated_skill_sources" in saved
+
+
+def test_a_meta_is_built_with_a_reentrant_ledger_lock(tmp_path, monkeypatch):
+    import threading as _threading
+    from scilink.agents.meta_agent.meta_orchestrator import MetaMode, MetaOrchestratorAgent
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    m = MetaOrchestratorAgent(base_dir=str(tmp_path / "meta"), model_name="anthropic/claude-sonnet-4-5",
+                              meta_mode=MetaMode.AUTONOMOUS, launch_dir=str(tmp_path))
+    assert isinstance(m._fanout_lock, type(_threading.RLock()))
