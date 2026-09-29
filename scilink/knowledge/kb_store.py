@@ -145,7 +145,9 @@ def snapshot_kb(kb_dir: Path, dest: Path, *, attempts: int = 8) -> Path:
             last_error = exc
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
-        if empty:
+        if empty and kb_dir.is_dir() and not _backup_path(kb_dir).is_dir():
+            # Really empty. An empty listing mid-swap (the live directory is
+            # briefly absent, the backup present) is retried like any tear.
             raise FileNotFoundError(f"Knowledge base {kb_dir} holds no index files.")
         _time.sleep(0.05 * (attempt + 1))
     raise RuntimeError(f"Knowledge base {kb_dir} kept changing while it was being copied"
