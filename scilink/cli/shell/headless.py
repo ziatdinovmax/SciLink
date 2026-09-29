@@ -78,7 +78,7 @@ def run(adapter, args, task: str, *, console: Console = None) -> int:
             adapter.set_autonomy(agent, "autonomous")
             hitl.set_default_channel(AutoAcceptChannel())
             try:
-                result = adapter.headless_run(agent, task)
+                result = adapter.headless_run(agent, task, context=adapter.headless_context(args))
             finally:
                 hitl.set_default_channel(None)
     except bootstrap.BootstrapError as e:

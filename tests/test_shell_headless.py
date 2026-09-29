@@ -44,7 +44,7 @@ def test_questions_are_auto_accepted(tmp_path, capsys, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     class AskingAdapter(FakeAdapter):
-        def headless_run(self, agent, task):
+        def headless_run(self, agent, task, context=None):
             agent.chat(task)   # asks through the chokepoint
             return {"status": "success", "summary": "answered " + ",".join(agent.answers)}
 

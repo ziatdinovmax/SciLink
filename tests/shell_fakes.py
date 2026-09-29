@@ -119,7 +119,7 @@ class FakeAdapter(ModeAdapter):
     def initial_turns(self, args, agent):
         return [args.initial_message] if getattr(args, "initial_message", None) else []
 
-    def headless_run(self, agent, task):
+    def headless_run(self, agent, task, context=None):
         return agent.run_task(task)
 
 
