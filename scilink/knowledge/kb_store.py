@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..skills.loader import scilink_home
+from ..utils.file_lock import is_locked, path_lock
 from ..utils.text_io import atomic_write_text
 
 _logger = logging.getLogger(__name__)
@@ -90,6 +91,69 @@ def read_manifest(kb_dir: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _kb_generation(kb_dir: Path):
+    """What changes whenever a KB is republished: the directory itself is
+    replaced by a rename (a new inode), and the manifest is rewritten."""
+    st = kb_dir.stat()
+    mf = kb_dir / MANIFEST_NAME
+    return (st.st_ino, st.st_dev, mf.read_bytes() if mf.exists() else b"")
+
+
+def snapshot_kb(kb_dir: Path, dest: Path, *, attempts: int = 8) -> Path:
+    """Copy a KB's ``default_kb_*`` files into ``dest`` as ONE generation.
+
+    Readers copy a store KB into a session-local cache, file by file and
+    without the KB's lock (taking it would make a reader wait out a whole
+    embedding run). A publish can land in the middle of that copy: the
+    index from one generation and the chunks from the next, or a file
+    missing in the instant the live directory is swapped. The copy is
+    therefore made into a temporary folder and accepted only if the KB's
+    generation is the same before and after; otherwise it is retried.
+    """
+    import time as _time
+    from ..utils.download import unique_sibling
+    kb_dir, dest = Path(kb_dir), Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    last_error: Optional[BaseException] = None
+    for attempt in range(attempts):
+        if not kb_dir.is_dir():
+            if not _backup_path(kb_dir).is_dir():
+                # Gone, not mid-swap (a swap keeps the backup while the live
+                # directory is briefly absent).
+                raise FileNotFoundError(f"Knowledge base {kb_dir} does not exist.")
+            _time.sleep(0.05 * (attempt + 1))
+            continue
+        tmp = unique_sibling(dest, ".snapshot_", "", directory=True)
+        empty = False
+        try:
+            before = _kb_generation(kb_dir)
+            names = sorted(f.name for f in kb_dir.glob("default_kb_*") if f.is_file())
+            empty = not names
+            if not empty:
+                for n in names:
+                    shutil.copy2(kb_dir / n, tmp / n)
+                if _kb_generation(kb_dir) == before:
+                    for n in names:
+                        os.replace(tmp / n, dest / n)
+                    # A file the source lacks (another KB's code index, from
+                    # an earlier attach) must not load beside this one.
+                    for stale in dest.glob("default_kb_*"):
+                        if stale.name not in names:
+                            stale.unlink()
+                    return dest
+        except FileNotFoundError as exc:      # caught mid-swap
+            last_error = exc
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        if empty and kb_dir.is_dir() and not _backup_path(kb_dir).is_dir():
+            # Really empty. An empty listing mid-swap (the live directory is
+            # briefly absent, the backup present) is retried like any tear.
+            raise FileNotFoundError(f"Knowledge base {kb_dir} holds no index files.")
+        _time.sleep(0.05 * (attempt + 1))
+    raise RuntimeError(f"Knowledge base {kb_dir} kept changing while it was being copied"
+                       + (f" ({last_error})" if last_error else ""))
+
+
 def list_kbs() -> List[Dict[str, Any]]:
     """All named KBs, each as its manifest plus ``name`` and ``path``.
 
@@ -103,6 +167,11 @@ def list_kbs() -> List[Dict[str, Any]]:
         return []
     for child in sorted(store.iterdir()):
         if child.is_dir() and child.name.startswith(".staging_"):
+            if is_locked(_lock_target(child.name[len(".staging_"):])):
+                # Another process is building this KB right now.
+                _logger.info("Knowledge base '%s' is being built by another process.",
+                             child.name[len(".staging_"):])
+                continue
             _logger.warning(
                 "⚠️  Leftover build directory %s — a previous "
                 "create/add/rebuild was interrupted. The live KB is intact; "
@@ -191,6 +260,53 @@ def embedding_compat_warning(manifest: Optional[Dict[str, Any]],
     return None
 
 
+def _serialized_per_kb(fn):
+    """Run a store mutation under a lock on the KB's name.
+
+    Two builds of one KB used to share ``.staging_<name>``, and each began by
+    deleting it, so they destroyed each other's work; two concurrent
+    ``add_to_kb`` calls would each copy the live KB, add their documents and
+    swap in, and the first addition was silently lost. Under the lock (held
+    across threads and processes) a second caller waits, then works on what
+    the first one published, and the fixed staging and backup names are safe:
+    only the lock holder can be building this KB, so a staging directory it
+    finds is a dead build's.
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(name, *args, **kwargs):
+        _validate_name(name)
+        kb_store_dir().mkdir(parents=True, exist_ok=True)
+        with path_lock(_lock_target(name), label=f"knowledge base '{name}'"):
+            _recover_stranded_backup(kb_path(name))
+            return fn(name, *args, **kwargs)
+    return wrapper
+
+
+def _lock_target(name: str) -> Path:
+    """What ``path_lock`` guards for KB ``name`` (its lock file is
+    ``.<name>.lock`` in the store, hidden from ``list_kbs``)."""
+    return kb_store_dir() / f".{name}"
+
+
+def _backup_path(final: Path) -> Path:
+    """Dot-prefixed like ``.staging_<name>``: ``<name>.bak`` was itself a
+    legal KB name (publishing ``foo`` deleted a KB called ``foo.bak``), and a
+    backup stranded by a crash was listed as a KB."""
+    return final.with_name(f".bak_{final.name}")
+
+
+def _recover_stranded_backup(final: Path) -> None:
+    """A crash between moving the live KB aside and renaming the new one in
+    leaves only the backup. Under the lock, put it back."""
+    backup = _backup_path(final)
+    if not final.exists() and backup.is_dir():
+        backup.rename(final)
+        _logger.warning(f"Restored knowledge base '{final.name}' from a backup left by an "
+                        "interrupted update.")
+
+
 def _swap_into_place(staging: Path, final: Path) -> None:
     """Publish `staging` at `final` without the KB ever being absent.
 
@@ -207,7 +323,7 @@ def _swap_into_place(staging: Path, final: Path) -> None:
     dropped only after the new copy is in place, and is restored if the
     rename itself fails.
     """
-    backup = final.with_name(final.name + ".bak")
+    backup = _backup_path(final)
     shutil.rmtree(backup, ignore_errors=True)
     had_previous = final.exists()
     if had_previous:
@@ -294,6 +410,7 @@ def _build_index_into(target: Path, embedding_model: str,
     return len(chunks), int(kb.index.ntotal) if kb.index else 0
 
 
+@_serialized_per_kb
 def create_kb(name: str,
               source_paths: List[str],
               embedding_model: str = "gemini-embedding-001",
@@ -360,6 +477,7 @@ def create_kb(name: str,
     return read_manifest(final)
 
 
+@_serialized_per_kb
 def import_kb(name: str,
               from_dir: str,
               embedding_model: str = "unknown",
@@ -432,6 +550,7 @@ def import_kb(name: str,
     return read_manifest(final)
 
 
+@_serialized_per_kb
 def add_to_kb(name: str,
               source_paths: List[str],
               api_key: Optional[str] = None,
@@ -560,6 +679,7 @@ def _append_index_into(target: Path, new_doc_paths: List[str],
     return len(chunks), (int(kb.index.ntotal) if kb.index else 0) - before
 
 
+@_serialized_per_kb
 def rebuild_kb(name: str,
                embedding_model: str,
                api_key: Optional[str] = None,
@@ -607,10 +727,14 @@ def rebuild_kb(name: str,
     return read_manifest(final)
 
 
+@_serialized_per_kb
 def delete_kb(name: str) -> None:
     """Remove a named KB from the store."""
     final = kb_path(name)
     if not final.is_dir():
         raise FileNotFoundError(f"KB '{name}' does not exist.")
     shutil.rmtree(final)
+    # A backup stranded by an earlier crash would otherwise be restored as
+    # this KB by the next locked operation on the name.
+    shutil.rmtree(_backup_path(final), ignore_errors=True)
     _logger.info(f"🗑️ KB '{name}' deleted.")

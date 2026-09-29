@@ -310,6 +310,14 @@ class KnowledgeBase:
                     print(f"    - ⚠️ Error loading repo maps file: {e}")
             
             n_vec = self.index.ntotal if self.index is not None else 0
+            if self.index is not None and n_vec != len(self.chunks):
+                # The index and the chunks come from different generations
+                # (a copy made while the KB was being republished): vector i
+                # would map to the wrong chunk, so keep to keyword retrieval.
+                self._dense_disabled_reason = (
+                    f"the index holds {n_vec} vectors for {len(self.chunks)} chunks")
+                print(f"  - ⚠️  Knowledge base index and chunks disagree "
+                      f"({self._dense_disabled_reason}); retrieving via BM25.")
             print(f"  - ✅ Successfully loaded {len(self.chunks)} chunks and index with {n_vec} vectors from {len(self.sources)} sources.")
             return True
         except Exception as e:
