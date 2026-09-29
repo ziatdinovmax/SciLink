@@ -20,6 +20,11 @@ loop. Otherwise the reference is analysed as usual and the new recipe is kept. A
 rebuild also tries them before building anything. And ``close`` writes the run's
 summary. Nothing here imports the server, chat or an orchestrator.
 
+Several loops can serve one instrument at once (two sessions, a swarm, the
+tab and a script), so every change to a home is made under one lock per
+instrument (``<id>/recipes.lock``), and every record is replaced whole. Reads
+take no lock: they see a record before or after a change, never half of one.
+
 Opt-in on purpose: a recipe verified on one sample is a hypothesis about the
 next, which is why a recalled recipe is replayed and judged before it is used,
 and why the change signal and the audits run on it like on any other.
@@ -35,6 +40,9 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ..utils.file_lock import path_lock
+from ..utils.text_io import atomic_write_text
+
 #: Never copied into the store: heavy per-run artifacts a replay does not need.
 _SKIP_DIRS = ("dcnn_trained", "__pycache__", "_candidates")
 _MAX_FILE_BYTES = 20 * 1024 * 1024
@@ -46,6 +54,15 @@ def instruments_root(root: Optional[str] = None) -> Path:
         return Path(root).expanduser()
     base = os.environ.get("SCILINK_HOME")
     return (Path(base).expanduser() if base else Path.home() / ".scilink") / "instruments"
+
+
+def _home_lock(home_dir: Path):
+    """The lock every change to one instrument's home is made under."""
+    return path_lock(Path(home_dir) / "recipes", label=f"instrument {Path(home_dir).name}")
+
+
+def _write_json(path: Path, obj: Dict[str, Any]) -> None:
+    atomic_write_text(path, json.dumps(obj, indent=1, default=str))
 
 
 def _safe(name: str) -> str:
@@ -65,12 +82,13 @@ class InstrumentHome:
 
     def _touch(self) -> None:
         path = self.dir / "instrument.json"
-        try:
-            known = json.loads(path.read_text())
-        except Exception:  # noqa: BLE001
-            known = {"first_seen": _now()}
-        known.update({**self.info, "last_seen": _now()})
-        path.write_text(json.dumps(known, indent=1, default=str), encoding="utf-8")
+        with _home_lock(self.dir):
+            try:
+                known = json.loads(path.read_text())
+            except Exception:  # noqa: BLE001
+                known = {"first_seen": _now()}
+            known.update({**self.info, "last_seen": _now()})
+            _write_json(path, known)
 
     # ---------------------------------------------------------------- recipes
     def recipes(self, modality: Optional[str] = None, technique: Optional[str] = None,
@@ -104,6 +122,10 @@ class InstrumentHome:
         """Keep the loop's current recipe. Idempotent per recipe id."""
         if loop.recipe is None or loop.anchor_dir is None:
             return None
+        with _home_lock(self.dir):
+            return self._save_recipe(loop, source)
+
+    def _save_recipe(self, loop: Any, source: Optional[str]) -> Dict[str, Any]:
         rid = str(loop.recipe["id"])
         dest = self.dir / "recipes" / rid
         meta_path = dest / "recipe.json"
@@ -126,18 +148,34 @@ class InstrumentHome:
             except Exception:  # noqa: BLE001
                 pass
         meta["last_used"] = _now()
-        meta_path.write_text(json.dumps(meta, indent=1, default=str), encoding="utf-8")
+        _write_json(meta_path, meta)
         self._trim()
         return meta
 
     def used(self, recipe_id: str) -> None:
         path = self.dir / "recipes" / str(recipe_id) / "recipe.json"
-        try:
-            meta = json.loads(path.read_text())
-            meta["uses"], meta["last_used"] = int(meta.get("uses") or 0) + 1, _now()
-            path.write_text(json.dumps(meta, indent=1, default=str), encoding="utf-8")
-        except Exception:  # noqa: BLE001
-            pass
+        with _home_lock(self.dir):
+            try:
+                meta = json.loads(path.read_text())
+                meta["uses"], meta["last_used"] = int(meta.get("uses") or 0) + 1, _now()
+                _write_json(path, meta)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def copy_out(self, anchor_dir: Any, dest: Any) -> Path:
+        """Copy a remembered recipe's run out of the store, whole. Made under
+        the home's lock, so a trim or a forget elsewhere cannot delete it
+        half-way, and through a temporary folder, so ``dest`` is either
+        absent or complete."""
+        dest = Path(dest)
+        with _home_lock(self.dir):
+            if dest.is_dir():
+                return dest
+            tmp = dest.with_name(f".{dest.name}.partial")
+            shutil.rmtree(tmp, ignore_errors=True)
+            shutil.copytree(Path(anchor_dir), tmp)
+            os.replace(tmp, dest)
+        return dest
 
     def _trim(self) -> None:
         metas = self.recipes()
@@ -164,7 +202,7 @@ class InstrumentHome:
                    "novelties": novelties, "params": params,
                    "tracked": {k: [f["features"][k] for f in frames[-1:] if k in (f.get("features") or {})]
                                for k in (loop.outputs or {})}}
-        with open(self.dir / "runs.jsonl", "a", encoding="utf-8") as fh:
+        with _home_lock(self.dir), open(self.dir / "runs.jsonl", "a", encoding="utf-8") as fh:
             fh.write(json.dumps(summary, default=str) + "\n")
         return summary
 
@@ -229,10 +267,12 @@ def forget_recipe(instrument: str, recipe_id: str, root: Optional[str] = None) -
     match = _find(instrument, root)
     if match is None or _safe(recipe_id) != str(recipe_id):
         return False
-    target = instruments_root(root) / match["key"] / "recipes" / str(recipe_id)
-    if not (target / "recipe.json").is_file():
-        return False
-    shutil.rmtree(target, ignore_errors=True)
+    home_dir = instruments_root(root) / match["key"]
+    target = home_dir / "recipes" / str(recipe_id)
+    with _home_lock(home_dir):
+        if not (target / "recipe.json").is_file():
+            return False
+        shutil.rmtree(target, ignore_errors=True)
     return not target.exists()
 
 
@@ -242,6 +282,17 @@ def forget_instrument(instrument: str, root: Optional[str] = None) -> bool:
     if match is None:
         return False
     target = instruments_root(root) / match["key"]
+    lock_file = target / "recipes.lock"
+    with _home_lock(target):
+        # Everything but the lock file, which Windows will not delete while
+        # it is held open; the emptied folder goes after the lock is released.
+        for child in list(target.iterdir()):
+            if child == lock_file:
+                continue
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
     shutil.rmtree(target, ignore_errors=True)
     return not target.exists()
 

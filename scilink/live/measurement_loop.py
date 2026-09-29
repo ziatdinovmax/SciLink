@@ -760,8 +760,8 @@ class MeasurementLoop:
             return str(anchor_dir)
         dest = self.output_dir / "recalled" / str(recipe_id or src.parent.name)
         if not dest.is_dir():
-            import shutil
-            shutil.copytree(src, dest)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            self._home.copy_out(src, dest)
         return str(dest)
 
     def _match_outputs(self) -> None:

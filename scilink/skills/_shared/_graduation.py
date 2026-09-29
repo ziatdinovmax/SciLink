@@ -27,6 +27,7 @@ of truth, honoring ``$SCILINK_HOME``).
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -35,8 +36,24 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from ...utils.file_lock import path_lock
 from ...utils.text_io import atomic_write_text
 from ..loader import graduated_skills_dir
+
+
+def skill_lock(skill_path: Path):
+    """The lock every write of one graduated skill is made under.
+
+    A write reads the skill, asks the model to merge, and writes the result;
+    two of them at once (two sessions, two swarm workers) would each merge
+    into the same old version and the first would be lost. The lock file is
+    ``.<name>.lock`` in the domain folder, beside the bundle rather than in
+    it, so a distillation the model fails still leaves no bundle behind, and
+    the loader (which reads folders only) never sees it.
+    """
+    skill_path = Path(skill_path)
+    return path_lock(skill_path.parent.parent / f".{skill_path.stem}",
+                     label=f"skill {skill_path.stem}")
 
 
 def safe_path_component(value: str, *, fallback: str = "unknown") -> str:
@@ -353,94 +370,97 @@ def graduate_to_skill_file(
     # a distillation the model fails leaves nothing behind.
     skill_path = skill_dir / f"{skill_name}.md"
 
-    knowledge_text = _format_knowledge(knowledge_entry)
+    # A proposal (write=False) changes nothing, so only a write holds the lock,
+    # from reading the existing skill to publishing the merge.
+    with (skill_lock(skill_path) if write else contextlib.nullcontext()):
+        knowledge_text = _format_knowledge(knowledge_entry)
 
-    is_update = skill_path.exists()
-    if is_update:
-        existing_data = _read_skill_as_dict(skill_path, domain=domain)
-        prompt = update_template.format(
-            skill_name=skill_name,
-            existing_skill=json.dumps(existing_data, indent=2),
-            new_knowledge=knowledge_text,
-        )
-    else:
-        prompt = fresh_template.format(
-            skill_name=skill_name,
-            domain=domain,
-            knowledge_text=knowledge_text,
-        )
+        is_update = skill_path.exists()
+        if is_update:
+            existing_data = _read_skill_as_dict(skill_path, domain=domain)
+            prompt = update_template.format(
+                skill_name=skill_name,
+                existing_skill=json.dumps(existing_data, indent=2),
+                new_knowledge=knowledge_text,
+            )
+        else:
+            prompt = fresh_template.format(
+                skill_name=skill_name,
+                domain=domain,
+                knowledge_text=knowledge_text,
+            )
 
-    raw = llm_call(prompt)
-    try:
-        parsed = parse_json_response(raw)
-    except ValueError:
-        # The model answered in prose (or the JSON was truncated off the
-        # end). One corrective retry with the contract restated up front.
-        retry_prompt = (
-            "Respond with ONLY a single JSON object — no prose before or "
-            "after it.\n\n" + prompt
-        )
-        parsed = parse_json_response(llm_call(retry_prompt))
-    # ``technique`` is what the technique-driven selectors route on (the
-    # built-ins all carry one); a learned skill without it is routable in
-    # name only. The measured techniques of the source records come first,
-    # then whatever aliases the model added.
-    techniques = merge_techniques(
-        (extra_meta or {}).get("technique"), parsed.get("technique"))
-    parsed.pop("technique", None)
-    if techniques:
-        parsed["technique"] = techniques
-    if extra_meta:
-        for key in _EXTRA_META_KEYS:
-            if key == "technique":
-                continue
-            if key in extra_meta and extra_meta[key] is not None:
-                parsed[key] = extra_meta[key]
-    if append_sections:
-        for key, text in append_sections.items():
-            text = (text or "").strip()
-            if not text:
-                continue
-            existing = (str(parsed.get(key) or "")).strip()
-            parsed[key] = f"{existing}\n\n{text}".strip() if existing else text
-    skill_content = format_skill_as_markdown(parsed)
+        raw = llm_call(prompt)
+        try:
+            parsed = parse_json_response(raw)
+        except ValueError:
+            # The model answered in prose (or the JSON was truncated off the
+            # end). One corrective retry with the contract restated up front.
+            retry_prompt = (
+                "Respond with ONLY a single JSON object — no prose before or "
+                "after it.\n\n" + prompt
+            )
+            parsed = parse_json_response(llm_call(retry_prompt))
+        # ``technique`` is what the technique-driven selectors route on (the
+        # built-ins all carry one); a learned skill without it is routable in
+        # name only. The measured techniques of the source records come first,
+        # then whatever aliases the model added.
+        techniques = merge_techniques(
+            (extra_meta or {}).get("technique"), parsed.get("technique"))
+        parsed.pop("technique", None)
+        if techniques:
+            parsed["technique"] = techniques
+        if extra_meta:
+            for key in _EXTRA_META_KEYS:
+                if key == "technique":
+                    continue
+                if key in extra_meta and extra_meta[key] is not None:
+                    parsed[key] = extra_meta[key]
+        if append_sections:
+            for key, text in append_sections.items():
+                text = (text or "").strip()
+                if not text:
+                    continue
+                existing = (str(parsed.get(key) or "")).strip()
+                parsed[key] = f"{existing}\n\n{text}".strip() if existing else text
+        skill_content = format_skill_as_markdown(parsed)
 
-    # Build-only mode: return the proposed content WITHOUT writing it, so a
-    # caller can show it for review (used by the upgrade propose/apply flow).
-    if not write:
+        # Build-only mode: return the proposed content WITHOUT writing it, so a
+        # caller can show it for review (used by the upgrade propose/apply flow).
+        if not write:
+            return {
+                "status": "success",
+                "method": "updated" if is_update else "created",
+                "skill_name": skill_name,
+                "domain": domain,
+                "skill_path": str(skill_path),
+                "content": skill_content,
+                "word_count": len(skill_content.split()),
+            }
+
+        # Loader-style bundles include __init__.py; harmless for path-loaded
+        # skills, but keeps the layout consistent with built-ins.
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "__init__.py").touch()
+        atomic_write_text(skill_path, skill_content)
+
+        word_count = len(skill_content.split())
+        warning = None
+        if word_count > WORD_COUNT_WARN_THRESHOLD:
+            warning = (
+                f"Graduated skill '{skill_name}' is now {word_count} words long; "
+                f"consider running a manual consolidation pass."
+            )
+
         return {
             "status": "success",
             "method": "updated" if is_update else "created",
             "skill_name": skill_name,
             "domain": domain,
             "skill_path": str(skill_path),
-            "content": skill_content,
-            "word_count": len(skill_content.split()),
+            "word_count": word_count,
+            "warning": warning,
         }
-
-    # Loader-style bundles include __init__.py; harmless for path-loaded
-    # skills, but keeps the layout consistent with built-ins.
-    skill_dir.mkdir(parents=True, exist_ok=True)
-    (skill_dir / "__init__.py").touch()
-    atomic_write_text(skill_path, skill_content)
-
-    word_count = len(skill_content.split())
-    warning = None
-    if word_count > WORD_COUNT_WARN_THRESHOLD:
-        warning = (
-            f"Graduated skill '{skill_name}' is now {word_count} words long; "
-            f"consider running a manual consolidation pass."
-        )
-
-    return {
-        "status": "success",
-        "method": "updated" if is_update else "created",
-        "skill_name": skill_name,
-        "domain": domain,
-        "skill_path": str(skill_path),
-        "word_count": word_count,
-        "warning": warning,
-    }
 
 
 # ──────────────────────────────────────────────────────────────
