@@ -1453,12 +1453,13 @@ class MetaOrchestratorAgent:
 
         entry = self._open_delegation(mode, task, context, context_from, label)
         depth = {k: v for k, v in (depth or {}).items() if v} if mode == "analysis" else {}
-        if depth:
-            entry["depth"] = depth
-        if mode == "analysis" and data_path:
-            entry["data_path"] = str(data_path)
-            if metadata:
-                entry["metadata"] = str(metadata)
+        with self._fanout_lock:               # new keys on a live entry: see _ledger_snapshot
+            if depth:
+                entry["depth"] = depth
+            if mode == "analysis" and data_path:
+                entry["data_path"] = str(data_path)
+                if metadata:
+                    entry["metadata"] = str(metadata)
         # A re-analysis guided by a prior fusion has effectively seen its
         # companions' findings (stamped by _open_delegation). Bound the spend
         # the same way steering is bounded: the guidance is additive-only.
@@ -1767,26 +1768,31 @@ class MetaOrchestratorAgent:
         status = result.get("status")
         if status is None or (status == "success" and result.get("error")):
             status = "error"
-        entry.update({
-            "status": status,
-            "summary": result.get("summary", ""),
-            "key_findings": result.get("key_findings", []),
-            "files_produced": result.get("files_produced", []),
-            "feature_tables": result.get("feature_tables", []),
-            "feature_tables_schema": result.get("feature_tables_schema", []),
-            "staged_solutions": result.get("staged_solutions", []),
-            "suggested_followups": result.get("suggested_followups", []),
-            "warnings": result.get("warnings", []),
-            "error": result.get("error"),
-            "completed_at": datetime.now().isoformat(),
-            # What later delegations can be matched against (#571).
-            "analysis_ids": [str(a.get("analysis_id")) for a in (result.get("analyses") or [])
-                             if isinstance(a, dict) and a.get("analysis_id")],
-            "recommended_parameters": (self._recommended_points_of(result)
-                                       if entry.get("mode") == "planning" else []),
-            "recommended_values": (self._recommended_values_of(result)
-                                   if entry.get("mode") == "planning" else []),
-        })
+        recommended_parameters = (self._recommended_points_of(result)
+                                  if entry.get("mode") == "planning" else [])
+        recommended_values = (self._recommended_values_of(result)
+                              if entry.get("mode") == "planning" else [])
+        # One update under the ledger lock: a checkpoint never sees an entry
+        # half-closed (the new status with the old summary).
+        with self._fanout_lock:
+            entry.update({
+                "status": status,
+                "summary": result.get("summary", ""),
+                "key_findings": result.get("key_findings", []),
+                "files_produced": result.get("files_produced", []),
+                "feature_tables": result.get("feature_tables", []),
+                "feature_tables_schema": result.get("feature_tables_schema", []),
+                "staged_solutions": result.get("staged_solutions", []),
+                "suggested_followups": result.get("suggested_followups", []),
+                "warnings": result.get("warnings", []),
+                "error": result.get("error"),
+                "completed_at": datetime.now().isoformat(),
+                # What later delegations can be matched against (#571).
+                "analysis_ids": [str(a.get("analysis_id")) for a in (result.get("analyses") or [])
+                                 if isinstance(a, dict) and a.get("analysis_id")],
+                "recommended_parameters": recommended_parameters,
+                "recommended_values": recommended_values,
+            })
         # A completed delegation is the ledger state worth preserving — the
         # every-N-messages auto-save left short sessions (fewer than
         # CHECKPOINT_INTERVAL turns) with no checkpoint at all, making them
@@ -1995,6 +2001,28 @@ class MetaOrchestratorAgent:
         except Exception as e:
             logging.warning(f"Failed to restore checkpoint: {e}")
 
+    def _ledger_snapshot(self) -> List[Dict[str, Any]]:
+        """A copy of the delegation ledger to serialize.
+
+        Fan-out branch threads write to their entries while the coordinator
+        checkpoints, and serializing the live dicts raised "dictionary
+        changed size during iteration", skipping that checkpoint. Each
+        container is copied with ``dict(d)`` / ``list(x)``, one C call that
+        holds the GIL throughout, and the recursion then walks those copies,
+        never the live objects, so a concurrent write cannot interleave. The
+        ledger lock (held by the multi-field writes) keeps an entry from
+        being caught half-updated.
+        """
+        def copy(obj):
+            if isinstance(obj, dict):
+                return {k: copy(v) for k, v in dict(obj).items()}
+            if isinstance(obj, (list, tuple)):
+                return [copy(v) for v in list(obj)]
+            return obj
+
+        with self._fanout_lock:
+            return copy(list(self._delegation_ledger))
+
     def _auto_checkpoint(self, verbose: bool = True):
         """Internal auto-checkpoint without LLM interaction.
 
@@ -2009,7 +2037,7 @@ class MetaOrchestratorAgent:
                     "meta_mode": self.meta_mode.value,
                     "message_count": self.message_count,
                     "children_instantiated": sorted(self._children.keys()),
-                    "delegation_ledger": self._delegation_ledger,
+                    "delegation_ledger": self._ledger_snapshot(),
                     "knowledge_dir": str(self.knowledge_dir) if self.knowledge_dir else None,
                 }
                 atomic_write_json(self.checkpoint_path, checkpoint_data,
