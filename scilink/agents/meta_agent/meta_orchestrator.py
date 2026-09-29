@@ -742,19 +742,22 @@ class MetaOrchestratorAgent:
         if compat:
             logging.warning(f"⚠️ {compat}")
 
-        self.knowledge_dir = target
         child = self._children.get("planning")
+        if child is not None and manifest is not None:
+            # Named store KB: rebind through a session-local copy so the
+            # child's index writes never mutate the shared store (same
+            # copy-on-write the orchestrator constructor applies). Copied
+            # BEFORE any attach state changes: a failed copy must leave the
+            # meta and its planner on the previous KB, together.
+            from ...knowledge.kb_store import snapshot_kb
+            cache = child.base_dir / "kb_cache"
+            snapshot_kb(target, cache)
+        self.knowledge_dir = target
         if child is not None:
             child.knowledge_dir = target
             child._kb_store_manifest = manifest or None
             if manifest is not None:
-                # Named store KB: rebind through a session-local copy so the
-                # child's index writes never mutate the shared store (same
-                # copy-on-write the orchestrator constructor applies).
-                from ...knowledge.kb_store import snapshot_kb
-                cache = child.base_dir / "kb_cache"
-                snapshot_kb(target, cache)
-                child.planner.rebind_kb(str(cache / "default_kb"))
+                child.planner.rebind_kb(str(child.base_dir / "kb_cache" / "default_kb"))
             else:
                 child.planner.rebind_kb(str(target / "default_kb"))
 

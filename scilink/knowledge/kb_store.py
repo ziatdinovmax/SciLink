@@ -116,20 +116,37 @@ def snapshot_kb(kb_dir: Path, dest: Path, *, attempts: int = 8) -> Path:
     dest.mkdir(parents=True, exist_ok=True)
     last_error: Optional[BaseException] = None
     for attempt in range(attempts):
+        if not kb_dir.is_dir():
+            if not _backup_path(kb_dir).is_dir():
+                # Gone, not mid-swap (a swap keeps the backup while the live
+                # directory is briefly absent).
+                raise FileNotFoundError(f"Knowledge base {kb_dir} does not exist.")
+            _time.sleep(0.05 * (attempt + 1))
+            continue
         tmp = unique_sibling(dest, ".snapshot_", "", directory=True)
+        empty = False
         try:
             before = _kb_generation(kb_dir)
             names = sorted(f.name for f in kb_dir.glob("default_kb_*") if f.is_file())
-            for n in names:
-                shutil.copy2(kb_dir / n, tmp / n)
-            if names and _kb_generation(kb_dir) == before:
+            empty = not names
+            if not empty:
                 for n in names:
-                    os.replace(tmp / n, dest / n)
-                return dest
+                    shutil.copy2(kb_dir / n, tmp / n)
+                if _kb_generation(kb_dir) == before:
+                    for n in names:
+                        os.replace(tmp / n, dest / n)
+                    # A file the source lacks (another KB's code index, from
+                    # an earlier attach) must not load beside this one.
+                    for stale in dest.glob("default_kb_*"):
+                        if stale.name not in names:
+                            stale.unlink()
+                    return dest
         except FileNotFoundError as exc:      # caught mid-swap
             last_error = exc
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+        if empty:
+            raise FileNotFoundError(f"Knowledge base {kb_dir} holds no index files.")
         _time.sleep(0.05 * (attempt + 1))
     raise RuntimeError(f"Knowledge base {kb_dir} kept changing while it was being copied"
                        + (f" ({last_error})" if last_error else ""))
@@ -715,4 +732,7 @@ def delete_kb(name: str) -> None:
     if not final.is_dir():
         raise FileNotFoundError(f"KB '{name}' does not exist.")
     shutil.rmtree(final)
+    # A backup stranded by an earlier crash would otherwise be restored as
+    # this KB by the next locked operation on the name.
+    shutil.rmtree(_backup_path(final), ignore_errors=True)
     _logger.info(f"🗑️ KB '{name}' deleted.")

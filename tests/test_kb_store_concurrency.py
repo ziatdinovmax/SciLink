@@ -263,3 +263,56 @@ def test_an_index_that_disagrees_with_its_chunks_is_not_used_for_dense_retrieval
     assert kb.load(str(prefix.with_suffix(".faiss")), str(prefix.with_suffix(".json")),
                    sources_path=str(prefix.with_suffix(".sources.json")))
     assert "2 vectors for 3 chunks" in (kb._dense_disabled_reason or "")
+
+
+# ── re-review follow-ups ──────────────────────────────────────────────────
+
+def test_delete_also_removes_a_stranded_backup(store, tmp_path):
+    kb_store.create_kb("gone", [_doc(tmp_path, "a.md")])
+    final = kb_store.kb_path("gone")
+    backup = final.with_name(".bak_gone")
+    backup.mkdir()
+    (backup / "manifest.json").write_text(json.dumps({"name": "gone", "sources": ["old.md"]}))
+    kb_store.delete_kb("gone")
+    assert not backup.exists()
+    kb_store.create_kb("gone", [_doc(tmp_path, "fresh.md")])      # not resurrected, no FileExistsError
+    assert kb_store.read_manifest(final)["sources"] == ["fresh.md"]
+
+
+def test_snapshot_of_a_missing_kb_fails_fast_and_says_so(store, tmp_path):
+    t0 = time.time()
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        kb_store.snapshot_kb(store / "nope", tmp_path / "cache")
+    empty = store / "empty"
+    empty.mkdir(parents=True)
+    with pytest.raises(FileNotFoundError, match="no index files"):
+        kb_store.snapshot_kb(empty, tmp_path / "cache")
+    assert time.time() - t0 < 0.5
+
+
+def test_snapshot_drops_files_the_source_lacks(store, tmp_path):
+    kb_store.create_kb("b", [_doc(tmp_path, "b.md")])
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "default_kb_code.faiss").write_bytes(b"from KB a")          # an earlier attach
+    kb_store.snapshot_kb(kb_store.kb_path("b"), cache)
+    assert not (cache / "default_kb_code.faiss").exists()
+    assert (cache / "default_kb_docs.faiss").exists()
+
+
+def test_a_failed_attach_leaves_the_meta_and_its_planner_on_the_old_kb(store, tmp_path):
+    from types import SimpleNamespace
+    from scilink.agents.meta_agent.meta_orchestrator import MetaOrchestratorAgent
+    broken = store / "broken"
+    broken.mkdir(parents=True)
+    (broken / "manifest.json").write_text(json.dumps({"name": "broken", "embedding_model": "m"}))
+    old = tmp_path / "old_kb"
+    rebinds = []
+    child = SimpleNamespace(base_dir=tmp_path / "planning", knowledge_dir=old, _kb_store_manifest=None,
+                            planner=SimpleNamespace(rebind_kb=rebinds.append))
+    m = MetaOrchestratorAgent.__new__(MetaOrchestratorAgent)
+    m.knowledge_dir, m._children, m.embedding_model = old, {"planning": child}, "m"
+    m._shared_kb_candidate = None
+    with pytest.raises(FileNotFoundError):
+        m.attach_knowledge_dir("broken")
+    assert m.knowledge_dir == old and child.knowledge_dir == old and rebinds == []
