@@ -77,10 +77,13 @@ def test_the_model_can_be_positional():
     assert seen.get("max_tokens", 0) > 4096
 
 
-def test_retries_still_defaulted():
-    """Pre-existing behaviour must survive the change."""
+def test_retries_are_scilinks_not_litellms():
+    """SciLink retries transient errors itself (tests/test_llm_retries.py), so
+    LiteLLM's no-wait constant retry is switched off, and every call carries a
+    per-attempt timeout."""
     seen = _captured(model="gpt-4o", messages=[])
-    assert seen["num_retries"] == 4
+    assert seen["num_retries"] == 0
+    assert seen["timeout"] == litellm_wrapper.LLM_TIMEOUT_S
 
 
 def test_it_sends_exactly_what_the_registry_reports():
