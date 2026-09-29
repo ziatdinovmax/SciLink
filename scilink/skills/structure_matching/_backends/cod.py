@@ -352,7 +352,10 @@ class CODBackend:
         try:
             # Published whole: two matchers fetching one id never share a file.
             from scilink.utils.download import download_once
-            download_once(_COD_CIF_URL.format(cid=sid), cached, timeout=30)
+            # One lock for the whole cache: a lock file beside every 10 KB
+            # CIF would double the cache's file count.
+            download_once(_COD_CIF_URL.format(cid=sid), cached, timeout=30,
+                          lock=self._cache_dir)
             return cached
         except Exception as exc:
             _logger.debug("COD %s CIF fetch failed: %s", cid, exc)

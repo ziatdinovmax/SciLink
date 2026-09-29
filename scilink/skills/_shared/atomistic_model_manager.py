@@ -80,7 +80,7 @@ def get_or_download_atomistic_model(settings: dict, logger: logging.Logger = Non
         # branches, best-of-N candidates, spawned series replays). The lock
         # makes one of them download; the others wait and then find it.
         from scilink.utils.file_lock import path_lock
-        with path_lock(default_path):
+        with path_lock(default_path, label="the DCNN ensemble"):
             if not _ready():
                 logger.warning(f"Default model directory '{default_path}' not found. Downloading...")
                 success = _download_and_extract_model(
@@ -155,17 +155,16 @@ def _download_and_extract_model(gdrive_id: str, output_dir: str, logger: logging
     from scilink.skills.image_analysis.atomic_stem import atomic_stem as atomistic_tools
     
     import shutil
-    import tempfile
+    from scilink.utils.download import unique_sibling
 
-    # Every intermediate is uniquely named beside the destination, and the
-    # extracted folder is published with one rename: a concurrent reader
-    # sees no ensemble or the whole ensemble, never some of its members.
+    # Every intermediate is uniquely named beside the destination (created
+    # with the umask applied by the kernel), and the extracted folder is
+    # published with one rename: a concurrent reader sees no ensemble or the
+    # whole ensemble, never some of its members.
     out = os.path.abspath(output_dir)
     parent, name = os.path.dirname(out), os.path.basename(out)
-    os.makedirs(parent, exist_ok=True)
-    fd, zip_filename = tempfile.mkstemp(dir=parent, prefix=f".{name}.", suffix=".zip")
-    os.close(fd)
-    staging = tempfile.mkdtemp(dir=parent, prefix=f".{name}.", suffix=".extract")
+    zip_filename = str(unique_sibling(parent, f".{name}.", ".zip"))
+    staging = str(unique_sibling(parent, f".{name}.", ".extract", directory=True))
     try:
         # Download: the release asset first, Google Drive as the fallback
         downloaded_zip_path = None
@@ -188,15 +187,21 @@ def _download_and_extract_model(gdrive_id: str, output_dir: str, logger: logging
             return False
 
         if os.path.exists(out):
+            if _locate_model_files(out, logging.getLogger("quiet")):
+                # Published by another process while this one downloaded
+                # (possible where locking is unavailable): keep theirs.
+                return True
             # An incomplete folder from an earlier interrupted run is moved
             # aside, not deleted: it may hold something the user put there.
-            aside = tempfile.mkdtemp(dir=parent, prefix=f".{name}.", suffix=".stale")
+            aside = str(unique_sibling(parent, f".{name}.", ".stale", directory=True))
             os.rename(out, os.path.join(aside, name))
             logger.warning(f"Moved the incomplete '{output_dir}' aside to '{aside}'.")
-        umask = os.umask(0)
-        os.umask(umask)
-        os.chmod(staging, 0o777 & ~umask)       # mkdtemp made it 0700
-        os.rename(staging, out)
+        try:
+            os.rename(staging, out)
+        except OSError:
+            if _locate_model_files(out, logging.getLogger("quiet")):
+                return True             # lost a publish race to a complete copy
+            raise
         return True
     finally:
         try:

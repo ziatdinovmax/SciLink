@@ -190,7 +190,6 @@ def test_concurrent_dcnn_requests_download_once_and_never_see_part_of_the_ensemb
     from scilink.skills.image_analysis.atomic_stem import atomic_stem as tools
 
     s = _Server(payload=_ensemble_zip(), chunk=8 * 1024, delay=0.01)
-    real_unzip = tools.unzip_file
 
     def slow_unzip(zip_path, out_dir, logger):
         # Extract one member at a time, slowly, so a reader has every chance
@@ -239,7 +238,6 @@ def test_concurrent_dcnn_requests_download_once_and_never_see_part_of_the_ensemb
     leftovers = [p.name for p in (tmp_path / "models").iterdir() if p.name.startswith(".dcnn_trained.")
                  and not p.name.endswith(".lock")]
     assert leftovers == []
-    assert real_unzip is not slow_unzip
 
 
 def test_an_incomplete_dcnn_folder_is_moved_aside_not_deleted(tmp_path, monkeypatch):
@@ -258,3 +256,189 @@ def test_an_incomplete_dcnn_folder_is_moved_aside_not_deleted(tmp_path, monkeypa
     assert len(list(Path(path).glob("atomnet3_*.tar"))) == N_MEMBERS
     kept = list((tmp_path / "models").glob(".dcnn_trained.*.stale/dcnn_trained/notes.txt"))
     assert len(kept) == 1 and kept[0].read_text() == "mine"
+
+
+# ── review follow-ups ─────────────────────────────────────────────────────
+
+def test_concurrent_downloads_never_touch_the_process_umask(tmp_path):
+    """Reading the umask (umask(0) then restore) changed it for the whole
+    process; threads racing through that window left files world-writable
+    or the umask at 0. Files are now created with the umask applied by the
+    kernel, so neither the downloads nor an unrelated writer can see it move."""
+    import sys
+    servers = [_Server(chunk=8 * 1024, delay=0.001) for _ in range(4)]
+    before = os.umask(0o022)
+    old_switch = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        stop = threading.Event()
+        unrelated = []
+
+        def writer():
+            i = 0
+            while not stop.is_set():
+                f = tmp_path / "results" / f"r{i}.txt"
+                f.parent.mkdir(exist_ok=True)
+                f.write_text("x")
+                unrelated.append(f)
+                i += 1
+
+        w = threading.Thread(target=writer)
+        w.start()
+        dests = [tmp_path / "cache" / f"w{i}.bin" for i in range(4)]
+        ts = [threading.Thread(target=download_once, args=(s.url, d)) for s, d in zip(servers, dests)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        stop.set()
+        w.join()
+        assert os.umask(0o022) == 0o022                  # untouched
+        assert all(d.stat().st_mode & 0o777 == 0o644 for d in dests)
+        assert unrelated and all(f.stat().st_mode & 0o777 == 0o644 for f in unrelated)
+    finally:
+        sys.setswitchinterval(old_switch)
+        os.umask(before)
+        for s in servers:
+            s.close()
+
+
+def test_a_filesystem_without_locking_still_downloads(server, tmp_path, monkeypatch, caplog):
+    """HPC mounts without flock raise ENOTSUP/ENOLCK: run unlocked (atomic
+    publish still holds), warn once, never fail the model."""
+    import errno
+    import fcntl
+    import logging as _logging
+    from scilink.utils import file_lock
+    real = fcntl.flock
+
+    def unsupported(fh, op):
+        if op & (fcntl.LOCK_EX | fcntl.LOCK_NB):
+            raise OSError(errno.ENOTSUP, "Operation not supported")
+        return real(fh, op)
+
+    monkeypatch.setattr(fcntl, "flock", unsupported)
+    file_lock._warned_unsupported.clear()
+    with caplog.at_level(_logging.WARNING, logger="scilink.utils.file_lock"):
+        a = download_once(server.url, tmp_path / "a.bin")
+        b = download_once(server.url, tmp_path / "b.bin")
+    assert a.read_bytes() == PAYLOAD and b.read_bytes() == PAYLOAD
+    assert sum("not supported" in r.message for r in caplog.records) == 1
+
+
+def test_the_windows_lock_serializes_across_handles(tmp_path, monkeypatch):
+    """No fcntl: path_lock uses msvcrt.locking on byte 0 of the lock file.
+    Simulated with a fake msvcrt whose locks conflict across handles."""
+    import sys
+    import types
+    held, guard = {}, threading.Lock()
+
+    def locking(fd, mode, nbytes):
+        key = os.fstat(fd).st_ino
+        with guard:
+            if mode == fake.LK_UNLCK:
+                held.pop(key, None)
+                return
+            if key in held:
+                raise OSError(13, "locked")
+            held[key] = fd
+
+    fake = types.SimpleNamespace(LK_NBLCK=2, LK_UNLCK=0, locking=locking)
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+    monkeypatch.setitem(sys.modules, "msvcrt", fake)
+    from scilink.utils.file_lock import is_locked, path_lock
+    inside, overlap = [0], []
+
+    def work():
+        with path_lock(tmp_path / "x"):
+            inside[0] += 1
+            overlap.append(inside[0])
+            time.sleep(0.05)
+            inside[0] -= 1
+
+    ts = [threading.Thread(target=work) for _ in range(4)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert max(overlap) == 1
+    with path_lock(tmp_path / "x"):
+        assert is_locked(tmp_path / "x")
+    assert not is_locked(tmp_path / "x")
+
+
+def test_is_locked_sees_a_holder_in_another_process(tmp_path):
+    from scilink.utils.file_lock import is_locked
+    target = tmp_path / "kb"
+    code = ("import sys, time; from scilink.utils.file_lock import path_lock\n"
+            "with path_lock(sys.argv[1]):\n    print('held', flush=True); time.sleep(5)")
+    env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1]))
+    p = subprocess.Popen([sys.executable, "-c", code, str(target)], env=env, stdout=subprocess.PIPE, text=True)
+    try:
+        assert p.stdout.readline().strip() == "held"
+        assert is_locked(target)
+    finally:
+        p.kill()
+        p.wait()
+    assert not is_locked(target)                      # the kernel released it
+
+
+def test_a_waiter_says_what_it_is_waiting_for(server, tmp_path, caplog):
+    import logging as _logging
+    from scilink.utils.file_lock import path_lock
+    dest = tmp_path / "big.pth"
+    release = threading.Event()
+
+    def holder():
+        with path_lock(dest):
+            release.wait(5)
+
+    h = threading.Thread(target=holder)
+    h.start()
+    time.sleep(0.1)
+    with caplog.at_level(_logging.INFO, logger="scilink.utils.file_lock"):
+        t = threading.Thread(target=download_once, args=(server.url, dest))
+        t.start()
+        time.sleep(0.3)
+        release.set()
+        t.join()
+        h.join()
+    assert any("Waiting for another process working on big.pth" in r.message for r in caplog.records)
+
+
+def test_a_complete_ensemble_published_meanwhile_is_kept(tmp_path, monkeypatch):
+    """Where locking is unavailable a second publisher used to move a
+    complete ensemble aside (and leave a 770 MB .stale copy): it now keeps
+    the one already there."""
+    from scilink.skills._shared import atomistic_model_manager as mm
+    from scilink.skills.image_analysis.atomic_stem import atomic_stem as tools
+    out = tmp_path / "dcnn_trained"
+
+    def fake_url(url, dest, logger):
+        Path(dest).write_bytes(_ensemble_zip())
+        # meanwhile another process publishes a complete ensemble
+        (out / "atomnet_ensemble").mkdir(parents=True)
+        for i in range(N_MEMBERS):
+            (out / "atomnet_ensemble" / f"atomnet3_{i}.tar").write_bytes(b"theirs")
+        return dest
+
+    monkeypatch.setattr(mm, "_download_url", fake_url)
+    assert mm._download_and_extract_model("gid", str(out), logging.getLogger("t"), url="https://x/y.zip")
+    assert (out / "atomnet_ensemble" / "atomnet3_0.tar").read_bytes() == b"theirs"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["dcnn_trained"]    # no .stale, no staging
+
+
+def test_no_download_or_publish_path_touches_the_umask(server, tmp_path, monkeypatch):
+    """The race above is two syscalls wide and rarely shows in a test; this
+    pins the property itself: nothing on these paths calls os.umask."""
+    from scilink.skills._shared import atomistic_model_manager as mm
+    calls = []
+    real = os.umask
+    monkeypatch.setattr(os, "umask", lambda m: calls.append(m) or real(m))
+    download_once(server.url, tmp_path / "a.bin")
+    s = _Server(payload=_ensemble_zip(), delay=0)
+    try:
+        mm._download_and_extract_model("gid", str(tmp_path / "dcnn_trained"), logging.getLogger("t"), url=s.url)
+    finally:
+        s.close()
+    assert calls == []
