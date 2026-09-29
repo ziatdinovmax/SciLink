@@ -34,6 +34,8 @@ __all__ = [
     "FeedbackChannel",
     "ConsoleChannel",
     "QueueChannel",
+    "WorkerChannel",
+    "question_timeout_s",
     "request_human_feedback",
     "get_channel",
     "set_default_channel",
@@ -139,58 +141,143 @@ class ConsoleChannel:
         return builtins.input(req.prompt)
 
 
+#: How long a worker waits for a person before it goes on with the gate's own
+#: default. Long enough for someone at the screen to read and answer; short
+#: enough that an unattended run is not held (and its budget spent) forever.
+QUESTION_TIMEOUT_S = 1800.0
+
+
+def question_timeout_s() -> Optional[float]:
+    """The worker question timeout: ``SCILINK_QUESTION_TIMEOUT_S`` seconds,
+    else :data:`QUESTION_TIMEOUT_S`. ``0`` (or ``none``) waits without limit."""
+    import os
+    raw = (os.environ.get("SCILINK_QUESTION_TIMEOUT_S") or "").strip().lower()
+    if not raw:
+        return QUESTION_TIMEOUT_S
+    if raw in ("0", "none", "off"):
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return QUESTION_TIMEOUT_S
+    return value if value > 0 else None
+
+
 class QueueChannel:
     """Parks requests from concurrent worker threads for serial serving.
 
-    Worker threads (fan-out branches) install this as their thread channel;
-    ``ask`` enqueues the request and blocks until a coordinator thread —
-    the one that owns the human — answers it via ``serve_pending``, which
-    relays each queued request through the coordinator's own active
-    channel (console prompt, UI modal, ...) one at a time.
+    Worker threads (fan-out branches, swarm workers) install this, usually
+    behind a :class:`WorkerChannel`, as their thread channel; ``ask`` parks
+    the request and blocks until a coordinator thread — the one that owns
+    the human — answers it via ``serve_pending``, which relays each parked
+    request through the coordinator's own active channel (console prompt, UI
+    modal, ...) one at a time. ``pending()`` says who is waiting, and on what.
 
     ``timeout_s`` bounds how long a worker waits for an answer; on timeout
-    the request's ``default`` answer is returned so an unattended branch
-    degrades to accept-as-is instead of hanging forever.
+    the request's ``default`` answer is returned, the question is withdrawn
+    (a person is never asked something nobody waits for any more) and the
+    worker's feedback log records ``timed_out``, so an unattended worker
+    degrades to the gate's default instead of hanging forever.
     """
 
     def __init__(self, timeout_s: Optional[float] = None) -> None:
-        self._queue: _queue_mod.Queue = _queue_mod.Queue()
+        self._items: List[Dict[str, Any]] = []
+        self._lock = threading.Lock()
         self.timeout_s = timeout_s
 
     def ask(self, req: FeedbackRequest) -> str:
-        event = threading.Event()
-        holder: Dict[str, str] = {}
-        self._queue.put((req, holder, event))
-        if not event.wait(self.timeout_s):
-            holder.setdefault("answer", req.default)
-        return holder.get("answer", req.default)
+        item: Dict[str, Any] = {"req": req, "event": threading.Event(),
+                                "state": "waiting", "answer": None}
+        with self._lock:
+            self._items.append(item)
+        answered = item["event"].wait(self.timeout_s)
+        with self._lock:
+            if not answered and not item["event"].is_set():
+                item["state"] = "timed_out"
+                if item in self._items:
+                    self._items.remove(item)
+        if item["state"] == "timed_out":
+            log = get_thread_feedback_log()
+            if log:
+                _append_record(log, {"id": req.id, "event": "timed_out",
+                                     "default": req.default, "after_s": self.timeout_s})
+            return req.default
+        return item["answer"] if item["answer"] is not None else req.default
+
+    def pending(self) -> List[Dict[str, Any]]:
+        """The questions waiting now, oldest first: who asks, about what."""
+        with self._lock:
+            items = list(self._items)
+        return [{"id": it["req"].id, "worker": it["req"].origin.get("branch_label"),
+                 "subject": it["req"].origin.get("work_subject"),
+                 "kind": it["req"].kind, "asked_at": it["req"].created_at,
+                 "being_answered": it["state"] == "serving"} for it in items]
 
     def serve_pending(self, through: Optional[FeedbackChannel] = None) -> int:
-        """Serve every queued request now; returns how many were answered.
+        """Serve every parked request now; returns how many were answered.
 
-        Called periodically from the coordinator's wait loop. A label from
-        ``origin['branch_label']`` is prefixed onto the prompt so the human
-        knows which branch is asking. If the serving channel raises (EOF,
-        stop, interrupt), the waiting worker is unblocked with the
-        request's default answer before the exception propagates.
+        Called periodically from the coordinator's wait loop. The asker
+        (``origin['branch_label']``, and the subject it works on) is prefixed
+        onto the prompt so the human knows who is asking. If the serving
+        channel raises (EOF, stop, interrupt), the waiting worker is unblocked
+        with the request's default answer before the exception propagates.
         """
         served = 0
         while True:
+            with self._lock:
+                item = next((it for it in self._items if it["state"] == "waiting"), None)
+                if item is None:
+                    return served
+                item["state"] = "serving"
+            req = item["req"]
+            to_serve = replace(req, prompt=_asker_prefix(req.origin) + req.prompt)
             try:
-                req, holder, event = self._queue.get_nowait()
-            except _queue_mod.Empty:
-                return served
-            label = req.origin.get("branch_label")
-            to_serve = (replace(req, prompt=f"\n[branch: {label}]{req.prompt}")
-                        if label else req)
-            try:
-                holder["answer"] = (through or get_channel()).ask(to_serve)
+                answer = (through or get_channel()).ask(to_serve)
             except BaseException:
-                holder.setdefault("answer", req.default)
-                event.set()
+                self._finish(item, req.default)
                 raise
-            event.set()
+            if not self._finish(item, answer):
+                print("  ⏱  that worker stopped waiting and went on with the default; "
+                      "this answer was not used.")
             served += 1
+
+    def _finish(self, item: Dict[str, Any], answer: str) -> bool:
+        """Hand ``answer`` to the waiting worker. False when it already gave up."""
+        with self._lock:
+            if item in self._items:
+                self._items.remove(item)
+            if item["state"] == "timed_out":
+                return False
+            item["state"], item["answer"] = "answered", answer
+            item["event"].set()
+            return True
+
+
+def _asker_prefix(origin: Dict[str, Any]) -> str:
+    label = origin.get("branch_label")
+    if not label:
+        return ""
+    subject = origin.get("work_subject")
+    return f"\n[{origin.get('worker_kind', 'branch')}: {label}{f' · {subject}' if subject else ''}]"
+
+
+class WorkerChannel:
+    """A worker thread's channel: tags each request with the worker asking
+    (and the subject it works on), then parks it on the coordinator's queue.
+
+    ``kind`` names what the worker is on the prompt ("branch" for a fan-out
+    branch, "worker" for a swarm item)."""
+
+    def __init__(self, queue_channel: QueueChannel, label: str, *,
+                 subject: Optional[str] = None, kind: str = "branch") -> None:
+        self._qch, self._label, self._subject, self._kind = queue_channel, label, subject, kind
+
+    def ask(self, req: FeedbackRequest) -> str:
+        req.origin.setdefault("branch_label", self._label)
+        req.origin.setdefault("worker_kind", self._kind)
+        if self._subject:
+            req.origin.setdefault("work_subject", self._subject)
+        return self._qch.ask(req)
 
 
 _default_channel: FeedbackChannel = ConsoleChannel()

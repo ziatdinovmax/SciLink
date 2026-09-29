@@ -814,19 +814,6 @@ def _branch_hitl_enabled(orch) -> bool:
         and orch._enable_human_feedback
 
 
-class _BranchChannel:
-    """Tags a branch's requests with its label, then parks them on the
-    shared queue for the coordinator to serve."""
-
-    def __init__(self, queue_channel, label: str) -> None:
-        self._qch = queue_channel
-        self._label = label
-
-    def ask(self, req):
-        req.origin.setdefault("branch_label", self._label)
-        return self._qch.ask(req)
-
-
 def _make_ephemeral_analysis_child(orch, base_dir: Path, restore: bool = False):
     """Build an isolated, one-shot analysis orchestrator for one branch.
 
@@ -1038,9 +1025,8 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
     if stop_event is not None:
         _register_branch_stop(stop_event)
     if queue_channel is not None:
-        from ...hitl import set_thread_channel
-        set_thread_channel(_BranchChannel(
-            queue_channel, branch.get("label") or slug))
+        from ...hitl import WorkerChannel, set_thread_channel
+        set_thread_channel(WorkerChannel(queue_channel, branch.get("label") or slug))
     # Bind this worker thread to the META's event log, branch-tagged: the
     # child's own chat() rebinds to the child session's log for the
     # duration of run_task (and restores), so the meta log records the
@@ -1887,9 +1873,9 @@ def run_fanout(orch, branches: List[dict],
     queue_channel = None
     branch_autonomy = None
     if _branch_hitl_enabled(orch):
-        from ...hitl import QueueChannel
+        from ...hitl import QueueChannel, question_timeout_s
         from ..exp_agents.analysis_orchestrator import AnalysisMode
-        queue_channel = QueueChannel()
+        queue_channel = QueueChannel(timeout_s=question_timeout_s())
         branch_autonomy = AnalysisMode[orch.meta_mode.name]
 
     pool = ThreadPoolExecutor(max_workers=max_workers)
