@@ -37,6 +37,75 @@ def _unregister_subprocess(proc: subprocess.Popen) -> None:
                 del _active_subprocesses[tid]
 
 
+# A generated script runs in its own session and process group (POSIX), so a
+# timeout or a Stop can end the whole tree it started: a loky or
+# multiprocessing pool for per-pixel fits, a solver it shelled out to.
+# Killing only the direct child left those grandchildren running, holding
+# memory and CPU after the analysis had moved on.
+_NEW_SESSION = os.name == "posix"
+
+
+def _kill_process_tree(proc: subprocess.Popen, grace: float = 2.0) -> None:
+    """SIGTERM the script's process group, give it ``grace`` seconds, then
+    SIGKILL whatever is left of the group.
+
+    The group is signalled only when the process leads its own group (it was
+    started with ``start_new_session``); otherwise, and off POSIX, only the
+    process itself is signalled, so a caller's own group is never hit.
+    """
+    group = None
+    if _NEW_SESSION:
+        try:
+            pgid = os.getpgid(proc.pid)
+            if pgid == proc.pid and pgid != os.getpgrp():
+                group = pgid
+        except OSError:          # already gone and reaped
+            group = None
+
+    def send(sig):
+        if group is not None:
+            try:
+                os.killpg(group, sig)
+                return
+            except OSError:      # the group is empty
+                pass
+        try:
+            proc.send_signal(sig)
+        except OSError:
+            pass
+
+    if proc.poll() is None:
+        send(signal.SIGTERM)
+        try:
+            proc.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            pass
+    # Always: the leader may have exited on SIGTERM while its pool workers
+    # ignored it.
+    send(getattr(signal, "SIGKILL", signal.SIGTERM))
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _kill_all_registered() -> None:
+    """At interpreter exit: a script in its own session no longer gets the
+    terminal's SIGINT or SIGHUP, so end the ones still registered."""
+    with _active_subprocesses_lock:
+        procs = [p for ps in _active_subprocesses.values() for p in ps]
+        _active_subprocesses.clear()
+    for proc in procs:
+        try:
+            _kill_process_tree(proc, grace=0.5)
+        except Exception:  # noqa: BLE001 - best effort at exit
+            pass
+
+
+import atexit as _atexit
+_atexit.register(_kill_all_registered)
+
+
 def kill_subprocesses_for_thread(tid: int) -> None:
     """Terminate all subprocesses registered by a given thread — including
     subprocesses of fan-out worker threads registered (via
@@ -52,15 +121,7 @@ def kill_subprocesses_for_thread(tid: int) -> None:
         procs = [p for t in target_tids
                  for p in _active_subprocesses.pop(t, [])]
     for proc in procs:
-        try:
-            proc.terminate()          # SIGTERM first
-            try:
-                proc.wait(timeout=2)  # Give it a moment to clean up
-            except subprocess.TimeoutExpired:
-                proc.kill()           # SIGKILL if still alive
-                proc.wait()
-        except OSError:
-            pass  # Already dead
+        _kill_process_tree(proc)      # SIGTERM, a moment to clean up, SIGKILL
 
 # Global cache for sandbox approval (shared across all agents in session)
 _GLOBAL_SANDBOX_APPROVED: bool = False
@@ -441,15 +502,20 @@ class ScriptExecutor:
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, env=env, cwd=script_dir,
                 preexec_fn=_sandbox_preexec(),
+                start_new_session=_NEW_SESSION,
             )
             # Register so OutputCapture.kill_subprocesses() can terminate it.
             _register_subprocess(proc)
             try:
                 stdout, stderr = proc.communicate(timeout=effective_timeout)
             except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
+                _kill_process_tree(proc, grace=0.5)
                 return {"status": "error", "message": f"Script execution timed out after {effective_timeout} seconds."}
+            except BaseException:
+                # Interrupted while waiting (Ctrl-C, a stop): the script is in
+                # its own session and would otherwise outlive us.
+                _kill_process_tree(proc, grace=0.5)
+                raise
             finally:
                 _unregister_subprocess(proc)
 
@@ -512,7 +578,7 @@ class WarmScriptExecutor(ScriptExecutor):
                 [sys.executable, "-u", worker], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, text=True, bufsize=1,
                 env=sandbox_env({"MP_API_KEY": self.mp_api_key} if self.mp_api_key else None),
-                preexec_fn=_sandbox_preexec())
+                preexec_fn=_sandbox_preexec(), start_new_session=_NEW_SESSION)
             ready = self._read_line(30.0)
             self._runs = 0
             return bool(ready and json.loads(ready).get("ready"))
@@ -549,8 +615,7 @@ class WarmScriptExecutor(ScriptExecutor):
                     proc.stdin.flush()
                     proc.wait(timeout=2)
                 except Exception:  # noqa: BLE001
-                    proc.kill()
-                    proc.wait(timeout=5)
+                    _kill_process_tree(proc, grace=0.5)
         except Exception:  # noqa: BLE001
             pass
 
@@ -590,7 +655,7 @@ class WarmScriptExecutor(ScriptExecutor):
                 self._runs += 1
                 if line is None:
                     dead = self._proc.poll() is not None
-                    self._proc.kill()
+                    _kill_process_tree(self._proc, grace=0.5)
                     self.close()
                     if dead:                      # the worker died (a crash in native code, a Stop)
                         return {"status": "error", "message": "Script execution was stopped or the "
