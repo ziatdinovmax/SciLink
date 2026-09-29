@@ -827,42 +827,18 @@ class _BranchChannel:
         return self._qch.ask(req)
 
 
-def _inherited_roots(orch):
-    """The parent's fence roots for a child (None keeps the child open)."""
-    fence = getattr(orch, "path_fence", None)
-    return [str(r) for r in fence.roots] if fence is not None else None
-
-
 def _make_ephemeral_analysis_child(orch, base_dir: Path, restore: bool = False):
     """Build an isolated, one-shot analysis orchestrator for one branch.
 
-    NOT registered in ``orch._children`` — these are ephemeral fan-out workers,
-    not the persistent singleton, so they share no mutable state across threads
-    and are never restored by the meta's child-restore path. Resting mode
-    AUTONOMOUS; run_task pins it per call. ``restore=True`` (the resume path)
-    rebuilds the worker IN its original session dir with its own checkpoint,
-    so it comes back holding its per-tool-checkpointed partial progress.
+    An ephemeral worker (``workers.build_child``): NOT registered in
+    ``orch._children``, so it shares no mutable state across threads and is
+    never restored by the meta's child-restore path. Resting mode AUTONOMOUS;
+    run_task pins it per call. ``restore=True`` (the resume path) rebuilds the
+    worker IN its original session dir with its own checkpoint, so it comes
+    back holding its per-tool-checkpointed partial progress.
     """
-    from ..exp_agents.analysis_orchestrator import (
-        AnalysisOrchestratorAgent, AnalysisMode,
-    )
-    base_dir.mkdir(parents=True, exist_ok=True)
-    child = AnalysisOrchestratorAgent(
-        base_dir=str(base_dir),
-        api_key=orch.api_key,
-        model_name=orch.model_name,
-        base_url=orch.base_url,
-        embedding_model=orch.embedding_model,
-        embedding_api_key=orch.embedding_api_key,
-        futurehouse_api_key=orch.futurehouse_api_key,
-        restore_checkpoint=restore,
-        analysis_mode=AnalysisMode.AUTONOMOUS,
-        file_roots=_inherited_roots(orch),
-    )
-    child._agent_label = "Analysis branch"
-    # Share skills / custom tools / MCP servers registered on the meta.
-    orch._propagate_extensions_to_child(child)
-    return child
+    from .workers import build_child
+    return build_child(orch, "analysis", base_dir, restore=restore, label="Analysis branch")
 
 
 def _branch_primary_path(branch: dict) -> str:
