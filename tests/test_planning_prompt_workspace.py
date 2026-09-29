@@ -80,3 +80,22 @@ def test_a_knowledge_dir_attached_mid_session_reaches_the_next_delegation(tmp_pa
     a.knowledge_dir = tmp_path / "attached_kb"
     a.set_autonomy_level(AutonomyLevel.AUTONOMOUS)            # run_task on entry
     assert str(tmp_path / "attached_kb") in a.messages[0]["content"]
+
+
+def test_the_bo_objective_is_the_targets_not_the_placeholder(tmp_path):
+    from types import SimpleNamespace
+    from scilink.agents.planning_agents.orchestrator_tools import OrchestratorTools
+    orch = SimpleNamespace(base_dir=tmp_path, planner=SimpleNamespace(),
+                           objective="Delegated by meta-agent", target_directions={"yield": "maximize"})
+    t = OrchestratorTools(orch)
+    assert t._distill_objective_for_bo(["yield", "cost"]) == "Optimize yield (maximize), cost."
+    orch.objective = "Maximize yield of NMC811 cathodes"
+    assert t._distill_objective_for_bo(["yield"]) == "Maximize yield of NMC811 cathodes"
+
+
+def test_scalarizer_prompts_leave_out_a_placeholder_objective():
+    import inspect
+    from scilink.agents.planning_agents import orchestrator_tools as ot
+    src = inspect.getsource(ot)
+    assert 'self.orch.objective != "Undefined Research Goal"' not in src
+    assert src.count("not in _placeholder_objectives()") == 2

@@ -261,6 +261,14 @@ def _norm_level(v) -> str:
     return str(int(f)) if f.is_integer() else repr(f)
 
 
+
+def _placeholder_objectives():
+    """Objectives that stand in for "none given" (imported here, lazily:
+    planning_orchestrator imports this module)."""
+    from .planning_orchestrator import PLACEHOLDER_OBJECTIVES
+    return PLACEHOLDER_OBJECTIVES
+
+
 class OrchestratorTools:
     """
     Manages tool definitions, schemas, and execution for the OrchestratorAgent.
@@ -609,10 +617,14 @@ class OrchestratorTools:
         directions. Result is cached on self.orch._distilled_objective.
         """
         raw = self.orch.objective
-        # Skip distillation for short/default objectives
-        if (not raw
-                or raw == "Undefined Research Goal"
-                or len(raw) <= 200):
+        if not raw or raw in _placeholder_objectives():
+            # No objective was given (the meta's delegated child carries a
+            # placeholder): state the declared targets, not the placeholder.
+            dirs = getattr(self.orch, "target_directions", None) or {}
+            parts = [f"{c} ({dirs[c]})" if c in dirs else str(c) for c in (target_cols or [])]
+            return f"Optimize {', '.join(parts)}." if parts else ""
+        # Short objectives need no distillation.
+        if len(raw) <= 200:
             return raw
 
         cached = getattr(self.orch, '_distilled_objective', None)
@@ -3921,7 +3933,7 @@ class OrchestratorTools:
             enhanced_objective = extraction_goal or ""
             # Always include the campaign objective so the scalarizer knows
             # what physically meaningful targets to derive
-            if self.orch.objective and self.orch.objective != "Undefined Research Goal":
+            if self.orch.objective and self.orch.objective not in _placeholder_objectives():
                 enhanced_objective = (
                     f"Research objective: {self.orch.objective}\n\n{enhanced_objective}"
                 ).strip()
@@ -4753,7 +4765,7 @@ class OrchestratorTools:
 
             # --- 3. Process each file through scalarizer ---
             enhanced_objective = extraction_goal or ""
-            if self.orch.objective and self.orch.objective != "Undefined Research Goal":
+            if self.orch.objective and self.orch.objective not in _placeholder_objectives():
                 enhanced_objective = (
                     f"Research objective: {self.orch.objective}\n\n{enhanced_objective}"
                 ).strip()
