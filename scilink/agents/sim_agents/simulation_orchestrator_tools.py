@@ -2271,6 +2271,12 @@ class SimulationOrchestratorTools:
                     unconverged.append(prop)
 
             all_converged = len(unconverged) == 0
+            # Diagnostic-only: report which observables converged and the
+            # per-property evidence (convergence_flag, value, verification
+            # reasoning). Deliberately no remedy — non-convergence has many
+            # causes (equilibration, state point, force field, sampling
+            # cadence, finite size), so the caller diagnoses from the evidence
+            # rather than being steered toward one fix.
             out = {
                 "status": "success",
                 "converged": all_converged,
@@ -2279,13 +2285,6 @@ class SimulationOrchestratorTools:
                 "skills_used": analysis.get("skills_used", []),
                 "data_kinds": analysis.get("data_kinds", []),
             }
-            if unconverged:
-                out["recommendation"] = (
-                    "One or more observables have not converged. Consider "
-                    "extending the production run or adding independent "
-                    "replicas with different velocity seeds to improve "
-                    "statistical sampling."
-                )
             return json.dumps(out, default=str)
 
         self._register_tool(
@@ -2297,11 +2296,12 @@ class SimulationOrchestratorTools:
                 "directory and inspects each computed property for "
                 "convergence flags (plateau_reached, converged, etc.). "
                 "Returns which properties have converged and which have "
-                "not, with a recommendation to extend production or add "
-                "replicas when convergence is incomplete. Use after a "
-                "successful simulation to verify that computed observables "
-                "(e.g. Green-Kubo viscosity) have adequate statistical "
-                "sampling. Not needed for DFT or single-point "
+                "not, with each property's value and verification reasoning "
+                "as evidence. Diagnostic only — it reports the finding, not a "
+                "remedy; use the evidence to judge whether a value is "
+                "trustworthy and, if not, why. Use after a successful "
+                "simulation to check computed observables (e.g. Green-Kubo "
+                "viscosity). Not needed for DFT or single-point "
                 "calculations — only for MD production runs with "
                 "time-series data."
             ),

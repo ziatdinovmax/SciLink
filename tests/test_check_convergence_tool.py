@@ -262,7 +262,10 @@ class TestToolIntegration:
         assert out["status"] == "success"
         assert out["converged"] is False
         assert out["unconverged"] == ["shear_viscosity"]
-        assert "recommendation" in out
+        # Diagnostic-only: the tool reports the finding + per-property
+        # evidence, and never prescribes a remedy.
+        assert "recommendation" not in out
+        assert out["properties"]["shear_viscosity"]["convergence_flag"] == "plateau_reached"
 
     def test_tool_with_dft_output_no_flags(self, tmp_path):
         orch = _make_fake_orch()
