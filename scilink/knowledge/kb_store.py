@@ -99,6 +99,35 @@ def _kb_generation(kb_dir: Path):
     return (st.st_ino, st.st_dev, mf.read_bytes() if mf.exists() else b"")
 
 
+_SNAPSHOT_MARK = ".snapshot_of.json"
+
+
+def snapshot_is_current(kb_dir: Path, dest: Path) -> bool:
+    """Whether the copy in ``dest`` is of the store KB's latest publish.
+
+    A session copies a store KB once; a ``scilink kb add`` from another
+    process then leaves it answering that the KB "does not contain" a
+    document the store has. Unknown (no marker, no manifest) counts as
+    current, so an old cache is not re-copied on every turn."""
+    try:
+        seen = json.loads((Path(dest) / _SNAPSHOT_MARK).read_text()).get("manifest")
+    except (OSError, ValueError):
+        return True
+    mf = Path(kb_dir) / MANIFEST_NAME
+    try:
+        latest = _manifest_digest(mf.read_bytes())
+    except OSError:
+        return True
+    return seen is None or latest == seen
+
+
+def _manifest_digest(manifest_bytes: bytes) -> str:
+    """The manifest changes on every publish (sources, counts, updated_at);
+    its digest names the publish more finely than updated_at's seconds."""
+    import hashlib
+    return hashlib.sha1(manifest_bytes).hexdigest()
+
+
 def snapshot_kb(kb_dir: Path, dest: Path, *, attempts: int = 8) -> Path:
     """Copy a KB's ``default_kb_*`` files into ``dest`` as ONE generation.
 
@@ -135,6 +164,10 @@ def snapshot_kb(kb_dir: Path, dest: Path, *, attempts: int = 8) -> Path:
                 if _kb_generation(kb_dir) == before:
                     for n in names:
                         os.replace(tmp / n, dest / n)
+                    # Which publish this copy is, so a session can tell when
+                    # the store has moved on (snapshot_is_current).
+                    atomic_write_text(dest / _SNAPSHOT_MARK,
+                                      json.dumps({"manifest": _manifest_digest(before[2])}))
                     # A file the source lacks (another KB's code index, from
                     # an earlier attach) must not load beside this one.
                     for stale in dest.glob("default_kb_*"):

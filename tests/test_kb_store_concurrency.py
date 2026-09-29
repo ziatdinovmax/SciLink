@@ -316,3 +316,43 @@ def test_a_failed_attach_leaves_the_meta_and_its_planner_on_the_old_kb(store, tm
     with pytest.raises(FileNotFoundError):
         m.attach_knowledge_dir("broken")
     assert m.knowledge_dir == old and child.knowledge_dir == old and rebinds == []
+
+
+# ── a session's copy follows the store ────────────────────────────────────
+
+def test_a_snapshot_knows_when_the_store_has_moved_on(store, tmp_path, monkeypatch):
+    kb_store.create_kb("live", [_doc(tmp_path, "a.md")])
+    cache = tmp_path / "cache"
+    kb_store.snapshot_kb(kb_store.kb_path("live"), cache)
+    assert kb_store.snapshot_is_current(kb_store.kb_path("live"), cache)
+    monkeypatch.setattr(kb_store, "_append_index_into", lambda t, n, *a, **k: (1, 1))
+    kb_store.add_to_kb("live", [_doc(tmp_path, "b.md")])                # another process, say
+    assert not kb_store.snapshot_is_current(kb_store.kb_path("live"), cache)
+    assert kb_store.snapshot_is_current(kb_store.kb_path("live"), tmp_path / "no_marker_here")
+
+
+def test_a_planning_session_refreshes_its_copy_after_a_store_update(store, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from scilink.agents.planning_agents.planning_orchestrator import PlanningOrchestratorAgent
+    kb_store.create_kb("live", [_doc(tmp_path, "a.md")])
+    o = PlanningOrchestratorAgent.__new__(PlanningOrchestratorAgent)
+    o.base_dir = tmp_path / "planning"
+    o.knowledge_dir = kb_store.kb_path("live")
+    o._kb_store_manifest = kb_store.read_manifest(o.knowledge_dir)
+    rebinds = []
+    o.planner = SimpleNamespace(rebind_kb=rebinds.append)
+    kb_store.snapshot_kb(o.knowledge_dir, o.base_dir / "kb_cache")    # the constructor's seed
+    assert o._refresh_store_kb() is False and rebinds == []
+    monkeypatch.setattr(kb_store, "_append_index_into", lambda t, n, *a, **k: (1, 1))
+    kb_store.add_to_kb("live", [_doc(tmp_path, "b.md")])
+    assert o._refresh_store_kb() is True
+    assert rebinds == [str(o.base_dir / "kb_cache" / "default_kb")]
+    assert "b.md" in o._kb_store_manifest["sources"]
+    assert o._refresh_store_kb() is False                              # once per publish
+
+
+def test_every_planning_turn_checks_the_store_first():
+    import inspect
+    from scilink.agents.planning_agents.planning_orchestrator import PlanningOrchestratorAgent
+    src = inspect.getsource(PlanningOrchestratorAgent.chat)
+    assert src.index("self._refresh_store_kb()") < src.index("_handle_litellm_chat")
