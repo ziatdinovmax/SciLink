@@ -295,12 +295,19 @@ def llm_timeout_s() -> float:
 
 
 def _chain(exc: BaseException):
-    """The exception and everything it was raised from, outermost first."""
+    """The exception and what it was raised from, outermost first: the
+    explicit ``__cause__``, else the implicit ``__context__`` unless Python
+    was told to suppress it."""
     seen, cur = set(), exc
     while cur is not None and id(cur) not in seen:
         seen.add(id(cur))
         yield cur
-        cur = cur.__cause__ or cur.__context__
+        if cur.__cause__ is not None:
+            cur = cur.__cause__
+        elif not cur.__suppress_context__:
+            cur = cur.__context__
+        else:
+            cur = None
 
 
 def _http_status(e: BaseException) -> Optional[int]:
@@ -336,23 +343,28 @@ def _retry_class(exc: BaseException) -> Optional[str]:
     ``__cause__`` chain first: on Bedrock a malformed or wrong API key arrives
     as ``APIConnectionError`` 500 whose cause is a 403.
     """
-    inner = [_http_status(e) for e in list(_chain(exc))[1:]]
-    for status in inner:
-        if status is not None:
-            if 400 <= status < 500 and status not in (408, 429):
-                return None
-            break
     if litellm is not None:
         timeout_cls = getattr(litellm, "Timeout", None)
         if isinstance(timeout_cls, type) and isinstance(exc, timeout_cls):
             return "once"
-        conn_cls = getattr(litellm, "APIConnectionError", None)
-        if isinstance(conn_cls, type) and isinstance(exc, conn_cls):
-            # LiteLLM's catch-all: a real transport failure keeps the full
-            # budget, anything else gets one retry.
+        catch_all = tuple(c for c in (getattr(litellm, "APIConnectionError", None),
+                                      getattr(litellm, "APIError", None))
+                          if isinstance(c, type))
+        if catch_all and isinstance(exc, catch_all):
+            # LiteLLM's catch-all, the only case where the inner status
+            # decides: a mapped class (RateLimitError built from a
+            # "ThrottlingException" 400, say) already says what it is.
+            inner = [_http_status(e) for e in list(_chain(exc))[1:]]
+            for status in inner:
+                if status is not None:
+                    if 400 <= status < 500 and status not in (408, 429):
+                        return None
+                    break
+            # A real transport failure keeps the full budget, anything else
+            # gets one retry.
             if any(_is_transport_error(e) for e in _chain(exc)):
                 return "full"
-            if any(s in _TRANSIENT_STATUS for s in inner if s is not None):
+            if any(st in _TRANSIENT_STATUS for st in inner if st is not None):
                 return "full"
             return "once"
         full = tuple(c for c in (

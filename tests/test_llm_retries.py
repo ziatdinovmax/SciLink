@@ -318,3 +318,41 @@ def test_num_retries_none_means_the_default(sleeps):
     p = _Provider(_unavailable())
     _run(p, num_retries=None)
     assert len(p.calls) == 2
+
+
+def test_a_throttle_litellm_mapped_from_a_400_is_still_retried(sleeps):
+    """LiteLLM maps some throttles by their text: a Bedrock 400 carrying
+    'ThrottlingException' becomes RateLimitError 429 whose cause is the 400.
+    The mapped class decides, not the inner status."""
+    err = _raised_from(_rate_limited(), _Status(400))
+    p = _Provider(err, _raised_from(_rate_limited(), _Status(400)))
+    _run(p)
+    assert len(p.calls) == 3
+
+
+def test_an_unrelated_exception_being_handled_does_not_decide(sleeps):
+    """A call made while handling some other exception carries it as
+    __context__; a Timeout there is still retried once, not made final."""
+    def timeout_while_handling():
+        try:
+            raise _Status(404)                      # unrelated, e.g. a lookup that failed
+        except _Status:
+            return _raised_in_handler(_timeout())
+
+    p = _Provider(timeout_while_handling(), _timeout())
+    with pytest.raises(litellm.Timeout):
+        _run(p)
+    assert len(p.calls) == 2
+
+
+def _raised_in_handler(exc):
+    try:
+        raise exc
+    except Exception as e:
+        return e
+
+
+def test_the_bedrock_bad_key_chain_is_still_final(sleeps):
+    err = _raised_from(litellm.APIConnectionError(message="Invalid API Key format", llm_provider="bedrock",
+                                                  model="m"), _Status(403))
+    assert lw._retry_class(err) is None
