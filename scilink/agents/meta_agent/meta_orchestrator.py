@@ -674,12 +674,41 @@ class MetaOrchestratorAgent:
         except Exception:  # noqa: BLE001 - listing is best-effort context
             return []
 
+    def _attached_kb_note(self) -> str:
+        """System-prompt note naming the attached knowledge base. Without it
+        the meta's model was never told a KB was attached (the note below
+        lists only detached ones), and live it searched uploads for facts
+        the KB held instead of delegating to planning, which is grounded in
+        it."""
+        kb = Path(self.knowledge_dir)
+        manifest = None
+        try:
+            from ...knowledge.kb_store import read_manifest
+            manifest = read_manifest(kb)
+        except Exception:  # noqa: BLE001 - the note is best-effort context
+            manifest = None
+        if manifest and manifest.get("name"):
+            label = f"'{manifest['name']}'"
+            if manifest.get("description"):
+                label += f" — {manifest['description']}"
+            srcs = list(manifest.get("sources") or [])[:15]
+        else:
+            label = str(kb)
+            srcs = self._kb_source_names(kb)[:15]
+        detail = f" Sources: {', '.join(srcs)}." if srcs else ""
+        return (
+            "\n\n## KNOWLEDGE BASE (attached)\n"
+            f"- {label} at {kb}.{detail}\n"
+            "Every planning delegation is grounded in it, so a task that needs "
+            "what it records goes to `delegate_to_planning`."
+        )
+
     def _kb_note(self) -> str:
-        """System-prompt note listing detached knowledge bases: the launch
-        directory's shared KB (if any) plus the named KBs from the
-        persistent store."""
+        """System-prompt note on knowledge bases: the attached one, or else
+        the detached ones (the launch directory's shared KB, if any, plus
+        the named KBs from the persistent store)."""
         if self.knowledge_dir:
-            return ""
+            return self._attached_kb_note()
         lines = []
         if self._shared_kb_candidate:
             srcs = self._kb_source_names(self._shared_kb_candidate)[:15]
