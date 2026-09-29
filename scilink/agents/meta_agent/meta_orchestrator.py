@@ -832,7 +832,7 @@ class MetaOrchestratorAgent:
         """
         if "planning" not in self._children:
             from ..planning_agents.planning_orchestrator import (
-                PlanningOrchestratorAgent, AutonomyLevel,
+                DELEGATED_OBJECTIVE, PlanningOrchestratorAgent, AutonomyLevel,
             )
             restore = (self.planning_dir / "checkpoint.json").exists()
             self.logger.info(
@@ -840,7 +840,7 @@ class MetaOrchestratorAgent:
                 f"at {self.planning_dir}"
             )
             self._children["planning"] = PlanningOrchestratorAgent(
-                objective="Delegated by meta-agent",
+                objective=DELEGATED_OBJECTIVE,
                 base_dir=str(self.planning_dir),
                 api_key=self.api_key,
                 model_name=self.model_name,

@@ -583,6 +583,12 @@ def get_system_prompt(
 
 
 
+# Objectives that stand in for "none given": the constructor's default and
+# the one the meta agent builds its planning child with.
+DELEGATED_OBJECTIVE = "Delegated by meta-agent"
+PLACEHOLDER_OBJECTIVES = frozenset({"Undefined Research Goal", DELEGATED_OBJECTIVE})
+
+
 class PlanningOrchestratorAgent:
     """
     Orchestrator agent for coordinating multi-iteration research campaigns.
@@ -917,7 +923,10 @@ class PlanningOrchestratorAgent:
             return ""  # Not needed, human will guide
         
         context_parts = ["\n\n**WORKSPACE CONFIGURATION:**"]
-        context_parts.append(f"- Research objective: {self.objective}")
+        # A placeholder is not an objective: the meta builds its planning
+        # child with one, and the task of each delegation says what to do.
+        if self.objective and self.objective not in PLACEHOLDER_OBJECTIVES:
+            context_parts.append(f"- Research objective: {self.objective}")
 
         if self.data_dir:
             context_parts.append(f"- Data directory: {self.data_dir}")

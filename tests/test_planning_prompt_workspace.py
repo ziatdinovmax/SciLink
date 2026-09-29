@@ -60,3 +60,23 @@ def test_human_feedback_still_follows_the_level(tmp_path):
     assert a._enable_human_feedback is False
     a.set_autonomy_level(AutonomyLevel.AUTOPILOT)
     assert a._enable_human_feedback is True
+
+
+@pytest.mark.parametrize("objective", ["Delegated by meta-agent", "Undefined Research Goal"])
+def test_a_placeholder_objective_is_not_presented_as_the_objective(tmp_path, objective):
+    a = _agent(tmp_path)
+    a.objective = objective
+    a.set_autonomy_level(AutonomyLevel.AUTONOMOUS)
+    prompt = a.messages[0]["content"]
+    assert "Research objective" not in prompt
+    assert str(a.knowledge_dir) in prompt
+
+
+def test_a_knowledge_dir_attached_mid_session_reaches_the_next_delegation(tmp_path):
+    """The meta's attach_knowledge_dir sets child.knowledge_dir without a
+    rebuild; run_task's level switch on entry now carries it into the
+    prompt."""
+    a = _agent(tmp_path)
+    a.knowledge_dir = tmp_path / "attached_kb"
+    a.set_autonomy_level(AutonomyLevel.AUTONOMOUS)            # run_task on entry
+    assert str(tmp_path / "attached_kb") in a.messages[0]["content"]
