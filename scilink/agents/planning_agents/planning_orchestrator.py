@@ -1,4 +1,5 @@
 import json
+from scilink.utils.text_io import atomic_write_json
 import logging
 import os
 import time
@@ -1691,6 +1692,14 @@ class PlanningOrchestratorAgent:
                 print(f"  📦 Compressed {compressed} large tool result(s) in history "
                       f"({total_chars:,} → {new_total:,} chars)")
 
+    def _bo_data_points(self) -> int:
+        """Rows in the BO data file; 0 when it is absent or unreadable (an
+        unreadable CSV must not cost the whole checkpoint)."""
+        try:
+            return len(pd.read_csv(self.bo_data_path)) if self.bo_data_path.exists() else 0
+        except Exception:  # noqa: BLE001 - a count, not state the restore depends on
+            return 0
+
     def _auto_checkpoint(self, quiet: bool = False):
         """Internal auto-checkpoint without LLM interaction."""
         try:
@@ -1707,7 +1716,7 @@ class PlanningOrchestratorAgent:
                     {k: list(v) for k, v in self.input_bounds_override.items()}
                     if self.input_bounds_override else None),
                 "fidelity_spec": self.fidelity_spec,
-                "data_points_collected": len(pd.read_csv(self.bo_data_path)) if self.bo_data_path.exists() else 0,
+                "data_points_collected": self._bo_data_points(),
                 "planner_state": compact_planner_state(self.planner.state),
                 "message_count": self.message_count,
                 "latest_tea_results": self.latest_tea_results,
@@ -1721,14 +1730,21 @@ class PlanningOrchestratorAgent:
                 "custom_skills": self._custom_skills,
             }
             
-            with open(self.checkpoint_path, 'w', encoding="utf-8") as f:
-                json.dump(checkpoint_data, f, indent=2)
+            # default=str as in the meta and simulation: a stray numpy
+            # scalar or Path must not freeze every later checkpoint.
+            atomic_write_json(self.checkpoint_path, checkpoint_data, indent=2, default=str)
+            self._checkpoint_error = None
 
             if not quiet:
                 print(f"    ✅ Auto-checkpoint saved")
+            return True
 
         except Exception as e:
+            self._checkpoint_error = str(e)
             logging.warning(f"Auto-checkpoint failed: {e}")
+            if not quiet:
+                print(f"    ⚠️ Auto-checkpoint failed ({e}); the previous checkpoint is kept")
+            return False
 
     # Wall-clock throttle for the per-tool-call checkpoint: a burst of cheap
     # tool calls must not thrash the disk, while an expensive call (a whole
@@ -2087,8 +2103,7 @@ class PlanningOrchestratorAgent:
             # Filter out system messages for saved history
             history_data = [m for m in self.messages if m["role"] != "system"]
             
-            with open(self.history_path, 'w', encoding="utf-8") as f: 
-                json.dump(history_data, f, indent=2)
+            atomic_write_json(self.history_path, history_data, indent=2)
                 
         except Exception as e:
             logging.warning(f"Failed to save history: {e}")

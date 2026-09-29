@@ -15,6 +15,7 @@ this development stage — see CLAUDE.md "Why no BaseChatOrchestrator refactor".
 """
 
 import json
+from scilink.utils.text_io import atomic_write_json
 import re
 import logging
 import os
@@ -551,10 +552,12 @@ class MetaOrchestratorAgent:
         self._delegation_ledger: List[Dict[str, Any]] = []
         # Complementarity verdicts cached by frozenset of dataset paths, so the
         # standalone assess_complementarity tool and the internal gate in
-        # run_fanout share one LLM call. Serializes ledger preallocation and
-        # fusion-entry appends across fan-out worker threads.
+        # run_fanout share one LLM call.
         self._complementarity_cache: Dict[frozenset, Dict[str, Any]] = {}
-        self._fanout_lock = threading.Lock()
+        # Serializes ledger index allocation and appends: every
+        # _open_delegation, fan-out preallocation and fusion entry. Re-entrant
+        # because fan-out preallocation holds it while opening its entries.
+        self._fanout_lock = threading.RLock()
         # Serializes checkpoint writes: _close_delegation checkpoints on every
         # completion, and fan-out workers close their entries concurrently.
         self._checkpoint_lock = threading.Lock()
@@ -1500,7 +1503,14 @@ class MetaOrchestratorAgent:
 
         Finalized later by ``_close_delegation``. Having the entry present up
         front lets the UI delegation tree show the delegation while it runs.
+        The index is allocated and the entry appended under the ledger lock,
+        so concurrent delegations never share an index.
         """
+        with self._fanout_lock:
+            return self._open_delegation_locked(mode, task, context, context_from, label)
+
+    def _open_delegation_locked(self, mode, task, context, context_from,
+                                label=None) -> Dict[str, Any]:
         index = len(self._delegation_ledger) + 1
         # Normalize context_from to valid prior delegation indices (the LLM may
         # pass ints, strings, or "#n" forms; drop anything out of range).
@@ -2002,10 +2012,8 @@ class MetaOrchestratorAgent:
                     "delegation_ledger": self._delegation_ledger,
                     "knowledge_dir": str(self.knowledge_dir) if self.knowledge_dir else None,
                 }
-                tmp_path = self.checkpoint_path.with_suffix(".json.tmp")
-                with open(tmp_path, 'w', encoding="utf-8") as f:
-                    json.dump(checkpoint_data, f, indent=2, default=str)
-                os.replace(tmp_path, self.checkpoint_path)
+                atomic_write_json(self.checkpoint_path, checkpoint_data,
+                                  indent=2, default=str)
             if verbose:
                 print(f"    ✅ Auto-checkpoint saved")
             return True
@@ -2123,8 +2131,7 @@ class MetaOrchestratorAgent:
         try:
             history_data = [m for m in self.messages if m["role"] != "system"]
             history_data = sanitize_history_images(history_data)
-            with open(self.history_path, 'w', encoding="utf-8") as f:
-                json.dump(history_data, f, indent=2)
+            atomic_write_json(self.history_path, history_data, indent=2)
         except Exception as e:
             logging.warning(f"Failed to save history: {e}")
 

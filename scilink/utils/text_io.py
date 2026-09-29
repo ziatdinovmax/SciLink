@@ -29,11 +29,44 @@ persists or reloads model-generated prose should move here too.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
-import tempfile
 from pathlib import Path
 from typing import Any
+
+
+_WINDOWS = os.name == "nt"
+
+
+def _replace(src: str, dst: Path) -> None:
+    """``os.replace``, retried a few times on Windows when the destination is
+    held open by another process."""
+    import time
+    delays = (0.05, 0.1, 0.2) if _WINDOWS else ()
+    for delay in delays:
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            time.sleep(delay)
+    os.replace(src, dst)
+
+
+def _exclusive_temp(p: Path):
+    """A new, uniquely named temp file beside ``p``, opened for writing:
+    ``(fd, path)``. Created with ``O_EXCL`` at mode ``0o666`` so the kernel
+    applies the umask (``mkstemp`` would create it ``0600``)."""
+    import secrets
+    for _ in range(100):
+        tmp = str(p.parent / f".{p.name}.{secrets.token_hex(6)}.tmp")
+        try:
+            fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                         | getattr(os, "O_BINARY", 0), 0o666)
+            return fd, tmp
+        except FileExistsError:
+            continue
+    raise FileExistsError(f"could not create a temp file beside {p}")
 
 
 def atomic_write_text(path: Any, text: str) -> Path:
@@ -48,30 +81,48 @@ def atomic_write_text(path: Any, text: str) -> Path:
     shared ``~/.scilink`` store.
 
     The temp file lives in the destination directory so the ``os.replace``
-    is a same-filesystem rename (atomic on POSIX and Windows).
+    is a same-filesystem rename (atomic on POSIX and Windows). There is no
+    ``fsync``: a killed process leaves the old or the new file, whole, but a
+    power loss or an OS crash can still lose the last write.
+
+    On Windows ``os.replace`` fails with ``PermissionError`` while another
+    process holds the destination open (a reader, an antivirus scan, an
+    indexer), so it is retried briefly before giving up.
     """
     p = Path(path)
-    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=f".{p.name}.",
-                               suffix=".tmp")
+    fd, tmp = _exclusive_temp(p)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        # mkstemp creates 0600 and os.replace carries that mode onto the
-        # destination; match what a plain write_text would have produced —
-        # keep an existing file's mode, honor the umask for a new one.
+        # os.replace carries the temp file's mode onto the destination. The
+        # temp was created at 0o666 with the umask applied by the kernel,
+        # which is what a plain write_text gives a new file; an existing
+        # file keeps its own mode. The umask is never read: reading it
+        # (umask(0) then restore) briefly changes it for the whole process,
+        # and a file another thread creates in that window comes out 0666.
         try:
-            mode = os.stat(p).st_mode & 0o777
-        except OSError:
-            umask = os.umask(0)
-            os.umask(umask)
-            mode = 0o666 & ~umask
-        os.chmod(tmp, mode)
-        os.replace(tmp, p)
+            os.chmod(tmp, os.stat(p).st_mode & 0o777)
+        except FileNotFoundError:
+            pass
+        _replace(tmp, p)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
         raise
     return p
+
+
+def atomic_write_json(path: Any, obj: Any, **dumps_kwargs: Any) -> Path:
+    """Serialize ``obj`` completely, then publish it with ``atomic_write_text``.
+
+    ``json.dump`` straight into an ``open(path, "w")`` truncates the file
+    first and writes as it goes, so a value that fails to serialize (a
+    circular reference, an object with no JSON form) destroys the previous
+    file as well as failing the write. Serializing to a string first means a
+    failure raises before anything on disk is touched, and the previous
+    content survives whole.
+    """
+    return atomic_write_text(path, json.dumps(obj, **dumps_kwargs))
 
 
 def write_text_utf8(path: Any, text: str, *, append: bool = False) -> Path:
