@@ -197,9 +197,21 @@ def _attributed_branch(fn):
     (#627) — so the worker registers as the coordinator's child for the
     duration of the branch. Routing only: no ``[tag]`` log prefix and no
     panel trimming, so CLI output is unchanged.
+
+    The branch's LLM usage is charged to the same session: a worker thread
+    starts untagged, so the coordinator's session is captured here, on the
+    coordinator's thread, and bound on the worker's (the branch adds its own
+    label as the worker).
     """
+    from ... import tracing
     from ...utils.log_context import attributed_to_current
-    return attributed_to_current(fn)
+    routed = attributed_to_current(fn)
+    session = tracing.current_session()
+
+    def run(*args, **kwargs):
+        with tracing.attributed(session=session):
+            return routed(*args, **kwargs)
+    return run
 
 
 def _ensure_stop_guard_installed() -> None:
@@ -1034,6 +1046,9 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
     from ...session_events import append_event, set_thread_event_log
     _branch_label = branch.get("branch_id") or branch.get("label") or slug
     set_thread_event_log(Path(orch.base_dir) / "events.jsonl")
+    from ... import tracing
+    _usage_tag = tracing.attributed(worker=f"fanout:{index:02d}_{slug}")
+    _usage_tag.__enter__()
     # Pre-assigned so the finally block can log even on the one path that
     # propagates (a user-initiated AgentStoppedError re-raised below).
     result: dict = {"status": "error",
@@ -1096,6 +1111,7 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
              "session_dir": str(base_dir)},
             json.dumps(result, default=str), branch=_branch_label)
         set_thread_event_log(None)
+        _usage_tag.__exit__(None, None, None)
         if queue_channel is not None:
             from ...hitl import set_thread_channel
             set_thread_channel(None)

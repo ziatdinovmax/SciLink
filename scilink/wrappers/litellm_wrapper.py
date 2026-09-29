@@ -274,6 +274,8 @@ _BACKOFF_BASE_S = 2.0
 _BACKOFF_CAP_S = 60.0
 _TRANSIENT_STATUS = frozenset({408, 429, 500, 502, 503, 504, 529})
 
+from .llm_limiter import llm_slot
+
 _logger = logging.getLogger(__name__)
 
 
@@ -435,6 +437,12 @@ def _jitter_retry_after(retry_after: float, attempt: int) -> float:
     return retry_after + random.uniform(0, min(retry_after, step / 2))
 
 
+def _embedding(**kwargs):
+    """``litellm.embedding`` inside the model's in-flight slot."""
+    with llm_slot(kwargs.get("model")):
+        return litellm.embedding(**kwargs)
+
+
 def _completion_with_retries(retries: Optional[int], **kwargs):
     """``litellm.completion`` with SciLink's retry policy (see above).
 
@@ -446,7 +454,9 @@ def _completion_with_retries(retries: Optional[int], **kwargs):
     once_used = False
     for attempt in range(retries + 1):
         try:
-            return litellm.completion(**kwargs)
+            # The slot is held for the call only, not across the backoff below.
+            with llm_slot(kwargs.get("model")):
+                return litellm.completion(**kwargs)
         except Exception as exc:
             kind = _retry_class(exc)
             if attempt >= retries or kind is None:
@@ -1129,7 +1139,7 @@ class LiteLLMEmbeddingModel:
             all_embeddings = []
             for batch_idx, batch in enumerate(batches):
                 try:
-                    response = litellm.embedding(
+                    response = _embedding(
                         model=effective_model,
                         input=batch,
                         api_key=self.api_key,
@@ -1215,7 +1225,7 @@ class LiteLLMEmbeddingModel:
         # Base case: single text
         if len(texts) == 1:
             try:
-                response = litellm.embedding(
+                response = _embedding(
                     model=model,
                     input=texts,
                     api_key=self.api_key,
@@ -1228,7 +1238,7 @@ class LiteLLMEmbeddingModel:
                     # Single text is too large - truncate it
                     logging.warning("Single text still too large, truncating further...")
                     truncated = texts[0][:len(texts[0]) // 2]
-                    response = litellm.embedding(
+                    response = _embedding(
                         model=model,
                         input=[truncated],
                         api_key=self.api_key,
@@ -1239,7 +1249,7 @@ class LiteLLMEmbeddingModel:
         
         # Try the full batch first
         try:
-            response = litellm.embedding(
+            response = _embedding(
                 model=model,
                 input=texts,
                 api_key=self.api_key,

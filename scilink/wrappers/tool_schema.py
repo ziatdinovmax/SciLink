@@ -231,7 +231,9 @@ class _PortableCompletions:
             if openai_tools_need_no_reasoning(model) and "reasoning_effort" not in kwargs:
                 kwargs["reasoning_effort"] = "none"
         _t0 = time.perf_counter()
-        response = self._raw.create(*args, **kwargs)
+        from .llm_limiter import llm_slot
+        with llm_slot(kwargs.get("model") or self._default_model):
+            response = self._raw.create(*args, **kwargs)
         # The proxy path's chat loops call this shim directly: count the
         # call (and trace it when tracing is on) like the wrapper classes.
         try:

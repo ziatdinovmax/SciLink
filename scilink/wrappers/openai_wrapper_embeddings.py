@@ -1,5 +1,7 @@
 import openai
 from typing import List
+
+from .llm_limiter import llm_slot
 from openai._utils import maybe_transform
 from openai.types import embedding_create_params
 from openai.types.create_embedding_response import CreateEmbeddingResponse
@@ -22,11 +24,12 @@ class OpenAIAsEmbeddingModel:
             "input": content,
         }
 
-        response = self.client.embeddings._post(
-            "/embeddings",
-            body=maybe_transform(params, embedding_create_params.EmbeddingCreateParams),
-            cast_to=CreateEmbeddingResponse,
-        )
+        with llm_slot(self.model):
+            response = self.client.embeddings._post(
+                "/embeddings",
+                body=maybe_transform(params, embedding_create_params.EmbeddingCreateParams),
+                cast_to=CreateEmbeddingResponse,
+            )
 
         if not response.data:
             raise ValueError(f"Invalid response from embedding API: 'data' key is empty or missing. Response: {response}")

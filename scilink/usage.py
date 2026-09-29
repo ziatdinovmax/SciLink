@@ -41,6 +41,10 @@ class UsageLedger:
             lambda: {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0})
         self.by_session: Dict[str, Dict[str, float]] = defaultdict(
             lambda: {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0})
+        # Only calls made for a worker (a fan-out branch, a swarm item) land
+        # here; a session's own calls stay in by_session alone.
+        self.by_worker: Dict[str, Dict[str, float]] = defaultdict(
+            lambda: {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0})
 
     def _apply(self, rec: Dict[str, Any]) -> None:
         if rec.get("kind") == "period":
@@ -52,8 +56,11 @@ class UsageLedger:
         self.prompt_tokens += p
         self.completion_tokens += c
         self.seconds += float(rec.get("latency_s") or 0.0)
-        for table, key in ((self.by_model, rec.get("model") or "unknown"),
-                           (self.by_session, rec.get("session") or "unattributed")):
+        tables = [(self.by_model, rec.get("model") or "unknown"),
+                  (self.by_session, rec.get("session") or "unattributed")]
+        if rec.get("worker"):
+            tables.append((self.by_worker, rec["worker"]))
+        for table, key in tables:
             row = table[str(key)]
             row["calls"] += 1
             row["prompt_tokens"] += p
@@ -81,11 +88,14 @@ class UsageLedger:
             pass                       # the count in memory still holds
 
     # -- the sink ---------------------------------------------------------
-    def record(self, model, prompt_tokens, completion_tokens, latency_s, session) -> None:
+    def record(self, model, prompt_tokens, completion_tokens, latency_s, session,
+               worker=None) -> None:
         rec = {"ts": round(time.time(), 3), "model": model,
                "prompt_tokens": int(prompt_tokens or 0),
                "completion_tokens": int(completion_tokens or 0),
                "latency_s": round(float(latency_s or 0.0), 3), "session": session}
+        if worker:
+            rec["worker"] = worker
         with self._lock:
             self._apply(rec)
             self._append(rec)
@@ -109,6 +119,7 @@ class UsageLedger:
                 "llm_seconds": round(self.seconds, 1),
                 "by_model": {k: dict(v) for k, v in self.by_model.items()},
                 "by_session": {k: dict(v) for k, v in self.by_session.items()},
+                "by_worker": {k: dict(v) for k, v in self.by_worker.items()},
                 "budget_tokens": self.budget,
                 "remaining_tokens": (None if self.budget is None
                                      else max(0, self.budget - self.total_tokens)),
