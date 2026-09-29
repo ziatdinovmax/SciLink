@@ -288,6 +288,8 @@ def test_a_stop_during_the_wait_lands_before_the_next_attempt(monkeypatch):
     handler = turn_log_handler(cap, threading.get_ident())
     root = logging.getLogger()
     old_level = root.level
+    old_disable = logging.root.manager.disable     # other test files disable logging at import
+    logging.disable(logging.NOTSET)
     root.addHandler(handler)
     root.setLevel(logging.INFO)
     monkeypatch.setattr(lw.time, "sleep", lambda s: setattr(cap, "stop_requested", True))
@@ -298,6 +300,7 @@ def test_a_stop_during_the_wait_lands_before_the_next_attempt(monkeypatch):
     finally:
         root.removeHandler(handler)
         root.setLevel(old_level)
+        logging.disable(old_disable)
     assert len(p.calls) == 1
 
 
