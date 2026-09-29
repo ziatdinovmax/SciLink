@@ -674,6 +674,17 @@ class MetaOrchestratorAgent:
         except Exception:  # noqa: BLE001 - listing is best-effort context
             return []
 
+    @staticmethod
+    def _sources_detail(srcs) -> str:
+        """' Sources: a, b, c.' for a prompt note, at most 15 names, with a
+        count of the rest so a document left off the list is not read as
+        absent from the KB."""
+        srcs = [str(x) for x in (srcs or [])]
+        if not srcs:
+            return ""
+        more = f" (+{len(srcs) - 15} more)" if len(srcs) > 15 else ""
+        return f" Sources: {', '.join(srcs[:15])}{more}."
+
     def _attached_kb_note(self) -> str:
         """System-prompt note naming the attached knowledge base. Without it
         the meta's model was never told a KB was attached (the note below
@@ -691,11 +702,11 @@ class MetaOrchestratorAgent:
             label = f"'{manifest['name']}'"
             if manifest.get("description"):
                 label += f" — {manifest['description']}"
-            srcs = list(manifest.get("sources") or [])[:15]
+            srcs = list(manifest.get("sources") or [])
         else:
             label = str(kb)
-            srcs = self._kb_source_names(kb)[:15]
-        detail = f" Sources: {', '.join(srcs)}." if srcs else ""
+            srcs = self._kb_source_names(kb)
+        detail = self._sources_detail(srcs)
         return (
             "\n\n## KNOWLEDGE BASE (attached)\n"
             f"- {label} at {kb}.{detail}\n"
@@ -711,8 +722,7 @@ class MetaOrchestratorAgent:
             return self._attached_kb_note()
         lines = []
         if self._shared_kb_candidate:
-            srcs = self._kb_source_names(self._shared_kb_candidate)[:15]
-            detail = f" Sources: {', '.join(srcs)}." if srcs else ""
+            detail = self._sources_detail(self._kb_source_names(self._shared_kb_candidate))
             lines.append(
                 f"- (unnamed, launch directory) {self._shared_kb_candidate} — "
                 f"attach with attach_knowledge_base() [no argument].{detail}"
@@ -721,8 +731,7 @@ class MetaOrchestratorAgent:
             from ...knowledge.kb_store import list_kbs
             for m in list_kbs():
                 desc = f" — {m['description']}" if m.get("description") else ""
-                srcs = (m.get("sources") or [])[:15]
-                detail = f" Sources: {', '.join(srcs)}." if srcs else ""
+                detail = self._sources_detail(m.get("sources"))
                 lines.append(
                     f"- '{m['name']}'{desc} — attach with "
                     f"attach_knowledge_base(path='{m['name']}').{detail}"
@@ -1143,6 +1152,9 @@ class MetaOrchestratorAgent:
             cache = child.base_dir / "kb_cache"
             snapshot_kb(self.knowledge_dir, cache)
             child.planner.rebind_kb(str(cache / "default_kb"))
+        # The attached-KB note lists the sources: refresh it, or the model
+        # routes on a list without the document it just added.
+        self.set_meta_mode(self.meta_mode)
         return updated
 
     def register_skill(self, skill_path: str) -> str:

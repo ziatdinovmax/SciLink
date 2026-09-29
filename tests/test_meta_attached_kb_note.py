@@ -74,3 +74,35 @@ def test_attaching_moves_the_prompt_from_detached_to_attached(home):
     prompt = m.messages[0]["content"]
     assert prompt.startswith(get_system_prompt(MetaMode.AUTONOMOUS))
     assert "(attached)" in prompt and "'lab-kb'" in prompt and "NOT attached" not in prompt
+
+
+def test_adding_to_the_attached_kb_refreshes_the_listed_sources(home, tmp_path, monkeypatch):
+    from scilink.knowledge import kb_store
+
+    def fake_build(target, *a, **k):
+        for suffix, data in ((".faiss", b"i"), (".json", "[]"), (".sources.json", "[]")):
+            f = (target / "default_kb_docs").with_suffix(suffix)
+            f.write_bytes(data) if isinstance(data, bytes) else f.write_text(data)
+        return 1, 1
+
+    monkeypatch.setattr(kb_store, "_build_index_into", fake_build)
+    monkeypatch.setattr(kb_store, "_append_index_into", lambda t, n, *a, **k: (len(n), len(n)))
+    base = tmp_path / "base.md"
+    base.write_text("base")
+    kb_store.create_kb("lab-kb", [str(base)], embedding_model="m")
+    m = _meta(kb_store.kb_path("lab-kb"))
+    m.embedding_api_key = m.embedding_base_url = m.base_url = None
+    m.embedding_model = "m"
+    m._children = {}
+    m.set_meta_mode(MetaMode.AUTONOMOUS)
+    assert "base.md" in m.messages[0]["content"] and "new_record.md" not in m.messages[0]["content"]
+    new = tmp_path / "new_record.md"
+    new.write_text("more")
+    m.add_documents_to_kb([str(new)])
+    assert "new_record.md" in m.messages[0]["content"]
+
+
+def test_a_long_source_list_says_how_many_more(home):
+    kb = _store_kb(home, sources=[f"doc{i:02d}.pdf" for i in range(20)])
+    note = _meta(kb)._kb_note()
+    assert "doc14.pdf" in note and "doc15.pdf" not in note and "(+5 more)" in note
