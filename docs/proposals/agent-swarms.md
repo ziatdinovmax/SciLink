@@ -398,7 +398,11 @@ one below has a mechanism, and most are cheap.
 
 **1. One worker's failure stays in that worker.** Exceptions become an error
 result per item (as `_delegate` and fan-out already do). A timeout cancels
-only that item. An item likely to exhaust memory runs in its own process.
+only that item. An item likely to exhaust memory runs in its own process,
+and on cloud resources in its own task (see "Running on cloud resources"):
+on 2026-09-28 two concurrent atomic-resolution image analyses on an 8 GB
+laptop reached 8.3 and 6.4 GB and froze the whole machine, where a
+per-worker memory limit would have ended one worker.
 A degraded item is reported as degraded and excluded from consensus, as
 fan-out already excludes a degraded branch from fusion. The swarm's result
 lists what failed beside what succeeded.
@@ -608,6 +612,118 @@ its clients.
   fire. A sample-level one still does, and its recommendation says the
   region is unknown.
 
+## Running on cloud resources
+
+The swarm is meant to run on cloud resources, AWS first. The hosted-campaigns
+proposal already fixes the outer shape: one ECS/Fargate task per campaign, the
+campaign's files on its own EFS access point, and model weights on a shared
+read-only one. A swarm lives inside one campaign. What changes is where a
+worker runs and what a worker may assume.
+
+### Two placements for a worker
+
+- **In the campaign task.** The coordinator and its workers share the
+  campaign's task, as threads and processes. This is the simple shape, and
+  right for items bound by LLM calls: planning, curve fitting, a
+  simulation's input generation. It is bounded by the task size, and the
+  spike's tasks were 2 vCPU / 8 GB, the same memory as the laptop that froze.
+- **In a worker task.** A heavy item (an image or datacube analysis, a
+  series replay pool, an MLIP run) runs as its own ECS task. It uses the same
+  image and the campaign's EFS access point, and its size is chosen for the
+  item's class. The coordinator stays in the campaign task and starts the
+  worker task with the item spec, the way the live loop's re-anchor hands
+  its spec to a subprocess today (`live/_reanchor.py`).
+
+Worker tasks buy the isolation this proposal asks for. An out-of-memory kill
+is confined to the task's cgroup, so it ends one worker and not the campaign.
+The coordinator reads the task's stop reason and records the item as
+`out_of_memory`. The item budget then decides: retry once at the next task
+size, or report the item as failed.
+
+### Memory is declared per item class, not guessed from the input
+
+Fan-out's admission estimates memory from input bytes (`_branch_mem_estimate`:
+6x the input, with a 0.5 GB floor). The 1024 x 1024 image that froze the
+laptop is about 8 MB, so the estimate was 0.5 GB. The generated scripts that
+ran on it peaked at 6 to 8 GB, and what they loaded was the DCNN ensemble
+and its working arrays, not the input. The estimate cannot see that, and on
+a cloud task the error is the difference between a run and an OOM kill.
+
+- **Measure every item.** Record the peak resident memory of each item's
+  scripts: `ru_maxrss` of the sandbox subprocess, or the task's memory
+  metric. Keep it against `(mode, skill, data shape)` in a small table on
+  the campaign volume.
+- **Size from what was measured.** Admission and task sizing read that
+  table. An unknown class gets a conservative default, and the first run
+  of a class is its measurement.
+- **Let the cgroup be the cap.** `SCILINK_SANDBOX_MEM_MB` (`RLIMIT_AS`)
+  stays off by default, as `_sandbox_limits` documents: it breaks CUDA and
+  Metal, which reserve more address space than they use. On a CPU task the
+  cgroup is the cap that holds. On a laptop nothing caps a script today.
+
+### The board across tasks
+
+A worker task shares no memory with the coordinator, so it cannot append to
+the board in-process. The first version keeps the single-writer rule without
+a network API:
+
+- Each worker writes only its own `findings.jsonl` in its item directory
+  on EFS.
+- The coordinator polls those files and appends them to the board.
+- The board file itself is written by the coordinator alone.
+
+Reads work the same way in reverse: a worker gets its board snapshot in its
+item spec at start, and at a stage boundary it reads a snapshot file the
+coordinator refreshes. A board service (behind MCP, as the instruments
+section needs) replaces the files only when a worker must read the board
+mid-run.
+
+### Shared files on EFS
+
+- **Locks.** `path_lock` is `flock`. On Linux, the NFS client emulates
+  `flock` with the POSIX byte-range locks that EFS supports. The spike saw
+  no lock errors on the script bank, but one run is not a load test. Stage
+  4's tests include concurrent `path_lock` holders on EFS from two tasks.
+- **Model weights.** The shared models access point is read-only in the
+  hosted design, so `download_once` cannot fill it at runtime. Weights are
+  loaded into it when the image is built or by an admin job. A worker that
+  finds a weight file missing fails with a clear message instead of
+  downloading into its own volume.
+
+### Provider quotas are shared by every task
+
+Bedrock limits requests and tokens per minute per account and region.
+Every worker in every campaign on that account draws on the same quota, and
+the LLM limiter in §5 is per process, so no single task can see the whole
+load. Two things hold regardless:
+
+- **Backoff survives shared throttling.** Throttling comes back as a
+  retryable `RateLimitError`, with jittered backoff (stage 0), so tasks
+  throttled together do not retry together.
+- **The circuit breaker works per task.** It pauses admission when errors
+  from the provider pass a threshold, and each task can see its own error
+  rate.
+
+The quota share is a control-plane setting: a per-campaign concurrency and
+tokens-per-minute allowance, passed to the campaign task, which its
+limiter enforces.
+
+### Cost and liveness
+
+- **Compute is a third budget.** The swarm budget adds task-seconds per
+  item class to tokens and wall-clock. A worker task is billed for as long
+  as it runs.
+- **The coordinator reconciles against ECS.** A worker task can end
+  without writing a result: an OOM, a Spot reclaim, a lost host. The
+  coordinator checks task status, not only a thread. An item whose task
+  stopped is `interrupted`, and the resume path re-queues it, as it does
+  today for fan-out branches after a restart.
+- **Spot is for idempotent items only.** Replays and re-runnable analyses
+  can go on Fargate Spot. Anything holding a human question stays on
+  on-demand.
+- **Credentials.** A worker task uses the campaign's task role (hosted
+  phase two, item 4), and its item spec carries no secrets.
+
 ## Build order
 
 Backend first, UI last, per CLAUDE.md's sequencing rule. Stage 0 is worth
@@ -618,9 +734,11 @@ can already hit.
    - Atomic child checkpoints and chat histories.
    - `download_once` for SAM, DCNN and COD.
    - A lock on `_open_delegation`.
-   - Retries and a timeout on the chat-session LLM path.
+   - SciLink-side LLM retries with backoff and a timeout on every path
+     (LiteLLM's default retry waits nothing between attempts).
    - Process-group kill in `ScriptExecutor`.
-   - Unique staging and tmp names in `kb_store` and `sessions.jsonl`.
+   - A lock per KB name in `kb_store`, and a locked, atomic
+     `sessions.jsonl`.
    - A default timeout on the fan-out `QueueChannel`.
 1. **A concurrent meta.**
    - Ephemeral workers for all three modes.
@@ -639,8 +757,12 @@ can already hit.
    - Steering, `fusion_feedback` and `informed_by` rebased onto board reads.
 3. **Reactions.** Subscriptions, `task_request`, causal chains and cycle
    refusal, supersede-chain stops, retraction and taint.
-4. **Scheduling.** Swarm budgets with reservation, the circuit breaker, and
-   process workers for heavy items.
+4. **Scheduling.**
+   - Swarm budgets with reservation and the circuit breaker.
+   - Process workers for heavy items.
+   - Measured peak memory per item class, and admission sized from it.
+   - On AWS: worker tasks for heavy item classes, OOM and Spot
+     reconciliation against ECS, and per-campaign provider quotas.
 5. **Several instruments.**
    - The instrument worker and its log-to-board bridge.
    - Several live runs per session (`_RUNS` keyed by run, not session).
@@ -728,6 +850,10 @@ driven through the Live tab.
   autonomous runs?
 - **IPC for process workers.** A queue to the coordinator is simplest. Is a
   board behind MCP needed before hosting needs it?
+- **When does an item leave the campaign task?** A fixed list of heavy
+  classes, or a threshold on its measured peak memory against the task's
+  headroom? A worker task costs minutes of cold start (the image pull), so
+  a short item may be cheaper queued in place.
 - **Default budgets.** Measure first: run a representative cross-mode swarm
   and read `usage.jsonl` before choosing defaults, as the fast-and-live work
   did with `stage_timings`.
