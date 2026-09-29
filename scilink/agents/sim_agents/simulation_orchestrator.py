@@ -140,8 +140,9 @@ The session is iterative and structure-centric. Typical flow:
      status, download results once complete.
   7. Analyze the output, suggest fixes if the run failed.
   8. For MD production runs, check observable convergence
-     (`check_observable_convergence`) — extend production or add
-     replicas if time-series observables have not converged.
+     (`check_observable_convergence`) — report which time-series
+     observables are not converged, with the evidence, and diagnose the
+     cause before changing the run.
   9. Generate a final report summarizing the full workflow.
 
 Users often iterate on one structure, then ask for variants (different

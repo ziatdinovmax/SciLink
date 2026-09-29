@@ -252,7 +252,7 @@ def scenario_loop() -> bool:
     for i, v in checks:
         for prop, p in (v.get("properties") or {}).items():
             print(f"    check@{i}: {prop} = {p.get('value')} {p.get('units')} "
-                  f"(converged={p.get('converged')})")
+                  f"(state={p.get('state')})")
 
     if not unconverged_idx and checks:
         print("  NOTE: the first run already converged — the loop was not "

@@ -1,7 +1,9 @@
 """Tests for the check_observable_convergence orchestrator tool.
 
-Unit tests for convergence-flag scanning and tool-level integration
-with a monkeypatched SimulationAnalysisAgent.
+Covers the strict three-state classifier (`_classify_convergence`) directly
+and the tool end-to-end with a monkeypatched SimulationAnalysisAgent. The
+classifier is the single source of truth — there is no separate mirror to
+drift.
 """
 
 import json
@@ -14,147 +16,110 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-
-# ---------------------------------------------------------------------------
-# Convergence-flag scanning helpers
-# ---------------------------------------------------------------------------
-
-# The flag vocabulary must match the tool implementation.
-_CONVERGENCE_FLAG_KEYS = frozenset({
-    "plateau_reached", "converged", "linear_regime", "extreme_narrowing",
-})
-
-
-def _check_flags(results: dict) -> dict:
-    """Pure-function mirror of the tool's convergence-flag scanning logic.
-
-    Given a ``run_analysis`` results dict, return
-    ``{"converged": bool, "unconverged": [str], "properties": dict}``.
-    """
-    properties = {}
-    unconverged = []
-    for prop, result in results.items():
-        if result.get("status") == "error":
-            properties[prop] = {"status": "error"}
-            continue
-
-        flag_key = None
-        flag_value = None
-        for key in _CONVERGENCE_FLAG_KEYS:
-            if key in result:
-                flag_key = key
-                flag_value = result[key]
-                break
-
-        prop_converged = flag_value if flag_key is not None else True
-        properties[prop] = {"converged": bool(prop_converged)}
-        if flag_key is not None:
-            properties[prop]["convergence_flag"] = flag_key
-            properties[prop]["flag_value"] = flag_value
-        if not prop_converged:
-            unconverged.append(prop)
-
-    return {
-        "converged": len(unconverged) == 0,
-        "unconverged": unconverged,
-        "properties": properties,
-    }
+from scilink.agents.sim_agents.simulation_orchestrator_tools import (  # noqa: E402
+    _classify_convergence, _parse_flag_bool,
+)
 
 
 # ---------------------------------------------------------------------------
-# Unit tests: convergence-flag scanning (pure, no LLM)
+# _parse_flag_bool — strict boolean coercion of model-written flags
 # ---------------------------------------------------------------------------
 
-class TestCheckFlags:
-    def test_all_converged(self):
-        results = {
-            "shear_viscosity": {
-                "status": "success", "value": 0.89, "units": "mPa·s",
-                "plateau_reached": True,
-            },
-        }
-        out = _check_flags(results)
-        assert out["converged"] is True
-        assert out["unconverged"] == []
-        assert out["properties"]["shear_viscosity"]["converged"] is True
+class TestParseFlagBool:
+    def test_real_bools_pass_through(self):
+        assert _parse_flag_bool(True) is True
+        assert _parse_flag_bool(False) is False
 
-    def test_one_unconverged(self):
-        results = {
-            "shear_viscosity": {
-                "status": "success", "value": 0.89, "units": "mPa·s",
-                "plateau_reached": False,
-            },
-        }
-        out = _check_flags(results)
-        assert out["converged"] is False
-        assert out["unconverged"] == ["shear_viscosity"]
-        assert out["properties"]["shear_viscosity"]["converged"] is False
-        assert out["properties"]["shear_viscosity"]["convergence_flag"] == "plateau_reached"
+    def test_bool_strings_any_case(self):
+        assert _parse_flag_bool("true") is True
+        assert _parse_flag_bool("True") is True
+        assert _parse_flag_bool("FALSE") is False
+        assert _parse_flag_bool("  false  ") is False
 
-    def test_no_flag_means_converged(self):
-        results = {
-            "band_gap": {
-                "status": "success", "value": 1.1, "units": "eV",
-            },
-        }
-        out = _check_flags(results)
-        assert out["converged"] is True
-        assert out["unconverged"] == []
-        assert out["properties"]["band_gap"]["converged"] is True
-        assert "convergence_flag" not in out["properties"]["band_gap"]
+    def test_unparseable_is_none(self):
+        # The classic bug: bool("False") is True. These must NOT coerce.
+        for v in ("False?", "maybe", "yes", "", 0, 1, None, 0.0):
+            assert _parse_flag_bool(v) is None, v
 
-    def test_mixed_flag_names(self):
-        results = {
-            "shear_viscosity": {
-                "status": "success", "value": 0.89, "units": "mPa·s",
-                "plateau_reached": True,
-            },
-            "t1_time": {
-                "status": "success", "value": 2.3, "units": "ps",
-                "extreme_narrowing": False,
-            },
-        }
-        out = _check_flags(results)
-        assert out["converged"] is False
-        assert out["unconverged"] == ["t1_time"]
-        assert out["properties"]["shear_viscosity"]["converged"] is True
-        assert out["properties"]["t1_time"]["converged"] is False
 
-    def test_empty_results(self):
-        out = _check_flags({})
-        assert out["converged"] is True
-        assert out["unconverged"] == []
-        assert out["properties"] == {}
+# ---------------------------------------------------------------------------
+# _classify_convergence — converged / not_converged / not_assessed
+# ---------------------------------------------------------------------------
 
-    def test_error_property_skipped(self):
-        results = {
-            "shear_viscosity": {
-                "status": "error", "message": "script crashed",
-            },
-            "diffusion": {
-                "status": "success", "value": 2.3e-9, "units": "m²/s",
-                "converged": True,
-            },
-        }
-        out = _check_flags(results)
-        assert out["converged"] is True
-        assert out["unconverged"] == []
-        assert out["properties"]["shear_viscosity"]["status"] == "error"
+class TestClassify:
+    def _state(self, result):
+        return _classify_convergence(result)["state"]
 
-    def test_multiple_unconverged(self):
-        results = {
-            "shear_viscosity": {
-                "status": "success", "value": 0.89, "units": "mPa·s",
-                "plateau_reached": False,
-            },
-            "diffusion": {
-                "status": "success", "value": 2.3e-9, "units": "m²/s",
-                "converged": False,
-            },
-        }
-        out = _check_flags(results)
-        assert out["converged"] is False
-        assert set(out["unconverged"]) == {"shear_viscosity", "diffusion"}
+    def test_flag_true_converged(self):
+        assert self._state({"value": 0.89, "plateau_reached": True}) == "converged"
+
+    def test_flag_false_not_converged(self):
+        assert self._state({"value": 0.89, "plateau_reached": False}) == "not_converged"
+
+    def test_no_flag_no_verdict_not_assessed(self):
+        assert self._state({"value": 1.1, "units": "eV"}) == "not_assessed"
+
+    def test_no_flag_plausible_true_not_assessed(self):
+        assert self._state({
+            "value": 1.1, "verification": {"plausible": True},
+        }) == "not_assessed"
+
+    def test_string_true_flag_converged(self):
+        assert self._state({"value": 1.0, "plateau_reached": "true"}) == "converged"
+
+    # --- Maxim's review table (each row was reported as converged) ---
+
+    def test_row1_no_flag_implausible_not_converged(self):
+        # value:-0.4, no flag, verification.plausible:false
+        assert self._state({
+            "value": -0.4, "verification": {"plausible": False,
+                                            "reasoning": "negative"},
+        }) == "not_converged"
+
+    def test_row2_string_false_flag_not_converged(self):
+        # plateau_reached:"False" (a string) — bool("False") is True, so this
+        # must be parsed strictly.
+        assert self._state({"value": 0.5, "plateau_reached": "False"}) == "not_converged"
+
+    def test_row3_mixed_flags_not_converged_deterministic(self):
+        # converged:true + plateau_reached:false — every flag is read, so the
+        # false one wins regardless of dict/hash order. Run repeatedly to make
+        # the determinism explicit.
+        result = {"value": 0.5, "converged": True, "plateau_reached": False}
+        for _ in range(20):
+            assert self._state(dict(result)) == "not_converged"
+
+    # --- other edge cases ---
+
+    def test_plausible_false_overrides_true_flag(self):
+        assert self._state({
+            "value": 0.5, "plateau_reached": True,
+            "verification": {"plausible": False},
+        }) == "not_converged"
+
+    def test_unparseable_only_flag_not_assessed(self):
+        assert self._state({"value": 0.5, "plateau_reached": "maybe"}) == "not_assessed"
+
+    def test_true_plus_unparseable_not_assessed(self):
+        # A true flag can't be trusted when another present flag is unreadable.
+        assert self._state({
+            "value": 0.5, "converged": True, "plateau_reached": "maybe",
+        }) == "not_assessed"
+
+    def test_all_flags_true_converged(self):
+        assert self._state({
+            "value": 0.5, "converged": True, "plateau_reached": True,
+        }) == "converged"
+
+    def test_evidence_records_flags_and_verification(self):
+        ev = _classify_convergence({
+            "value": 0.89, "units": "mPa·s", "plateau_reached": False,
+            "verification": {"plausible": False, "reasoning": "x"},
+        })
+        assert ev["value"] == 0.89 and ev["units"] == "mPa·s"
+        assert ev["verification"]["reasoning"] == "x"
+        assert ev["flags"]["plateau_reached"]["parsed"] is False
+        assert ev["flags"]["plateau_reached"]["raw"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +127,6 @@ class TestCheckFlags:
 # ---------------------------------------------------------------------------
 
 def _make_fake_orch(**overrides):
-    """Create a minimal mock orchestrator with LLM config."""
     orch = MagicMock()
     orch.api_key = overrides.get("api_key", "test-key")
     orch.base_url = overrides.get("base_url", None)
@@ -180,163 +144,150 @@ def _make_fake_orch(**overrides):
 
 
 def _build_tools(orch):
-    """Build the tool registry; returns the tools instance."""
     from scilink.agents.sim_agents.simulation_orchestrator_tools import (
         SimulationOrchestratorTools,
     )
     return SimulationOrchestratorTools(orch)
 
 
+def _run_tool(tmp_path, results, research_goal="viscosity"):
+    """Invoke the tool with a monkeypatched analysis agent returning ``results``."""
+    orch = _make_fake_orch()
+    tools = _build_tools(orch)
+    analysis_result = {
+        "status": "success", "results": results,
+        "skills_used": ["viscosity_greenkubo"], "data_kinds": ["thermo_log"],
+    }
+    with patch(
+        "scilink.agents.sim_agents.simulation_analysis_agent"
+        ".SimulationAnalysisAgent"
+    ) as MockAgent:
+        MockAgent.return_value.run_analysis.return_value = analysis_result
+        raw = tools.functions_map["check_observable_convergence"](
+            output_dir=str(tmp_path), research_goal=research_goal,
+        )
+    return json.loads(raw)
+
+
 class TestToolIntegration:
     def test_tool_registered(self):
-        orch = _make_fake_orch()
-        tools = _build_tools(orch)
+        tools = _build_tools(_make_fake_orch())
         assert "check_observable_convergence" in tools.functions_map
 
     def test_tool_returns_converged(self, tmp_path):
-        orch = _make_fake_orch()
-        tools = _build_tools(orch)
-
-        analysis_result = {
-            "status": "success",
-            "results": {
-                "shear_viscosity": {
-                    "status": "success", "value": 0.89, "units": "mPa·s",
-                    "plateau_reached": True,
-                    "verification": {"plausible": True, "reasoning": "ok"},
-                },
+        out = _run_tool(tmp_path, {
+            "shear_viscosity": {
+                "status": "success", "value": 0.89, "units": "mPa·s",
+                "plateau_reached": True,
+                "verification": {"plausible": True, "reasoning": "ok"},
             },
-            "skills_used": ["viscosity_greenkubo"],
-            "data_kinds": ["thermo_log"],
-        }
-
-        with patch(
-            "scilink.agents.sim_agents.simulation_analysis_agent"
-            ".SimulationAnalysisAgent"
-        ) as MockAgent:
-            mock_instance = MagicMock()
-            mock_instance.run_analysis.return_value = analysis_result
-            MockAgent.return_value = mock_instance
-
-            raw = tools.functions_map["check_observable_convergence"](
-                output_dir=str(tmp_path), research_goal="shear viscosity",
-            )
-
-        out = json.loads(raw)
+        })
         assert out["status"] == "success"
         assert out["converged"] is True
-        assert out["unconverged"] == []
-        assert out["properties"]["shear_viscosity"]["converged"] is True
+        assert out["unconverged"] == [] and out["not_assessed"] == []
+        assert out["properties"]["shear_viscosity"]["state"] == "converged"
 
     def test_tool_returns_unconverged(self, tmp_path):
-        orch = _make_fake_orch()
-        tools = _build_tools(orch)
-
-        analysis_result = {
-            "status": "success",
-            "results": {
-                "shear_viscosity": {
-                    "status": "success", "value": 0.89, "units": "mPa·s",
-                    "plateau_reached": False,
-                    "verification": {"plausible": False,
-                                     "reasoning": "not converged"},
-                },
+        out = _run_tool(tmp_path, {
+            "shear_viscosity": {
+                "status": "success", "value": 0.89, "units": "mPa·s",
+                "plateau_reached": False,
+                "verification": {"plausible": False, "reasoning": "no plateau"},
             },
-            "skills_used": ["viscosity_greenkubo"],
-            "data_kinds": ["thermo_log"],
-        }
-
-        with patch(
-            "scilink.agents.sim_agents.simulation_analysis_agent"
-            ".SimulationAnalysisAgent"
-        ) as MockAgent:
-            mock_instance = MagicMock()
-            mock_instance.run_analysis.return_value = analysis_result
-            MockAgent.return_value = mock_instance
-
-            raw = tools.functions_map["check_observable_convergence"](
-                output_dir=str(tmp_path), research_goal="shear viscosity",
-            )
-
-        out = json.loads(raw)
-        assert out["status"] == "success"
+        })
         assert out["converged"] is False
         assert out["unconverged"] == ["shear_viscosity"]
-        # Diagnostic-only: the tool reports the finding + per-property
-        # evidence, and never prescribes a remedy.
+        assert out["properties"]["shear_viscosity"]["state"] == "not_converged"
+        # Diagnostic-only: never prescribes a remedy.
         assert "recommendation" not in out
-        assert out["properties"]["shear_viscosity"]["convergence_flag"] == "plateau_reached"
 
-    def test_tool_with_dft_output_no_flags(self, tmp_path):
-        orch = _make_fake_orch()
-        tools = _build_tools(orch)
-
-        analysis_result = {
-            "status": "success",
-            "results": {
-                "band_gap": {
-                    "status": "success", "value": 1.1, "units": "eV",
-                    "verification": {"plausible": True, "reasoning": "ok"},
-                },
+    def test_tool_row1_no_flag_implausible(self, tmp_path):
+        out = _run_tool(tmp_path, {
+            "shear_viscosity": {
+                "status": "success", "value": -0.4, "units": "mPa·s",
+                "verification": {"plausible": False, "reasoning": "negative"},
             },
-            "skills_used": ["band_structure"],
-            "data_kinds": ["dft_output"],
-        }
+        })
+        assert out["converged"] is False
+        assert out["unconverged"] == ["shear_viscosity"]
+        assert out["properties"]["shear_viscosity"]["state"] == "not_converged"
 
-        with patch(
-            "scilink.agents.sim_agents.simulation_analysis_agent"
-            ".SimulationAnalysisAgent"
-        ) as MockAgent:
-            mock_instance = MagicMock()
-            mock_instance.run_analysis.return_value = analysis_result
-            MockAgent.return_value = mock_instance
+    def test_tool_row2_string_false_flag(self, tmp_path):
+        out = _run_tool(tmp_path, {
+            "shear_viscosity": {
+                "status": "success", "value": 0.5, "units": "mPa·s",
+                "plateau_reached": "False",
+            },
+        })
+        assert out["converged"] is False
+        assert out["unconverged"] == ["shear_viscosity"]
 
-            raw = tools.functions_map["check_observable_convergence"](
-                output_dir=str(tmp_path), research_goal="band gap",
-            )
+    def test_tool_row3_mixed_flags(self, tmp_path):
+        out = _run_tool(tmp_path, {
+            "shear_viscosity": {
+                "status": "success", "value": 0.5, "units": "mPa·s",
+                "converged": True, "plateau_reached": False,
+            },
+        })
+        assert out["converged"] is False
+        assert out["unconverged"] == ["shear_viscosity"]
 
-        out = json.loads(raw)
+    def test_tool_dft_no_flags_not_assessed(self, tmp_path):
+        out = _run_tool(tmp_path, {
+            "band_gap": {
+                "status": "success", "value": 1.1, "units": "eV",
+                "verification": {"plausible": True, "reasoning": "ok"},
+            },
+        }, research_goal="band gap")
+        # Nothing was found not-converged, but the property carried no
+        # convergence signal, so it is surfaced as not_assessed — not silently
+        # reported converged.
         assert out["converged"] is True
         assert out["unconverged"] == []
+        assert out["not_assessed"] == ["band_gap"]
+        assert out["properties"]["band_gap"]["state"] == "not_assessed"
         assert "recommendation" not in out
+
+    def test_tool_error_property_surfaced(self, tmp_path):
+        out = _run_tool(tmp_path, {
+            "shear_viscosity": {"status": "error", "message": "script crashed"},
+            "diffusion": {
+                "status": "success", "value": 2.3e-9, "units": "m²/s",
+                "converged": True,
+            },
+        })
+        assert out["properties"]["shear_viscosity"]["state"] == "error"
+        assert out["properties"]["diffusion"]["state"] == "converged"
 
     def test_tool_handles_analysis_error(self, tmp_path):
         orch = _make_fake_orch()
         tools = _build_tools(orch)
-
         with patch(
             "scilink.agents.sim_agents.simulation_analysis_agent"
             ".SimulationAnalysisAgent"
         ) as MockAgent:
-            mock_instance = MagicMock()
-            mock_instance.run_analysis.return_value = {
-                "status": "error",
-                "message": "no recognized output",
-                "results": {},
+            MockAgent.return_value.run_analysis.return_value = {
+                "status": "error", "message": "no recognized output", "results": {},
             }
-            MockAgent.return_value = mock_instance
-
             raw = tools.functions_map["check_observable_convergence"](
                 output_dir=str(tmp_path), research_goal="viscosity",
             )
-
-        out = json.loads(raw)
-        assert out["status"] == "error"
+        assert json.loads(raw)["status"] == "error"
 
     def test_tool_handles_exception(self, tmp_path):
         orch = _make_fake_orch()
         tools = _build_tools(orch)
-
         with patch(
             "scilink.agents.sim_agents.simulation_analysis_agent"
             ".SimulationAnalysisAgent"
         ) as MockAgent:
             MockAgent.side_effect = RuntimeError("boom")
-
             raw = tools.functions_map["check_observable_convergence"](
                 output_dir=str(tmp_path), research_goal="viscosity",
             )
-
         out = json.loads(raw)
-        assert out["status"] == "error"
-        assert "boom" in out["message"]
+        assert out["status"] == "error" and "boom" in out["message"]
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-v"]))
