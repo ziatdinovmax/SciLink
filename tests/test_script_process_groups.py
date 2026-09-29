@@ -211,3 +211,36 @@ def test_a_stop_during_a_warm_run_takes_its_helper_with_it(tmp_path):
         assert _wait_gone(gc)
     finally:
         w.close()
+
+
+def test_the_signal_handler_cannot_deadlock_on_the_registry_lock():
+    """A SIGTERM landing while the main thread holds the registry lock ran a
+    handler that waited for that same lock forever."""
+    # In a subprocess with a timeout, so a regression fails instead of
+    # hanging the suite.
+    code = ("from scilink import executors as ex\n"
+            "with ex._active_subprocesses_lock:\n"      # the main thread is inside _register_subprocess
+            "    ex._kill_all_registered()\n"          # what the handler does, on this same thread
+            "print('ok')")
+    env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1]))
+    out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60)
+    assert out.stdout.strip() == "ok", out.stderr[-400:]
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs fork")
+def test_a_forked_child_does_not_inherit_the_parents_scripts(tmp_path):
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    ex._mark_own_group(proc)
+    ex._register_subprocess(proc)
+    try:
+        r, w = os.pipe()
+        pid = os.fork()
+        if pid == 0:                                # child: the registry must be empty
+            os.write(w, str(sum(len(v) for v in ex._active_subprocesses.values())).encode())
+            os._exit(0)
+        os.waitpid(pid, 0)
+        assert os.read(r, 16) == b"0"
+        assert proc.poll() is None                  # the parent's script is untouched
+    finally:
+        ex._unregister_subprocess(proc)
+        ex._kill_process_tree(proc, grace=0.2)

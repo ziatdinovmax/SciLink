@@ -15,8 +15,22 @@ DEFAULT_TIMEOUT = 600
 
 # Global registry of active subprocesses, keyed by thread ID.
 # Accessible from any thread so the UI stop handler can kill them.
-_active_subprocesses_lock = threading.Lock()
+# Re-entrant: the SIGHUP/SIGTERM handler below takes it on the main thread,
+# which may be holding it (inside _register_subprocess) when the signal lands.
+_active_subprocesses_lock = threading.RLock()
 _active_subprocesses: dict[int, set[subprocess.Popen]] = {}
+
+
+def _forget_inherited_subprocesses() -> None:
+    """In a forked child the registry holds the PARENT's scripts; a SIGTERM
+    to the child must not end them."""
+    global _active_subprocesses_lock
+    _active_subprocesses_lock = threading.RLock()
+    _active_subprocesses.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_forget_inherited_subprocesses)
 
 
 def _register_subprocess(proc: subprocess.Popen) -> None:
@@ -620,7 +634,9 @@ class WarmScriptExecutor(ScriptExecutor):
     - each run has its own working directory, and the caller's is never touched;
     - the timeout is hard: the worker is killed and replaced, as a fresh process
       would be;
-    - the user's Stop reaches it (the worker is registered like any subprocess);
+    - a chat turn's Stop reaches it (the worker is registered like any
+      subprocess); the Live tab's Stop only sets its loop's event, so a replay
+      already running there finishes or times out;
     - stdout / stderr are captured at the file-descriptor level, so the result
       has the same shape and the same success rule (exit code 0).
 
