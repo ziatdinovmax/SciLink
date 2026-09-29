@@ -34,16 +34,12 @@ def _index_lock():
     SciLink process on the machine; the lock is held across threads and
     processes around each read-modify-write. A home that cannot hold the
     lock file runs unlocked: the index is a convenience."""
-    lock = path_lock(index_path())
-    try:
-        lock.__enter__()
-    except OSError:
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(path_lock(index_path()))
+        except OSError:
+            pass
         yield
-        return
-    try:
-        yield
-    finally:
-        lock.__exit__(None, None, None)
 
 
 # ── the index ────────────────────────────────────────────────────
@@ -221,8 +217,7 @@ def resolve_session(ref: str, mode: Optional[str] = None, *, root=None,
     local = Path(root or Path.cwd()) / ref
     if local.is_dir():
         return local.resolve() if _under(local, within) else None
-    with _index_lock():
-        records = _read_index()
+    records = _read_index()     # published atomically: a plain read is consistent
     matches = [Path(r["path"]) for r in records.values()
                if r.get("id") == ref and (mode is None or r.get("mode") == mode)
                and Path(r["path"]).is_dir() and _under(Path(r["path"]), within)]

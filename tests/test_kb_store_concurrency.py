@@ -170,3 +170,96 @@ def test_a_home_that_cannot_hold_the_lock_still_registers_nothing_breaks(tmp_pat
         assert S.list_sessions("meta", root=tmp_path) is not None
     finally:
         home.chmod(0o755)
+
+
+# ── review follow-ups: readers, backups, live builds ──────────────────────
+
+def _generation_append(target, new_doc_paths, *a, **k):
+    """Stand-in for _append_index_into that writes the index and the chunks
+    as one generation, tagged so a reader can tell generations apart."""
+    import uuid
+    tag = uuid.uuid4().hex
+    (target / "default_kb_docs.faiss").write_bytes(tag.encode() * 4000)
+    (target / "default_kb_docs.json").write_text(json.dumps([tag] * 4000))
+    return len(new_doc_paths), len(new_doc_paths)
+
+
+def test_a_reader_never_copies_a_mixed_generation(store, tmp_path, monkeypatch):
+    kb_store.create_kb("busy", [_doc(tmp_path, "base.md")])
+    _generation_append(kb_store.kb_path("busy"), [])        # tag the first generation
+    monkeypatch.setattr(kb_store, "_append_index_into", _generation_append)
+    stop = threading.Event()
+
+    def writer():
+        i = 0
+        while not stop.is_set():
+            kb_store.add_to_kb("busy", [_doc(tmp_path, f"n{i}.md")])
+            i += 1
+
+    w = threading.Thread(target=writer)
+    w.start()
+    mixed, copies = 0, 0
+    try:
+        deadline = time.time() + 6
+        while time.time() < deadline:
+            dest = tmp_path / "caches" / f"c{copies}"
+            kb_store.snapshot_kb(kb_store.kb_path("busy"), dest)
+            idx = (dest / "default_kb_docs.faiss").read_bytes()[:32].decode()
+            chunks = json.loads((dest / "default_kb_docs.json").read_text())[0]
+            mixed += idx != chunks
+            copies += 1
+    finally:
+        stop.set()
+        w.join()
+    assert copies > 20
+    assert mixed == 0
+
+
+def test_a_backup_stranded_by_a_crash_is_restored(store, tmp_path, monkeypatch):
+    kb_store.create_kb("vault", [_doc(tmp_path, "base.md")])
+    final = kb_store.kb_path("vault")
+    final.rename(final.with_name(".bak_vault"))             # crashed between the two renames
+    monkeypatch.setattr(kb_store, "_append_index_into", lambda t, n, *a, **k: (1, 1))
+    kb_store.add_to_kb("vault", [_doc(tmp_path, "more.md")])
+    assert {"base.md", "more.md"} <= set(kb_store.read_manifest(final)["sources"])
+    assert not final.with_name(".bak_vault").exists()
+
+
+def test_publishing_a_kb_does_not_delete_one_named_like_its_backup(store, tmp_path, monkeypatch):
+    kb_store.create_kb("foo.bak", [_doc(tmp_path, "keep.md")])
+    kb_store.create_kb("foo", [_doc(tmp_path, "base.md")])
+    monkeypatch.setattr(kb_store, "_append_index_into", lambda t, n, *a, **k: (1, 1))
+    kb_store.add_to_kb("foo", [_doc(tmp_path, "more.md")])
+    assert kb_store.read_manifest(kb_store.kb_path("foo.bak"))["sources"] == ["keep.md"]
+    assert [m["name"] for m in kb_store.list_kbs()] == ["foo", "foo.bak"]
+
+
+def test_list_kbs_tells_a_live_build_from_a_dead_one(store, tmp_path, caplog):
+    import logging as _logging
+    from scilink.utils.file_lock import path_lock
+    (store / ".staging_live").mkdir(parents=True)
+    (store / ".staging_dead").mkdir(parents=True)
+    with caplog.at_level(_logging.INFO, logger="scilink.knowledge.kb_store"):
+        with path_lock(kb_store._lock_target("live")):
+            kb_store.list_kbs()
+    warnings = [r.message for r in caplog.records if r.levelno >= _logging.WARNING]
+    assert any(".staging_dead" in w for w in warnings)
+    assert not any(".staging_live" in w for w in warnings)
+    assert any("being built by another process" in r.message for r in caplog.records)
+
+
+def test_an_index_that_disagrees_with_its_chunks_is_not_used_for_dense_retrieval(tmp_path):
+    import faiss
+    import numpy as np
+    from scilink.knowledge.knowledge_base import KnowledgeBase
+    prefix = tmp_path / "default_kb_docs"
+    idx = faiss.IndexFlatL2(4)
+    idx.add(np.random.rand(2, 4).astype("float32"))
+    faiss.write_index(idx, str(prefix.with_suffix(".faiss")))
+    prefix.with_suffix(".json").write_text(json.dumps(
+        [{"text": f"chunk {i}", "metadata": {}} for i in range(3)]))
+    prefix.with_suffix(".sources.json").write_text("[]")
+    kb = KnowledgeBase(embedding_model=None)
+    assert kb.load(str(prefix.with_suffix(".faiss")), str(prefix.with_suffix(".json")),
+                   sources_path=str(prefix.with_suffix(".sources.json")))
+    assert "2 vectors for 3 chunks" in (kb._dense_disabled_reason or "")

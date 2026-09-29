@@ -805,12 +805,12 @@ class PlanningOrchestratorAgent:
                 # artifact — mutate the store only via 'scilink kb'). Seed a
                 # session-local copy of the persisted index; loading stays
                 # instant and any session appends stay session-local.
-                import shutil as _shutil
+                from ...knowledge.kb_store import snapshot_kb
                 cache = self.base_dir / "kb_cache"
-                cache.mkdir(parents=True, exist_ok=True)
-                for f in self.knowledge_dir.glob("default_kb_*"):
-                    if not (cache / f.name).exists():
-                        _shutil.copy2(f, cache / f.name)
+                if not any(cache.glob("default_kb_*")):
+                    # One consistent generation even while another process
+                    # is publishing an update to the store KB.
+                    snapshot_kb(self.knowledge_dir, cache)
                 planner_kwargs["kb_base_path"] = str(cache / "default_kb")
             else:
                 planner_kwargs["kb_base_path"] = str(self.knowledge_dir / "default_kb")

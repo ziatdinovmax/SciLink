@@ -406,7 +406,7 @@ class TestCrashSafeSwap:
         kb_store._swap_into_place(staging, kb)
         assert (kb / "default_kb_docs.faiss").read_bytes() == b"REBUILT"
         assert not staging.exists()
-        assert not kb.with_name(kb.name + ".bak").exists()   # no litter
+        assert not kb_store._backup_path(kb).exists()   # no litter
 
     def test_swap_works_when_there_is_no_previous_kb(self, store):
         kb = kb_store.kb_path("fresh")
@@ -420,7 +420,7 @@ class TestCrashSafeSwap:
         kb = kb_store.kb_path("mykb")
         kb.mkdir(parents=True)
         (kb / "x").write_text("live")
-        stale = kb.with_name(kb.name + ".bak")
+        stale = kb_store._backup_path(kb)
         stale.mkdir()
         (stale / "junk").write_text("from a previous failure")
         staging = kb_store.kb_store_dir() / ".staging_mykb"

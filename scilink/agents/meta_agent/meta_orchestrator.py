@@ -751,11 +751,9 @@ class MetaOrchestratorAgent:
                 # Named store KB: rebind through a session-local copy so the
                 # child's index writes never mutate the shared store (same
                 # copy-on-write the orchestrator constructor applies).
-                import shutil as _shutil
+                from ...knowledge.kb_store import snapshot_kb
                 cache = child.base_dir / "kb_cache"
-                cache.mkdir(parents=True, exist_ok=True)
-                for f in target.glob("default_kb_*"):
-                    _shutil.copy2(f, cache / f.name)
+                snapshot_kb(target, cache)
                 child.planner.rebind_kb(str(cache / "default_kb"))
             else:
                 child.planner.rebind_kb(str(target / "default_kb"))
@@ -1106,11 +1104,9 @@ class MetaOrchestratorAgent:
         child = self._children.get("planning")
         if (child is not None and self.knowledge_dir
                 and self.knowledge_dir.name == name):
-            import shutil as _shutil
+            from ...knowledge.kb_store import snapshot_kb
             cache = child.base_dir / "kb_cache"
-            cache.mkdir(parents=True, exist_ok=True)
-            for f in self.knowledge_dir.glob("default_kb_*"):
-                _shutil.copy2(f, cache / f.name)
+            snapshot_kb(self.knowledge_dir, cache)
             child.planner.rebind_kb(str(cache / "default_kb"))
         return updated
 
