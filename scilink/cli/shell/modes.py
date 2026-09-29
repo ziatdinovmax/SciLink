@@ -74,8 +74,16 @@ class ModeAdapter:
     def initial_turns(self, args, agent) -> List[str]:
         return []
 
-    def headless_run(self, agent, task: str) -> Dict[str, Any]:
-        result = agent.run_task(task)
+    def headless_context(self, args) -> Optional[Dict[str, Any]]:
+        """What the mode's flags name that a ``-p`` task must also be given.
+        The interactive shell feeds such inputs through ``initial_turns``;
+        headless runs one task and never reads those turns, so an input
+        returned here travels with the task as ``run_task`` context."""
+        return None
+
+    def headless_run(self, agent, task: str,
+                     context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        result = agent.run_task(task, context=context)
         return result if isinstance(result, dict) else {"status": "success", "summary": str(result)}
 
 
@@ -263,7 +271,7 @@ apply here):
     def initial_turns(self, args, agent):
         return [args.initial_message] if getattr(args, "initial_message", None) else []
 
-    def headless_run(self, agent, task):
+    def headless_run(self, agent, task, context=None):
         reply = agent.chat(task)
         ledger = getattr(agent, "_delegation_ledger", None) or []
         files = [f for e in ledger for f in (e.get("files_produced") or [])]
@@ -417,9 +425,23 @@ Metadata Options:
                          "analysis agent and explain your reasoning.")
         return turns
 
-    def headless_run(self, agent, task):
+    def headless_context(self, args):
+        """``--data`` / ``--metadata``: the interactive shell seeds its first
+        turn from them; a ``-p`` task gets them as context (they were
+        silently dropped, and the agent asked for the data file)."""
+        data, meta = getattr(args, "data_path", None), getattr(args, "metadata_path", None)
+        ctx: Dict[str, Any] = {}
+        if data:
+            ctx["data_path"] = str(Path(data).absolute())
+        if meta:
+            ctx["metadata_path"] = str(Path(meta).absolute())
+            ctx["metadata_format"] = ("JSON: load it" if Path(meta).suffix.lower() == ".json"
+                                      else "text description: convert it to metadata")
+        return ctx or None
+
+    def headless_run(self, agent, task, context=None):
         from scilink.agents.exp_agents.analysis_orchestrator import AnalysisMode
-        return agent.run_task(task, autonomy=AnalysisMode.AUTONOMOUS)
+        return agent.run_task(task, context=context, autonomy=AnalysisMode.AUTONOMOUS)
 
 
 def _agents(shell, arg: str) -> None:
@@ -595,9 +617,9 @@ Recommended project layout (co-pilot):
         return ["Survey the workspace using list_workspace_files. Report what data files, "
                 "papers, and other resources are available.", rec]
 
-    def headless_run(self, agent, task):
+    def headless_run(self, agent, task, context=None):
         from scilink.agents.planning_agents.planning_orchestrator import AutonomyLevel
-        return agent.run_task(task, autonomy=AutonomyLevel.AUTONOMOUS)
+        return agent.run_task(task, context=context, autonomy=AutonomyLevel.AUTONOMOUS)
 
 
 def _objective(shell, arg: str) -> None:
@@ -678,9 +700,9 @@ Scope (for now):
     def initial_turns(self, args, agent):
         return [args.initial_request] if getattr(args, "initial_request", None) else []
 
-    def headless_run(self, agent, task):
+    def headless_run(self, agent, task, context=None):
         from scilink.agents.sim_agents.simulation_orchestrator import SimulationMode
-        return agent.run_task(task, autonomy=SimulationMode.AUTONOMOUS)
+        return agent.run_task(task, context=context, autonomy=SimulationMode.AUTONOMOUS)
 
 
 def _structures(shell, arg: str) -> None:
