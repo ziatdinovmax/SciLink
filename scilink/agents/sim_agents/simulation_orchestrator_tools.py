@@ -29,6 +29,87 @@ import pandas as pd
 # read_document character cap — longer documents are truncated (~50k tokens).
 _READ_DOC_MAX_CHARS = 200_000
 
+# Convergence-flag vocabulary emitted by time-series analysis skills. A tuple
+# (deterministic order), and every flag present on a property is inspected —
+# never just the first — so a mix like {converged: true, plateau_reached:
+# false} is judged the same way on every run.
+_CONVERGENCE_FLAG_KEYS = (
+    "plateau_reached", "converged", "linear_regime", "extreme_narrowing",
+)
+
+
+def _parse_flag_bool(value: Any):
+    """Strictly coerce a model-written convergence flag to a bool.
+
+    Real bools pass through; the strings ``"true"``/``"false"`` (any case) map
+    to a bool; anything else (a number, another string, ``None``) is
+    unparseable and returns ``None``. Never call ``bool()`` on a raw flag —
+    ``bool("False")`` is ``True``.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s == "true":
+            return True
+        if s == "false":
+            return False
+    return None
+
+
+def _classify_convergence(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Classify one analysis result as converged / not_converged / not_assessed.
+
+    Convergence is a claim about a time-series observable; plausibility is a
+    separate trust signal from the analysis verifier. Precedence:
+
+    1. ``verification.plausible is False`` -> ``not_converged`` (untrustworthy),
+       whatever the flags say. A verifier-rejected result can still arrive with
+       ``status="success"`` because the codegen engine returns the best attempt
+       on exhaustion, so the verdict must be honored here.
+    2. otherwise inspect every convergence flag PRESENT, parsed strictly:
+       - any present flag is ``False``          -> ``not_converged``
+       - >=1 present flag and all are ``True``  -> ``converged``
+       - no parseable flag present              -> ``not_assessed``
+
+    Returns the evidence dict (value/units/verification) plus ``state`` and,
+    when any flag was present, a ``flags`` map of ``{name: {raw, parsed}}``.
+    """
+    verification = result.get("verification") or {}
+    plausible = verification.get("plausible")
+
+    flags: Dict[str, Any] = {}
+    any_false = any_true = any_unparseable = False
+    for key in _CONVERGENCE_FLAG_KEYS:
+        if key in result:
+            parsed = _parse_flag_bool(result[key])
+            flags[key] = {"raw": result[key], "parsed": parsed}
+            if parsed is False:
+                any_false = True
+            elif parsed is True:
+                any_true = True
+            else:
+                any_unparseable = True
+
+    if plausible is False:
+        state = "not_converged"
+    elif any_false:
+        state = "not_converged"
+    elif any_true and not any_unparseable:
+        state = "converged"
+    else:
+        # No flag at all, or only unparseable ones — nothing to stand on.
+        state = "not_assessed"
+
+    evidence = {
+        k: v for k, v in result.items()
+        if k in ("value", "units", "verification")
+    }
+    evidence["state"] = state
+    if flags:
+        evidence["flags"] = flags
+    return evidence
+
 
 def _extract_document_text(path: Path, ocr_model: Any = None) -> Dict[str, Any]:
     """Kept as a name for callers; the implementation is the shared engine's."""
@@ -2199,6 +2280,111 @@ class SimulationOrchestratorTools:
                         "When to propose patched inputs: 'auto' (default; "
                         "only on failure or a poor verdict), 'always' "
                         "(whenever below 'good'), or 'skip' (verdict only)."
+                    ),
+                },
+            },
+            required=["output_dir", "research_goal"],
+        )
+
+        # =====================================================================
+        # 9. CHECK OBSERVABLE CONVERGENCE (post-run analysis)
+        # =====================================================================
+        def check_observable_convergence(
+            output_dir: str, research_goal: str,
+        ) -> str:
+            from .simulation_analysis_agent import SimulationAnalysisAgent
+
+            try:
+                agent = SimulationAnalysisAgent(
+                    output_dir=output_dir,
+                    api_key=self.orch.api_key,
+                    base_url=self.orch.base_url,
+                    model_name=self.orch.model_name,
+                )
+                analysis = agent.run_analysis(research_goal, run_dir=output_dir)
+            except Exception as e:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Analysis failed: {e}",
+                })
+
+            if analysis.get("status") == "error":
+                return json.dumps({
+                    "status": "error",
+                    "message": analysis.get("message", "analysis returned error"),
+                })
+
+            results = analysis.get("results") or {}
+            properties = {}
+            unconverged = []
+            not_assessed = []
+
+            for prop, result in results.items():
+                if result.get("status") == "error":
+                    properties[prop] = {
+                        "state": "error",
+                        "message": result.get("message", ""),
+                    }
+                    continue
+
+                evidence = _classify_convergence(result)
+                properties[prop] = evidence
+                if evidence["state"] == "not_converged":
+                    unconverged.append(prop)
+                elif evidence["state"] == "not_assessed":
+                    not_assessed.append(prop)
+
+            # Diagnostic-only: report each property's state (converged /
+            # not_converged / not_assessed) with the evidence behind it, and no
+            # remedy — non-convergence has many causes (equilibration, state
+            # point, force field, sampling cadence, finite size), so the caller
+            # diagnoses from the evidence. Top-level `converged` means nothing
+            # was found not-converged/untrustworthy; `not_assessed` lists the
+            # properties that carried no convergence signal to judge.
+            out = {
+                "status": "success",
+                "converged": len(unconverged) == 0,
+                "properties": properties,
+                "unconverged": unconverged,
+                "not_assessed": not_assessed,
+                "skills_used": analysis.get("skills_used", []),
+                "data_kinds": analysis.get("data_kinds", []),
+            }
+            return json.dumps(out, default=str)
+
+        self._register_tool(
+            func=check_observable_convergence,
+            name="check_observable_convergence",
+            description=(
+                "Post-run convergence check for time-series observables. "
+                "Runs the simulation analysis agent on a finished run "
+                "directory and classifies each computed property as "
+                "'converged', 'not_converged', or 'not_assessed', with the "
+                "value, convergence flags, and verification reasoning as "
+                "evidence. A property is not_converged when the verifier "
+                "judged it implausible or any convergence flag is false; "
+                "not_assessed when it carried no convergence signal to judge "
+                "(e.g. a structural or single-point property). Diagnostic "
+                "only — it reports the finding, not a remedy; use the "
+                "evidence to judge whether a value is trustworthy and, if "
+                "not, why. Use after a successful simulation to check "
+                "computed observables (e.g. Green-Kubo viscosity)."
+            ),
+            parameters={
+                "output_dir": {
+                    "type": "string",
+                    "description": (
+                        "Absolute path to the finished run's output "
+                        "directory containing trajectory and/or thermo "
+                        "log files."
+                    ),
+                },
+                "research_goal": {
+                    "type": "string",
+                    "description": (
+                        "What the simulation was meant to compute — "
+                        "drives which analysis skills are selected and "
+                        "which convergence flags are checked."
                     ),
                 },
             },

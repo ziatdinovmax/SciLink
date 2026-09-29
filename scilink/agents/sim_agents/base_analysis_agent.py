@@ -556,7 +556,10 @@ class BaseAnalysisAgent(ABC):
             msg = f"SyntaxError: {e.msg} (line {e.lineno})"
             return {"ok": False, "status": "error", "message": msg,
                     "concise_error": msg}
-        slug = re.sub(r"[^0-9a-zA-Z]+", "_", name).strip("_") or "analysis"
+        # Capped: `name` embeds the free-text research goal, and an uncapped
+        # slug exceeds the 255-byte filename limit (ENAMETOOLONG).
+        slug = re.sub(r"[^0-9a-zA-Z]+", "_", name).strip("_")[:80].rstrip("_") \
+            or "analysis"
         exec_result = self.executor.execute_script(
             script_content=code, working_dir=str(self.output_dir))
         if exec_result.get("status") == "success":

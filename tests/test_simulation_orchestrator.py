@@ -108,6 +108,9 @@ EXPECTED_TOOLS = {
     "read_document",
     "list_generated_structures",
     "analyze_output",
+    "check_observable_convergence",
+    "get_history_events",
+    "search_session_history",
     "route_simulation",
     "list_available_software",
     # HPC tools

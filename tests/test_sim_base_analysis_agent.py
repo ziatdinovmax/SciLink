@@ -54,6 +54,13 @@ class TestExecution:
         r = agent._execute_script('print(json.dumps({"a": 1}))extra)', "t")
         assert r["status"] == "error" and "SyntaxError" in r["concise_error"]
 
+    def test_execute_script_long_name_saves_capped_filename(self, agent):
+        name = "shear_viscosity for the research goal: " + "very long goal " * 30
+        r = agent._execute_script('print(\'{"status":"success","value":5}\')', name)
+        assert r["status"] == "success" and r["value"] == 5
+        saved = Path(r["code_path"])
+        assert saved.is_file() and len(saved.name) <= 83
+
     def test_execute_script_reads_injected_globals(self, agent, tmp_path):
         # compute_property injects DATA_FILES/OUTPUT_DIR; a script can read them.
         data = tmp_path / "d.txt"
