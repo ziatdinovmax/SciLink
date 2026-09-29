@@ -140,6 +140,8 @@ class _Child:
 def _meta(child):
     from scilink.agents.meta_agent.meta_orchestrator import MetaMode, MetaOrchestratorAgent
     m = MetaOrchestratorAgent.__new__(MetaOrchestratorAgent)
+    import threading as _threading
+    m._fanout_lock = _threading.RLock()        # the ledger lock the constructor builds
     m.meta_mode = MetaMode.AUTONOMOUS
     m.logger = SimpleNamespace(exception=lambda *a, **k: None)
     m.opened = []
