@@ -118,3 +118,96 @@ def test_a_process_sharing_our_group_is_killed_alone(tmp_path):
 def test_a_successful_script_is_unaffected(tmp_path):
     r = ex.ScriptExecutor(timeout=30).execute_script("print('hello')", working_dir=str(tmp_path))
     assert r["status"] == "success" and r["stdout"].strip() == "hello"
+
+
+# ── review follow-ups ─────────────────────────────────────────────────────
+
+# The script starts a helper that INHERITS its stdout/stderr and exits at
+# once: communicate() waits for EOF the helper holds, and the leader is a
+# zombie. On macOS getpgid() of that zombie raises ESRCH.
+LEADER_EXITS = textwrap.dedent("""
+    import subprocess, sys
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    open("grandchild.pid", "w").write(str(child.pid))
+""")
+
+# A helper that does NOT hold the pipes: the script exits 0 and returns.
+DETACHED = textwrap.dedent("""
+    import subprocess, sys
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    open("grandchild.pid", "w").write(str(child.pid))
+    print("done")
+""")
+
+
+def test_a_timeout_ends_a_helper_after_the_script_itself_exited(tmp_path):
+    t0 = time.time()
+    result = ex.ScriptExecutor(timeout=3).execute_script(LEADER_EXITS, working_dir=str(tmp_path))
+    assert result["status"] == "error" and "timed out" in result["message"]
+    assert time.time() - t0 < 15
+    assert _wait_gone(_grandchild(tmp_path))
+
+
+def test_a_stop_ends_a_helper_after_the_script_itself_exited(tmp_path):
+    results = {}
+    t = threading.Thread(target=lambda: results.update(
+        r=ex.ScriptExecutor(timeout=120).execute_script(LEADER_EXITS, working_dir=str(tmp_path))))
+    t.start()
+    gc = _grandchild(tmp_path)
+    time.sleep(0.5)                                  # the leader has exited by now
+    t0 = time.time()
+    ex.kill_subprocesses_for_thread(t.ident)
+    t.join(timeout=20)
+    assert not t.is_alive() and time.time() - t0 < 10
+    assert _wait_gone(gc)
+
+
+def test_a_detached_helper_does_not_outlive_a_successful_script(tmp_path):
+    r = ex.ScriptExecutor(timeout=30).execute_script(DETACHED, working_dir=str(tmp_path))
+    assert r["status"] == "success" and r["stdout"].strip() == "done"
+    assert _wait_gone(_grandchild(tmp_path))
+
+
+@pytest.mark.parametrize("signame", ["SIGHUP", "SIGTERM"])
+def test_a_hangup_or_terminate_of_the_parent_ends_the_script_tree(tmp_path, signame):
+    """A new session no longer receives the terminal's SIGHUP (window closed,
+    SSH dropped); Python dies of SIGHUP/SIGTERM without running atexit."""
+    import signal
+    parent_code = textwrap.dedent(f"""
+        import sys
+        from scilink import executors as ex
+        ex.ScriptExecutor(timeout=120).execute_script({SCRIPT!r}, working_dir={str(tmp_path)!r})
+    """)
+    env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1]))
+    parent = subprocess.Popen([sys.executable, "-c", parent_code], env=env)
+    gc = _grandchild(tmp_path, timeout=30)
+    os.kill(parent.pid, getattr(signal, signame))
+    parent.wait(timeout=20)
+    assert parent.returncode == -getattr(signal, signame)     # still dies of the same signal
+    assert _wait_gone(gc)
+
+
+def test_a_warm_run_that_times_out_takes_its_helper_with_it(tmp_path):
+    w = ex.WarmScriptExecutor(timeout=3)
+    try:
+        r = w.execute_script(SCRIPT, working_dir=str(tmp_path))
+        assert r["status"] == "error"
+        assert _wait_gone(_grandchild(tmp_path))
+    finally:
+        w.close()
+
+
+def test_a_stop_during_a_warm_run_takes_its_helper_with_it(tmp_path):
+    w = ex.WarmScriptExecutor(timeout=120)
+    results = {}
+    try:
+        t = threading.Thread(target=lambda: results.update(r=w.execute_script(SCRIPT, working_dir=str(tmp_path))))
+        t.start()
+        gc = _grandchild(tmp_path, timeout=30)
+        ex.kill_subprocesses_for_thread(t.ident)
+        t.join(timeout=20)
+        assert not t.is_alive()
+        assert _wait_gone(gc)
+    finally:
+        w.close()

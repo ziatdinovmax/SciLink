@@ -45,22 +45,57 @@ def _unregister_subprocess(proc: subprocess.Popen) -> None:
 _NEW_SESSION = os.name == "posix"
 
 
+def _mark_own_group(proc: subprocess.Popen) -> subprocess.Popen:
+    """Record that ``proc`` was started in a new session by us, so its
+    process group id is its pid by construction."""
+    if _NEW_SESSION:
+        proc._scilink_own_group = True       # type: ignore[attr-defined]
+    return proc
+
+
+def _group_of(proc: subprocess.Popen) -> "int | None":
+    """The process group to signal for ``proc``, or None to signal it alone.
+
+    A group we created is ``proc.pid``, known without asking: on macOS
+    ``getpgid`` of a script that has already exited (a zombie whose helper
+    still holds its pipes) raises ``ESRCH``, which is exactly the case where
+    the group matters. The id cannot name someone else's group while the
+    leader is unreaped or any member of the group is alive. For a process
+    we did not start, the group is used only if it leads its own.
+    """
+    if not _NEW_SESSION:
+        return None
+    if getattr(proc, "_scilink_own_group", False):
+        return proc.pid
+    try:
+        pgid = os.getpgid(proc.pid)
+        if pgid == proc.pid and pgid != os.getpgrp():
+            return pgid
+    except OSError:              # already gone and reaped
+        pass
+    return None
+
+
+def _end_leftover_group(proc: subprocess.Popen) -> None:
+    """After a script exited on its own: end anything it left running in its
+    group (a detached helper that does not hold its pipes). A generated
+    script has no business leaving a daemon behind."""
+    if _NEW_SESSION and getattr(proc, "_scilink_own_group", False):
+        try:
+            os.killpg(proc.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        except OSError:          # the group is already empty
+            pass
+
+
 def _kill_process_tree(proc: subprocess.Popen, grace: float = 2.0) -> None:
     """SIGTERM the script's process group, give it ``grace`` seconds, then
     SIGKILL whatever is left of the group.
 
-    The group is signalled only when the process leads its own group (it was
-    started with ``start_new_session``); otherwise, and off POSIX, only the
-    process itself is signalled, so a caller's own group is never hit.
+    The group is signalled only when the process leads its own group;
+    otherwise, and off POSIX, only the process itself is signalled, so a
+    caller's own group is never hit.
     """
-    group = None
-    if _NEW_SESSION:
-        try:
-            pgid = os.getpgid(proc.pid)
-            if pgid == proc.pid and pgid != os.getpgrp():
-                group = pgid
-        except OSError:          # already gone and reaped
-            group = None
+    group = _group_of(proc)
 
     def send(sig):
         if group is not None:
@@ -104,6 +139,38 @@ def _kill_all_registered() -> None:
 
 import atexit as _atexit
 _atexit.register(_kill_all_registered)
+
+
+def _on_fatal_signal(signum, frame):  # noqa: ARG001 - signal handler signature
+    """SIGHUP (the terminal closed, an SSH session dropped) and SIGTERM end
+    the interpreter WITHOUT running atexit, and a script in its own session
+    does not receive them. End the registered scripts, then die of the same
+    signal as before."""
+    try:
+        _kill_all_registered()
+    finally:
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+
+def _install_fatal_signal_cleanup() -> None:
+    """Only on the main thread (signal handlers can be set nowhere else) and
+    only where nobody else handles the signal: a web server's or uvicorn's
+    own handlers stay untouched, and they shut down through atexit."""
+    if not _NEW_SESSION or threading.current_thread() is not threading.main_thread():
+        return
+    for name in ("SIGHUP", "SIGTERM"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            if signal.getsignal(sig) is signal.SIG_DFL:
+                signal.signal(sig, _on_fatal_signal)
+        except (ValueError, OSError):
+            pass
+
+
+_install_fatal_signal_cleanup()
 
 
 def kill_subprocesses_for_thread(tid: int) -> None:
@@ -504,10 +571,12 @@ class ScriptExecutor:
                 preexec_fn=_sandbox_preexec(),
                 start_new_session=_NEW_SESSION,
             )
+            _mark_own_group(proc)
             # Register so OutputCapture.kill_subprocesses() can terminate it.
             _register_subprocess(proc)
             try:
                 stdout, stderr = proc.communicate(timeout=effective_timeout)
+                _end_leftover_group(proc)
             except subprocess.TimeoutExpired:
                 _kill_process_tree(proc, grace=0.5)
                 return {"status": "error", "message": f"Script execution timed out after {effective_timeout} seconds."}
@@ -579,6 +648,7 @@ class WarmScriptExecutor(ScriptExecutor):
                 stderr=subprocess.DEVNULL, text=True, bufsize=1,
                 env=sandbox_env({"MP_API_KEY": self.mp_api_key} if self.mp_api_key else None),
                 preexec_fn=_sandbox_preexec(), start_new_session=_NEW_SESSION)
+            _mark_own_group(self._proc)
             ready = self._read_line(30.0)
             self._runs = 0
             return bool(ready and json.loads(ready).get("ready"))
