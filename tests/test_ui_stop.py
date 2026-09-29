@@ -192,6 +192,7 @@ def test_meta_sweep_closes_running_delegations_as_interrupted():
     from scilink.agents.meta_agent.meta_orchestrator import MetaOrchestratorAgent
 
     orch = MetaOrchestratorAgent.__new__(MetaOrchestratorAgent)
+    orch._fanout_lock = threading.RLock()        # the ledger lock the constructor builds
     orch.logger = _logging.getLogger("test_meta_sweep")
     done = {"index": 1, "mode": "analysis", "label": "done-one",
             "status": "success", "summary": "fine", "key_findings": ["x"]}
