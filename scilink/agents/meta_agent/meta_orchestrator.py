@@ -647,12 +647,15 @@ class MetaOrchestratorAgent:
         self.meta_mode = mode
         self._enable_human_feedback = self._should_enable_human_feedback()
 
-        new_system_prompt = get_system_prompt(mode) + self._kb_note()
-        self._system_prompt = new_system_prompt
-        if self.messages and self.messages[0]["role"] == "system":
-            self.messages[0]["content"] = new_system_prompt
-
+        self._refresh_system_prompt()
         logging.info(f"🔄 Meta mode changed: {old_mode.value} → {mode.value}")
+
+    def _refresh_system_prompt(self) -> None:
+        """Rebuild the system prompt (the mode's prompt plus the knowledge
+        base note) and put it in the message history."""
+        self._system_prompt = get_system_prompt(self.meta_mode) + self._kb_note()
+        if self.messages and self.messages[0]["role"] == "system":
+            self.messages[0]["content"] = self._system_prompt
 
     @staticmethod
     def _kb_source_names(kb_dir: Path) -> list:
@@ -674,16 +677,55 @@ class MetaOrchestratorAgent:
         except Exception:  # noqa: BLE001 - listing is best-effort context
             return []
 
-    def _kb_note(self) -> str:
-        """System-prompt note listing detached knowledge bases: the launch
-        directory's shared KB (if any) plus the named KBs from the
-        persistent store."""
-        if self.knowledge_dir:
+    @staticmethod
+    def _sources_detail(srcs) -> str:
+        """' Sources: a, b, c.' for a prompt note, at most 15 names, with a
+        count of the rest so a document left off the list is not read as
+        absent from the KB."""
+        srcs = [str(x) for x in (srcs or [])]
+        if not srcs:
             return ""
+        more = f" (+{len(srcs) - 15} more)" if len(srcs) > 15 else ""
+        return f" Sources: {', '.join(srcs[:15])}{more}."
+
+    def _attached_kb_note(self) -> str:
+        """System-prompt note naming the attached knowledge base. Without it
+        the meta's model was never told a KB was attached (the note below
+        lists only detached ones), and live it searched uploads for facts
+        the KB held instead of delegating to planning, which is grounded in
+        it."""
+        kb = Path(self.knowledge_dir)
+        manifest = None
+        try:
+            from ...knowledge.kb_store import read_manifest
+            manifest = read_manifest(kb)
+        except Exception:  # noqa: BLE001 - the note is best-effort context
+            manifest = None
+        if manifest and manifest.get("name"):
+            label = f"'{manifest['name']}'"
+            if manifest.get("description"):
+                label += f" — {manifest['description']}"
+            srcs = list(manifest.get("sources") or [])
+        else:
+            label = str(kb)
+            srcs = self._kb_source_names(kb)
+        detail = self._sources_detail(srcs)
+        return (
+            "\n\n## KNOWLEDGE BASE (attached)\n"
+            f"- {label} at {kb}.{detail}\n"
+            "Every planning delegation is grounded in it, so a task that needs "
+            "what it records goes to `delegate_to_planning`."
+        )
+
+    def _kb_note(self) -> str:
+        """System-prompt note on knowledge bases: the attached one, or else
+        the detached ones (the launch directory's shared KB, if any, plus
+        the named KBs from the persistent store)."""
+        if self.knowledge_dir:
+            return self._attached_kb_note()
         lines = []
         if self._shared_kb_candidate:
-            srcs = self._kb_source_names(self._shared_kb_candidate)[:15]
-            detail = f" Sources: {', '.join(srcs)}." if srcs else ""
+            detail = self._sources_detail(self._kb_source_names(self._shared_kb_candidate))
             lines.append(
                 f"- (unnamed, launch directory) {self._shared_kb_candidate} — "
                 f"attach with attach_knowledge_base() [no argument].{detail}"
@@ -692,8 +734,7 @@ class MetaOrchestratorAgent:
             from ...knowledge.kb_store import list_kbs
             for m in list_kbs():
                 desc = f" — {m['description']}" if m.get("description") else ""
-                srcs = (m.get("sources") or [])[:15]
-                detail = f" Sources: {', '.join(srcs)}." if srcs else ""
+                detail = self._sources_detail(m.get("sources"))
                 lines.append(
                     f"- '{m['name']}'{desc} — attach with "
                     f"attach_knowledge_base(path='{m['name']}').{detail}"
@@ -765,7 +806,7 @@ class MetaOrchestratorAgent:
                 child.planner.rebind_kb(str(target / "default_kb"))
 
         # The detached-KB note no longer applies — refresh the system prompt.
-        self.set_meta_mode(self.meta_mode)
+        self._refresh_system_prompt()
         self._auto_checkpoint()
         logging.info(f"📚 Knowledge base attached: {target}")
         return str(target)
@@ -1114,6 +1155,9 @@ class MetaOrchestratorAgent:
             cache = child.base_dir / "kb_cache"
             snapshot_kb(self.knowledge_dir, cache)
             child.planner.rebind_kb(str(cache / "default_kb"))
+        # The attached-KB note lists the sources: refresh it, or the model
+        # routes on a list without the document it just added.
+        self._refresh_system_prompt()
         return updated
 
     def register_skill(self, skill_path: str) -> str:
