@@ -646,6 +646,8 @@ class LiveRun:
         self._decision = "stop" if action == "stop" else (dict(params) if params else "resume")
         if action == "stop":
             self._stop.set()
+            if self.loop is not None:
+                self.loop.interrupt()
         self._decided.set()
         return {"decision": action, "params": params or None}
 
@@ -657,6 +659,10 @@ class LiveRun:
     # -------------------------------------------------------------- control
     def stop(self) -> None:
         self._stop.set()
+        # A replay already running would otherwise run to its end or its
+        # timeout before the loop sees the flag.
+        if self.loop is not None:
+            self.loop.interrupt()
 
     def set_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Parameters the operator wants from the next frame on — an accepted

@@ -57,6 +57,7 @@ FLAG_DRIFT = "drift_suspected"            # a material part of the frame is unli
 FLAG_DEADLINE = "deadline_missed"         # slower than frame_deadline_s
 FLAG_LLM_USED = "llm_used"                # the zero-LLM path was left (fallback codegen)
 FLAG_OUT_OF_RANGE = "out_of_reference_range"  # a target left its plausible range
+FLAG_INTERRUPTED = "interrupted"          # stopped mid-frame by interrupt(): not a failure
 
 #: Flags that say "the recipe has stopped describing the data".
 _BREACH_FLAGS = (FLAG_FIT_FAILED, FLAG_GATE_POOR, FLAG_DRIFT)
@@ -850,6 +851,9 @@ class MeasurementLoop:
         flags: List[str] = []
         result: Dict[str, Any] = {}
         error = None
+        import threading as _threading
+        self._interrupt_requested = False
+        self._frame_thread = _threading.get_ident()
         try:
             agent = self._agent_factory(str(frame_dir))
             self._use_warm_executor(agent)
@@ -858,7 +862,19 @@ class MeasurementLoop:
         except Exception as e:  # noqa: BLE001 - one frame must not kill the loop
             error = f"{type(e).__name__}: {e}"
             self.logger.exception(f"frame {idx} raised")
+        finally:
+            self._frame_thread = None
         latency = time.perf_counter() - t0
+        if self._interrupt_requested:
+            # Stopped from outside while the frame ran: not evidence about the
+            # recipe, so it neither counts as a failure nor teaches the drift
+            # monitor, and nothing is escalated or recommended from it.
+            record = {"event": "frame", "step": idx, "data": str(data_path),
+                      "params": params or {}, "features": {}, "flags": [FLAG_INTERRUPTED],
+                      "latency_s": round(latency, 3), "recipe_id": self.recipe["id"],
+                      "frame_dir": str(frame_dir)}
+            self._append(record)
+            return record
 
         features = (self.modality.features(result)
                     if result.get("status") in self.modality.usable_status else {})
@@ -1407,6 +1423,21 @@ class MeasurementLoop:
     @property
     def escalating(self) -> bool:
         return self._escalation is not None
+
+    def interrupt(self) -> bool:
+        """End the frame that is being analysed now, from any thread: its
+        replay script (warm worker or cold subprocess) and everything that
+        script started. A stop that only sets a flag waits for the frame to
+        finish or time out; a person pressing Stop means now. The frame is
+        logged as ``interrupted``, not as a failed fit. Returns whether a
+        frame was running."""
+        tid = getattr(self, "_frame_thread", None)
+        if tid is None:
+            return False
+        self._interrupt_requested = True
+        from scilink.executors import kill_subprocesses_for_thread
+        kill_subprocesses_for_thread(tid)
+        return True
 
     def pending_work(self) -> Optional[Dict[str, Any]]:
         """The slow-clock work still running (an audit, a rebuild), or ``None``.
