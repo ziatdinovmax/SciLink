@@ -442,3 +442,39 @@ def test_no_download_or_publish_path_touches_the_umask(server, tmp_path, monkeyp
     finally:
         s.close()
     assert calls == []
+
+
+def test_a_windows_share_that_cannot_lock_runs_unlocked(tmp_path, monkeypatch):
+    """Only EACCES/EDEADLOCK from msvcrt.locking means 'held'; any other
+    error (a share without locking) must not poll forever."""
+    import sys
+    import types
+    import errno as _errno
+    from scilink.utils import file_lock
+
+    def locking(fd, mode, nbytes):
+        raise OSError(_errno.EINVAL, "locking not supported on this share")
+
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+    monkeypatch.setitem(sys.modules, "msvcrt", types.SimpleNamespace(LK_NBLCK=2, LK_UNLCK=0, locking=locking))
+    file_lock._warned_unsupported.clear()
+    ran = []
+    with file_lock.path_lock(tmp_path / "x"):
+        ran.append(True)
+    assert ran == [True]
+
+
+def test_an_error_in_an_unlocked_body_carries_no_lock_context(tmp_path, monkeypatch):
+    import errno as _errno
+    import fcntl
+    from scilink.utils import file_lock
+
+    def unsupported(fh, op):
+        raise OSError(_errno.ENOTSUP, "Operation not supported")
+
+    monkeypatch.setattr(fcntl, "flock", unsupported)
+    file_lock._warned_unsupported.clear()
+    with pytest.raises(ValueError) as info:
+        with file_lock.path_lock(tmp_path / "x"):
+            raise ValueError("body")
+    assert info.value.__context__ is None

@@ -75,8 +75,12 @@ def _try_acquire(fh) -> bool:
     try:
         msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
         return True
-    except OSError:
-        return False
+    except OSError as exc:
+        # Only "someone holds it" means held; anything else (a share that
+        # cannot lock) falls back to running unlocked, as flock's ENOTSUP does.
+        if exc.errno in (errno.EACCES, getattr(errno, "EDEADLOCK", errno.EDEADLK)):
+            return False
+        raise _Unsupported(exc) from exc
 
 
 def _acquire_blocking(fh) -> None:
@@ -145,14 +149,19 @@ def path_lock(path: Any, *, label: Optional[str] = None) -> Iterator[None]:
         with lock:
             yield
         return
-    fh = open(lock_path, "a+")
+    fh = open(lock_path, "a+b")
     try:
+        unsupported = None
         try:
             if not _try_acquire(fh):
                 _logger.info(f"Waiting for another process working on {label or Path(path).name} ...")
                 _acquire_blocking(fh)
         except _Unsupported as exc:
-            _warn_unsupported(lock_path, exc.__cause__ or exc)
+            unsupported = exc
+        if unsupported is not None:
+            # Yielded outside the except block, so an error raised by the
+            # caller's body does not carry "During handling of ..." noise.
+            _warn_unsupported(lock_path, unsupported.__cause__ or unsupported)
             yield
             return
         try:
@@ -170,7 +179,7 @@ def is_locked(path: Any) -> bool:
     if not lock_path.exists() or not _has_os_lock():
         return False
     try:
-        with open(lock_path, "a+") as fh:
+        with open(lock_path, "a+b") as fh:
             try:
                 if _try_acquire(fh):
                     _release(fh)
