@@ -377,9 +377,38 @@ work, and it does so by rules the meta declares when the swarm launches.
 
 ### 5. Scheduling and budgets
 
-- **Admission** generalises `_admit_branch`: slots per mode, a memory
-  estimate per item, and a hold on anything over the machine's headroom. It
-  still always admits when nothing is running, so there is no deadlock.
+- **A capacity plan decides whether and how to run the swarm, before it
+  starts.** The coordinator adds up the items' expected peak memory
+  (measured per item class; see "Running on cloud resources") and compares
+  it with what the host can give: available memory minus a margin on a
+  laptop, the task size on a cloud task.
+  - If everything fits, the items run concurrently.
+  - If the heavy items do not fit together, they run one at a time and the
+    light ones run beside them.
+  - If one item does not fit the host at all, it is not started. On cloud
+    resources it goes to a worker task sized for it. On a laptop the result
+    says why it did not run.
+
+  In autopilot the plan is part of the swarm-plan gate ("2 of 4 items are
+  heavy, about 7 GB each; this machine has 5 GB free; they will run one at
+  a time"). Autonomous runs apply it without asking and never overcommit.
+  Today's `_admit_branch` always admits a branch when nothing else is
+  running, so on its own it would still have started the 8 GB analysis
+  that froze an 8 GB laptop. The plan is what can refuse that one.
+- **Admission** generalises `_admit_branch` for what the plan admitted:
+  slots per mode, the item's memory from the plan, and a hold on anything
+  over the current headroom. It admits a first item only when that item
+  fits the host, so there is still no deadlock and no overcommit.
+- **A memory guard watches while the swarm runs.** Estimates can be wrong,
+  and other programs on a laptop take memory too. The coordinator samples
+  free memory (psutil, or `memory_pressure` on macOS) every few seconds.
+  - Below a soft threshold it stops admitting.
+  - Below a hard one it cancels the most recently started heavy worker
+    (stop event, then a process-group kill) and records the item as
+    `memory_pressure`. The item is re-queued to run alone, once.
+
+  Ending one worker on purpose is better than what happened without a
+  guard: the OS killed system services at random and the machine froze.
 - **An LLM concurrency limiter** sits in the wrappers (process-wide, per
   provider/model): a semaphore on in-flight calls, plus backoff with jitter
   on 429s so N workers do not retry in step. A circuit breaker pauses
@@ -760,7 +789,10 @@ can already hit.
 4. **Scheduling.**
    - Swarm budgets with reservation and the circuit breaker.
    - Process workers for heavy items.
-   - Measured peak memory per item class, and admission sized from it.
+   - Measured peak memory per item class, the pre-launch capacity plan
+     sized from it, and the runtime memory guard.
+   - Worth taking early, into today's fan-out: the plan's refusal of an
+     item larger than the host, and the guard.
    - On AWS: worker tasks for heavy item classes, OOM and Spot
      reconciliation against ECS, and per-campaign provider quotas.
 5. **Several instruments.**
