@@ -19,6 +19,26 @@ import torch
 logger = logging.getLogger(__name__)
 
 
+def sam_checkpoint_dir() -> str:
+    """Where SAM weights are cached: ``<SCILINK_MODELS>/sam``, else
+    ``<SCILINK_HOME or ~/.scilink>/models/sam`` — the same per-machine model
+    cache the other downloaded weights use, so relocating the home (a
+    container, a per-campaign volume) carries the weights with it. The
+    pre-existing ``~/.cache/scilink/checkpoints`` is honoured when it already
+    holds weights and the cache does not, so nothing is re-downloaded."""
+    import glob
+    models = os.environ.get("SCILINK_MODELS")
+    if models:
+        base = os.path.expanduser(models)
+    else:
+        base = os.path.join(os.path.expanduser(os.environ.get("SCILINK_HOME") or "~/.scilink"), "models")
+    current = os.path.join(base, "sam")
+    legacy = os.path.join(os.path.expanduser("~"), ".cache", "scilink", "checkpoints")
+    if not glob.glob(os.path.join(current, "*.pth")) and glob.glob(os.path.join(legacy, "*.pth")):
+        return legacy
+    return current
+
+
 def mps_available() -> bool:
     """Apple-Silicon GPU present and usable by this torch build."""
     mps = getattr(torch.backends, "mps", None)
@@ -98,7 +118,7 @@ class ParticleAnalyzer:
     @classmethod
     def _ensure_checkpoint(cls, checkpoint_path: Optional[str], model_type: str) -> str:
         if checkpoint_path is None:
-            ckpt_dir = os.path.join(os.path.expanduser("~"), ".cache", "scilink", "checkpoints")
+            ckpt_dir = sam_checkpoint_dir()
             os.makedirs(ckpt_dir, exist_ok=True)
             checkpoint_path = os.path.join(ckpt_dir, f"sam_{model_type}.pth")
 

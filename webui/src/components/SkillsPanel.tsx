@@ -2,19 +2,29 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type SkillCatalog } from "../api";
 import { Dropzone } from "./Dropzone";
 import { MarkdownBody } from "./MarkdownBody";
-import { MemoryPanel } from "./MemoryPanel";
+import { SkillBuilder } from "./SkillBuilder";
 
 /** Skills tab — upload custom skills for this session and browse the
- * catalog (built-in bundles by domain, plus what you uploaded), with a
- * markdown viewer, then the persistent-memory pipeline (MemoryPanel). */
+ * catalog: shipped bundles by domain plus what persistent memory adds
+ * (learned skills, forks — labelled, never folded into "built-in"), with
+ * a markdown viewer. The memory pipeline itself lives on the Memory tab. */
+
+const ORIGIN_LABEL: Record<string, string> = {
+  learned: "learned",
+  fork: "fork of built-in",
+};
 
 export function SkillsPanel({
   sessionId,
   active,
+  onOpenMemory,
 }: {
   sessionId: string;
   active: boolean;
+  onOpenMemory?: () => void;
 }) {
+  const [notice, setNotice] = useState<string | null>(null);
+  const [memoryOn, setMemoryOn] = useState<boolean | null>(null);
   const [cat, setCat] = useState<SkillCatalog | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notes, setNotes] = useState<string[]>([]);
@@ -27,7 +37,10 @@ export function SkillsPanel({
   }, [sessionId]);
 
   useEffect(() => {
-    if (active) refresh();
+    if (active) {
+      refresh();
+      api.memory().then((m) => setMemoryOn(m.enabled)).catch(() => setMemoryOn(null));
+    }
   }, [active, refresh]);
 
   const view = async (domain: string, name: string) => {
@@ -58,7 +71,10 @@ export function SkillsPanel({
       ),
     }))
     .filter((d) => d.skills.length > 0);
-  const total = (cat?.builtin ?? []).reduce((n, d) => n + d.skills.length, 0);
+  const all = (cat?.builtin ?? []).flatMap((d) => d.skills);
+  const nBuiltin = all.filter((s) => s.origin === "builtin").length;
+  const nLearned = all.filter((s) => s.origin === "learned").length;
+  const nForks = all.filter((s) => s.origin === "fork").length;
 
   return (
     <div className="skills-panel">
@@ -102,10 +118,29 @@ export function SkillsPanel({
         ))}
       </section>
 
+      <SkillBuilder
+        sessionId={sessionId}
+        catalog={cat}
+        memoryOn={memoryOn}
+        onOpenMemory={onOpenMemory}
+        onSaved={(c, note) => { if (c) setCat(c); else refresh(); setNotice(note); setError(null); }}
+      />
+
       <section className="tools-section">
         <h3>
-          Built-in skills <span className="caption">({total})</span>
+          Skill catalog{" "}
+          <span className="caption">
+            ({nBuiltin} built-in{nLearned ? ` · ${nLearned} learned` : ""}{nForks ? ` · ${nForks} fork${nForks === 1 ? "" : "s"}` : ""})
+          </span>
         </h3>
+        <p className="caption">
+          Shipped bundles, plus what persistent memory adds when it is on — learned skills and forks
+          are labelled. Curate them on the{" "}
+          {onOpenMemory ? (
+            <button type="button" className="link-btn inline" onClick={onOpenMemory}>Memory tab</button>
+          ) : "Memory tab"}.
+        </p>
+        {notice && <p className="caption">{notice}</p>}
         <input
           type="text"
           placeholder="Filter by name, description, or domain…"
@@ -135,18 +170,44 @@ export function SkillsPanel({
                 d.skills.map((s) => (
                   <div key={s.name} className="skill-row">
                     <code>{s.name}</code>
+                    {s.origin !== "builtin" && (
+                      <span className={`mem-badge ${s.origin}`} title={s.origin === "fork"
+                        ? "A copy in persistent memory that shadows the shipped skill of the same name"
+                        : "Distilled or graduated into persistent memory"}>
+                        {ORIGIN_LABEL[s.origin]}
+                      </span>
+                    )}
+                    {s.provisional && (
+                      <span className="mem-badge pending" title="Not in auto-routing until approved on the Memory tab">provisional</span>
+                    )}
                     <span className="caption skill-desc">{s.description}</span>
                     <button type="button" className="link-btn" onClick={() => void view(d.domain, s.name)}>
                       view
                     </button>
+                    {s.origin === "builtin" && (
+                      <button
+                        type="button"
+                        className="link-btn"
+                        title="Copy this shipped skill into persistent memory so it can be edited and upgraded; the copy shadows the built-in."
+                        onClick={async () => {
+                          try {
+                            await api.memorySkillAction(d.domain, s.name, "fork");
+                            setNotice(`Forked ${d.domain}/${s.name} into persistent memory — edit or upgrade it on the Memory tab.`);
+                            refresh();
+                          } catch (e) {
+                            setError(e instanceof Error ? e.message : String(e));
+                          }
+                        }}
+                      >
+                        fork into memory
+                      </button>
+                    )}
                   </div>
                 ))}
             </div>
           );
         })}
       </section>
-
-      <MemoryPanel sessionId={sessionId} active={active} />
 
       {viewing && (
         <div className="skill-viewer" role="dialog" aria-label={viewing.title}>

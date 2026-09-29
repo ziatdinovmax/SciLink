@@ -121,6 +121,106 @@ export const VOCAB = {
     "verbose_section": "Verbose output",
     "verbose_toggle": "Show verbose output"
   },
+  "question_labels": {
+    "approve_or_revise": {
+      "accept": "Approve plan",
+      "input": "Your plan feedback (optional):",
+      "submit": "Request changes"
+    },
+    "approve_or_revise/code_review": {
+      "accept": "Approve code",
+      "input": "Your code feedback (optional):",
+      "submit": "Request changes"
+    },
+    "bestofn_select": {
+      "accept": "Accept judge's pick (Candidate {pick})",
+      "select": "Select the candidate to lock:",
+      "use": "Use selected"
+    },
+    "code_review": {
+      "accept": "Approve code",
+      "input": "Your code feedback (optional):",
+      "submit": "Request changes"
+    },
+    "confirm": {
+      "cancel": "Cancel",
+      "confirm": "Confirm"
+    },
+    "confirm/fanout_confirm": {
+      "cancel": "Cancel",
+      "confirm": "🔀 Launch parallel analysis"
+    },
+    "consensus_select": {
+      "accept": "Keep the independent results",
+      "select": "Select the model to apply to every re-fitted unit:",
+      "use": "Use selected for all"
+    },
+    "dataset_description": {
+      "accept": "Skip (let agent guess)",
+      "input": "Describe your data (optional):",
+      "submit": "Submit description"
+    },
+    "default": {
+      "accept": "Accept as-is",
+      "input": "Your feedback (optional):",
+      "submit": "Submit feedback"
+    },
+    "keep_or_revert": {
+      "keep": "Keep user-guided fit",
+      "revert": "Revert to original fit"
+    },
+    "keep_or_revert/consistency_result": {
+      "keep": "Use the consensus result",
+      "revert": "Keep the independent result"
+    },
+    "keep_or_revert/plan_reopen": {
+      "input": "Adopt it with changes (optional):",
+      "keep": "Adopt the revision",
+      "revert": "Keep my approved plan",
+      "submit": "Adopt with changes"
+    },
+    "plan_candidate_select": {
+      "accept": "Accept judge's pick (Candidate {pick})",
+      "select": "Select the plan candidate to proceed with:",
+      "use": "Use selected plan"
+    },
+    "review_fit": {
+      "accept": "Accept fit",
+      "input": "Your fit feedback (optional):",
+      "submit": "Request changes"
+    },
+    "review_metrics": {
+      "accept": "Approve extraction",
+      "input": "Your extraction feedback (optional):",
+      "submit": "Request changes"
+    },
+    "review_plan": {
+      "accept": "Approve plan",
+      "input": "Your plan feedback (optional):",
+      "submit": "Request changes"
+    },
+    "review_result": {
+      "accept": "Accept result",
+      "input": "Your feedback on the result (optional):",
+      "submit": "Request changes"
+    }
+  },
+  "question_widgets": {
+    "approve_or_revise": "generic",
+    "bestofn_select": "bestofn",
+    "code_review": "code_review",
+    "confirm": "confirm",
+    "consensus_select": "bestofn",
+    "dataset_description": "dataset_description",
+    "free_text": "generic",
+    "keep_or_revert": "keep_revert",
+    "plan_candidate_select": "plan_candidates",
+    "review_fit": "generic",
+    "review_metrics": "generic",
+    "review_plan": "generic",
+    "review_result": "generic"
+  },
+  "revert_repair_label": "Revert auto-correction",
   "status_badges": {
     "awaiting_input": "🟠 awaiting your input",
     "idle": "⚪ idle",

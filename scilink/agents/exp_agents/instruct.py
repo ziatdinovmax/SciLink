@@ -3140,6 +3140,7 @@ are added by the caller.
 
 {{
   "description": "<one self-contained sentence (no trailing period) that lets a downstream agent decide if this skill is relevant>",
+  "technique": ["<measurement technique names and common aliases this skill applies to, e.g. \"Raman spectroscopy\", \"micro-Raman\"; [] if it is not technique-specific>"],
   "overview": "<what domain/technique this skill covers, what data it applies to, and when to use it>",
   "planning": "<strategy constraints, recommended parameter ranges, setup considerations, and any user-specified corrections or preferences>",
   "analysis": "<code patterns, workflows, or processing steps that have proven effective; include specific parameter values that worked>",
@@ -3186,6 +3187,42 @@ DELETE that section.
 
 Output ONLY the JSON object. Do not wrap in code blocks. Do not include any prose outside the JSON."""
 
+SKILL_DRAFT_INSTRUCTIONS = """You are an expert scientific data analyst writing a SKILL: a short markdown \
+document that a downstream analysis agent reads at fixed points of a run. A skill has a one-sentence \
+description (the agents route on it), a technique list (the selectors match the data's measurement \
+technique against it) and five sections, each read at its own stage:
+
+- overview: what the technique or method is, what data it fits, when to reach for it (and when not to)
+- planning: how to plan a use of it — model form or pipeline, parameter heuristics, what varies between \
+datasets and how to choose
+- implementation: how to write the code — the recipe a generated script should follow (libraries, steps, \
+the exact algorithm where it matters; a concrete code snippet is stronger than prose)
+- interpretation: how to read the output and judge plausibility — what the numbers mean, typical ranges, \
+what a bad result looks like
+- validation: how to verify it — quality criteria, sanity checks, failure indicators, tolerances
+
+**Skill so far (the author's text is authoritative; keep its facts and style):**
+{skill_json}
+
+**Author's notes on what the skill should cover:**
+{notes}
+
+**Grounding context** (numbered sources; cite them inline as [n] where you use them; if this block is \
+empty, write from general expertise and do not invent references):
+{grounding}
+
+**Write these sections:** {targets}
+
+Rules: be concrete and concise (the skill is read into the model's context every run); state real \
+parameter ranges, checks and pitfalls rather than generalities; never contradict the author's text; \
+if the author left the description empty, propose one sentence; if the technique list is empty, propose \
+the measurement technique names and common aliases as a list (or [] when the skill is not \
+technique-specific).
+
+Return ONLY a JSON object with the keys {target_keys} (markdown allowed inside values, no `##` \
+headings), plus "description" (a string, only if you propose one), "technique" (a list, only if you \
+propose one) and "sources_used" (the [n] numbers you cited). No prose outside the JSON."""
+
 BANK_EDIT_ADAPT_INSTRUCTIONS = """You are an expert scientific data analyst. A PROVEN {script_kind} script \
 from the script bank closely matches the current dataset. Adapt it with the SMALLEST possible set of \
 exact text edits — do NOT rewrite it. The proven structure is the value: a minimal-edit adaptation \
@@ -3209,9 +3246,16 @@ old_text must appear EXACTLY ONCE in the script. Keep each edit small (a value, 
 thresholds, windows, scale factors. Keep the vetted algorithm, model family, and overall structure.
 3. NEVER touch the output contract: {output_contract}.
 4. If the script fits this dataset as-is, return an empty edits list.
+5. If THIS dataset is a different KIND of signal than the proven script models (a peak script \
+for oscillation / ring-down data, a step or edge for a peak, a decay for a resonance, ...), do \
+NOT repurpose the script: return an empty edits list with "model_family_kept": false. Changing \
+the peak profile (Gaussian, Voigt, EMG, ...), the baseline form or the number of components to \
+follow the plan IS an adaptation of the same kind of signal — make those edits.
+6. Copy each old_text verbatim from the script above, including its exact leading whitespace \
+(top-level lines have none).
 
 Return ONLY a JSON object: {{"edits": [{{"old_text": "...", "new_text": "..."}}, ...], \
-"rationale": "<one sentence on what was adapted and why>"}}
+"model_family_kept": true, "rationale": "<one sentence on what was adapted and why>"}}
 Do not wrap in code blocks. No prose outside the JSON."""
 
 
@@ -3241,6 +3285,7 @@ the caller.
 
 {{
   "description": "<one self-contained sentence (no trailing period) naming the technique/model so a downstream agent can decide if this skill is relevant>",
+  "technique": ["<measurement technique names and common aliases this skill applies to, e.g. \"Raman spectroscopy\", \"micro-Raman\"; [] if it is not technique-specific>"],
   "overview": "<what kind of data/problem this approach fits and when to reach for it>",
   "planning": "<the model form and fitting strategy in general terms; parameter init/bounds heuristics; why the originally-planned model was insufficient>",
   "analysis": "<the generalized, parameterized recipe: how to set up and run the fit, abstracted from this dataset's specifics>",
@@ -3303,6 +3348,7 @@ Return a JSON object with exactly the following keys. Use markdown within values
 
 {{
   "description": "<one self-contained sentence (no trailing period) naming the technique/model so a downstream agent can decide if this skill is relevant>",
+  "technique": ["<measurement technique names and common aliases this skill applies to, e.g. \"Raman spectroscopy\", \"micro-Raman\"; [] if it is not technique-specific>"],
   "overview": "<what kind of data/problem this approach fits and when to reach for it>",
   "planning": "<the model form and strategy in general terms; parameter heuristics; what varies across the examples and how to choose; why the default plan was insufficient>",
   "analysis": "<the generalized, parameterized recipe distilled from all examples>",
@@ -3342,6 +3388,7 @@ the caller.
 
 {{
   "description": "<one self-contained sentence (no trailing period) naming the technique/imaging problem so a downstream agent can decide if this skill is relevant>",
+  "technique": ["<measurement technique names and common aliases this skill applies to, e.g. \"Raman spectroscopy\", \"micro-Raman\"; [] if it is not technique-specific>"],
   "overview": "<what kind of image/problem this approach fits and when to reach for it>",
   "planning": "<the pipeline shape and strategy in general terms; key parameter heuristics; why the originally-planned pipeline was insufficient>",
   "analysis": "<the generalized, parameterized recipe: how to set up and run the analysis, abstracted from this image's specifics>",

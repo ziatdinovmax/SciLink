@@ -53,7 +53,8 @@ _counters_lock = threading.Lock()
 
 def note_llm_call(latency_s: Optional[float] = None,
                   prompt_tokens: Optional[int] = None,
-                  completion_tokens: Optional[int] = None) -> None:
+                  completion_tokens: Optional[int] = None,
+                  model: Optional[str] = None) -> None:
     """Count one completed LLM call (missing token counts count as 0)."""
     with _counters_lock:
         _counters["calls"] += 1
@@ -105,6 +106,50 @@ _counters: Dict[str, float] = {
 }
 _off_path = threading.local()
 
+# ── Usage attribution ──────────────────────────────────────────────
+# A deployment that meters LLM usage installs ONE sink per process
+# (``set_usage_sink``); every completed call reaches it with its model, its
+# token counts and the session tagged on the calling thread (``bind_session``,
+# set by whatever runs a session's turn). Worker threads a turn spawns carry
+# no tag unless they bind one, so per-session figures are best-effort while
+# the process total is exact — which is the right way round for one server
+# per workspace.
+_usage_sink = None
+_session_tag = threading.local()
+# For a thread that carries no tag (a worker a turn spawned): a resolver the
+# host installs, answering "which ONE session is running work right now" or
+# None. On a server that runs one turn at a time it is exact; with several
+# turns in flight it declines and the call stays unattributed.
+_session_resolver = None
+
+
+def set_usage_sink(sink) -> None:
+    """``sink(model, prompt_tokens, completion_tokens, latency_s, session)``
+    for every completed call; ``None`` removes it. Never raises into a call."""
+    global _usage_sink
+    _usage_sink = sink
+
+
+def bind_session(session_id: Optional[str]) -> None:
+    """Tag LLM calls made on THIS thread with a session id (``None`` clears)."""
+    _session_tag.value = session_id
+
+
+def set_session_resolver(resolver) -> None:
+    """``resolver() -> session id | None`` consulted for untagged threads."""
+    global _session_resolver
+    _session_resolver = resolver
+
+
+def current_session() -> Optional[str]:
+    tagged = getattr(_session_tag, "value", None)
+    if tagged is not None or _session_resolver is None:
+        return tagged
+    try:
+        return _session_resolver()
+    except Exception:
+        return None
+
 
 class off_path:
     """Context manager: LLM calls made on this thread inside the block are
@@ -128,9 +173,17 @@ class off_path:
 
 def note_llm_call(latency_s: Optional[float] = None,
                   prompt_tokens: Optional[int] = None,
-                  completion_tokens: Optional[int] = None) -> None:
+                  completion_tokens: Optional[int] = None,
+                  model: Optional[str] = None) -> None:
     """Count one completed LLM call. Never raises."""
     try:
+        sink = _usage_sink
+        if sink is not None:
+            try:
+                sink(model, int(prompt_tokens or 0), int(completion_tokens or 0),
+                     float(latency_s or 0.0), current_session())
+            except Exception:
+                pass
         if getattr(_off_path, "depth", 0):
             with _lock:
                 _counters["off_path_calls"] += 1

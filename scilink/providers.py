@@ -79,6 +79,9 @@ def _bedrock_apply(pasted_key, values, base_url):
     If api_key is set, litellm uses it instead of the AWS credential chain and
     Bedrock auth fails silently. boto3 reads AWS_BEARER_TOKEN_BEDROCK and
     AWS_REGION_NAME from the environment, so nothing below the sidebar changes.
+    With no pasted key the token entry is dropped (empty values are not
+    exported) and boto3's default chain decides: static keys, a profile, or
+    the ECS task / EKS pod role.
     """
     return ProviderAuth(
         api_key=None,
@@ -110,10 +113,17 @@ PROVIDERS: Tuple[ProviderSpec, ...] = (
                       "encode the region."),
             ),
         ),
-        cred_env=("AWS_BEARER_TOKEN_BEDROCK", "AWS_ACCESS_KEY_ID"),
+        # Ambient credentials boto3's default chain resolves without a pasted
+        # key: a bearer token, static keys, a profile, or — on ECS / EKS — the
+        # task or pod role, which is how a hosted container calls Bedrock with
+        # no secret in it at all.
+        cred_env=("AWS_BEARER_TOKEN_BEDROCK", "AWS_ACCESS_KEY_ID", "AWS_PROFILE",
+                  "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+                  "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_WEB_IDENTITY_TOKEN_FILE"),
         cred_error=("Paste your Bedrock API key, or set AWS credentials "
-                    "(AWS_BEARER_TOKEN_BEDROCK, or AWS_ACCESS_KEY_ID + "
-                    "AWS_SECRET_ACCESS_KEY) in the environment."),
+                    "(AWS_BEARER_TOKEN_BEDROCK, AWS_ACCESS_KEY_ID + "
+                    "AWS_SECRET_ACCESS_KEY, AWS_PROFILE) in the environment, "
+                    "or run under an ECS task / EKS pod role."),
     ),
 
     # ---- FUTURE (stubbed) — each additionally needs the model_kwargs ----

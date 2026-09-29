@@ -38,7 +38,8 @@ from .._locked_exec import (
     DATA_NAME, CANDIDATES_DIR_NAME, atomic_np_save,
 )
 from .._qc_engine import CodegenQCEngine, QCEngineSpec, QCItemContext
-from .base_controllers import run_plan_refinement_gate
+from .base_controllers import (bestofn_join_subject, consensus_subject, consistency_subject,
+                               run_plan_refinement_gate, steps_block)
 from ....utils.codegen_parse import parse_codegen_response
 from ....utils.synthesis_parse import salvage_synthesis_from_response
 from ....hitl import request_human_feedback
@@ -584,18 +585,11 @@ def _resolve_parallel_workers(value: Optional[int]) -> int:
     """Resolve the effective non-anchor worker count.
 
     Precedence: explicit constructor value (when not None) > env var
-    ``SCILINK_CURVE_FIT_WORKERS`` > 1. Values <1 are clamped to 1.
+    ``SCILINK_CURVE_FIT_WORKERS`` > ``SCILINK_MAX_WORKERS`` > 1; the
+    process-wide ceiling caps the result. Values <1 are clamped to 1.
     """
-    if value is None:
-        env = os.environ.get("SCILINK_CURVE_FIT_WORKERS")
-        if env:
-            try:
-                value = int(env)
-            except ValueError:
-                value = 1
-        else:
-            value = 1
-    return max(int(value), 1)
+    from scilink.utils.workers import resolve_workers
+    return resolve_workers(value, "SCILINK_CURVE_FIT_WORKERS", 1)
 
 
 def build_verification_prompt_with_history(
@@ -2137,6 +2131,69 @@ class GenerateCurveFittingReportController:
 # UNIFIED CONTROLLERS (for series analysis support)
 # ============================================================================
 
+
+def fitting_plan_subject(state: dict) -> dict:
+    """What the fitting-plan gate shows, as subject blocks (scilink.hitl):
+    the same sections ``_display_plan`` prints, with its emoji, read from
+    the same state, so the console and the structured surfaces cannot
+    disagree."""
+    from ....hitl import make_subject, subject_block as block
+
+    is_single = state.get("is_single_spectrum", True)
+    num = state.get("num_spectra", 1)
+    mode = "single spectrum" if is_single else f"series of {num} spectra"
+    blocks = []
+    if state.get("observations"):
+        blocks.append(block("text", label="🔍 Observations", markdown=str(state["observations"])))
+    blocks.append(block("text", label="📊 Approach",
+                        markdown=str(state.get("analysis_approach") or "N/A")))
+    blocks.append(block("text", label="📐 Physical model",
+                        markdown=str(state.get("physical_model") or "N/A")))
+    params = [str(x) for x in state.get("parameters_to_extract") or []]
+    blocks.append(block("text", label="🎯 Parameters to extract",
+                        markdown=", ".join(params) if params else "N/A"))
+    strategy = state.get("fitting_strategy")
+    if strategy:
+        blocks.append(steps_block("⚙️ Fitting strategy", str(strategy)))
+
+    series_plan = state.get("series_analysis_plan") or {}
+    regimes = series_plan.get("regimes") or []
+    if regimes and not is_single:
+        values = (state.get("series_metadata") or {}).get("values") or []
+        if isinstance(values, dict):
+            values = list(values.values())
+        unit = (state.get("series_metadata") or {}).get("unit", "")
+        rows = []
+        for i, regime in enumerate(regimes, 1):
+            indices = regime.get("spectrum_indices") or []
+            span = ""
+            if values and indices:
+                valid = [values[k] for k in indices if k < len(values)]
+                if valid:
+                    span = f" ({min(valid)}–{max(valid)} {unit})".rstrip()
+            rows.append([
+                i, regime.get("name", "Unnamed"),
+                f"{indices}{span}",
+                regime.get("physical_model") or series_plan.get("physical_model") or "N/A",
+                ", ".join(regime.get("parameters_to_extract")
+                          or series_plan.get("parameters_to_extract") or []),
+            ])
+        blocks.append(block("table", label=f"📦 Series fitting regimes ({len(regimes)})",
+                            columns=["#", "Regime", "Spectra", "Model", "Parameters"],
+                            rows=rows, caption="The model is locked per regime"))
+        if series_plan.get("rationale"):
+            blocks.append(block("text", label="Rationale", markdown=str(series_plan["rationale"])))
+        transitions = series_plan.get("transition_points") or []
+        if transitions:
+            blocks.append(block("table", label="Transition points",
+                                columns=["Between indices", "Transition"],
+                                rows=[[str(t.get("between_indices", "?")),
+                                       t.get("description", "N/A")] for t in transitions]))
+    elif not is_single:
+        blocks.append(block("notice", title="📦 Locked model",
+                            lines=[f"This fitting model will be applied to all {num} spectra."]))
+    return make_subject(f"📋 Proposed fitting plan — {mode}", blocks)
+
 class CurveFittingPlanningController:
     """
     Plans the fitting analysis for the first spectrum: drafts the plan (one
@@ -2260,6 +2317,7 @@ class CurveFittingPlanningController:
             "\n🤔 Your feedback (or Enter to accept): ",
             kind="review_plan",
             origin={"stage": "fitting_plan"},
+            subject=fitting_plan_subject(state),
         ).strip()
         
         if feedback == "":
@@ -6312,12 +6370,15 @@ Return JSON with:
                 )
             print("-" * 60)
 
+            subject = bestofn_join_subject(candidates, winner, judge_info, allow_more,
+                                           "R²", self.output_dir)
             for _ in range(3):
                 response = request_human_feedback(
                     f"\nYour choice (Enter = accept candidate "
                     f"{winner['attempt']}): ",
                     kind="bestofn_select",
                     origin={"stage": "bestofn_join"},
+                    subject=subject,
                 ).strip()
 
                 if not response:
@@ -7761,6 +7822,8 @@ Return JSON: {{"script": "<the complete modified script>"}}
             "\n🤔 Your choice: ",
             kind="consensus_select",
             origin={"stage": "series_consensus"},
+            subject=consensus_subject(improved, model_counts, "spectra", "model",
+                                      "new_model", "new_r2", "R²"),
         ).strip()
         if not response:
             print("✅ Keeping independent refit results.")
@@ -7885,6 +7948,8 @@ Return JSON: {{"script": "<the complete modified script>"}}
             kind="keep_or_revert",
             options=["consensus", ""],
             origin={"stage": "consistency_result"},
+            subject=consistency_subject("spectrum", idx, name, "model", consensus_model,
+                                        consensus_r2, original_model, original_r2, "R²"),
         ).strip().lower()
         if response == "consensus":
             print(f"✅ Using consensus model for [{idx}] {name}")

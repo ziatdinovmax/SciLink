@@ -12,6 +12,7 @@ refactor".
 """
 
 import json
+from scilink.utils import path_fence as _path_fence
 import os
 import logging
 import sys
@@ -428,6 +429,13 @@ class MetaOrchestratorTools:
         return result
 
     def _dispatch_tool(self, tool_name: str, **kwargs) -> str:
+        # A hosted server fences every path a tool is handed (see
+        # scilink.utils.path_fence); on a laptop the fence is None.
+        fence = getattr(getattr(self, "orch", None), "path_fence", None)
+        if fence is not None:
+            refused = fence.refuse_tool_args(kwargs, self.orch.base_dir)
+            if refused:
+                return json.dumps({"status": "error", "tool": tool_name, "message": refused})
         if tool_name not in self.functions_map:
             return json.dumps({
                 "status": "error",
@@ -475,7 +483,11 @@ class MetaOrchestratorTools:
             })
 
         try:
-            return self.functions_map[tool_name](**kwargs)
+            with _path_fence.bound(fence):
+                try:
+                    return self.functions_map[tool_name](**kwargs)
+                except _path_fence.PathFenceError as e:
+                    return json.dumps({"status": "error", "tool": tool_name, "message": str(e)})
         except TypeError as e:
             if "unexpected keyword argument" in str(e):
                 import inspect as _inspect
@@ -543,7 +555,8 @@ class MetaOrchestratorTools:
                 "Delegate an experimental-data-analysis task to the analysis "
                 "specialist (microscopy, spectroscopy, curve fitting, "
                 "hyperspectral datacubes, quality assessment, feature "
-                "extraction, novelty checks). The specialist runs autonomously "
+                "extraction, novelty of claims from an analysed dataset). The "
+                "specialist runs autonomously "
                 "with no interactive user and returns a structured JSON result "
                 "(status, summary, key_findings, files_produced, "
                 "suggested_followups, warnings, delegation_index). `task` must "
@@ -1293,6 +1306,14 @@ class MetaOrchestratorTools:
                 return r.text if hasattr(r, "text") else str(r)
 
             act = (action or "list").lower()
+            if act not in ("list", "list_staged", "show"):
+                from ...skills.loader import memory_enabled
+                if not memory_enabled():
+                    return json.dumps({
+                        "status": "error", "action": act,
+                        "message": ("Persistent memory is OFF, so the store is inert and "
+                                    "nothing is written. Enable it with `scilink memory "
+                                    "enable` (or the Memory panel) first.")})
 
             # Curated (built-in) skills are ALREADY available and auto-selected by
             # the domain agents — surface them so the orchestrator has the full
@@ -1571,7 +1592,8 @@ class MetaOrchestratorTools:
                     continue
                 p = Path(fname)
                 cands = [p] if p.is_absolute() else (
-                    ([base / fname] if base is not None else []) + [Path.cwd() / fname])
+                    ([base / fname] if base is not None else [])
+                    + [Path(getattr(self.orch, "launch_dir", None) or Path.cwd()) / fname])
                 target = next((c for c in cands if c.is_file()), None)
                 if target is None:
                     unresolved.append(str(fname))

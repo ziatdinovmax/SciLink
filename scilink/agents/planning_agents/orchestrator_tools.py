@@ -5,6 +5,7 @@ Supports both Google Gemini (function objects) and OpenAI (JSON schemas).
 
 from datetime import datetime
 import json
+from scilink.utils import path_fence as _path_fence
 from .planning_rag import (author_technical_document,
                            document_to_markdown)
 import logging
@@ -1697,6 +1698,16 @@ class OrchestratorTools:
         return entries, None
 
     def _resolve_data_path(self, path_input: str) -> tuple[str, str]:
+        """``_resolve_data_path_unfenced`` held to the workspace's roots when
+        a fence is bound (its search list reaches the process cwd)."""
+        resolved, err = self._resolve_data_path_unfenced(path_input)
+        fence = _path_fence.current()
+        if resolved is not None and fence is not None and not fence.allows(resolved):
+            return None, json.dumps({"status": "error",
+                                     "message": fence.message(resolved, "data path")})
+        return resolved, err
+
+    def _resolve_data_path_unfenced(self, path_input: str) -> tuple[str, str]:
         """
         Resolves user input to actual file path with fuzzy matching for typos.
         
@@ -8072,6 +8083,14 @@ class OrchestratorTools:
             from scilink.skills._shared._graduation import graduate_to_skill_file
 
             print(f"  ⚡ Tool: Graduating knowledge '{knowledge_id}' to skill '{skill_name}'...")
+            from scilink.skills.loader import memory_enabled
+            if not memory_enabled():
+                return json.dumps({
+                    "status": "error",
+                    "message": ("Persistent memory is OFF, so the store is inert and "
+                                "nothing is written. Enable it with `scilink memory enable` "
+                                "(or the Memory panel) and call this tool again."),
+                })
 
             # Find the knowledge entry
             knowledge_entry = None
@@ -8203,6 +8222,14 @@ class OrchestratorTools:
             )
             from scilink.skills._shared._graduation import graduate_to_skill_file
             from scilink.skills.loader import graduated_skills_dir
+            from scilink.skills.loader import memory_enabled
+            if not memory_enabled():
+                return json.dumps({
+                    "status": "error",
+                    "message": ("Persistent memory is OFF, so the store is inert and "
+                                "nothing is written. Enable it with `scilink memory enable` "
+                                "(or the Memory panel) and call this tool again."),
+                })
 
             print(f"  ⚡ Tool: Updating skill '{skill_name}'...")
 
@@ -9083,6 +9110,13 @@ class OrchestratorTools:
         return result
 
     def _dispatch_tool(self, tool_name: str, **kwargs) -> str:
+        # A hosted server fences every path a tool is handed (see
+        # scilink.utils.path_fence); on a laptop the fence is None.
+        fence = getattr(getattr(self, "orch", None), "path_fence", None)
+        if fence is not None:
+            refused = fence.refuse_tool_args(kwargs, self.orch.base_dir)
+            if refused:
+                return json.dumps({"status": "error", "tool": tool_name, "message": refused})
         if tool_name not in self.functions_map:
             return json.dumps({
                 "status": "error",
@@ -9103,7 +9137,11 @@ class OrchestratorTools:
             })
 
         try:
-            return self.functions_map[tool_name](**kwargs)
+            with _path_fence.bound(fence):
+                try:
+                    return self.functions_map[tool_name](**kwargs)
+                except _path_fence.PathFenceError as e:
+                    return json.dumps({"status": "error", "tool": tool_name, "message": str(e)})
         except TypeError as e:
             # An unexpected keyword reaches here as a bare TypeError whose
             # message names the offending argument but not the valid ones,

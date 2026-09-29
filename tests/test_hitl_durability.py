@@ -148,3 +148,30 @@ def test_thread_isolated_logs(tmp_path):
             if r["event"] == "asked"] == ["review_plan"]
     assert [r["kind"] for r in _records(log_b)
             if r["event"] == "asked"] == ["review_fit"]
+
+
+def test_subject_travels_to_the_log_and_the_sidecar(tmp_path):
+    """A gate that declares what is under review has it recorded at ask
+    time and in the pending sidecar, so a run that dies while blocked says
+    what it was showing."""
+    log = tmp_path / "feedback_log.jsonl"
+    subject = {"title": "Plan", "blocks": [{"type": "text", "markdown": "hi"}]}
+    seen = {}
+
+    class Capture:
+        def ask(self, req):
+            seen["req"] = req
+            seen["sidecar"] = json.loads(
+                (tmp_path / "pending_question.json").read_text())
+            return ""
+
+    set_default_channel(Capture())
+    with use_feedback_log(log):
+        request_human_feedback("p: ", kind="review_plan", subject=subject)
+    assert seen["req"].subject == subject
+    assert seen["sidecar"]["subject"] == subject
+    assert _records(log)[0]["subject"] == subject
+    # a request without one records None, as before
+    with use_feedback_log(log):
+        request_human_feedback("p: ", kind="review_plan")
+    assert _records(log)[2]["subject"] is None

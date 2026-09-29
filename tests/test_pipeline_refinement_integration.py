@@ -65,6 +65,9 @@ class TestWorkflowComposition:
 
         import scilink.agents.sim_agents._engine_inputs as ei
         import scilink.agents.sim_agents.force_field_agent as ffa
+        import scilink.agents.sim_agents.potential_selection as ps
+        monkeypatch.setattr(ps, "select_potential_family", lambda **kw: {
+            "family": "force_field", "reasoning": "test", "source": "forced"})
         monkeypatch.setattr(ffa, "ForceFieldAgent", FakeFFAgent)
         monkeypatch.setattr(ei, "write_md_inputs",
                             lambda ps, sw, wd: {"structure_file": str(structure),

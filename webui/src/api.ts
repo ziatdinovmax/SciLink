@@ -45,6 +45,39 @@ export interface AppConfig {
   };
 }
 
+export interface OpsStatus {
+  ok: boolean;
+  version: string;
+  uptime_s: number;
+  workspace?: string;
+  state: "idle" | "busy" | "draining";
+  draining: boolean;
+  busy: string[];
+  idle_for_s: number;
+  sessions_live: number;
+}
+
+export interface UsageRow {
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+}
+
+export interface UsageSummary {
+  period_start: number;
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  llm_seconds: number;
+  by_model: Record<string, UsageRow>;
+  by_session: Record<string, UsageRow>;
+  budget_tokens: number | null;
+  remaining_tokens: number | null;
+  over_budget: boolean;
+  file: string;
+}
+
 export interface ReportRef {
   path: string;
   name: string;
@@ -60,6 +93,63 @@ export interface ChatMessage {
   verbose?: string;
 }
 
+/** What a question is about, as blocks (the Python vocabulary is
+ * `scilink.hitl.SUBJECT_BLOCKS`; the shell renders the same shapes). Every
+ * block may carry a `label`, its section heading. */
+export type SubjectBlock = { label?: string } & (
+  | { type: "text"; markdown: string }
+  | {
+      type: "fields";
+      items: {
+        label: string;
+        value: string | number | null;
+        unit?: string;
+        flag?: "ok" | "warn" | "bad";
+      }[];
+    }
+  | { type: "chips"; items: string[] }
+  | { type: "steps"; items: string[] }
+  | {
+      type: "table";
+      columns: string[];
+      rows: (string | number | null)[][];
+      caption?: string;
+    }
+  | { type: "figure"; path: string | null; file?: string; caption?: string }
+  | {
+      type: "candidates";
+      items: {
+        idx: number;
+        name?: string;
+        metric?: string;
+        value?: string | number;
+        approved?: boolean;
+        figure?: string | null;
+        judge_comment?: string;
+        /** markdown under the card head (a plan candidate's fields) */
+        body?: string;
+        /** a file to open in the Files tab (the candidate's full plan) */
+        report?: string | null;
+        report_file?: string;
+      }[];
+      /** null when no candidate is preferred (a consensus question) */
+      pick?: number | null;
+      reasoning?: string;
+      caveats?: string[];
+    }
+  | {
+      type: "compare";
+      left: { label: string; blocks: SubjectBlock[] };
+      right: { label: string; blocks: SubjectBlock[] };
+    }
+  | { type: "notice"; title: string; lines: string[]; tone?: "info" | "warn" }
+);
+
+export interface QuestionSubject {
+  title: string;
+  blocks: SubjectBlock[];
+}
+
 export interface PresentedQuestion {
   request_id: string;
   kind: string;
@@ -70,24 +160,23 @@ export interface PresentedQuestion {
     | "keep_revert"
     | "bestofn"
     | "plan_candidates"
-    | "fanout_confirm";
+    | "confirm";
   labels: Record<string, string>;
   prompt: string;
+  /** the captured console text: the body of a question whose gate declared no subject */
   context_display: string;
-  preview_images: string[];
-  candidate_captions: Record<string, string>;
   code_files: { name: string; content: string }[];
   candidates?: { idx: number; label: string }[];
-  judge_pick?: number;
-  fanout?: {
-    verdict: string | null;
-    join_axis: string | null;
-    rationale: string | null;
-    branches: string[];
-  };
+  judge_pick?: number | null;
   /** What the decision is about: the auto-correction a revert would undo,
    * or why an approved plan is being reopened. */
   notice?: { title: string; lines: string[] };
+  /** The gate's own reply words when it declared them: the first is the
+   * keep-or-revert primary ("keep", "consensus", ...). */
+  options?: string[] | null;
+  /** Present when the gate declared what is under review; the panel then
+   * renders these blocks and keeps `context_display` behind a disclosure. */
+  subject?: QuestionSubject;
   default: string;
 }
 
@@ -176,11 +265,26 @@ export interface TelemetrySnapshot {
 
 
 /** Persistent memory (GET /memory and friends — scilink/server/memory_api.py). */
+export interface MemoryEvidence {
+  session: string | null; adapted: boolean; at: string | null;
+  data: Record<string, unknown> | null; model_type: string | null; cross_kind: boolean;
+}
 export interface MemoryBankRow {
   id: string; label: string; n_successes: number; n_retrievals: number;
   n_independent?: number | null; n_failures?: number | null;
   sessions: string[]; metric: unknown; created_at: string | null;
   proven: boolean; promoted_to_staging: string | null;
+  model_type?: string | null; data_kind?: string | null; data?: Record<string, unknown> | null;
+  provenance?: Record<string, unknown>; evidence?: MemoryEvidence[];
+}
+export interface MemoryArchivedRow {
+  domain: string; id: string; label: string; reason: string | null; archived_at: string | null;
+  n_successes: number | null; n_retrievals: number | null; n_failures: number | null;
+}
+export interface MemorySweepRow { domain: string; id: string; reason: string; label: string; idle_days: number | null }
+export interface MemoryJobRow {
+  id: string; kind: string; label: string; status: "running" | "done" | "error"; error: string | null;
+  skill_name: string | null; domain: string | null; target: string | null;
 }
 export interface MemoryVariantGroup {
   ids: string[]; min_similarity: number | null; suggested_technique: string | null; n_unpromoted: number;
@@ -196,9 +300,11 @@ export interface MemoryInboxGroup {
 export interface MemorySkill {
   name: string; domain: string; path: string; provisional: boolean; provenance: string | null;
   session: string | null; description: string; metric: string; shadows_builtin: boolean;
+  technique: string[]; n_examples: number | null; has_backup: boolean;
 }
 export interface MemoryOverview {
   enabled: boolean; env_override: string | null; home: string;
+  shared_server: boolean; can_delete: boolean; archived: MemoryArchivedRow[];
   consolidate_min_n: number; proven_n: number;
   pipeline: { bank_total: number; bank_proven: number; bank_archived?: number;
               inbox_total: number; inbox_ready: number;
@@ -316,7 +422,7 @@ export interface FolderCheck {
 }
 
 export interface SkillCatalog {
-  builtin: { domain: string; label: string; skills: { name: string; description: string }[] }[];
+  builtin: { domain: string; label: string; skills: { name: string; description: string; origin: "builtin" | "learned" | "fork"; provisional: boolean }[] }[];
   custom: { name: string; path: string }[];
   skills_supported: boolean;
 }
@@ -624,6 +730,8 @@ const json = (body: unknown): RequestInit => ({
 
 export const api = {
   authMe: () => req<AuthInfo>(`/auth/me`),
+  opsStatus: () => req<OpsStatus>(`/ops/status`),
+  usage: () => req<UsageSummary>(`/usage`),
   login: (token: string) => req<{ user: string }>(`/auth/login`, json({ token })),
   logout: () => req<{ ok: boolean }>(`/auth/logout`, { method: "POST" }),
 
@@ -709,6 +817,17 @@ export const api = {
   telemetry: (id: string) => req<TelemetrySnapshot>(`/sessions/${id}/telemetry`),
 
   skills: (id: string) => req<SkillCatalog>(`/sessions/${id}/skills`),
+  draftOptions: (id: string) =>
+    req<{ knowledge_bases: { name: string; embedding_model: string | null; sources: string[] }[]; literature_available: boolean }>(
+      `/sessions/${id}/skills/draft-options`),
+  draftSkill: (id: string, body: { name: string; domain: string; description: string; technique: string[];
+                                   sections: Record<string, string>; notes: string; kb: string | null;
+                                   literature: boolean; fill: "empty" | "all" }) =>
+    req<{ job_id: string; label: string }>(`/sessions/${id}/skills/draft`, json(body)),
+  composeSkill: (id: string, body: { name: string; domain: string; description: string; technique: string[];
+                                     sections: Record<string, string>; save: "preview" | "session" | "memory" }) =>
+    req<{ name: string; domain: string; markdown: string; saved: string; path?: string; catalog?: SkillCatalog }>(
+      `/sessions/${id}/skills/compose`, json(body)),
   skillMarkdown: async (id: string, domain: string, name: string) => {
     const r = await fetch(
       `${BASE}/sessions/${id}/skills/${encodeURIComponent(domain)}/${encodeURIComponent(name)}`,
@@ -742,7 +861,18 @@ export const api = {
     req<{ status: string; backup_path: string }>(
       `/memory/skills/${encodeURIComponent(domain)}/${encodeURIComponent(name)}`,
       { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content }) }),
-  memorySkillAction: (domain: string, name: string, action: "promote" | "demote" | "prune" | "diff" | "fork") =>
+  memorySkillTechnique: (domain: string, name: string, technique: string[]) =>
+    req<{ technique: string[]; backup_path: string }>(`/memory/skills/${encodeURIComponent(domain)}/${encodeURIComponent(name)}/technique`,
+      { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ technique }) }),
+  memoryArchived: (domain?: string) =>
+    req<{ archived: MemoryArchivedRow[] }>(`/memory/bank/archived${domain ? `?domain=${encodeURIComponent(domain)}` : ""}`),
+  memoryBankRestore: (domain: string, id: string) =>
+    req<{ restored: number }>(`/memory/bank/${encodeURIComponent(domain)}/${encodeURIComponent(id)}/restore`, { method: "POST" }),
+  memoryBankSweep: (body: { domain?: string | null; days?: number | null; dry_run: boolean }) =>
+    req<{ dry_run: boolean; records: MemorySweepRow[] }>("/memory/bank/sweep",
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
+  memoryJobs: () => req<{ jobs: MemoryJobRow[] }>("/memory/jobs"),
+  memorySkillAction: (domain: string, name: string, action: "promote" | "demote" | "prune" | "diff" | "fork" | "restore-backup") =>
     req<Record<string, unknown>>(
       `/memory/skills/${encodeURIComponent(domain)}/${encodeURIComponent(name)}/${action}`, { method: "POST" }),
   memoryBankRecord: (domain: string, id: string) =>

@@ -108,6 +108,7 @@ _SECTION_KEYS: tuple[str, ...] = (
 # Fixed allowlist so the frontmatter can't accumulate arbitrary fields,
 # and so description-only callers produce byte-identical output.
 _EXTRA_META_KEYS: tuple[str, ...] = (
+    "technique",
     "provisional",
     "provenance",
     "session",
@@ -202,6 +203,27 @@ def parse_json_response(raw: str) -> Dict[str, Any]:
     raise ValueError(
         f"No JSON object found in LLM response (first 200 chars): {raw[:200]!r}"
     )
+
+
+def merge_techniques(*sources) -> List[str]:
+    """Normalise technique names from several sources into one short,
+    de-duplicated list (first occurrence wins, case-insensitively)."""
+    out: List[str] = []
+    seen: set = set()
+    for src in sources:
+        if src is None:
+            continue
+        items = [src] if isinstance(src, str) else list(src) if isinstance(src, (list, tuple, set)) else []
+        for item in items:
+            name = " ".join(str(item or "").split())[:60]
+            key = name.lower()
+            if not name or key in seen or key in ("none", "null", "unknown", "n/a"):
+                continue
+            seen.add(key)
+            out.append(name)
+            if len(out) >= 8:
+                return out
+    return out
 
 
 def format_skill_as_markdown(data: Dict[str, Any]) -> str:
@@ -327,7 +349,8 @@ def graduate_to_skill_file(
     skill_name = safe_path_component(skill_name, fallback="unnamed_skill")
     domain_dir = skills_root / domain
     skill_dir = domain_dir / skill_name
-    skill_dir.mkdir(parents=True, exist_ok=True)
+    # The bundle directory is created only when the file is written (below):
+    # a distillation the model fails leaves nothing behind.
     skill_path = skill_dir / f"{skill_name}.md"
 
     knowledge_text = _format_knowledge(knowledge_entry)
@@ -358,8 +381,19 @@ def graduate_to_skill_file(
             "after it.\n\n" + prompt
         )
         parsed = parse_json_response(llm_call(retry_prompt))
+    # ``technique`` is what the technique-driven selectors route on (the
+    # built-ins all carry one); a learned skill without it is routable in
+    # name only. The measured techniques of the source records come first,
+    # then whatever aliases the model added.
+    techniques = merge_techniques(
+        (extra_meta or {}).get("technique"), parsed.get("technique"))
+    parsed.pop("technique", None)
+    if techniques:
+        parsed["technique"] = techniques
     if extra_meta:
         for key in _EXTRA_META_KEYS:
+            if key == "technique":
+                continue
             if key in extra_meta and extra_meta[key] is not None:
                 parsed[key] = extra_meta[key]
     if append_sections:
@@ -386,6 +420,7 @@ def graduate_to_skill_file(
 
     # Loader-style bundles include __init__.py; harmless for path-loaded
     # skills, but keeps the layout consistent with built-ins.
+    skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "__init__.py").touch()
     atomic_write_text(skill_path, skill_content)
 

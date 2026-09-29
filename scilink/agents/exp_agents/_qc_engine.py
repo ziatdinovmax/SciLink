@@ -48,6 +48,96 @@ from typing import Any, Optional
 BANK_EDIT_ADAPT_MIN_SCORE = 0.45
 
 
+# Model-family vocabulary for the cross-kind guard: each word maps to the
+# KIND of signal a model describes. Two descriptions that share no kind
+# describe different physics (a peak profile vs a ring-down vs a step),
+# and an "adaptation" between them is a rewrite of the model, not a
+# re-seeding of it. Swapping one peak profile for another (EMG → Voigt)
+# stays within a kind. Baseline words are not in the vocabulary, and a
+# description with no family word never triggers the guard.
+_MODEL_FAMILY_WORDS = (
+    ("voigt", "peak"), ("lorentz", "peak"), ("gauss", "peak"),
+    ("exponentially-modified", "peak"), ("exponentially modified", "peak"),
+    ("emg", "peak"), ("doniach", "peak"), ("fano", "peak"),
+    ("lognormal", "peak"), ("log-normal", "peak"), ("pearson", "peak"),
+    ("damped", "oscillation"), ("cosine", "oscillation"),
+    ("sinusoid", "oscillation"), ("sine", "oscillation"),
+    ("oscillat", "oscillation"), ("ring-down", "oscillation"),
+    ("ringdown", "oscillation"),
+    ("exponential decay", "decay"), ("exp decay", "decay"),
+    ("stretched", "decay"), ("bi-exponential", "decay"),
+    ("biexponential", "decay"), ("relaxation", "decay"),
+    ("sigmoid", "step"), ("logistic", "step"), ("error function", "step"),
+    ("erf", "step"), ("step", "step"),
+    ("power law", "powerlaw"), ("power-law", "powerlaw"),
+    ("polynomial", "polynomial"),
+)
+
+
+def model_family_tokens(text) -> set:
+    """The signal kinds a free-text model description names."""
+    t = str(text or "").lower()
+    return {kind for needle, kind in _MODEL_FAMILY_WORDS if needle in t}
+
+
+def model_families_disjoint(a, b) -> bool:
+    """True when both descriptions name a signal kind and share none."""
+    fa, fb = model_family_tokens(a), model_family_tokens(b)
+    return bool(fa) and bool(fb) and not (fa & fb)
+
+
+def relax_snippet_edits(text: str, edits: list) -> tuple:
+    """Re-anchor edits whose ``old_text`` is not in ``text`` because of
+    leading whitespace only.
+
+    Live: the adapter returned a script's top-level ``params.add(...)``
+    lines with a four-space indent four times out of four, and the exact
+    applier rejected every batch. Each such edit is matched by its lines
+    with leading whitespace ignored; a UNIQUE block match rewrites
+    ``old_text`` to the script's actual text and re-indents ``new_text``
+    by the same shift. Ambiguous or absent blocks are left for the applier
+    to refuse. Returns ``(edits, n_relaxed)``; never raises.
+    """
+    lines = text.splitlines()
+    stripped = [l.lstrip() for l in lines]
+    out, n_relaxed = [], 0
+    for e in edits:
+        if not isinstance(e, dict):
+            out.append(e)
+            continue
+        old = e.get("old_text") or ""
+        if not old or old in text:
+            out.append(e)
+            continue
+        want = old.splitlines()
+        want_s = [l.lstrip() for l in want]
+        if not want_s or not want_s[0]:
+            out.append(e)
+            continue
+        hits = [i for i in range(len(lines) - len(want) + 1)
+                if stripped[i:i + len(want)] == want_s]
+        if len(hits) != 1:
+            out.append(e)
+            continue
+        i = hits[0]
+        actual = "\n".join(lines[i:i + len(want)])
+        # Shift new_text's indentation the way old_text's was shifted.
+        model_indent = len(want[0]) - len(want_s[0])
+        real_indent = len(lines[i]) - len(stripped[i])
+        new = e.get("new_text") or ""
+        fixed_new = []
+        for l in new.splitlines():
+            lead = len(l) - len(l.lstrip())
+            if l.strip():
+                lead = max(0, lead - model_indent) + real_indent
+                fixed_new.append(" " * lead + l.lstrip())
+            else:
+                fixed_new.append(l)
+        out.append({**e, "old_text": actual, "new_text": "\n".join(fixed_new)})
+        n_relaxed += 1
+    return out, n_relaxed
+
+
 def try_bank_edit_adapt(host, ctx, *, domain: str, script_kind: str,
                         output_contract: str, config_key: str,
                         data_context: str, run_fn):
@@ -124,10 +214,47 @@ def try_bank_edit_adapt(host, ctx, *, domain: str, script_kind: str,
         edits = parsed.get("edits")
         if not isinstance(edits, list):
             raise ValueError("no edits list in the adaptation reply")
+        # The adapter is asked to say when THIS data needs a different model
+        # family than the proven script implements. That is not an
+        # adaptation (live: a peak script "adapted" into a damped cosine in
+        # eight edits, then credited as a peak-fit success) — fall through
+        # to normal generation and leave the record's evidence alone.
+        kept = parsed.get("model_family_kept")
+        if kept is False or (isinstance(kept, str)
+                             and kept.strip().lower() in ("false", "no")):
+            ctx.bank_adapt_attempt["model_mismatch"] = True
+            raise ValueError("model family mismatch: this dataset needs a "
+                             "different model than the proven script "
+                             f"({str(parsed.get('rationale'))[:100]})")
         if edits:
+            edits, n_relaxed = relax_snippet_edits(banked, edits)
+            if n_relaxed:
+                ctx.bank_adapt_attempt["n_relaxed"] = n_relaxed
             res = apply_snippet_edits(banked, edits)
             if res["status"] != "success":
-                raise ValueError(f"edits do not apply: {res['message']}")
+                # One corrected attempt with the applier's own message: the
+                # model sees which edit failed and why, against the same
+                # script.
+                fix = ("Your previous edit list did not apply: "
+                       f"{res['message']}\nReturn a corrected edit list. "
+                       "Copy each old_text VERBATIM from the proven script "
+                       "above, including its exact leading whitespace "
+                       "(top-level lines have none).\n\n" + prompt)
+                raw = host.model.generate_content(
+                    fix, generation_config=host.generation_config)
+                raw = raw.text if hasattr(raw, "text") else str(raw)
+                parsed = parse_json_response(raw)
+                edits = parsed.get("edits")
+                if not isinstance(edits, list) or not edits:
+                    raise ValueError(f"edits do not apply: {res['message']}")
+                edits, n_relaxed2 = relax_snippet_edits(banked, edits)
+                if n_relaxed2:
+                    ctx.bank_adapt_attempt["n_relaxed"] = (
+                        ctx.bank_adapt_attempt.get("n_relaxed") or 0) + n_relaxed2
+                ctx.bank_adapt_attempt["retried"] = True
+                res = apply_snippet_edits(banked, edits)
+                if res["status"] != "success":
+                    raise ValueError(f"edits do not apply: {res['message']}")
             adapted_script, n_edits = res["text"], res["n_edits"]
         else:
             adapted_script, n_edits = banked, 0
@@ -211,18 +338,26 @@ def record_bank_assist(host, ctx, res, *, domain: str,
             block["survived"] = bool(res.get("bank_edit_adapt"))
             if attempt.get("fell_through"):
                 block["fell_through"] = attempt["fell_through"]
+            for k in ("n_relaxed", "retried", "model_mismatch", "model_changed"):
+                if attempt.get(k):
+                    block[k] = attempt[k]
         if seconds is not None:
             block["seconds"] = round(float(seconds), 2)
         res["bank_assist"] = block
         from scilink.skills._shared import _script_bank
-        # The bank must learn bad news too: an adaptation that did not end up
-        # as the accepted script cost a call and delivered nothing.
-        if mode == "edit_adapt" and not block["survived"] and rec.get("id"):
+        # The bank must learn bad news too: an adaptation that executed and
+        # was then replaced, or did not execute, cost a call and delivered
+        # nothing — that is evidence about the SCRIPT. An edit list that
+        # never applied, or an adapter that declined the data as a different
+        # model family, says nothing about the script (live: four
+        # non-applying edit lists archived a good record as "never
+        # succeeds"), so those are logged but not charged.
+        if (mode == "edit_adapt" and not block["survived"] and rec.get("id")
+                and block["applied"]):
             _script_bank.record_failure(
                 domain, rec["id"],
                 "edit_adapt_" + ("replaced" if block["executed"]
-                                 else "not_executed" if block["applied"]
-                                 else "not_applied"),
+                                 else "not_executed"),
                 session=Path(str(getattr(host, "output_dir", "") or "")).name or None)
         _script_bank.log_assist(
             {**block, "session": Path(
@@ -246,12 +381,32 @@ def bump_bank_adapt_success(host, res, *, domain: str, ctx=None) -> None:
         if (bea and bea.get("id") and res.get("success")
                 and not res.get("quality_warning")):
             from scilink.skills._shared import _script_bank
+            # Cross-kind guard (belt to the adapter's own braces): a result
+            # whose model family shares nothing with the record's is a
+            # rewrite, and its success is evidence for a different method.
+            rec = ((getattr(ctx, "bank_exemplar", None) or {}).get("record")
+                   or {}) if ctx is not None else {}
+            rec_model = (rec.get("technique_signals") or {}).get("model_type")
+            if model_families_disjoint(rec_model, res.get("model_type")):
+                bea["model_changed"] = True
+                attempt = getattr(ctx, "bank_adapt_attempt", None)
+                if isinstance(attempt, dict):
+                    attempt["model_changed"] = True
+                host.logger.info(
+                    f"   🏦 ⚠️  Bank record {bea['id']}: adapted script fits a "
+                    "different model family "
+                    f"({str(rec_model)[:40]!r} → {str(res.get('model_type'))[:40]!r}); "
+                    "no cross-session credit.")
+                return
             # Evidence = the NEW data's digest (independent of the data the
             # record was banked on), plus the session.
             _script_bank.record_success(
                 domain, bea["id"],
                 session=Path(str(getattr(host, "output_dir", "") or "")).name or None,
                 fingerprint=getattr(ctx, "bank_query_fingerprint", None),
+                data_summary=_script_bank.fingerprint_summary(
+                    getattr(ctx, "bank_query_fingerprint", None)),
+                model_type=res.get("model_type"),
                 # An adaptation with edits means the ADAPTED script passed,
                 # not the banked one: evidence that the record is a good
                 # starting point, not that it runs unchanged. An adaptation

@@ -162,6 +162,7 @@ def _generate_inputs(
     force_field_files: Optional[Dict[str, str]] = None,
     staged: bool = False,
     required_observables: Optional[list] = None,
+    potential_selection: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Generate inputs for ``scale``, returning a normalized result.
 
@@ -231,17 +232,21 @@ def _generate_inputs(
         # the species are known, decide whether the interatomic potential
         # comes from a classical force field or an MLIP, then dispatch. The
         # router no longer makes this choice — it only picks the MD scale.
-        from .potential_selection import select_potential_family
-        selection = select_potential_family(
-            structure_file=structure_file, research_goal=request,
-            model_name=model_name, api_key=api_key, base_url=base_url,
-            force_field_files=force_field_files,
-        )
-        logger.info(
-            "potential selection: family=%s source=%s (%s)",
-            selection.get("family"), selection.get("source"),
-            selection.get("reasoning", ""),
-        )
+        # A caller that already selected (the workflow does, before any
+        # classical parameterization) passes its decision through.
+        selection = potential_selection
+        if selection is None:
+            from .potential_selection import select_potential_family
+            selection = select_potential_family(
+                structure_file=structure_file, research_goal=request,
+                model_name=model_name, api_key=api_key, base_url=base_url,
+                force_field_files=force_field_files,
+            )
+            logger.info(
+                "potential selection: family=%s source=%s (%s)",
+                selection.get("family"), selection.get("source"),
+                selection.get("reasoning", ""),
+            )
         if selection.get("family") == "mlip":
             result = _generate_mlip_inputs(
                 backend=None, structure_file=structure_file, request=request,
@@ -571,12 +576,31 @@ def _run_workflow_once(
     # Turn a packed box of coordinates into an engine-native, parameterized
     # input (e.g. a typed LAMMPS data file) via the engine-neutral FF stack:
     # ForceFieldAgent.parameterize -> ParameterizedSystem -> write_md_inputs.
-    # Gated on a components.json manifest, so MLIP-driven MD (potential-based,
-    # no manifest), pre-built data files, and non-MD scales are untouched. When
-    # the caller already supplied force_field_files, respect them.
+    # The potential family is chosen first (issue #666): a packed-box manifest
+    # exists whether the run ends up on a force field or an MLIP, and a
+    # classical FF cannot parameterize e.g. a metal slab, so parameterizing
+    # before selecting would fail (or force the classical choice) before the
+    # selector ever ran. Pre-built data files and non-MD scales are untouched.
+    # When the caller already supplied force_field_files, respect them.
+    potential_selection = None
     if (scale == "molecular_dynamics" and force_field_files is None):
+        from .potential_selection import select_potential_family
+        potential_selection = select_potential_family(
+            structure_file=structure_path, research_goal=user_request,
+            model_name=model_name, api_key=api_key, base_url=base_url,
+        )
+        result["potential_selection"] = potential_selection
+        logger.info(
+            "potential selection: family=%s source=%s (%s)",
+            potential_selection.get("family"),
+            potential_selection.get("source"),
+            potential_selection.get("reasoning", ""),
+        )
         manifest = _load_components_manifest(structure_path)
-        if manifest:
+        if potential_selection.get("family") == "mlip":
+            logger.info("MLIP selected; skipping classical force-field "
+                        "parameterization.")
+        elif manifest:
             try:
                 from .force_field_agent import ForceFieldAgent
                 from ._engine_inputs import write_md_inputs
@@ -746,6 +770,7 @@ def _run_workflow_once(
             output_dir=output_dir, api_key=api_key, base_url=base_url,
             model_name=model_name, force_field_files=force_field_files,
             staged=staged, required_observables=required_observables,
+            potential_selection=potential_selection,
         )
     except Exception as e:
         result["final_status"] = "failed_input_generation"

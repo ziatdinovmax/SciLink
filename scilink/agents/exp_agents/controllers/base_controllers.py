@@ -1,10 +1,144 @@
 import logging
 import os
+import re
 import textwrap
 from typing import Any, Callable, Optional
 import json
 
-from ....hitl import request_human_feedback
+from pathlib import Path as pathlib_Path
+
+from ....hitl import make_subject, request_human_feedback, subject_block
+
+
+def numbered_steps(text: str) -> list:
+    """Split a strategy or pipeline written as one paragraph into its steps:
+    numbered steps (the rule the plan printers use: a step number only after
+    a sentence end, so "cm-1." or "8.7" are never split), else a chain of
+    "->" arrows, which is how a pipeline is often written. One step comes
+    back as one item."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    parts = re.split(r"(?:^|\. )(?=\d+\. )", text)
+    steps = [re.sub(r"^\d+\.\s*", "", p).strip() for p in parts if p.strip()]
+    if len(steps) < 2 and " -> " in text:
+        # A chain only: "flatten -> segment -> measure". An arrow inside prose
+        # ("an S-shaped residual -> switch to asymmetric; ...") means
+        # "implies", and splitting there leaves dangling fragments (seen live
+        # on a fitting strategy), so a segment that holds a sentence end
+        # keeps the paragraph whole.
+        chain = [p.strip() for p in re.split(r"\s*->\s*", text) if p.strip()]
+        if all(". " not in p and len(p) <= 160 for p in chain):
+            steps = chain
+    steps = [st.rstrip(".") + "." if st and not st.endswith(".") else st for st in steps]
+    return steps if len(steps) > 1 else [text]
+
+
+def steps_block(label: str, text: str) -> dict:
+    """A ``steps`` block for a paragraph with several steps, a ``text``
+    block for one: a single step is not a numbered list."""
+    items = numbered_steps(text)
+    if len(items) > 1:
+        return subject_block("steps", label=label, items=items)
+    return subject_block("text", label=label, markdown=items[0] if items else "N/A")
+
+
+def bestofn_join_subject(candidates: list, winner: dict, judge_info: dict,
+                         allow_more: bool, metric: str, output_dir) -> dict:
+    """What the best-of-N join gate shows, as subject blocks (scilink.hitl):
+    one card per candidate with its review figure (the gate writes
+    ``bestofn_candidate_NN_review.png`` beside the question), its score and
+    gate verdict, the judge's pick and reasoning. ``metric`` is "R²" (curve)
+    or "score" (image)."""
+    digits = 4 if metric == "R²" else 2
+    items = []
+    for c in candidates:
+        figure = None
+        if c["result"].get("visualization_bytes"):
+            figure = str(pathlib_Path(output_dir) / f"bestofn_candidate_{c['attempt']:02d}_review.png")
+        items.append({"idx": c["attempt"], "name": f"{c['iterations']} iterations",
+                      "metric": metric, "value": f"{c['score']:.{digits}f}",
+                      "approved": bool(c["approved"]), "figure": figure})
+    block = subject_block("candidates", items=items, pick=winner["attempt"],
+                          reasoning=(judge_info.get("reasoning") or "")[:500] or None)
+    if allow_more:
+        block["free_text"] = {"input": "Or type 'more' to run the remaining candidates and compare:",
+                              "submit": "Send"}
+    return make_subject("🏁 Best-of-N candidates — review before locking the anchor", [block])
+
+
+def consensus_subject(improved: list, counts: dict, unit: str, kind: str,
+                      key_model: str, key_score: str, metric: str) -> dict:
+    """What the series consensus gate shows, as subject blocks
+    (scilink.hitl): the refitted units grouped by the model (or pipeline)
+    they chose, most common first — the rank is the reply."""
+    digits = 4 if metric == "R²" else 2
+    items = []
+    for i, (model, count) in enumerate(sorted(counts.items(), key=lambda x: -x[1]), 1):
+        idx = [str(r["index"]) for r in improved if r[key_model] == model]
+        scores = ", ".join(f"{r[key_score]:.{digits}f}" for r in improved if r[key_model] == model)
+        items.append({"idx": i, "name": str(model),
+                      "judge_comment": f"{unit} [{', '.join(idx)}] · {metric}: {scores}"})
+    block = subject_block("candidates", items=items, pick=None,
+                          free_text={"input": f"Or suggest a different {kind}:",
+                                     "submit": f"Use this {kind}"})
+    return make_subject(f"🔄 Adaptive refit — no {kind} consensus among the re-fitted {unit}",
+                        [block])
+
+
+def consistency_subject(unit: str, idx, name: str, kind: str, consensus: str,
+                        consensus_score: float, original: str, original_score: float,
+                        metric: str) -> dict:
+    """What the consistency keep-or-revert gate shows, as subject blocks
+    (scilink.hitl): the consensus result beside the independent one."""
+    digits = 4 if metric == "R²" else 2
+    def side(label, model, score, flag):
+        return {"label": label, "blocks": [subject_block("fields", items=[
+            {"label": kind.capitalize(), "value": model},
+            {"label": metric, "value": f"{score:.{digits}f}", "flag": flag}])]}
+    compare = subject_block("compare",
+                            left=side("Consensus", consensus, consensus_score, "bad"),
+                            right=side("Independent", original, original_score, "ok"))
+    return make_subject(f"⚠️ {unit.capitalize()} [{idx}] {name}: the consensus {kind} "
+                        f"has a lower {metric}", [compare])
+
+
+def refinement_plan_subject(state: dict) -> dict:
+    """What the hyperspectral targets gate shows, as subject blocks
+    (scilink.hitl): the sections ``IterativeFeedbackController`` prints,
+    from the same state."""
+    decision = state.get("refinement_decision") or {}
+    skip_mode = bool(state.get("skip_decomposition"))
+    title = state.get("iteration_title", "Current Analysis")
+    analysis_text = ((state.get("result_json") or {}).get("detailed_analysis") or "").strip()
+    targets = decision.get("targets") or []
+    blocks = []
+    if analysis_text:
+        blocks.append(subject_block("text", label="Summary of current analysis",
+                                    markdown=analysis_text))
+    elif skip_mode:
+        blocks.append(subject_block("text", label="Summary of current analysis", markdown=(
+            "Skip-decomposition mode — no iteration-stage analysis to summarize; the "
+            "synthesis stage will interpret after the dynamic-analysis step runs.")))
+    plan_label = "Analysis plan ready" if skip_mode else "Refinement needed"
+    blocks.append(subject_block("text", label="🧠 Proposed plan", markdown=(
+        f"{plan_label} = **{decision.get('refinement_needed', False)}**\n\n"
+        f"Reasoning: {decision.get('reasoning') or 'N/A'}")))
+    if targets:
+        rows = []
+        for i, t in enumerate(targets, 1):
+            # custom_code targets carry value=None by schema design — the
+            # description is the payload, so the cell stays empty.
+            value = t.get("value")
+            rows.append([i, t.get("type", "N/A"), "" if value is None else str(value),
+                         t.get("description", "No description provided.")])
+        blocks.append(subject_block("table", label=f"🎯 Targeted actions ({len(targets)})",
+                                    columns=["#", "Type", "Value", "Description"], rows=rows))
+    else:
+        blocks.append(subject_block("text", label="🎯 Targeted actions (0)",
+                                    markdown="No specific targets were generated."))
+    header = "Analysis plan review" if skip_mode else "Analysis step review"
+    return make_subject(f"🎯 {header} — {title}", blocks)
 
 
 def run_plan_refinement_gate(controller, state: dict, *,
@@ -347,6 +481,7 @@ class IterativeFeedbackController:
                 "\n🤔 Your feedback to adjust the targets/plan (or press Enter to accept): ",
                 kind="review_plan",
                 origin={"stage": "preprocess_plan"},
+                subject=refinement_plan_subject(state),
             ).strip()
         except KeyboardInterrupt:
             self.logger.warning("User interrupted feedback. Accepting original decision.")

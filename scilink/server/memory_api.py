@@ -80,7 +80,7 @@ def _inbox_row(rec: Dict[str, Any], _staging) -> Dict[str, Any]:
     }
 
 
-def memory_overview() -> Dict[str, Any]:
+def memory_overview(*, shared_server: bool = False) -> Dict[str, Any]:
     """Everything the panel shows at once: the switch, the pipeline strip,
     the bank by domain (with variant-group suggestions), the inbox by
     domain / technique, the skills. Never raises for a bad record."""
@@ -114,6 +114,12 @@ def memory_overview() -> Dict[str, Any]:
                 "sessions": r.get("sessions") or [], "metric": r.get("metric"),
                 "created_at": r.get("created_at"), "proven": bool(r.get("proven")),
                 "promoted_to_staging": r.get("promoted_to_staging"),
+                "model_type": r.get("model_type"), "data_kind": r.get("data_kind"),
+                "data": r.get("data"), "provenance": r.get("provenance") or {},
+                # Evidence, not a count: which session credited the record,
+                # on what data, under which model, and whether that model is
+                # a different kind of signal than the record's own.
+                "evidence": _evidence_rows(r),
             } for r in recs],
             "variant_groups": [{
                 "ids": g.get("ids") or [], "min_similarity": g.get("min_similarity"),
@@ -145,9 +151,15 @@ def memory_overview() -> Dict[str, Any]:
         })
 
     n_ready = sum(1 for g in inbox if g["ready"])
+    archived = _safe(_script_bank.list_archived, [])
     return {
         "enabled": enabled,
         "env_override": env or None,
+        # On a shared server deleting host-wide state is the operator's
+        # (the routes answer 403); the panel hides those controls.
+        "shared_server": bool(shared_server),
+        "can_delete": not shared_server,
+        "archived": [_archived_row(r) for r in archived],
         "home": _tilde(loader.scilink_home()),
         "consolidate_min_n": need,
         "proven_n": proven_n,
@@ -156,7 +168,7 @@ def memory_overview() -> Dict[str, Any]:
             "bank_proven": sum(1 for r in bank_rows if r.get("proven")),
             # Aged out of the listing (never used / never succeeds /
             # superseded) — intact on disk, restorable from the CLI.
-            "bank_archived": len(_safe(_script_bank.list_archived, [])),
+            "bank_archived": len(archived),
             "inbox_total": len(staged),
             "inbox_ready": n_ready,
             "skills_total": len(skills),
@@ -170,8 +182,104 @@ def memory_overview() -> Dict[str, Any]:
             "session": s.get("session"), "description": s.get("description") or "",
             "metric": _safe(lambda s=s: _staging.metric_label(s), ""),
             "shadows_builtin": _shadows_builtin(s.get("domain"), s.get("name")),
+            "technique": s.get("technique") or [],
+            "n_examples": s.get("n_examples"),
+            "has_backup": bool(s.get("has_backup")),
         } for s in skills],
     }
+
+
+def _evidence_rows(row: Dict[str, Any]) -> List[Dict[str, Any]]:
+    from scilink.agents.exp_agents._qc_engine import model_families_disjoint
+    own = row.get("model_type")
+    out = []
+    for e in row.get("evidence_log") or []:
+        out.append({
+            "session": e.get("session"), "adapted": bool(e.get("adapted")),
+            "at": e.get("at"), "data": e.get("data"),
+            "model_type": e.get("model_type"),
+            "cross_kind": bool(model_families_disjoint(own, e.get("model_type"))),
+        })
+    return out
+
+
+def _archived_row(rec: Dict[str, Any]) -> Dict[str, Any]:
+    _, _, _script_bank, _ = _mods()
+    stats = rec.get("stats") or {}
+    arch = rec.get("archived") or {}
+    return {
+        "domain": rec.get("domain"), "id": rec.get("id"),
+        "label": _safe(lambda: _script_bank.record_label(rec)[:120], rec.get("id")),
+        "reason": arch.get("reason") if isinstance(arch, dict) else None,
+        "archived_at": arch.get("at") if isinstance(arch, dict) else None,
+        "n_successes": stats.get("n_successes"), "n_retrievals": stats.get("n_retrievals"),
+        "n_failures": stats.get("n_failures"),
+    }
+
+
+def bank_archived(domain: Optional[str] = None) -> Dict[str, Any]:
+    _, _, _script_bank, _ = _mods()
+    rows = [_archived_row(r) for r in _safe(lambda: _script_bank.list_archived(domain), [])]
+    return {"archived": rows}
+
+
+def bank_restore(domain: str, rid: str) -> Dict[str, Any]:
+    _, _, _script_bank, _ = _mods()
+    n = _script_bank.restore_records(domain, [rid])
+    if not n:
+        raise MemoryError(404, f"No archived record {domain}/{rid}.")
+    return {"status": "success", "restored": n}
+
+
+def bank_sweep(domain: Optional[str], days: Optional[int], dry_run: bool) -> Dict[str, Any]:
+    """The aging rules as a preview (``dry_run``) or applied. Archiving is
+    reversible (restore), which is why the panel may do it at all."""
+    _, _, _script_bank, _ = _mods()
+    if days is not None and days < 0:
+        raise MemoryError(400, "days must be 0 or more.")
+    rows = _script_bank.sweep(domain or None, idle_days=days, dry_run=dry_run)
+    return {"status": "success", "dry_run": bool(dry_run), "days": days,
+            "records": [{"domain": r.get("domain"), "id": r.get("id"), "reason": r.get("reason"),
+                         "label": r.get("label"), "idle_days": r.get("idle_days")} for r in rows]}
+
+
+def skill_restore_backup(domain: str, name: str) -> Dict[str, Any]:
+    _, _memory, *_ = _mods()
+    _check_ref(domain, name)
+    try:
+        return _memory.restore_backup(domain, name)
+    except FileNotFoundError as exc:
+        raise MemoryError(404, str(exc)) from exc
+    except ValueError as exc:
+        raise MemoryError(400, str(exc)) from exc
+
+
+def skill_set_technique(domain: str, name: str, technique: List[str]) -> Dict[str, Any]:
+    _, _memory, *_ = _mods()
+    _check_ref(domain, name)
+    try:
+        return _memory.set_technique(domain, name, list(technique or []))
+    except FileNotFoundError as exc:
+        raise MemoryError(404, str(exc)) from exc
+
+
+def list_jobs() -> Dict[str, Any]:
+    """Every distillation job this server process has run, newest first,
+    with the part of the result the panel links to. Lost on restart, which
+    is why the panel says so instead of polling a 404 forever."""
+    with _jobs_lock:
+        jobs = list(_jobs.values())
+    out = []
+    for j in reversed(jobs):
+        res = j.get("result") if isinstance(j.get("result"), dict) else {}
+        out.append({
+            "id": j["id"], "kind": j["kind"], "label": j["label"], "status": j["status"],
+            "error": j.get("error"),
+            "skill_name": res.get("skill_name"), "domain": res.get("domain"),
+            "target": (f"{res.get('target_domain')}/{res.get('target_name')}"
+                       if res.get("target_name") else None),
+        })
+    return {"jobs": out}
 
 
 def _tilde(path) -> str:
@@ -234,8 +342,17 @@ def skill_action(domain: str, name: str, action: str) -> Dict[str, Any]:
     return out
 
 
+def _check_ref(domain: str, name: str) -> None:
+    _, _memory, *_ = _mods()
+    try:
+        _memory.check_skill_ref(domain, name)
+    except ValueError as exc:
+        raise MemoryError(400, str(exc)) from exc
+
+
 def fork_builtin(domain: str, name: str) -> Dict[str, Any]:
     _, _memory, *_ = _mods()
+    _check_ref(domain, name)
     try:
         out = _memory.fork_builtin(domain, name)
     except FileNotFoundError as exc:
@@ -422,11 +539,28 @@ def llm_call_for(agent: Any) -> Callable[[str], str]:
     return _call
 
 
+#: Finished jobs kept for polling; older ones are dropped so the in-process
+#: registry cannot grow without bound over a long-lived server.
+MAX_FINISHED_JOBS = 50
+
+
+def _restore_labels(_staging, domain: str, previous: Dict[str, Any]) -> None:
+    for rid, label in previous.items():
+        if label and _staging.get_staged(domain, rid) is not None:
+            try:
+                _staging.relabel_staged(domain, rid, label)
+            except Exception:  # noqa: BLE001 - best effort after a failure
+                pass
+
+
 def _start_job(kind: str, fn: Callable[[], Dict[str, Any]], label: str) -> Dict[str, Any]:
     job_id = uuid.uuid4().hex[:12]
     job = {"id": job_id, "kind": kind, "label": label, "status": "running",
            "result": None, "error": None}
     with _jobs_lock:
+        finished = [k for k, j in _jobs.items() if j.get("status") != "running"]
+        for k in finished[:max(0, len(finished) - MAX_FINISHED_JOBS + 1)]:
+            _jobs.pop(k, None)
         _jobs[job_id] = job
 
     def _run():
@@ -484,14 +618,25 @@ def start_consolidate(domain: str, ids: List[str], label: str,
         SKILL_UPDATE_INSTRUCTIONS, T2_CONSOLIDATION_INSTRUCTIONS)
 
     def _work():
+        # The consolidation reads a whole technique group, so the selection
+        # is relabelled first. A failed distillation puts the labels back:
+        # the UI promises the records are unchanged after a failure.
+        previous = {rid: (_staging.get_staged(domain, rid) or {}).get("technique")
+                    for rid in ids}
         for rid in ids:
             _staging.relabel_staged(domain, rid, norm)
-        res = _staging.consolidate_technique(
-            domain, norm, llm_call=llm_call,
-            consolidation_template=T2_CONSOLIDATION_INSTRUCTIONS,
-            update_template=SKILL_UPDATE_INSTRUCTIONS)
+        try:
+            res = _staging.consolidate_technique(
+                domain, norm, llm_call=llm_call,
+                consolidation_template=T2_CONSOLIDATION_INSTRUCTIONS,
+                update_template=SKILL_UPDATE_INSTRUCTIONS)
+        except Exception:
+            _restore_labels(_staging, domain, previous)
+            raise
         if res.get("status") == "success":
             res = {**res, "skill_name": f"auto_{norm}", "domain": domain}
+        else:
+            _restore_labels(_staging, domain, previous)
         return res
     return _start_job("consolidate", _work, f"{len(ids)} → auto_{norm}")
 
@@ -508,6 +653,7 @@ def start_propose_upgrade(domain: str, ids: List[str], target_domain: str,
     recs = [r for r in (_staging.get_staged(domain, i) for i in ids) if r]
     if len(recs) != len(ids):
         raise MemoryError(404, "One or more selected records no longer exist.")
+    _check_ref(target_domain, target_name)
     persistent = {s["name"] for s in _safe(lambda: _memory.list_memory(domain=target_domain), [])}
     builtin_target = target_name not in persistent
     from scilink.agents.exp_agents.instruct import (
@@ -559,6 +705,7 @@ def apply_upgrade(domain: str, ids: List[str], target_domain: str, target_name: 
     when the target was one, back up the current file, write, consume the
     records."""
     _, _memory, _, _staging = _mods()
+    _check_ref(target_domain, target_name)
     if not (content or "").strip():
         raise MemoryError(400, "Empty skill content.")
     if fork_first:

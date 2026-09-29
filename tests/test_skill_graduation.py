@@ -432,3 +432,67 @@ class TestFormatGraduatedSkillsBlock:
         assert "#### planning" in block
         assert "#### implementation" not in block
         assert "#### validation" not in block
+
+
+# ── technique frontmatter (live audit 2026-09-26: a consolidated skill had no
+# ``technique`` and the technique-driven selector never picked it) ──────────
+
+def test_merge_techniques_normalises_and_dedupes():
+    from scilink.skills._shared._graduation import merge_techniques
+    out = merge_techniques(["Raman spectroscopy", " raman  spectroscopy ", None, "unknown"],
+                           "micro-Raman", ["XRD", "Raman Spectroscopy"])
+    assert out == ["Raman spectroscopy", "micro-Raman", "XRD"]
+    assert merge_techniques(None, []) == []
+    assert len(merge_techniques([f"t{i}" for i in range(20)])) == 8
+
+
+def test_format_skill_writes_technique_list():
+    from scilink.skills._shared._graduation import format_skill_as_markdown
+    from scilink.skills.loader import _split_frontmatter
+    md = format_skill_as_markdown({"description": "d", "technique": ["Raman", "XRD"],
+                                   "overview": "o"})
+    meta, _ = _split_frontmatter(md, source="t")
+    assert meta["technique"] == ["Raman", "XRD"] and meta["description"] == "d"
+
+
+def test_graduate_merges_measured_and_model_techniques(tmp_path):
+    import json
+    from scilink.skills._shared._graduation import graduate_to_skill_file
+
+    def llm(prompt):
+        return json.dumps({"description": "d", "technique": ["XRD", "powder diffraction"],
+                           "overview": "o", "planning": "p"})
+    res = graduate_to_skill_file(
+        knowledge_entry={"x": 1}, skill_name="t_skill", domain="curve_fitting",
+        llm_call=llm, fresh_template="{skill_name} {domain} {knowledge_text}",
+        update_template="{skill_name} {domain} {existing_skill} {new_knowledge}",
+        skills_root=tmp_path, extra_meta={"technique": ["xrd", "Powder XRD"], "provisional": True})
+    text = open(res["skill_path"]).read()
+    from scilink.skills.loader import _split_frontmatter
+    meta, _ = _split_frontmatter(text, source="t")
+    # measured first, the model's aliases after, no case-duplicates
+    assert meta["technique"] == ["xrd", "Powder XRD", "powder diffraction"]
+    assert meta["provisional"] is True
+
+
+def test_consolidate_routes_on_the_records_measurement_technique(tmp_path, monkeypatch):
+    import json
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path))
+    from scilink.skills._shared import _staging
+    from scilink.skills.loader import _split_frontmatter
+    for i in range(2):
+        _staging.stage_solution("curve_fitting", "peaks", {
+            "provenance": "bank_nominated", "model": "one gaussian",
+            "measurement_context": {"technique": "Raman spectroscopy" if i else "raman"},
+            "session": f"s{i}", "working_script": "print(1)\n"})
+    res = _staging.consolidate_technique(
+        "curve_fitting", "peaks",
+        llm_call=lambda p: json.dumps({"description": "d", "technique": ["micro-Raman"],
+                                       "overview": "o"}),
+        consolidation_template="{skill_name} {domain} {knowledge_text}",
+        update_template="{skill_name} {domain} {existing_skill} {new_knowledge}")
+    assert res["status"] == "success"
+    meta, _ = _split_frontmatter(open(res["skill_path"]).read(), source="t")
+    # the two measured spellings first (staging order), the model's alias last
+    assert meta["technique"][-1] == "micro-Raman"
+    assert sorted(meta["technique"][:2]) == ["Raman spectroscopy", "raman"]

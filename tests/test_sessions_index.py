@@ -49,3 +49,25 @@ def test_touch_updates_name_and_time(tmp_path, monkeypatch):
     S.touch_session(d)
     e = S.list_sessions("meta")[0]
     assert e["label"].startswith("Grains") and e["updated"] >= rec["updated"]
+
+
+def test_within_confines_list_and_resolve_to_one_root(tmp_path, monkeypatch):
+    """One index per SCILINK_HOME serves every user root on a shared server;
+    ``within`` is what keeps one root's sessions out of another's view."""
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path / "home"))
+    a = tmp_path / "users" / "alice" / "analysis_session_20260101_000001"
+    b = tmp_path / "users" / "bob" / "analysis_session_20260101_000002"
+    for d in (a, b):
+        d.mkdir(parents=True)
+        (d / "checkpoint.json").write_text("{}")
+        S.register_session(d, "analyze")
+    everyone = {e["id"] for e in S.list_sessions("analyze")}
+    assert everyone == {a.name, b.name}
+    only_a = {e["id"] for e in S.list_sessions("analyze", root=a.parent, within=a.parent)}
+    assert only_a == {a.name}
+    # every resolve branch is confined: index id, name under root, absolute path
+    assert S.resolve_session(b.name, "analyze", within=a.parent) is None
+    assert S.resolve_session(a.name, "analyze", within=a.parent) == a.resolve()
+    assert S.resolve_session(b.name, "analyze", root=b.parent, within=a.parent) is None
+    assert S.resolve_session(str(b), "analyze", within=a.parent) is None
+    assert S.resolve_session(str(b), "analyze") == b.resolve()

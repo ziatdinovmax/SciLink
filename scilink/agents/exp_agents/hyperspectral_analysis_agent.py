@@ -1398,6 +1398,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     kind="review_plan",
                     context=rendered,      # non-terminal channels can show the plan
                     origin={"stage": "series_regime_plan", "round": _round + 1},
+                    subject=_series.regime_plan_subject(plan, series_metadata, scout, n),
                 ).strip()
             except (EOFError, KeyboardInterrupt):
                 self.logger.info("  Regime plan gate: no answer — plan accepted as is.")
@@ -1721,6 +1722,11 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         if getattr(self, "_series_role", None) == "replay":
             # The anchor banked this script once for the series; banking each
             # verbatim replay would inflate its proven-N per dataset.
+            return []
+        if getattr(self, "_strict_replay", False):
+            # Same rule for a live loop's strict replays: unreviewed, no
+            # model call, one stream (live: setup alone wrote three
+            # successes and every cube added one).
             return []
         from scilink.skills._shared import _script_bank
         if not _script_bank.bank_enabled():

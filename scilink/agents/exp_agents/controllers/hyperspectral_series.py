@@ -1112,6 +1112,52 @@ def render_regime_plan(plan: Optional[dict], series_metadata: dict,
     return "\n".join(lines)
 
 
+def regime_plan_subject(plan: Optional[dict], series_metadata: dict,
+                        scout: Optional[dict] = None, n: int = 0) -> dict:
+    """What the regime-plan gate shows, as subject blocks (scilink.hitl):
+    the sections ``render_regime_plan`` prints, from the same plan."""
+    from ....hitl import make_subject, subject_block as block
+
+    meta = series_metadata or {}
+    values = meta.get("values") if isinstance(meta.get("values"), list) else []
+    var, unit = meta.get("variable") or "index", meta.get("unit") or ""
+
+    def _lab(i):
+        # "0 (300 K)": the variable is named once, in the column header
+        return f"{i} ({values[i]} {unit})".replace(" )", ")") if i < len(values) else str(i)
+
+    blocks = []
+    red = (scout or {}).get("reduction") or {}
+    if red:
+        ac = red.get("axis_coherence") or {}
+        blocks.append(block("text", label="🔎 Change detection", markdown=(
+            f"change point ≈ {red.get('change_point'):g} ({var}), sharpness "
+            f"{red.get('change_sharpness')}, axis "
+            f"{'coherent' if ac.get('coherent', True) else 'NOT coherent (regimes interleave)'}")))
+    if not plan:
+        blocks.append(block("text", label="Regimes",
+                            markdown=f"1 regime — all {n} datasets share one locked script."))
+        return make_subject("📋 Proposed series regime plan", blocks)
+    if plan.get("rationale"):
+        blocks.append(block("text", label="💡 Rationale", markdown=str(plan["rationale"])))
+    rows = []
+    for r in plan.get("regimes") or []:
+        idx = r.get("dataset_indices") or []
+        rows.append([r.get("name"), ", ".join(_lab(i) for i in idx),
+                     f"dataset {idx[0]}" if idx else "?", r.get("description") or ""])
+    blocks.append(block("table", label=f"Regimes ({len(rows)})",
+                        columns=["Regime", f"Datasets ({var})", "Anchor", "Description"], rows=rows,
+                        caption="The anchor gets the full analysis; its script is locked "
+                                "and replayed on the rest"))
+    transitions = plan.get("transition_points") or []
+    if transitions:
+        blocks.append(block("table", label="↕ Transition points",
+                            columns=["Between indices", "Transition"],
+                            rows=[[str(tp.get("between_indices")), tp.get("description") or ""]
+                                  for tp in transitions]))
+    return make_subject("📋 Proposed series regime plan", blocks)
+
+
 def plan_series_regimes(model, generation_config, safety_settings, parse_fn: Callable,
                         state: Dict[str, Any], scout: Dict[str, Any],
                         logger: logging.Logger, feedback: Optional[str] = None,
@@ -1230,15 +1276,10 @@ def complete_locked_schema(row: Dict[str, Any], locked_columns: List[str],
 # ---------------------------------------------------------------------------
 
 def resolve_series_workers(value: Optional[int]) -> int:
-    """Explicit value > ``SCILINK_HS_SERIES_WORKERS`` env var > 1 (serial)."""
-    import os
-    if value is None:
-        env = os.environ.get("SCILINK_HS_SERIES_WORKERS")
-        try:
-            value = int(env) if env else 1
-        except ValueError:
-            value = 1
-    return max(int(value), 1)
+    """Explicit value > ``SCILINK_HS_SERIES_WORKERS`` > ``SCILINK_MAX_WORKERS``
+    > 1 (serial); the process-wide ceiling caps the result."""
+    from scilink.utils.workers import resolve_workers
+    return resolve_workers(value, "SCILINK_HS_SERIES_WORKERS", 1)
 
 
 def replay_worker(spec: Dict[str, Any]) -> Dict[str, Any]:

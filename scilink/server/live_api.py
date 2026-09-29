@@ -441,11 +441,16 @@ class LiveRun:
         self._truth: Dict[int, Dict[str, Any]] = {}
         self.loop: Any = None
         self._agent = agent
-        self._thread = threading.Thread(target=self._run, daemon=True,
+        self._thread = threading.Thread(target=self._run_tagged, daemon=True,
                                         name=f"scilink-live-{session_id}")
         self._thread.start()
 
     # ------------------------------------------------------------------ run
+    def _run_tagged(self) -> None:
+        from scilink import tracing
+        tracing.bind_session(self.session_id)      # usage ledger attribution
+        self._run()
+
     def _credentials(self) -> Dict[str, Any]:
         a = self._agent
         return {"model_name": getattr(a, "model_name", None) or "claude-opus-4-6",

@@ -25,6 +25,10 @@ class CreateSessionRequest(BaseModel):
     resume_dir: Optional[str] = None  # session dir NAME to resume, not a path
 
 
+class DrainRequest(BaseModel):
+    drain: bool = True
+
+
 class SendMessageRequest(BaseModel):
     content: str
 
@@ -84,6 +88,37 @@ class MemoryEditRequest(BaseModel):
 class MemoryIdsRequest(BaseModel):
     ids: List[str]
     technique: Optional[str] = None
+
+
+class ComposeSkillRequest(BaseModel):
+    name: str
+    domain: str = "curve_fitting"
+    description: str = ""
+    technique: List[str] = []
+    sections: Dict[str, str] = {}
+    save: str = "preview"           # preview | session | memory
+
+
+class DraftSkillRequest(BaseModel):
+    name: str = ""
+    domain: str = "curve_fitting"
+    description: str = ""
+    technique: List[str] = []
+    sections: Dict[str, str] = {}
+    notes: str = ""
+    kb: Optional[str] = None
+    literature: bool = False
+    fill: str = "empty"             # empty | all
+
+
+class MemoryTechniqueRequest(BaseModel):
+    technique: List[str] = []
+
+
+class MemorySweepRequest(BaseModel):
+    domain: Optional[str] = None
+    days: Optional[int] = None
+    dry_run: bool = True
 
 
 class MemoryConsolidateRequest(BaseModel):

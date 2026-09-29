@@ -79,6 +79,52 @@ What a shared server changes, and only a shared server:
   server for everyone);
 - cookie sessions live in memory, so a restart signs everyone out.
 
+### Behind an authenticating proxy
+
+When something in front of the server already knows who the user is — an
+OIDC / SSO proxy, a load balancer with authentication — let it say so
+instead of handing out tokens:
+
+```bash
+scilink-web --host 0.0.0.0 --auth-header X-Auth-Request-User \
+            --trusted-proxy 10.0.0.0/8
+```
+
+The user is the value of that header, honoured only on requests that arrive
+from a `--trusted-proxy` address or network (default: loopback, the
+reverse-proxy-on-the-same-host case). Each user gets an isolated session
+root under `<session-root>/users/<name>/`, exactly as with `--users`; the
+sign-in screen never appears, tokens and the login cookie are not accepted,
+and a restart signs nobody out because identity comes with every request.
+The proxy must strip that header from incoming requests before adding its
+own, or anyone could name themselves.
+
+### In a container, one per workspace
+
+The Dockerfile has a `web` target whose entrypoint is `scilink-web`:
+
+```bash
+docker build --target web -t scilink-web .
+docker run -p 8422:8422 -e SCILINK_WEB_TOKEN=<secret> \
+           -e AWS_BEARER_TOKEN_BEDROCK=... -e AWS_REGION_NAME=us-east-1 \
+           -v /srv/campaigns/perovskites:/workspace -v scilink-models:/models \
+           scilink-web
+```
+
+`/workspace` is the campaign's own volume: `sessions/` (the session root),
+`home/` (`SCILINK_HOME`: knowledge bases, banked scripts, graduated skills,
+instrument memory, the memory switch), `data/`, the usage ledger, and an
+optional `workspace.json` manifest that `/api/v1/ops/health` names.
+`/models` is the shared, read-only model cache. Everything one campaign
+learns or uploads stays on its volume, and vendor keys ride the container's
+environment and never reach generated scripts. The server binds all
+interfaces and therefore requires authentication: a token, or
+`--auth-header` behind an authenticating proxy. A control plane drives it
+through `/api/v1/ops/health`, `/api/v1/ops/status` (busy or idle, and for
+how long), `/api/v1/ops/drain` and `/api/v1/usage` (with the ops token,
+`SCILINK_OPS_TOKEN` as `X-Ops-Token`), and stops the container only after a
+drain reports idle.
+
 ### Embeddings
 
 Plan and Mission Control sessions ground on a knowledge base when one is
@@ -155,7 +201,7 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
 - **Live turn**: agent-working spinner, stop button, and a colorized
   streaming narration pane (meta reasoning cyan, delegated-specialist amber,
   handoff banners gold — same scheme as the Streamlit verbose panel).
-- **Human-in-the-loop**: all the Streamlit approval surfaces — free-text
+- **Human-in-the-loop**: every approval surface — free-text
   feedback with context box, dataset-description prompt, code review with
   the generated scripts inline, keep/revert, best-of-N candidate selection
   (with preview images and the judge's pick), plan-candidate selection, and
@@ -246,30 +292,71 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
 - **Skills tab** (all modes): upload custom skill `.md` files (saved under
   the session's `custom_skills/`, registered with the agent for this
   session, auto-selectable like built-ins) and browse the catalog — every
-  built-in bundle by domain with its one-line description, plus a
-  markdown viewer (frontmatter shown as a caption). Below it, **Persistent
-  memory** — the port of the Streamlit memory panel over one store per
-  server host (`$SCILINK_HOME` or `~/.scilink`, the same store `scilink
-  memory` manages): the on/off switch (persisted to the store's
+  bundle by domain with its one-line description and a markdown viewer
+  (frontmatter shown as a caption). What persistent memory adds is
+  labelled, never folded into the shipped count: `learned` (distilled or
+  graduated into the store), `fork of built-in`, `provisional`; a shipped
+  skill has a **fork into memory** button (copy-on-write; the fork shadows
+  it and can then be edited and upgraded on the Memory tab). **Build a
+  skill** is a form for the parts of a skill — name, domain, the
+  description the agents route on, the technique list the selectors match,
+  and the five sections (Overview → Planning → Implementation →
+  Interpretation → Validation, each with a hint of what belongs there) —
+  with a live preview rendered by the server exactly as the loader will
+  read it (`POST /sessions/{id}/skills/compose`, `save: preview`). "Use in
+  this session" saves and registers it like an upload; "Save to persistent
+  memory" writes an approved, authored bundle into the store (refused
+  while memory is off, since it would not load); "Start from" loads an
+  existing skill's parts into the form to derive a new one; the file can
+  also be downloaded. **Draft with the model** fills the empty sections (or
+  redrafts all of them) from the description, the technique list and your
+  notes, with your own text kept as authoritative context; it can be
+  grounded on a named knowledge base (top chunks, dense or keyword
+  retrieval) and on one FutureHouse literature search (the session's key,
+  minutes) — the draft says what it was grounded on, lists the sources it
+  was given and any grounding that could not be used, and nothing is saved
+  until you choose to. It runs as a job (`POST
+  /sessions/{id}/skills/draft`, polled through `/memory/jobs/{id}`).
+- **Memory tab** (all modes): persistent memory over one store per server
+  host (`$SCILINK_HOME` or `~/.scilink`, the same store `scilink memory`
+  manages). The header holds the on/off switch (persisted to the store's
   `config.json`; the `SCILINK_MEMORY` env var overrides it and the switch
-  says so), the pipeline strip, and the three stages in the order knowledge
-  flows. **1 · Script bank** — banked scripts by domain with proven (★)
-  badges, cross-session stats and a lazy record inspector (fields + the
-  working script); nominate one for review, or nominate a same-system
-  variant group under one technique label; delete. **2 · Review inbox** —
-  staged records by domain / technique (📜 nominations, 🐛 error lessons,
-  💬 your feedback; same-session records from other labels offered as
-  related), a record inspector with its bank link, discard, and the distill
-  flow: select records, distill into a **new** skill (consolidate; refuses a
-  label that would sweep in unselected records) or into an **existing** one
-  (targets ordered by a technique-match check, built-ins fork on upgrade,
-  mismatches flagged; preview → review the diff and additivity warnings,
-  optionally edit the proposal → apply with a `.md.bak` backup). The two
-  LLM calls (1–3 min) run as background jobs polled every 2 s, using the
-  current session's model. **3 · Skills** — provisional vs approved, with
-  view (frontmatter as caption), validated edit with backup, approve /
-  suspend, delete, and a diff against the shipped built-in for a fork.
-  Destructive actions are two-click confirms (no browser dialogs).
+  says so), the pipeline strip, and a **job strip**: every distillation
+  this server process ran, with elapsed time while it runs and a link to
+  the skill it produced; jobs started from this browser are remembered
+  per viewer, so after a server restart the strip says the job is unknown
+  rather than polling a 404. Then the three stages in the order knowledge
+  flows. **1 · Script bank** — banked scripts by domain with badges (★
+  proven or `n/N datasets`, the data kind, misses, in-inbox, and ⚠ suspect
+  credit), and **evidence, not a count**: a table of every credit — the
+  session, when, what data (kind, points, peaks, range), verbatim or
+  adapted, and the model that fit — with a credit from a different kind of
+  signal flagged. The working script opens lazily. Nominate one record, or
+  a same-system variant group under one label; delete. **Aging** lives in
+  the panel: a sweep preview (the records the rules would archive, with the
+  reason), a confirmed archive, the archived list with restore. **2 ·
+  Review inbox** — one open card per domain / technique (📜 nominations,
+  🐛 error lessons, 💬 your feedback; same-session records from other
+  labels offered as related) that does not collapse on refresh; a record
+  just nominated from the bank arrives selected and marked. The distill box
+  shows the normalised `auto_<name>` inline, says exactly why consolidation
+  is not yet possible (records missing, memory off, a label that would sweep
+  in unselected records), and renders a disabled button as disabled.
+  Distill into a **new** skill or an **existing** one (targets ordered by a
+  technique-match check, built-ins fork on upgrade); the proposal review is
+  a side-by-side diff (current | after upgrade) with changed words marked
+  and unchanged runs folded, the additivity check pinned in a sticky footer
+  beside Apply / Cancel, an optional edit of the proposal (re-checked as you
+  type) and a raw unified diff on request. **3 · Skills** — awaiting
+  approval vs approved, each row with its origin (consolidated from N
+  examples, auto-distilled, graduated in a session, fork of built-in), its
+  **technique** chips (or a "no technique — set one" warning, since the
+  selectors route on that list) with an inline editor, view, validated
+  edit, approve / suspend, diff vs built-in for a fork, **restore previous
+  version** (the backup every edit and upgrade writes; a restore swaps and
+  is itself reversible), delete. Destructive actions are two-click confirms
+  that turn into a red countdown button (no browser dialogs); on a shared
+  server they are hidden, matching the API's 403.
 - **MCP tab** (all modes): connect MCP servers — a `stdio` command, an
   SSE URL, or a streamable-HTTP URL with optional JSON headers — and
   disconnect them; each server card lists the tools it registered. The
@@ -325,9 +412,15 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
   stdout/logging teed through `OutputCapture`; a watcher emits incremental
   `log` SSE events.
 - HITL prompts route through `scilink.hitl.set_thread_channel` into an
-  HTTP-parking channel; the server converts each `FeedbackRequest` into a
-  structured "presented question" (widget type, labels, candidates, preview
-  images, code files) so the frontend renders without prompt sniffing.
+  HTTP-parking channel; the server presents each `FeedbackRequest` from
+  what the gate declared: its `subject` (blocks from
+  `scilink.hitl.SUBJECT_BLOCKS`, rendered by `SubjectBlocks.tsx` in the
+  printout's shape — emoji heading, full text under it) and its `kind`
+  (widget and words from `vocabulary.QUESTION_WIDGETS` /
+  `QUESTION_LABELS`, the gate's stage overriding the words). Nothing is
+  sniffed from a prompt or the console text; a gate that declared no
+  subject shows its kind's widget over the captured console text. See
+  `docs/proposals/structured-human-feedback.md`.
 - Artifacts are per-turn filesystem sweeps with the same rules as Streamlit
   (HTML report suppresses raw images; deliverable manifest decides which
   markdown embeds; path+mtime identity).
@@ -364,7 +457,16 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
 | GET | `/sessions/{id}/skills` | catalog: built-in bundles by domain with descriptions, the session's custom skills |
 | GET | `/sessions/{id}/skills/{domain}/{name}` | a skill's markdown (`domain` = catalog domain or `custom`) |
 | POST | `/sessions/{id}/skills` | multipart `.md` uploads → `custom_skills/`, registered with the agent |
-| GET | `/memory` | the store: switch, pipeline counts, bank by domain (+ variant groups), inbox by domain/technique, skills |
+| GET | `/memory` | the store: switch, `shared_server` / `can_delete`, pipeline counts, bank by domain (records with `evidence` rows and `model_type`, variant groups), the `archived` list, inbox by domain/technique, skills (with `technique`, `has_backup`, `n_examples`) |
+| POST | `/sessions/{id}/skills/compose` | the skill builder: `{name, domain, description, technique, sections, save}` → the rendered markdown; `save` is `preview` (render only), `session` (custom_skills/ + register) or `memory` (an approved bundle in the store, `provenance: authored`; 400 while memory is off, 409 if the name exists) |
+| GET | `/sessions/{id}/skills/draft-options` | what a draft can be grounded on: the named knowledge bases, and whether the session can search the literature |
+| POST | `/sessions/{id}/skills/draft` | `{name, domain, description, technique, sections, notes, kb?, literature, fill}` → a job whose result is the drafted sections (plus a description / technique when they were empty), the grounding used and warnings; 400 when nothing is empty (with `fill: empty`) or nothing to go on |
+| GET | `/memory/jobs` | every distillation or draft job this server process ran, newest first, with the skill or target it produced |
+| GET | `/memory/bank/archived` | archived bank records (`?domain=`) |
+| POST | `/memory/bank/sweep` | `{domain?, days?, dry_run}` → the records the aging rules would archive (preview) or did archive; applying is 403 on a shared server |
+| POST | `/memory/bank/{domain}/{id}/restore` | bring an archived record back |
+| PUT | `/memory/skills/{domain}/{name}/technique` | `{technique: [...]}` → set (or clear) the routing list, with a `.md.bak` backup |
+| POST | `/memory/skills/{domain}/{name}/restore-backup` | swap the `.md.bak` back into place (the current file becomes the backup) |
 | POST | `/memory/enabled` | `{enabled}` → persisted to the store's `config.json` |
 | GET/PUT | `/memory/skills/{domain}/{name}` | a persistent skill's markdown / validated edit with `.md.bak` backup |
 | POST | `/memory/skills/{domain}/{name}/{action}` | `promote` · `demote` · `prune` · `diff` (fork vs built-in) · `fork` (copy a built-in into the store) |

@@ -151,12 +151,26 @@ def _entry(sd: Path, mode: str, rec: Optional[Dict[str, Any]] = None) -> Optiona
     }
 
 
+def _under(path: Path, within) -> bool:
+    """Whether ``path`` lies inside ``within`` (``None`` means anywhere)."""
+    if within is None:
+        return True
+    try:
+        return path.resolve().is_relative_to(Path(within).resolve())
+    except (OSError, ValueError):
+        return False
+
+
 def list_sessions(mode: str, *, root=None,
-                  exclude: Collection[str] = ()) -> List[Dict[str, Any]]:
+                  exclude: Collection[str] = (),
+                  within=None) -> List[Dict[str, Any]]:
     """Resumable sessions of ``mode``, newest first: everything the index
     knows (any folder) plus a scan of ``root`` for sessions that predate the
     index. Index entries whose directory is gone are dropped from the file.
-    ``exclude`` names ids to skip (a web manager's live sessions)."""
+    ``exclude`` names ids to skip (a web manager's live sessions).
+    ``within`` confines the result to sessions under that directory: the
+    index is one file per ``SCILINK_HOME``, so on a server with per-user
+    roots it holds every user's sessions, and a user's list must not."""
     excluded = set(exclude)
     entries: Dict[str, Dict[str, Any]] = {}
     with _lock:
@@ -170,7 +184,7 @@ def list_sessions(mode: str, *, root=None,
         if rec.get("mode") != mode:
             continue
         sd = Path(p)
-        if sd.name in excluded:
+        if sd.name in excluded or not _under(sd, within):
             continue
         e = _entry(sd, mode, rec)
         if e:
@@ -181,20 +195,23 @@ def list_sessions(mode: str, *, root=None,
     return sorted(entries.values(), key=lambda e: e["updated"], reverse=True)
 
 
-def resolve_session(ref: str, mode: Optional[str] = None, *, root=None) -> Optional[Path]:
+def resolve_session(ref: str, mode: Optional[str] = None, *, root=None,
+                    within=None) -> Optional[Path]:
     """The directory for a session reference: an existing path, a name
-    under ``root`` (the current folder by default), or an id in the index."""
+    under ``root`` (the current folder by default), or an id in the index.
+    ``within`` confines every branch to that directory (see
+    :func:`list_sessions`); a reference outside it resolves to ``None``."""
     p = Path(ref).expanduser()
     if p.is_dir():
-        return p.resolve()
+        return p.resolve() if _under(p, within) else None
     local = Path(root or Path.cwd()) / ref
     if local.is_dir():
-        return local.resolve()
+        return local.resolve() if _under(local, within) else None
     with _lock:
         records = _read_index()
     matches = [Path(r["path"]) for r in records.values()
                if r.get("id") == ref and (mode is None or r.get("mode") == mode)
-               and Path(r["path"]).is_dir()]
+               and Path(r["path"]).is_dir() and _under(Path(r["path"]), within)]
     if matches:
         return max(matches, key=lambda d: records[str(d)].get("updated", 0)).resolve()
     return None

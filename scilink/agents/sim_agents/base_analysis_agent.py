@@ -29,6 +29,7 @@ from ...auth import get_internal_proxy_key, require_vendor_credentials
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from ...executors import ScriptExecutor, check_security_sandbox_indicators
+from ..exp_agents._qc_engine import CodegenQCEngine, QCEngineSpec, QCItemContext
 from ._deprecation import normalize_params
 
 import logging
@@ -50,10 +51,14 @@ class BaseAnalysisAgent(ABC):
     """Base for simulation-analysis agents: a verified codegen engine.
 
     Provides the LLM client, skill loading, and the reusable
-    ``compute_property`` loop (generate → execute sandboxed → verify → refine).
-    A subclass implements :meth:`run_analysis` with the modality's pipeline
-    (identify outputs, select the technique skill by available data, plan the
-    properties to compute, and call :meth:`compute_property` for each).
+    ``compute_property`` engine (generate → execute sandboxed → verify →
+    refine with progressive annealing). Powered by the shared
+    ``CodegenQCEngine`` (#439 Tier 2), which adds verification-quality
+    retries and constraint annealing on top of the existing crash-recovery
+    loop. A subclass implements :meth:`run_analysis` with the modality's
+    pipeline (identify outputs, select the technique skill by available
+    data, plan the properties to compute, and call :meth:`compute_property`
+    for each).
 
     Attributes:
         model: The resolved generative-model client.
@@ -61,6 +66,18 @@ class BaseAnalysisAgent(ABC):
         output_dir: Directory analysis artifacts are written to.
         state: Per-run scratch state (skills loaded, intermediate results).
     """
+
+    _CONSTRAINT_ANNEALING_SCHEDULE = (
+        "constrained — follow the recipe closely",
+        "relaxed — vary the computational approach",
+        "hot — try any method that can compute this property",
+    )
+
+    _QC_ENGINE_SPEC = QCEngineSpec(
+        config_key=None,
+        refine_anchor="none",
+        refit_fail_msg="   ❌ Refit could not execute",
+    )
 
     def __init__(
         self,
@@ -72,6 +89,7 @@ class BaseAnalysisAgent(ABC):
         max_refinement_attempts: int = 2,
         google_api_key: Optional[str] = None,
         local_model: Optional[str] = None,
+        max_verification_iterations: Optional[int] = None,
     ):
         """Construct the agent and its LLM client + sandbox executor.
 
@@ -84,10 +102,16 @@ class BaseAnalysisAgent(ABC):
             base_url: OpenAI-compatible internal-proxy URL; when set, requests
                 route through the proxy client, otherwise through LiteLLM.
             executor_timeout: Per-script sandbox timeout, in seconds.
-            max_refinement_attempts: How many times a failed script is
-                regenerated from its error before giving up.
+            max_refinement_attempts: How many times a script that *crashed*
+                (or violated the output contract) is regenerated from its
+                error before giving up. Bounds the initial attempt only.
             google_api_key: Deprecated. Use ``api_key``.
             local_model: Deprecated. Use ``base_url``.
+            max_verification_iterations: How many times a script that ran but
+                produced an *implausible* result is regenerated with verifier
+                feedback (each iteration is one generation, one execution and
+                one verification, plus a final verification after the last).
+                Defaults to ``max_refinement_attempts``.
 
         Raises:
             ValueError: If ``base_url`` is set and no key can be resolved.
@@ -96,6 +120,7 @@ class BaseAnalysisAgent(ABC):
         self.output_dir = Path(output_dir).resolve()
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.max_refinement_attempts = max_refinement_attempts
+        self._max_verification_iterations = max_verification_iterations
         self.state: Dict[str, Any] = {}
 
         api_key, base_url = normalize_params(
@@ -126,6 +151,12 @@ class BaseAnalysisAgent(ABC):
         self.executor = ScriptExecutor(timeout=executor_timeout)
         score, _ = check_security_sandbox_indicators()
         self.in_container = score >= 4
+
+    @property
+    def max_verification_iterations(self) -> int:
+        if self._max_verification_iterations is not None:
+            return self._max_verification_iterations
+        return self.max_refinement_attempts
 
     # ── skills ────────────────────────────────────────────────────────
 
@@ -181,10 +212,11 @@ class BaseAnalysisAgent(ABC):
     ) -> Dict[str, Any]:
         """Compute one property from ``data_files`` via verified codegen.
 
-        Generates a Python script for ``task`` (guided by ``recipe`` — a skill's
-        implementation section), runs it sandboxed, and — on success — optionally
-        checks the returned value is physically plausible. A failed run is
-        regenerated from its error up to ``max_refinement_attempts`` times.
+        Powered by :class:`CodegenQCEngine` (#439 Tier 2): generates a Python
+        script for ``task``, runs it sandboxed, and — on success — optionally
+        verifies the result for physical plausibility. Implausible results
+        trigger refinement retries with progressive constraint annealing;
+        execution crashes are retried separately inside the initial attempt.
 
         Args:
             task: What to compute (e.g. ``"shear viscosity via Green-Kubo"``).
@@ -193,6 +225,7 @@ class BaseAnalysisAgent(ABC):
                 the generated code should follow.
             packages: Packages the script may import (defaults to the standard set).
             verify: When True, run the LLM plausibility gate on the result.
+            output_type: ``"scalar"`` | ``"curve"`` | ``"image"`` | ``"datacube"``.
 
         Returns:
             ``{"status", "value"?, "units"?, "verification"?, "code_path",
@@ -205,12 +238,42 @@ class BaseAnalysisAgent(ABC):
                 "output_type %r is not one of %s; treating it as a non-scalar "
                 "artifact output. Check the skill's `output:` frontmatter.",
                 output_type, sorted(_OUTPUT_TYPES))
-        # Inject the inputs the generated body references as globals, so it needs
-        # no hardcoded paths and stays engine-neutral.
         preamble = (
             f"DATA_FILES = {json.dumps(data_files)}\n"
             f"OUTPUT_DIR = {json.dumps(str(self.output_dir))}\n\n"
         )
+        ctx = QCItemContext(
+            state={
+                "task": task,
+                "data_files": data_files,
+                "recipe": recipe,
+                "packages": pkgs,
+                "output_type": output_type,
+                "verify": verify,
+                "preamble": preamble,
+            },
+            data=data_files,
+            data_path=str(self.output_dir),
+            item_name=task,
+            item_idx=0,
+        )
+        engine = CodegenQCEngine(host=self, spec=self._QC_ENGINE_SPEC)
+        return engine.run_item(ctx)
+
+    # ── CodegenQCEngine hooks ────────────────────────────────────────
+
+    def qc_setup(self, ctx: QCItemContext) -> None:
+        pass
+
+    def qc_try_reuse(self, ctx: QCItemContext):
+        return None
+
+    def qc_run_initial(self, ctx: QCItemContext) -> dict:
+        s = ctx.state
+        task, data_files = s["task"], s["data_files"]
+        recipe, pkgs = s["recipe"], s["packages"]
+        output_type, preamble = s["output_type"], s["preamble"]
+
         code = self._generate_code(task, data_files, recipe, pkgs, output_type)
         error_info: Dict[str, Any] = {}
         for attempt in range(self.max_refinement_attempts + 1):
@@ -239,28 +302,170 @@ class BaseAnalysisAgent(ABC):
                         continue
                     out["artifact"] = artifact
                     out["output_type"] = output_type
-                if (verify and out.get("status") == "success"
-                        and (out.get("value") is not None or out.get("artifact"))):
-                    out["verification"] = self._verify_result(
-                        task, out, output_type)
+                out["success"] = True
+                out["script"] = code
                 return out
             error_info = result
-        return {"status": "error", "message": error_info.get("message", "unknown"),
+        return {"success": False, "status": "error",
+                "message": error_info.get("message", "unknown"),
                 "attempts": self.max_refinement_attempts + 1}
+
+    def qc_record_initial(self, ctx: QCItemContext, result: dict) -> None:
+        ctx.best_result = result
+
+    def qc_record_initial_failure(self, ctx: QCItemContext, result: dict) -> None:
+        pass
+
+    def qc_verification_bypass(self, ctx: QCItemContext) -> bool:
+        if not ctx.state.get("verify", True):
+            ctx.approved = True
+            return True
+        return False
+
+    def qc_log_skip_verification(self, ctx: QCItemContext) -> None:
+        pass
+
+    def qc_loop_setup(self, ctx: QCItemContext) -> None:
+        pass
+
+    def qc_verify(self, ctx: QCItemContext):
+        s = ctx.state
+        result = ctx.current_result or ctx.best_result
+        if not result or result.get("status") != "success":
+            return None
+        if not (result.get("value") is not None or result.get("artifact")):
+            return None
+        return self._verify_result(s["task"], result, s["output_type"])
+
+    def qc_on_verify_none(self, ctx: QCItemContext) -> None:
+        pass
+
+    def qc_assess(self, ctx: QCItemContext, verification: dict) -> None:
+        # The verdict travels with the result it judged, so whichever result
+        # is returned carries its own verification, not the latest one.
+        judged = ctx.current_result or ctx.best_result
+        judged["verification"] = verification
+        score = 1.0 if verification.get("plausible", True) else 0.0
+        ctx.current_score = score
+        if score > ctx.best_score:
+            ctx.best_score = score
+            ctx.best_result = judged
+        ctx.verification_history.append(verification)
+
+    def qc_check_accept(self, ctx: QCItemContext, verification: dict) -> bool:
+        return bool(verification.get("plausible", True))
+
+    def qc_refine(self, ctx: QCItemContext, verification: dict) -> dict:
+        reasoning = verification.get("reasoning", "")
+        ctx.annealing_level = min(
+            ctx.iteration + 1, len(self._CONSTRAINT_ANNEALING_SCHEDULE) - 1)
+        level = ctx.annealing_level
+        annealing_text = self._CONSTRAINT_ANNEALING_SCHEDULE[level]
+        ctx.state["_verification_feedback"] = (
+            f"The previous result was judged implausible: {reasoning}\n"
+            f"Approach guidance ({annealing_text}): adjust your method accordingly."
+        )
+        return {}
+
+    def qc_refit(self, ctx: QCItemContext, verification: dict,
+                 refine_from, just_escalated_to_hot: bool) -> dict:
+        s = ctx.state
+        task, data_files = s["task"], s["data_files"]
+        recipe, pkgs = s["recipe"], s["packages"]
+        output_type, preamble = s["output_type"], s["preamble"]
+        feedback = s.get("_verification_feedback", "")
+
+        # The recipe stays at every level: it is what tells codegen how to read
+        # the engine's output format. At hot it becomes advisory (the method
+        # may change) rather than dropped.
+        hot = len(self._CONSTRAINT_ANNEALING_SCHEDULE) - 1
+        advisory = just_escalated_to_hot or ctx.annealing_level >= hot
+
+        code = self._generate_code(task, data_files, recipe, pkgs, output_type,
+                                    verification_feedback=feedback,
+                                    recipe_advisory=advisory)
+        result = self._execute_script(preamble + code, task)
+        if result.get("ok"):
+            out = {k: v for k, v in result.items() if k != "ok"}
+            out["attempts"] = (ctx.best_result or {}).get("attempts", 1) + ctx.iteration + 1
+            if output_type != "scalar" and out.get("status") == "success":
+                artifact = self._resolve_artifact(out.get("artifact"))
+                if artifact is None:
+                    return {"success": False, "status": "error",
+                            "message": "refit produced no artifact"}
+                out["artifact"] = artifact
+                out["output_type"] = output_type
+            out["success"] = True
+            out["script"] = code
+            return out
+        return {"success": False, "status": "error",
+                "message": result.get("message", "refit failed")}
+
+    def qc_after_refit(self, ctx: QCItemContext, refit_result: dict,
+                       verification: dict) -> None:
+        ctx.current_result = refit_result
+        ctx.current_score = -1.0  # unverified until qc_assess scores it
+
+    def qc_final_verify(self, ctx: QCItemContext) -> None:
+        result = ctx.current_result
+        if not result or result.get("status") != "success":
+            return
+        if result.get("value") is not None or result.get("artifact"):
+            v = self._verify_result(
+                ctx.state["task"], result, ctx.state["output_type"])
+            result["verification"] = v
+            ctx.verification_history.append(v)
+            if v.get("plausible", True):
+                ctx.best_result = result
+                ctx.best_score = 1.0
+                ctx.approved = True
+
+    def qc_post_verification(self, ctx: QCItemContext):
+        if ctx.approved and ctx.best_result:
+            return {k: v for k, v in ctx.best_result.items()
+                    if k not in ("success", "script", "ok")}
+        return None
+
+    def qc_fallback(self, ctx: QCItemContext) -> dict:
+        if ctx.best_result and ctx.best_result.get("status") == "success":
+            return {k: v for k, v in ctx.best_result.items()
+                    if k not in ("success", "script", "ok")}
+        source = ctx.best_result or ctx.initial_result or {}
+        return {"status": "error",
+                "message": source.get("message", "all attempts failed"),
+                "attempts": source.get("attempts",
+                             self.max_refinement_attempts + 1)}
 
     def _generate_code(self, task: str, data_files: Dict[str, str],
                        recipe: str, packages: List[str],
-                       output_type: str = "scalar") -> str:
+                       output_type: str = "scalar",
+                       verification_feedback: str = "",
+                       recipe_advisory: bool = False) -> str:
         """Generate a self-contained analysis script for ``task``.
 
         ``output_type`` selects the output contract the script must satisfy: a
         ``scalar`` prints ``value``/``units``; a ``curve``/``image``/``datacube``
         writes the artifact into ``OUTPUT_DIR`` and returns a reference plus
         summary statistics the verification gate can judge.
+
+        ``verification_feedback``, when non-empty, carries the reasoning from a
+        prior verification failure and the current annealing-level guidance, so
+        the regenerated script addresses the identified issue.
+        ``recipe_advisory`` (the hot annealing level) keeps the recipe in the
+        prompt — it documents how to read the data — but frees the method.
         """
         files_desc = "\n".join(f"  - {name}: {path}"
                                for name, path in data_files.items())
         output_contract = self._output_contract(output_type)
+        feedback_block = (
+            f"\nPRIOR ATTEMPT FEEDBACK:\n{verification_feedback}\n"
+            if verification_feedback else ""
+        )
+        recipe_label = (
+            "TECHNIQUE RECIPE (advisory at this level: keep its guidance on "
+            "reading the data files, but you may change the method)"
+            if recipe_advisory else "TECHNIQUE RECIPE (follow this)"
+        )
         prompt = (
             "You are a scientific data-analysis engineer. Write a complete, "
             "self-contained Python script that computes the requested property "
@@ -268,7 +473,8 @@ class BaseAnalysisAgent(ABC):
             "JSON object on the LAST line of stdout.\n\n"
             f"TASK: {task}\n\n"
             f"DATA FILES (globals `DATA_FILES` maps name -> path):\n{files_desc}\n\n"
-            + (f"TECHNIQUE RECIPE (follow this):\n{recipe}\n\n" if recipe else "")
+            + (f"{recipe_label}:\n{recipe}\n\n" if recipe else "")
+            + feedback_block
             + "REQUIREMENTS:\n"
             f"- Import only from: {', '.join(packages)}.\n"
             "- `DATA_FILES` (dict name->path) and `OUTPUT_DIR` (str) are ALREADY "
