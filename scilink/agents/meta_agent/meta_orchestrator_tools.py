@@ -787,6 +787,69 @@ class MetaOrchestratorTools:
             required=["datasets"],
         )
 
+        # -- run_swarm (several delegations of any mode at once) -------------
+        def run_swarm(work_items: list, item_time_budget_s: float = None) -> str:
+            print(f"  🐝 Swarm of {len(work_items or [])} item(s)...")
+            from .swarm import run_swarm as _run_swarm
+            return _run_swarm(self.orch, work_items, item_time_budget_s=item_time_budget_s)
+
+        self._register_tool(
+            func=run_swarm,
+            name="run_swarm",
+            description=(
+                "Run SEVERAL delegations of ANY mode (analysis, planning, simulation) "
+                "at the same time, when the parts of a request do not depend on each "
+                "other: e.g. an analysis of a dataset beside a simulation of the "
+                "structure it concerns, or planning questions about different "
+                "samples. Each item is an ordinary delegation on the ledger. Items do "
+                "NOT see each other's results, so work where one step needs another's "
+                "result is delegated in turn, not swarmed. For complementary datasets "
+                "of ONE system whose analyses should be fused, use "
+                "`delegate_to_analyses`. The machine's memory decides how many run at "
+                "once, and an item too large for it is not started (the result says "
+                "why). In AUTOPILOT the user confirms the swarm first and items pause "
+                "for their approvals, one question at a time. Each item's `task` must "
+                "be complete and self-contained, with absolute paths."
+            ),
+            parameters={
+                # Not "items": a property named like the JSON-schema keyword
+                # is ambiguous to schema tooling.
+                "work_items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "mode": {"type": "string",
+                                     "enum": ["analysis", "planning", "simulation"]},
+                            "task": {"type": "string",
+                                     "description": "Complete, self-contained instruction."},
+                            "label": {"type": "string",
+                                      "description": "Short 2-5 word label for the item."},
+                            "subject": {"type": "string",
+                                        "description": "Optional: what the item is about "
+                                                       "(a sample, dataset or structure), "
+                                                       "shown with its questions."},
+                            "data_path": {"type": "string",
+                                          "description": "Optional, analysis items: the "
+                                                         "dataset path, used to estimate the "
+                                                         "item's memory."},
+                            "context": {"type": "object",
+                                        "description": "Optional context, as for a "
+                                                       "delegate_to_* call."},
+                        },
+                        "required": ["mode", "task", "label"],
+                    },
+                    "description": "The items to run concurrently (2-8).",
+                },
+                "item_time_budget_s": {
+                    "type": "number",
+                    "description": ("Optional per-item wall-clock budget in seconds "
+                                    "(default 3600; <= 0 disables)."),
+                },
+            },
+            required=["work_items"],
+        )
+
         # -- delegate_to_analyses (parallel fan-out, full-mesh aux) ----------
         def delegate_to_analyses(branches: list,
                                  figure_style: str = None,

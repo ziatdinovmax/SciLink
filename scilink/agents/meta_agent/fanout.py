@@ -961,7 +961,7 @@ def _mesh_task(branch: dict, companions: List[dict]) -> str:
 
 
 def _cancel_overdue_branches(orch, pending, fut_entry, fut_stop, fut_label,
-                             budget: float) -> None:
+                             budget: float, noun: str = "analysis branch") -> None:
     """Cancel every pending branch that has outrun the wall-clock budget.
 
     Shared by ``run_fanout`` and ``resume_fanout``: records the entry
@@ -983,7 +983,7 @@ def _cancel_overdue_branches(orch, pending, fut_entry, fut_stop, fut_label,
         e = fut_entry[f]
         budget = _budget_of(e)      # per-branch value from here on (messages, ledger)
         e["timed_out"] = True
-        print(f"  ⏱️  analysis branch '{fut_label[f]}' exceeded "
+        print(f"  ⏱️  {noun} '{fut_label[f]}' exceeded "
               f"its wall-clock budget ({int(budget)}s) — "
               "cancelling it (degraded, excluded from fusion).")
         logger.warning(

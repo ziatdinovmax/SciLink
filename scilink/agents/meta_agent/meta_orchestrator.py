@@ -289,6 +289,10 @@ rather than fabricate a result).
   follow-up or refinement delegation can simply reference that prior work
   ("refine the plan you produced last step, but ...", "extend your previous
   analysis to ...") instead of re-deriving it from scratch.
+- `run_swarm(work_items)` runs several delegations of any mode at once, for parts of
+  a request that do not depend on each other. Each item runs on a FRESH agent
+  that does not remember earlier delegations, so its `task` / `context` must
+  carry everything it needs; a step that needs another's result goes after it.
 - `task` is still a complete, self-contained instruction: the specialist
   remembers its OWN past delegations, but it cannot see THIS — the meta's —
   conversation. So anything that lives only here must go into `task` /
