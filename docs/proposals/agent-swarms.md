@@ -1,11 +1,13 @@
 # Proposal: swarms — concurrent agents that share what they find
 
-Status: design notes, drafted 2026-09-28 against `main` at b988c7cd
-(Release 0.0.83). Nothing implemented. Based on a source audit of the meta
+Status: stage 0 merged to `main` on 2026-09-29 (head 328bd2bb); stage 1 is
+next, and "Starting stage 1" below is where to begin. The design notes were
+drafted 2026-09-28 against `main` at b988c7cd (Release 0.0.83), based on a source audit of the meta
 agent (`meta_orchestrator.py`, `meta_orchestrator_tools.py`, `fanout.py`,
 `telemetry.py`), the three mode orchestrators' `run_task`, the executors, the
 human-feedback layer, the LLM wrappers and the persistent stores under
-`~/.scilink`. Line numbers are as of that commit.
+`~/.scilink`. Line numbers in the sections up to "Build order" are as of
+b988c7cd; "Starting stage 1" cites 328bd2bb.
 
 ## Context — the ask, and what the word means here
 
@@ -759,16 +761,31 @@ Backend first, UI last, per CLAUDE.md's sequencing rule. Stage 0 is worth
 doing whether or not the swarm is built. It fixes defects the current fan-out
 can already hit.
 
-0. **Fixes for today's parallelism.**
-   - Atomic child checkpoints and chat histories.
-   - `download_once` for SAM, DCNN and COD.
-   - A lock on `_open_delegation`.
-   - SciLink-side LLM retries with backoff and a timeout on every path
-     (LiteLLM's default retry waits nothing between attempts).
-   - Process-group kill in `ScriptExecutor`.
-   - A lock per KB name in `kb_store`, and a locked, atomic
-     `sessions.jsonl`.
-   - A default timeout on the fan-out `QueueChannel`.
+0. **Fixes for today's parallelism. Done: merged 2026-09-29.**
+   - Atomic child checkpoints and chat histories; a lock on
+     `_open_delegation` (#679). Every ledger write under that lock, and
+     `_ledger_snapshot()` for readers (#693).
+   - `path_lock` (`utils/file_lock.py`) and `download_once`
+     (`utils/download.py`) for SAM, DCNN and COD (#678).
+   - SciLink-side LLM retries: transient errors only, jittered backoff,
+     `Retry-After` honoured, and a timeout on every path (#681). LiteLLM's
+     default retry waited nothing and retried 400s. The chat loops' outer
+     timeout loops are gone (#691).
+   - Process-group kill in `ScriptExecutor`, plus cleanup on SIGHUP/SIGTERM
+     (#684); Windows Job objects (#692, not yet run on a real Windows
+     machine).
+   - A lock per KB name in `kb_store`, a locked, atomic `sessions.jsonl`,
+     and snapshot-first KB attach (#683). A session's KB copy refreshes when
+     the store is published again (#689).
+   - Found while live-testing, fixed in their own PRs: the planning prompt
+     kept its workspace block across autonomy changes (#686); the meta names
+     the attached KB (#687); headless `-p` passes `--data`/`--metadata` (#688);
+     the Live tab's Stop ends the running frame (#690). Filed, not fixed:
+     #685, generated code that runs outside the executor.
+   - **Not done, carried into stage 1:** the default timeout on fan-out's
+     `QueueChannel`, skipped because `fanout_branch_hitl` is never set today
+     and the multi-slot queue replaces it anyway; and the store locks of
+     robustness item 9 for distill staging, graduation and instrument home.
 1. **A concurrent meta.**
    - Ephemeral workers for all three modes.
    - A per-worker thread channel and a multi-slot question queue (the web
@@ -827,6 +844,117 @@ A live run closes stages 1 and 3: an analysis whose claim triggers a
 simulation, on Bedrock, with the board inspected afterwards. Stage 5 closes
 with two MCP demo instruments (`python -m scilink.live.mcp_demo_server`)
 driven through the Live tab.
+
+## Starting stage 1
+
+Line references are to `main` at 328bd2bb. Each step is one small PR off
+`main`, with offline tests and, where it changes a run, a live check. The
+order puts what the later steps rely on first.
+
+**Step 1: the stores that concurrent workers will share.** Carried over from
+stage 0. Wrap the read-modify-write sites in distill staging and graduation
+(`skills/_shared/_staging.py`, `_graduation.py`) and the instrument home
+(`live/instrument_home.py`: plain `write_text` and the `used()` counter) in
+`path_lock`, the way `kb_store` and `sessions.py` use it. Test: two threads
+and two processes hitting one record lose no update.
+
+**Step 2: ephemeral workers for all three modes.**
+- Generalise `_make_ephemeral_analysis_child` (`fanout.py:836`) to
+  `_make_ephemeral_child(orch, mode, base_dir, restore=False)`. Keep the old
+  name as a wrapper so the fan-out resume path is untouched.
+- Planning is built like `_get_planning_child` (`meta_orchestrator.py:864`):
+  `DELEGATED_OBJECTIVE`, `data_dir=None`, and the meta's `knowledge_dir`.
+  Each worker copies a store KB into its own `kb_cache` (`_refresh_store_kb`,
+  `planning_orchestrator.py:1372`), so workers never share index files. The
+  cost is one copy per worker.
+- Simulation is built like `_get_simulation_child` (`:919`), with the import
+  inside the function. A missing `ase` makes that item an error, not the
+  swarm.
+- None is registered in `orch._children`. Each worker gets its own
+  directory, so the `run_task` windows (analysis `:1464`, planning `:1450`,
+  simulation `simulation_orchestrator.py:530`) are correct by construction.
+- Test: two workers of every mode pair on one meta at once, stubbed LLM.
+  Each `run_task` reports only its own outputs, and each ledger entry is
+  its own.
+
+**Step 3: process-global state onto the session (robustness item 10).**
+The sites:
+- Sandbox approval: `_GLOBAL_SANDBOX_APPROVED` (`executors.py:509-543`).
+  It becomes an approval the session or coordinator owns and workers
+  inherit. The module bool remains the standalone fallback.
+- `os.environ.setdefault("UNSAFE_EXECUTION_OK", "true")` at
+  `mcp_server.py:1343`, `hyperspectral_series.py:1306` and
+  `live/_reanchor.py:43`: pass the approval instead.
+- Credentials written to the environment: `server/session_manager.py:85`,
+  `litellm_wrapper.py:163`, `cli/shell/bootstrap.py:73`, and the
+  `_api_manager` singleton (`auth.py:235`). Pass them as client kwargs.
+- `sandbox_env(extra, source)` (`executors.py:597`) already takes a
+  `source`; the session passes its own snapshot of the environment.
+- The `builtins.input` swaps (`server/runner.py:366`, `cli/shell/turn.py:233`,
+  `ui/app.py:639`) and `hitl.set_default_channel` in headless mode
+  (`cli/shell/headless.py:79`). These stay, but every worker thread sets its
+  own thread channel before it runs, so no worker ever reaches them.
+- `ExecutionTimeout` (`executors.py:902`) uses SIGALRM only on the main
+  thread. Confirm that worker threads take its other path.
+- Decide whether issue #685 (generated code outside the executor) lands
+  here, since it is the same boundary.
+
+**Step 4: a channel per worker and a multi-slot question queue.**
+- `_BranchChannel` (`fanout.py:817`) becomes the worker channel. It tags
+  `origin` with the worker and its subject.
+- `QueueChannel` (`hitl.py:142`) holds several outstanding questions. It
+  gets a default `timeout_s` (the stage 0 carry-over); on timeout it resolves
+  to the gate's own default and records `timed_out`.
+- `ParkingChannel.ask` (`server/hitl_channel.py:63-79`) and
+  `TurnState.pending_question` (`server/runner.py:135`) change from one
+  slot to a list keyed by origin. `pending_question.json` (`hitl.py:333`)
+  becomes one file per worker directory.
+- The web UI and the shell show one question at a time from the list,
+  with who is asking. Labels go in `scilink/ui/vocabulary.py` and the
+  generated TS twin, per CLAUDE.md. Structured subjects already carry
+  `origin`.
+- Test: two questions outstanding at once, answered out of order, each
+  reaching its own worker, and one timing out to its default.
+
+**Step 5: an LLM limiter and usage per worker.**
+- A semaphore per (provider, model) inside `_completion_with_retries`
+  (`litellm_wrapper.py:438`). Every completion goes through it since #681.
+  The embedding calls (`:1132-1231`) do not, and need the same cap. It is
+  sized by an env var, with a conservative default. Backoff and
+  `Retry-After` already exist.
+- A worker tag beside the session tag (`tracing.py:118`), written by
+  `record` into `usage.jsonl`. Telemetry reads every worker, not just the
+  two persistent children.
+- Test: N threads against a fake provider never exceed the cap, and usage
+  is split correctly by worker.
+
+**Step 6: `run_swarm(items, budget)`, items only.**
+- An item is `{mode, task, context, subject, budget}`. Each runs on a
+  step 2 worker in `<meta_session>/swarm/<NN>_<slug>/`, with a ledger entry
+  opened through `_open_delegation`.
+- Reuse fan-out's coordinator machinery: its pool, the stop guard,
+  `_admit_branch` (`fanout.py:111`) and the resume path (`:1349`).
+- Autopilot shows the swarm plan first: items, budget and memory. It is a
+  new gate, so it declares a `subject=` from the start.
+- With it, take the stage 4 item marked "worth taking early": refuse an
+  item whose estimate exceeds what the host can give, and the runtime
+  memory guard. `_admit_branch` alone still admits anything when nothing
+  else runs.
+
+**Live checks that close stage 1**, one heavy run at a time:
+1. `run_swarm` with a curve-fitting analysis and a simulation side by side.
+2. Two planning items against one attached KB.
+3. An autopilot swarm with two questions outstanding, answered through the
+   web UI and through the terminal shell.
+4. After each run, confirm that `usage.jsonl` attributes calls per worker
+   and each worker's directory holds only its own outputs.
+
+**Baseline for regressions.** The full suite on `main` at 328bd2bb gave 24
+failed, 3721 passed and 29 errors, all environment and `logging.disable`
+ordering noise. Compare each branch against a `main` worktree run by the set
+of failing test ids, not by the counts. `test_grain_twin_proxy::
+test_threshold_is_tunable` and the wall-clock cases in
+`test_per_tool_checkpoint` are flaky.
 
 ## What stays as it is
 
