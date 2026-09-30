@@ -1656,10 +1656,29 @@ class PlanningOrchestratorAgent:
         # verified only when a human approved it): the review stamp, an
         # unattended gate, and any blocking finding still standing.
         from .planning_rag import blocking_findings
+        from .parser_utils import plan_directions, plan_is_portfolio
+        # The plan's substance in one line each: an experiment's hypothesis,
+        # a portfolio's direction. key_findings is the campaign
+        # configuration; these are what a later task can be told.
+        hypotheses: List[str] = []
+        if plan_is_portfolio(_plan):
+            for d in plan_directions(_plan):
+                text = str(d.get("hypothesis") or d.get("title") or "").strip()
+                if text:
+                    hypotheses.append(f"Direction: {text}")
+        else:
+            for exp in _plan.get("proposed_experiments") or []:
+                if not isinstance(exp, dict):
+                    continue
+                name = str(exp.get("experiment_name") or exp.get("name") or exp.get("title") or "").strip()
+                hyp = str(exp.get("hypothesis") or "").strip()
+                if hyp or name:
+                    hypotheses.append(f"Experiment{' ' + repr(name) if name else ''}: {hyp or 'no hypothesis stated'}")
         plan_review = {
             "human_review": _plan.get("human_review") or None,
             "unattended_gate": _plan.get("unattended_gate") or None,
             "iteration": _plan.get("iteration"),
+            "hypotheses": hypotheses[:8],
             "blocking_findings": [{"issue": f.get("issue"), "conflict": f.get("conflict")}
                                   for f in blocking_findings(_plan.get("critic_findings"))],
             "files": [f for f in files_produced if str(f).endswith("plan.json")][:3],

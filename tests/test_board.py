@@ -388,9 +388,12 @@ def test_planning_and_simulation_records_follow_their_gates():
     entry = {"index": 5, "label": "purity plan", "mode": "planning", "status": "success",
              "recommended_parameters": [{"T_C": 450, "t_min": 30}]}
     approved = {"key_findings": ["Optimization target: purity (maximize)."],
-                "plan_review": {"human_review": {"status": "accepted"}, "blocking_findings": []}}
+                "plan_review": {"human_review": {"status": "accepted"}, "blocking_findings": [],
+                                "hypotheses": ["Experiment 'Purity check': A7 is single-phase anatase"]}}
     recs = board_mod.records_for(entry, approved)
-    assert [(r["kind"], r["status"]) for r in recs] == [("claim", "verified"), ("parameter_point", "verified")]
+    assert [(r["kind"], r["status"]) for r in recs] == [("claim", "verified"), ("claim", "verified"),
+                                                        ("parameter_point", "verified")]
+    assert recs[0]["payload"]["text"].startswith("Experiment 'Purity check'")
     unattended = {"key_findings": ["Optimization target: purity (maximize)."],
                   "plan_review": {"human_review": None, "unattended_gate": {"would_have_been": "accepted"},
                                   "blocking_findings": [{"issue": "650 C exceeds the furnace limit",
@@ -427,17 +430,22 @@ def test_planning_run_task_reports_how_the_plan_was_settled(tmp_path, monkeypatc
     orch.chat = fake_chat
     orch.planner.state["current_plan"] = {
         "iteration": 1, "human_review": {"status": "accepted", "iteration": 1},
+        "proposed_experiments": [{"experiment_name": "Purity check", "hypothesis": "A7 is single-phase anatase"},
+                                 {"experiment_name": "Anneal"}],
         "critic_findings": [{"severity": "blocking", "issue": "650 C exceeds the furnace limit",
                              "conflict": "650 C vs 600 C"}]}
     r = orch.run_task("plan it")
     assert r["plan_review"]["human_review"] == {"status": "accepted", "iteration": 1}
+    assert r["plan_review"]["hypotheses"] == ["Experiment 'Purity check': A7 is single-phase anatase",
+                                              "Experiment 'Anneal': no hypothesis stated"]
     assert r["plan_review"]["unattended_gate"] is None
     assert r["plan_review"]["blocking_findings"] == [{"issue": "650 C exceeds the furnace limit",
                                                       "conflict": "650 C vs 600 C"}]
-    orch.planner.state["current_plan"] = {"iteration": 2, "unattended_gate": {"would_have_been": "accepted"}}
+    orch.planner.state["current_plan"] = {"iteration": 2, "unattended_gate": {"would_have_been": "accepted"},
+                                          "directions": [{"title": "Doping series", "hypothesis": "Nb widens the gap"}]}
     r = orch.run_task("plan again")
     assert r["plan_review"]["human_review"] is None and r["plan_review"]["unattended_gate"]["would_have_been"] == "accepted"
-    assert r["plan_review"]["blocking_findings"] == []
+    assert r["plan_review"]["blocking_findings"] == [] and r["plan_review"]["hypotheses"] == ["Direction: Nb widens the gap"]
 
 
 def test_the_recipe_is_the_agents_approved_script(tmp_path):

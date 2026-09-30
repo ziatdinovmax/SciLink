@@ -419,10 +419,12 @@ def _planning_records(entry: Dict[str, Any], result: Dict[str, Any]) -> List[Dic
             "plan went on unattended (nobody answered its review)" if review.get("unattended_gate")
             else "plan not reviewed by a human")
     out = []
-    for text in result.get("key_findings") or []:
+    # The plan's hypotheses first (its substance), then the campaign
+    # configuration key_findings carries; all under the plan's review status.
+    for text in list(review.get("hypotheses") or []) + list(result.get("key_findings") or []):
         text = str(text).strip()
         if text:
-            out.append({"kind": "claim", "payload": {"text": text},
+            out.append({"kind": "claim", "payload": {"text": text[:1500]},
                         "status": "verified" if approved else "provisional",
                         "evidence": {"gate": gate, "files": list(review.get("files") or [])[:3]}})
     # Points the BO engine computed: an engine's output, not an author's
