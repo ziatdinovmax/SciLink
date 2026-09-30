@@ -2834,6 +2834,65 @@ def _assess_fusion_novelty(orch, claims: list):
     return scored or None
 
 
+def _ledger_dependents(ledger: List[dict], indices: List[int]) -> Dict[int, set]:
+    """For each of ``indices``, the OTHER indices it depends on through the
+    ledger: ``context_from`` (declared or inferred) and ``informed_by``
+    (labels), closed transitively over every entry (a fusion's
+    ``context_from`` is what it fused). Keyed by index: labels repeat
+    (every fusion is "cross-dataset fusion") and a re-analysis may reuse
+    its branch's label."""
+    by_index = {e["index"]: e for e in ledger if isinstance(e.get("index"), int)}
+    by_label: Dict[str, List[int]] = {}
+    for e in ledger:
+        if e.get("label"):
+            by_label.setdefault(str(e["label"]), []).append(e["index"])
+
+    def parents(i: int) -> set:
+        e = by_index.get(i) or {}
+        out = set()
+        for c in e.get("context_from") or []:
+            try:
+                out.add(int(c))
+            except (TypeError, ValueError):
+                pass
+        for lbl in e.get("informed_by") or []:
+            out.update(by_label.get(str(lbl), []))
+        out.discard(i)
+        return out
+
+    wanted = set(indices)
+    result: Dict[int, set] = {}
+    for i in indices:
+        seen, stack = set(), list(parents(i))
+        while stack:
+            j = stack.pop()
+            if j in seen or j == i:
+                continue
+            seen.add(j)
+            stack.extend(parents(j))
+        result[i] = (seen & wanted) - {i}
+    return result
+
+
+def independent_support_of(board, ledger: List[dict], entries: List[dict]) -> Dict[str, Any]:
+    """Fusion's independence count over ``entries`` (the agreeing set):
+    the board's read graph (``board.independent_support``) joined with the
+    ledger's own coupling edges. Keyed by delegation index; ``dependent``
+    is rendered as ``label (#index)`` for the prompt and the report."""
+    idx = [e["index"] for e in entries]
+    disp = {e["index"]: f"'{e.get('label') or 'delegation'}' (#{e['index']})" for e in entries}
+    on_board = board.independent_support({e["index"]: list(e.get("posted") or []) for e in entries},
+                                         reads={e["index"]: list(e.get("reads") or []) for e in entries})
+    deps: Dict[int, set] = {i: set() for i in idx}
+    for k, others in on_board["dependent"].items():
+        deps[int(k)].update(int(o) for o in others)
+    for i, others in _ledger_dependents(ledger, idx).items():
+        deps[i].update(others)
+    dependent = {disp[i]: [disp[j] for j in sorted(o)] for i, o in deps.items() if o}
+    return {"count": len(idx) - len(dependent), "raw": len(idx), "dependent": dependent,
+            "by_index": {str(i): sorted(o) for i, o in deps.items() if o}}
+
+
 def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> str:
     """Reconcile finished branch findings into one cross-dataset narrative.
 
@@ -2966,15 +3025,13 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
     board = getattr(orch, "board", None)
     support = None
     if board is not None:
-        _keys = {(e.get("label") or f"delegation {e['index']}"): e for e in ok}
-        support = board.independent_support(
-            {lbl: list(e.get("posted") or []) for lbl, e in _keys.items()},
-            reads={lbl: list(e.get("reads") or []) for lbl, e in _keys.items()})
+        support = independent_support_of(board, ledger, ok)
         for lbl, srcs in support["dependent"].items():
             independence_caveats.append(
-                f"Branch '{lbl}' had read findings of {srcs} (board reads, "
-                "transitively) before it reported; its agreement with them is "
-                "not an independent confirmation.")
+                f"Branch {lbl} had read or been given findings of {srcs} "
+                "(board reads, context_from or informed_by, transitively) before "
+                "it reported; its agreement with them is not an independent "
+                "confirmation.")
 
     # Harmonized replay — METHOD coupling, the opposite of an independence
     # spend: branches that replayed the donor's approved script verbatim are
@@ -3129,13 +3186,16 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
             "previews, and figures only; do not present any cross-dataset "
             "number as computed.\n")
            if computed and computed.get("status") != "success" else "")
-        + ((f"\n\nINDEPENDENT SUPPORT (computed from the board's read graph, "
-            f"not judged): {support['count']} of {support['raw']} branches "
-            "reached their findings without having read another branch's"
+        + ((f"\n\nINDEPENDENT SUPPORT (computed, not judged): {support['count']} of "
+            f"{support['raw']} branches reached their findings without having read or "
+            "been given another branch's, counting the board's read graph and the "
+            "ledger's context_from / informed_by edges, transitively"
             + (f"; dependent: {json.dumps(support['dependent'])}"
                if support["dependent"] else "")
-            + ". Render this number where you weigh agreement; agreement "
-            "among the dependent branches counts once.\n")
+            + ". It does NOT see a finding pasted into a task or context by hand "
+            "without a context_from citation, so treat it as an upper bound. Render "
+            "this number where you weigh agreement; agreement among the dependent "
+            "branches counts once.\n")
            if support is not None else "")
         + ((f"\n\nINDEPENDENCE PROVENANCE: these branches are NOT fully "
             "independent of the listed companions "

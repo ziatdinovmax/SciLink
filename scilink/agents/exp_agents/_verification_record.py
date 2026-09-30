@@ -240,3 +240,50 @@ def build_verification_prompt_history(
     ])
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# the verdict a caller may rely on
+# ---------------------------------------------------------------------------
+
+def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
+    """Did this analysis pass its own pipeline's checks?
+
+    A run's ``status`` says whether it produced a result, not whether the
+    result was approved: the curve and image agents return ``success`` for a
+    salvaged best-available fit (``quality_warning``), for a run whose
+    verification did not finish (``quality_history.unverified``) and for a
+    result the verifier never approved (``approved`` false); hyperspectral
+    reports ``partial``. This reads those signals, per item for a series,
+    and gives one answer with the reason — for the board, which posts only
+    what an agent verified as verified, and for any caller that must not
+    mistake a produced result for an approved one.
+    """
+    full = full_result or {}
+    status = full.get("status")
+    if status != "success":
+        return {"verified": False, "reason": f"status {status!r}"}
+    if full.get("quality_warning"):
+        return {"verified": False, "reason": "salvaged best-available result (quality_warning)"}
+    rv = full.get("reuse_validity") or {}
+    if rv.get("reused") and rv.get("verdict") not in (None, "good"):
+        return {"verified": False, "reason": f"reused script verdict {rv.get('verdict')!r}"}
+    items = full.get("individual_results")
+    if isinstance(items, list) and items:
+        histories = [(it.get("name") or it.get("index"), it.get("quality_history"))
+                     for it in items if isinstance(it, dict) and it.get("success")]
+        if not histories:
+            return {"verified": False, "reason": "no item succeeded"}
+    else:
+        histories = [(None, full.get("quality_history"))]
+    for name, qh in histories:
+        where = f" (item {name})" if name is not None else ""
+        if not isinstance(qh, dict) or not qh:
+            return {"verified": False, "reason": f"no verification record{where}"}
+        if qh.get("unverified"):
+            return {"verified": False, "reason": f"verification did not finish{where}"
+                    + (f": {qh.get('stopped_by')}" if qh.get("stopped_by") else "")}
+        if not qh.get("approved"):
+            return {"verified": False, "reason": f"the verifier did not approve the result{where}"}
+    return {"verified": True, "reason": "approved by the analysis verifier"}
+

@@ -13,6 +13,7 @@ import inspect
 import json
 from scilink.utils.text_io import atomic_write_json
 import logging
+from ._verification_record import analysis_verdict
 import os
 import time
 from pathlib import Path
@@ -1702,6 +1703,10 @@ class AnalysisOrchestratorAgent:
                     "status": rec.get("status"),
                     "data_path": rec.get("data_path"),
                     "output_directory": rec.get("output_directory"),
+                    # Whether the agent's own verification approved the
+                    # result (a salvaged or unverified run is still
+                    # status "success"): what the board calls verified.
+                    **analysis_verdict(rec.get("full_result")),
                 } for rec in new_analyses
             ],
             "warnings": warnings,

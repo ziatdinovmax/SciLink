@@ -389,23 +389,39 @@ def _analysis_records(entry: Dict[str, Any], result: Dict[str, Any]) -> List[Dic
         if text.startswith("[") and "]" in text:
             aid, claim = text[1:text.index("]")].strip(), text[text.index("]") + 1:].strip()
         rec = status_by_id.get(aid or "")
-        verified = bool(rec) and rec.get("status") == "success"
+        # ``verified`` is the agent's own verdict (analysis_verdict): a
+        # salvaged, unverified or unapproved result is "success" too, and
+        # stays provisional here with the reason as its gate.
+        verified, why = _analysis_verified(rec)
         if not claim:
             continue
-        out.append({"kind": "claim", "payload": {"text": claim},
+        out.append({"kind": "claim", "payload": {"text": claim[:1500]},
                     "status": "verified" if verified else "provisional",
-                    "evidence": {"analysis_ids": [aid] if aid else [],
-                                 "gate": "analysis pipeline (QC and verification passed)"
-                                 if verified else "analysis not marked successful"}})
+                    "evidence": {"analysis_ids": [aid] if aid else [], "gate": why}})
     for aid, rec in status_by_id.items():
         script = _recipe_script(rec.get("output_directory"))
         if script is not None:
+            verified, why = _analysis_verified(rec)
             out.append({"kind": "recipe", "payload": {"path": str(script), "analysis_id": aid,
                                                       "agent": rec.get("agent_name")},
-                        "status": "verified" if rec.get("status") == "success" else "provisional",
+                        "status": "verified" if verified else "provisional",
                         "evidence": {"analysis_ids": [aid], "files": [str(script)],
-                                     "gate": "approved analysis script"}})
+                                     "gate": ("approved analysis script: " if verified
+                                              else "script of an unapproved run: ") + why}})
     return out
+
+
+def _analysis_verified(row: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
+    """(verified, reason) for one ``analyses`` row of an analysis result.
+    A row without the verdict (an older caller) is not verified: the board
+    never promotes on ``status`` alone."""
+    if not row:
+        return False, "claim names no analysis of this run"
+    if row.get("verified") is True:
+        return True, f"analysis {row.get('analysis_id')}: {row.get('reason') or 'approved by the analysis verifier'}"
+    return False, (f"analysis {row.get('analysis_id')}: {row.get('reason') or 'no verification verdict'}"
+                   if row.get("status") == "success" else
+                   f"analysis {row.get('analysis_id')} did not succeed (status {row.get('status')!r})")
 
 
 def _recipe_script(out_dir: Any) -> Optional[Path]:

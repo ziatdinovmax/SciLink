@@ -192,9 +192,11 @@ class AnalysisWorker:
                 "key_findings": [f"[analysis_1] anatase from {task[:12]}",
                                  "[analysis_2] rutile trace (unverified run)",
                                  "an unattributed remark"],
-                "analyses": [{"analysis_id": "analysis_1", "status": "success",
+                "analyses": [{"analysis_id": "analysis_1", "status": "success", "verified": True,
+                              "reason": "approved by the analysis verifier",
                               "output_directory": str(out), "agent_name": "CurveFittingAgent"},
-                             {"analysis_id": "analysis_2", "status": "error"}],
+                             {"analysis_id": "analysis_2", "status": "error", "verified": False,
+                              "reason": "status 'error'"}],
                 "files_produced": [], "suggested_followups": [], "warnings": []}
 
 
@@ -343,7 +345,8 @@ def _branch(meta, index, label, reads=None):
             e["reads"] = list(reads)
     meta._close_delegation(e, {"status": "success", "summary": f"{label} summary",
                                "key_findings": [f"[analysis_{index}] anatase ({label})"],
-                               "analyses": [{"analysis_id": f"analysis_{index}", "status": "success"}],
+                               "analyses": [{"analysis_id": f"analysis_{index}", "status": "success",
+                                             "verified": True}],
                                "files_produced": [], "warnings": []})
     return e
 
@@ -355,8 +358,8 @@ def test_fusion_reports_independent_support_and_posts_its_claims(meta, monkeypat
     b = _branch(meta, 2, "XRD A7")
     out = json.loads(fo.fuse_delegations(meta, [1, 2]))
     assert out["status"] == "success"
-    assert out["independent_support"] == {"count": 2, "raw": 2, "dependent": {}}
-    assert "INDEPENDENT SUPPORT (computed from the board's read graph, not judged): 2 of 2" in _fusion_llm.prompts[-1]
+    assert out["independent_support"] == {"count": 2, "raw": 2, "dependent": {}, "by_index": {}}
+    assert "INDEPENDENT SUPPORT (computed, not judged): 2 of 2" in _fusion_llm.prompts[-1]
     fusion = meta._delegation_ledger[-1]
     assert fusion["mode"] == "fusion" and set(fusion["reads"]) == set(a["posted"]) | set(b["posted"])
     rec = meta.board.get(fusion["posted"][0])
@@ -370,12 +373,13 @@ def test_fusion_reports_independent_support_and_posts_its_claims(meta, monkeypat
         e3["parallel_group"] = "fanout_1"
     meta._close_delegation(e3, {"status": "success", "summary": "again",
                                 "key_findings": ["[analysis_3] anatase (again)"],
-                                "analyses": [{"analysis_id": "analysis_3", "status": "success"}],
+                                "analyses": [{"analysis_id": "analysis_3", "status": "success", "verified": True}],
                                 "files_produced": [], "warnings": []})
     out = json.loads(fo.fuse_delegations(meta, [1, 2, e3["index"]]))
     assert out["independent_support"] == {"count": 2, "raw": 3,
-                                          "dependent": {"Raman A7 again": ["Raman A7", "XRD A7"]}}
-    assert any("had read findings of" in c for c in out["caveats"])
+                                          "dependent": {"'Raman A7 again' (#4)": ["'Raman A7' (#1)", "'XRD A7' (#2)"]},
+                                          "by_index": {"4": [1, 2]}}
+    assert any("had read or been given findings of" in c for c in out["caveats"])
     assert "2 of 3 branches" in _fusion_llm.prompts[-1]
 
 
@@ -384,8 +388,43 @@ def test_one_branch_informed_by_the_other_counts_one(meta, monkeypatch):
     a = _branch(meta, 1, "Raman A7")
     _branch(meta, 2, "XRD A7", reads=a["posted"])
     out = json.loads(fo.fuse_delegations(meta, [1, 2]))
-    assert out["independent_support"] == {"count": 1, "raw": 2, "dependent": {"XRD A7": ["Raman A7"]}}
+    assert out["independent_support"] == {"count": 1, "raw": 2, "dependent": {"'XRD A7' (#2)": ["'Raman A7' (#1)"]},
+                                          "by_index": {"2": [1]}}
     assert out["caveats"] and "not an independent confirmation" in out["caveats"][0]
+
+
+def test_independence_counts_the_ledgers_own_edges(meta, monkeypatch):
+    """Review of #702: a check given a peer's finding in `context`, a
+    re-analysis citing an analysis (not a fusion), and an entry stamped
+    informed_by were all counted independent. Keyed by index, so duplicate
+    labels and a fusion of fusions count right."""
+    monkeypatch.setattr(fo, "_llm_json", _fusion_llm)
+    a = _branch(meta, 1, "fit")
+    b = _branch(meta, 2, "fit")                                      # a duplicate label
+    # a check item told a peer's finding through context (declared context_from)
+    c = meta._open_delegation("analysis", "confirm the fit", {"peer": a["key_findings"]}, [1], "fit")
+    with meta._fanout_lock:
+        c["fanout"] = True; c["parallel_group"] = "fanout_1"
+    meta._close_delegation(c, {"status": "success", "summary": "s", "key_findings": ["[analysis_3] anatase"],
+                               "analyses": [{"analysis_id": "analysis_3", "status": "success", "verified": True}],
+                               "files_produced": [], "warnings": []})
+    out = json.loads(fo.fuse_delegations(meta, [1, 2, 3]))
+    assert out["independent_support"] == {"count": 2, "raw": 3, "dependent": {"'fit' (#3)": ["'fit' (#1)"]},
+                                          "by_index": {"3": [1]}}
+    # an informed_by stamp (the legacy fan-out coupling) is an edge too
+    with meta._fanout_lock:
+        b["informed_by"] = ["fit"]; b["informed_via"] = "steering"
+    out = json.loads(fo.fuse_delegations(meta, [1, 2]))
+    assert out["independent_support"]["by_index"] == {"2": [1]}
+    # a fusion of two fusions: raw 2, both labelled "cross-dataset fusion"
+    f1 = meta._delegation_ledger[-2]["index"]; f2 = meta._delegation_ledger[-1]["index"]
+    out = json.loads(fo.fuse_delegations(meta, [f1, f2]))
+    # (they share inputs but neither read the other: raw 2, and the count is
+    # about reads, not common ancestry — a caveat the prompt states)
+    assert out["independent_support"]["raw"] == 2
+    assert set(out["independent_support"]["dependent"]) <= {f"'cross-dataset fusion' (#{f1})", f"'cross-dataset fusion' (#{f2})"}
+    # the prompt says what the count leaves out
+    assert "does NOT see a finding pasted into a task" in _fusion_llm.prompts[-1]
 
 
 # ------------------------------------------------------- what the modes post
@@ -417,6 +456,44 @@ def test_planning_and_simulation_records_follow_their_gates():
     assert recs[0]["payload"]["inputs"] == ["INCAR"]
     # a failed delegation posts nothing
     assert board_mod.records_for({"mode": "analysis", "status": "error"}, {"key_findings": ["[a] x"]}) == []
+
+
+def test_a_salvaged_or_unverified_analysis_stays_provisional(tmp_path):
+    """An agent returns "success" for a salvaged best-available fit, an
+    unverified (out of budget) run and a result the verifier never approved
+    (review of #702). The row's verdict decides, never the status."""
+    from scilink.agents.exp_agents._verification_record import analysis_verdict
+    ok = {"status": "success", "quality_history": {"approved": True}}
+    assert analysis_verdict(ok) == {"verified": True, "reason": "approved by the analysis verifier"}
+    assert not analysis_verdict({**ok, "quality_warning": "below threshold"})["verified"]
+    assert "did not finish" in analysis_verdict(
+        {"status": "success", "quality_history": {"approved": False, "unverified": True, "stopped_by": "time_budget"}})["reason"]
+    assert "did not approve" in analysis_verdict({"status": "success", "quality_history": {"approved": False}})["reason"]
+    assert "no verification record" in analysis_verdict({"status": "success"})["reason"]
+    assert "reused script" in analysis_verdict({**ok, "reuse_validity": {"reused": True, "verdict": "poor"}})["reason"]
+    assert analysis_verdict({**ok, "reuse_validity": {"reused": True, "verdict": "good"}})["verified"]
+    assert analysis_verdict({"status": "partial", "quality_history": {"approved": True}})["reason"] == "status 'partial'"
+    series = {"status": "success", "individual_results": [
+        {"name": "s0", "success": True, "quality_history": {"approved": True}},
+        {"name": "s1", "success": False, "quality_history": None},
+        {"name": "s2", "success": True, "quality_history": {"approved": False}}]}
+    assert analysis_verdict(series)["reason"] == "the verifier did not approve the result (item s2)"
+    series["individual_results"][2]["quality_history"]["approved"] = True
+    assert analysis_verdict(series)["verified"]
+    # on the board: the same claim text, provisional with the reason as its gate
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "fitting_script.py").write_text("")
+    entry = {"index": 1, "label": "fit", "mode": "analysis", "status": "success"}
+    result = {"key_findings": ["[a1] anatase"],
+              "analyses": [{"analysis_id": "a1", "status": "success", "verified": False,
+                            "reason": "salvaged best-available result (quality_warning)",
+                            "output_directory": str(tmp_path)}]}
+    recs = board_mod.records_for(entry, result)
+    assert [(r["kind"], r["status"]) for r in recs] == [("claim", "provisional"), ("recipe", "provisional")]
+    assert "salvaged" in recs[0]["evidence"]["gate"] and "unapproved run" in recs[1]["evidence"]["gate"]
+    # a row without a verdict (an older caller) is never promoted on status
+    result["analyses"][0] = {"analysis_id": "a1", "status": "success"}
+    assert all(r["status"] == "provisional" for r in board_mod.records_for(entry, result))
 
 
 def test_planning_run_task_reports_how_the_plan_was_settled(tmp_path, monkeypatch):

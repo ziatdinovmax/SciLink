@@ -145,9 +145,10 @@ def main():
           len(a_reads) == 1 and a_reads[0] in b_posted
           and ag.board.get(a_reads[0])["kind"] == "measurement"
           and ag.board.get(a_reads[0])["status"] == "verified")
+    _sup = fused.get("independent_support") or {}
     check("fusion computes independent_support 1 of 2",
-          fused.get("independent_support") == {"count": 1, "raw": 2,
-                                               "dependent": {"techA series": ["techB series"]}})
+          (_sup.get("count"), _sup.get("raw")) == (1, 2)
+          and list(_sup.get("dependent") or {}) == [f"'techA series' (#{by_label['techA series']['index']})"])
     check("fusion prompt renders the computed count",
           "INDEPENDENT SUPPORT" in prompt and "1 of 2 branches" in prompt)
 
