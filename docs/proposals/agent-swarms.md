@@ -1,7 +1,8 @@
 # Proposal: swarms — concurrent agents that share what they find
 
-Status: stage 0 merged to `main` on 2026-09-29 (head 328bd2bb); stage 1 is
-next, and "Starting stage 1" below is where to begin. The design notes were
+Status: stage 0 merged to `main` on 2026-09-29 (head 328bd2bb). Stage 1 is
+PR #697, built as "Starting stage 1" below describes; what changed on the way
+is recorded under the stage in "Build order". Stage 2 (the board) is next. The design notes were
 drafted 2026-09-28 against `main` at b988c7cd (Release 0.0.83), based on a source audit of the meta
 agent (`meta_orchestrator.py`, `meta_orchestrator_tools.py`, `fanout.py`,
 `telemetry.py`), the three mode orchestrators' `run_task`, the executors, the
@@ -796,6 +797,31 @@ can already hit.
 
    This alone gives parallel cross-mode work, such as an analysis next to a
    simulation.
+
+   **Built in #697 (2026-09-29).** What changed from the plan:
+   - *Process-global state* needed no change for a swarm. A swarm's workers
+     all run in one user's session, under that user's consent and
+     credentials, so sharing them is correct. The cross-session leak is a
+     multi-user-server concern, left to process-per-campaign hosting. Each
+     worker installs its own thread channel, so no question reaches
+     `builtins.input`, and `ExecutionTimeout` already uses a per-thread
+     watchdog off the main thread.
+   - *The question queue* got its timeout, withdrawal and `pending()`
+     listing in the backend. The web `ParkingChannel` keeps one slot: the
+     coordinator serves questions one at a time through it, so a multi-slot
+     panel moves to stage 6.
+   - *The memory guard* cancels the running item expected to hold the most
+     memory (the newest of equals), not simply the newest. It acts one
+     cancellation at a time, reading memory again only after the cancelled
+     worker has ended.
+   - *The LLM cap* defaults to 16 calls in flight per model, above what
+     today's runs reach. It covers completions, embeddings and the internal
+     proxy client.
+   - The tool parameter is `work_items`, not `items`: a property named like
+     the JSON-schema keyword is ambiguous to schema tooling.
+   - *Not done:* swarm workers in the Telemetry tab; the web UI and shell
+     driven live with worker questions; and HPC submission from meta-driven
+     simulations (#696), which a swarm of simulation items needs.
 2. **The board.**
    - The record schema, the single writer and recorded reads.
    - Verified-only propagation and board-blind checks.
@@ -847,7 +873,8 @@ driven through the Live tab.
 
 ## Starting stage 1
 
-Line references are to `main` at 328bd2bb. Each step is one small PR off
+Kept as the plan stage 1 was built from (#697); see the notes under stage 1
+in "Build order" for what changed. Line references are to `main` at 328bd2bb. Each step is one small PR off
 `main`, with offline tests and, where it changes a run, a live check. The
 order puts what the later steps rely on first.
 
