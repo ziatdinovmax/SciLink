@@ -646,6 +646,53 @@ through inherited internals), no base class is required. The contract is
 duck-typed; what the children share is *interface shape*, not
 *implementation*.
 
+## Swarms: several delegations at once, on fresh agents
+
+`run_swarm(work_items)` (`scilink/agents/meta_agent/swarm.py`) runs 2-8
+delegations of any mode concurrently, each on an **ephemeral worker**
+(`workers.build_child`, the one constructor behind the persistent specialists
+too) in `<meta_session>/swarm/<NN>_<slug>/`, each an ordinary ledger
+delegation. The design, its stages and what each stage left open are in
+`docs/proposals/agent-swarms.md`; stages 0 and 1 are on `main` (#697), stage 2
+(the shared board) is next. Settled rules, each learned from a live run or a
+review:
+
+- **A swarm item is a fresh agent.** It does not remember earlier delegations;
+  its task and context carry everything. The persistent specialists stay for
+  conversation, where accumulating context is the point — and two concurrent
+  `run_task` calls on one specialist would each report the other's output.
+- **The coordinator is rules, not a model.** Admission by free memory, a
+  capacity plan that refuses an item larger than the machine, a memory guard
+  that cancels the heaviest running item (never one running alone) and reruns
+  it alone once, a wall-clock budget per item, no item starting another. The
+  model decides between swarm runs and inside each item, never within a run.
+- **A gate nobody answers is never a human decision.** Worker questions go
+  through one queue (`hitl.QueueChannel`), served on a thread of their own
+  (`hitl.QuestionServer`) so the coordinator keeps enforcing its rules, tagged
+  with who asks (`WorkerChannel`), and time out to the gate's default — with
+  the clock restarting when the question is shown, and the wait left out of
+  the item's budget. A timeout, including one inside a channel with its own
+  clock (`hitl.mark_timed_out`, the MCP server's), is visible to the gate
+  (`last_question_timed_out`): the planner then writes `unattended_gate`, never
+  `human_review`. A plan settled by silence would be settled by nobody.
+- **A cancel must reach a waiting worker.** A print is not the only place a
+  Stop lands: a parked question, an LLM-slot wait, a backoff sleep and a
+  best-of-N candidate all poll the thread's cancel
+  (`log_context.register_cancel`, `inherited_context`). A new agent that spawns
+  its own threads uses `attributed_to_current` or `inherited_context`, or its
+  threads run on after their item is cancelled.
+- **The provider and the stores are shared.** At most `SCILINK_LLM_MAX_INFLIGHT`
+  calls per model are in flight (`wrappers/llm_limiter.py`, held per request,
+  never across a backoff); usage is charged per worker; the distill staging,
+  graduated skills and instrument homes take a lock for every change, and a
+  reviewed skill upgrade refuses a skill that changed during the review.
+- **One PR per stage.** A stage is verified as a whole: the full suite against
+  a `main` worktree by failing-test ids, and live checks on Bedrock from a
+  frozen snapshot, one heavy run at a time.
+
+A new sub-agent or skill inside a mode gets all of this without swarm code;
+a fourth mode would not, and there will not be one.
+
 ## The terminal is one shell over the four chat modes
 
 `scilink/cli/shell/` is the single REPL behind bare `scilink` (meta),
