@@ -997,6 +997,128 @@ of failing test ids, not by the counts. `test_grain_twin_proxy::
 test_threshold_is_tunable` and the wall-clock cases in
 `test_per_tool_checkpoint` are flaky.
 
+## After stage 1: what is on main, and what is open
+
+Everything a fresh session needs to start stage 2 is here and in the two
+sections above ("Starting stage 1" for the shape of a stage's work, and the
+notes under stage 1 in "Build order" for what the reviews changed). Line
+references are to `main` at bed2f7f8.
+
+**What is on main (stage 1, #697):**
+- `scilink/agents/meta_agent/swarm.py`: `run_swarm` (:311), `normalize_items`
+  (:90), `capacity_plan` (:119), `_run_item` (:209), `_guard_memory` (:273);
+  the meta tool `run_swarm(work_items, item_time_budget_s)` in
+  `meta_orchestrator_tools.py`, and one bullet in the meta prompt (a swarm
+  item is a fresh agent).
+- `scilink/agents/meta_agent/workers.py`: `build_child` (:51, the one
+  constructor for persistent specialists and workers), `release_child` (:150).
+- `scilink/hitl.py`: `QueueChannel` (:183, timeouts, withdrawal, `pending()`,
+  `close()`), `QuestionServer` (:341), `WorkerChannel` (:418),
+  `mark_timed_out` / `last_question_timed_out` / `unattended_questions`
+  (:388-), `question_timeout_s`. The planner's `_stamp_human_review` skips
+  the stamp after a timeout and writes `unattended_gate`.
+- `scilink/utils/log_context.py`: `register_cancel` / `raise_if_cancelled` /
+  `cancel_watched`, `inherited_context`; `attributed_to_current` carries the
+  session and worker usage tags and the cancel.
+- `scilink/wrappers/llm_limiter.py`: `llm_slot`, `llm_max_inflight`;
+  `litellm_wrapper.call_with_retries` (shared by the LiteLLM path and the
+  proxy client); `tracing.attributed`, `usage.UsageLedger.by_worker`.
+- Locks: `_staging` (domain lock), `_graduation.skill_lock`, `_memory`
+  mutators, `live/instrument_home.py` (`instruments/.locks/<id>.lock`),
+  `base_hash` from proposal to apply.
+- Tests: `test_run_swarm.py`, `test_worker_questions.py`, `test_llm_limiter.py`,
+  `test_ephemeral_workers.py`, `test_store_locks_concurrency.py`, plus
+  `test_best_of_n_anchor.py::test_candidates_inherit_the_items_cancel_and_usage_tags`.
+- Knobs: `SCILINK_SWARM_MAX_WORKERS` (3), `SCILINK_QUESTION_TIMEOUT_S` (1800;
+  `0`/`none` = no bound), `SCILINK_LLM_MAX_INFLIGHT` (16; `0` lifts it);
+  constants `SWARM_MAX_ITEMS` (8), `SWARM_ITEM_TIME_BUDGET_S` (3600),
+  `SWARM_MEMORY_FLOOR_BYTES` (0.75 GB), `SWARM_DRAIN_TIMEOUT_S` (600).
+
+**Open after stage 1** (none blocks stage 2; each says where it belongs):
+- *Telemetry tab does not show swarm workers* (`telemetry.py` reads the two
+  persistent children). Stage 6, or a small PR any time.
+- *Multi-slot question panel* — the web `ParkingChannel` and
+  `TurnState.pending_question` keep one slot; the coordinator serves one
+  question at a time through it; the panel shows who asks (`asker`). Stage 6.
+- *A question already on screen when a swarm returns stays until answered*
+  (its answer is then discarded with the "not used" notice); clearing the
+  web's `pending_question` from the swarm would reach into the turn. Stage 6.
+- *Web UI and shell were never driven live with worker questions*; the
+  backend paths were (scripted person, MCP client stand-in).
+- *Two timing-dependent behaviours were never exercised live*, only offline:
+  two workers' questions waiting at the same moment, and the timeout clock
+  restarting when a queued question is shown (both live runs had the
+  workers reach their gates minutes apart).
+- *Memory is estimated, not measured*: an analysis item from its data file's
+  size ×6, else a per-mode floor (0.5 GB). A heavy new modality (4D
+  tomography) may be refused or held on a laptop. Stage 4 measures per class.
+- *Planning workers copy a plain-folder KB in full*, up to 8× per swarm; a
+  store KB is the recommended shape (copied once by the planner). Accepted.
+- *Queue time is inside the reported LLM latency*. Accepted.
+- *No swarm resume*: after a Stop, queued items stay `running` on the ledger
+  until the next turn's sweep marks them interrupted. Documented; fan-out has
+  a resume, the swarm does not.
+- *HPC from meta-driven simulations* — #696 (plumbing, a way to connect, and
+  long jobs in a swarm). A swarm of simulation items prepares inputs only.
+- *Generated code outside the executor* — #685 (predates the swarm).
+
+## Starting stage 2 (the board)
+
+The design is §2 above; the tests to write are listed under "Build order".
+The board is the first thing that makes items collaborate, so it is also
+where the independence rule gets its structural form. One PR for the stage
+(the user's rule), verified like stage 1: the full suite against a `main`
+worktree by the set of failing test ids, and live checks on Bedrock from a
+frozen snapshot, one heavy run at a time.
+
+**Step 1: the record and the writer.** A `scilink/agents/meta_agent/board.py`:
+the record schema of §2, `Board.append(record)` as the only writer (the
+coordinator's thread; workers post through an in-process queue the
+coordinator drains on each poll), `board.jsonl` under the meta session with
+an in-memory index, a torn last line skipped on load (as `recipes()` does),
+and `Board.snapshot(subject=, kind=, include_provisional=False)` returning a
+filtered, immutable view with the ids it returned. `supersedes` and
+`retraction` records, and the fold that gives the current view.
+
+**Step 2: posting.** `_run_item` posts a worker's verified findings at its
+commit point (after `run_task` returns): one `claim` per `key_findings` entry
+with the analysis id as evidence, `recipe` / `structure` / `parameter_point`
+where the mode produces them, `hazard` for a blocking plan conflict. What
+"verified" means per mode is what the mode already checks (QC and replay
+gates, a human-approved or unattended plan is NOT verified, a validated
+structure). A worker's own result stays the ledger entry; the board holds
+the typed, small records with files by path.
+
+**Step 3: reading.** An item opts in with `reads_board`; the read happens once
+at the start of the item (a rendered block in the task, the shape of
+`_steering_block`, `fanout.py:853`) and the returned ids are stamped on the
+ledger entry as `reads`. `check` items (best-of-N candidates, audits, fusion
+verification) are refused a read by the API, not by prompt text. Board
+context is additive by type: hint kinds only, never a gate parameter.
+
+**Step 4: independence.** `independent_support(claim, board)`: the count of
+agreeing authors whose transitive read sets do not include another
+supporter's finding. Fusion (`fuse_delegations`,
+`meta_orchestrator_tools.py:1084`) reports it beside the raw count; the
+existing `informed_by` / `informed_via` stamps
+(`meta_orchestrator.py:1544`, `fanout.py:1812`) become reads on the board, so
+the prompt-level discount in fusion renders a number instead of guessing.
+
+**Step 5: the meta reads the board between runs.** A `get_board(subject,
+kind)` tool (filtered, private fields dropped, provisional excluded unless
+asked) so the meta's model can launch the next swarm from what the last one
+found. This is where "delegate tasks" lives; it stays at turn granularity.
+
+**Tests:** independence counting on constructed read graphs; a check
+refused a read; verified-only propagation; a superseded record folded out;
+a torn last line skipped; the writer serialised under concurrent posts;
+the board in the meta checkpoint and restore.
+
+**Live checks that close stage 2:** a swarm of two analyses on one subject
+followed by a swarm that reads their claims (the second run's ledger entries
+show the reads); fusion of two independent analyses reporting
+`independent_support == 2`, and of one informed by the other reporting 1.
+
 ## What stays as it is
 
 - The three modes.
