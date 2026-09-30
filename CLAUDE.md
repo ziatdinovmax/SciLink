@@ -690,16 +690,25 @@ run or a review:
   delegation posts typed, small records to `swarm/board.jsonl`
   (`meta_agent/board.py`): a claim, a measurement, a recipe or structure by
   path, a parameter point, a hazard. One writer, never edited in place (a
-  correction `supersedes`, a withdrawal is a `retraction`), and `verified`
-  means the author's own pipeline passed it — an analysis QC, a human-approved
-  plan (an unattended one stays provisional), a validated structure. The board
-  adds no judge. A reader gets verified records only, as hints under the same
-  additive-only rule as steering; a swarm item reads once, at its start
-  (`reads_board`), and a `check` item is refused a read by the API, not by
-  prompt text. Every read is recorded (`reads`), so fusion's
-  `independent_support` is computed from the read graph and rendered, not
-  guessed; a new mode of coupling two delegations becomes a read on the board,
-  not a new prompt caveat.
+  correction `supersedes`, a withdrawal is a `retraction`, and neither takes
+  effect from an unchecked record of another author), and `verified` means a
+  GATE the author's own pipeline runs passed it — the analysis verifier's
+  approval (`analysis_verdict`: a salvaged, unverified or unapproved result is
+  "success" too, and stays provisional), a human-approved plan (an unattended
+  one stays provisional; only the delegation that wrote or settled the plan
+  posts it), the structure validator. Engine output that passed no gate — a BO
+  point, a steering reduction, a TEA summary — is provisional. The board adds
+  no judge. A reader gets verified records only, as quoted data between markers,
+  clipped and budgeted, under the same additive-only rule as steering; a swarm
+  item reads once, at its start (`reads_board`, the newest 24), and a `check`
+  item is refused a read by the API, not by prompt text. Every read is
+  recorded (`reads`, exactly what was shown), so fusion's `independent_support`
+  is computed — the board's read graph joined with the ledger's `context_from`
+  and `informed_by` edges, keyed by delegation index — and rendered with what it
+  cannot see (a finding pasted by hand with no citation); a new way of coupling
+  two delegations becomes a read on the board, not a new prompt caveat. A
+  record describes its artifact as it was when posted; a later edit is a later
+  delegation's record.
 - **One PR per stage.** A stage is verified as a whole: the full suite against
   a `main` worktree by failing-test ids, and live checks on Bedrock from a
   frozen snapshot, one heavy run at a time.

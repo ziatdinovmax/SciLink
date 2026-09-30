@@ -887,6 +887,30 @@ can already hit.
    - *Found by the tests:* a post after a torn last line was appended onto
      the torn text. The writer now starts on a fresh line when the file does
      not end with one.
+   - *From the review (PR #702):* an analysis claim is verified on the
+     agent's own verdict, not on `status` — the curve and image agents
+     return `success` for a salvaged best-available fit (`quality_warning`),
+     an unverified run (`quality_history.unverified`) and a result the
+     verifier never approved (`approved` false); `analysis_verdict`
+     (`_verification_record.py`) reads those, per item for a series, and the
+     `analyses` rows of `run_task` carry `verified` and `reason`. Fusion's
+     `independent_support` is keyed by delegation index (labels repeat) and
+     joins the board's read graph with the ledger's `context_from` (declared
+     or inferred) and `informed_by` edges, transitively
+     (`fanout.independent_support_of`); the prompt says what it cannot see.
+     Only the delegation that wrote or settled a plan posts its hypotheses
+     (`plan_review.written_here`); configuration and TEA findings, BO points
+     and steering reductions are provisional (no gate); a blocking finding a
+     human approved the plan over is settled and not posted. A reader is
+     shown the newest 24 records, clipped and under a budget, between data
+     markers, and is stamped with exactly those ids. Records are written
+     JSON-clean (a `Path` or numpy scalar in `evidence` no longer breaks
+     every later read). A supersede or retraction takes effect only from the
+     original's author, a verified record, or the coordinator. `get_board`
+     falls back to every subject only for a subject the board has never
+     seen; subjects are NFKC-normalised. A re-analysis citing a fusion
+     inherits the fusion's reads as well as its claims. The hyperspectral
+     recipe is `dynamic_analysis_records.json`.
    - *Found live:* the curve agent's approved script is
      `scripts/fitting_script.py` (a series: one per spectrum), the image
      agent's `analysis_script.py` — the recipe takes the folder's
@@ -1148,8 +1172,12 @@ references are to `main` at bed2f7f8.
   are stage 3's (retraction and taint, supersede-chain stops).
 - *Taint is not propagated.* A retracted finding's dependents keep their
   status; `read_closure` gives stage 3 the graph to taint over.
-- *Reads are once per item.* Stage boundaries inside a mode (the design's
-  optional mid-run read points) are not exposed; an item reads at its start.
+- *Reads are once per item, the newest 24 records.* Stage boundaries inside
+  a mode (the design's optional mid-run read points) are not exposed.
+- *Independence counts reads and citations, not common ancestry.* Two
+  fusions over the same inputs count as two supporters; a finding pasted into
+  a task by hand with no `context_from` is invisible to the count (the prompt
+  says so).
 - *Subjects are strings matched case-insensitively.* Two spellings of one
   sample are two subjects; the meta's prompt asks for one spelling per item.
   A registry of subjects is stage 5's.

@@ -846,11 +846,13 @@ class MetaOrchestratorTools:
                                 "type": "object",
                                 "description": ("Optional: read the board when the item "
                                                 "starts. An empty object reads the verified "
-                                                "findings on the item's subject; keys "
-                                                "narrow it: subject (string), kinds (list of "
-                                                "claim | measurement | recipe | structure | "
-                                                "parameter_point | hazard), "
-                                                "include_provisional (bool, marked as such)."),
+                                                "findings on the item's subject (every subject "
+                                                "when the item has none); keys narrow it: "
+                                                "subject (string), kinds (list of claim | "
+                                                "measurement | recipe | structure | "
+                                                "parameter_point | hazard), include_provisional "
+                                                "(bool, marked as such). The newest 24 are "
+                                                "shown and recorded as read."),
                                 "properties": {
                                     "subject": {"type": "string"},
                                     "kinds": {"type": "array", "items": {"type": "string"}},
@@ -878,16 +880,19 @@ class MetaOrchestratorTools:
         # -- get_board (the session's findings, between runs) ----------------
         def get_board(subject: str = None, kind: str = None,
                       include_provisional: bool = False, limit: int = 40) -> str:
+            from . import board as board_mod
             board = self.orch.board
             subject_note = None
             try:
                 view = board.snapshot(subject=subject, kind=kind or None,
                                       include_provisional=bool(include_provisional))
-                if subject and not view.records and board.snapshot(
-                        kind=kind or None, include_provisional=bool(include_provisional)).records:
+                known = {board_mod._norm_subject(x["subject"]) for x in board.subjects()}
+                if subject and board_mod._norm_subject(subject) not in known and known:
                     # Subjects are the items' own strings; a guessed spelling
                     # matches nothing. Show every subject rather than an empty
                     # board (found live: "anatase sample" vs "TiO2 nanopowder A7").
+                    # Only for a subject the board has never seen: a known
+                    # subject with nothing verified is an honest empty answer.
                     view = board.snapshot(kind=kind or None,
                                           include_provisional=bool(include_provisional))
                     subject_note = (f"no records are filed under {subject!r}; showing every "

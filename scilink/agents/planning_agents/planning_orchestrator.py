@@ -1512,6 +1512,8 @@ class PlanningOrchestratorAgent:
         # Snapshot prior state so we report "what was produced *during* this
         # call" rather than "everything in the session."
         files_before = _snapshot_files()
+        _plan_before = json.dumps((self.planner.state or {}).get("current_plan") or {},
+                                  sort_keys=True, default=str)
 
         # Isolate this delegation's plan artifacts in their own sub-directory
         # so a persistent planning child (reused by the meta agent) does not
@@ -1679,6 +1681,10 @@ class PlanningOrchestratorAgent:
             "unattended_gate": _plan.get("unattended_gate") or None,
             "iteration": _plan.get("iteration"),
             "hypotheses": hypotheses[:8],
+            # Whether THIS call wrote or settled the plan (the persistent
+            # child keeps its plan across delegations): a later TEA-only
+            # call must not pass an earlier approval on as its own.
+            "written_here": json.dumps(_plan, sort_keys=True, default=str) != _plan_before,
             "blocking_findings": [{"issue": f.get("issue"), "conflict": f.get("conflict")}
                                   for f in blocking_findings(_plan.get("critic_findings"))],
             "files": [f for f in files_produced if str(f).endswith("plan.json")][:3],

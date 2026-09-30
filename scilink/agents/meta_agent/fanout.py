@@ -1822,10 +1822,11 @@ def run_fanout(orch, branches: List[dict],
             entries.append(entry)
 
     # On the board a steering payload is a finding OF THE COMPANION: a
-    # measurement of its series (a deterministic reduction, verified as
-    # posted) filed under the companion's ledger index, which the steered
-    # branch has READ before it starts. That read is what fusion's
-    # independence count sees; the informed_by stamp above stays as prose.
+    # measurement of its series (a deterministic reduction, but no gate
+    # passed it, so provisional, under the mode "steering") filed under the
+    # companion's ledger index, which the steered branch has READ before it
+    # starts. That read is what fusion's independence count sees; the
+    # informed_by stamp above stays as prose.
     board = getattr(orch, "board", None)
     if board is not None:
         by_label = {b["label"]: (b, e) for b, e in zip(run_branches, entries)}
@@ -1838,9 +1839,9 @@ def run_fanout(orch, branches: List[dict],
                 c_entry = src[1]
                 try:
                     rec = board.post(
-                        kind="measurement", status="verified",
+                        kind="measurement", status="provisional",
                         author={"worker": f"fan-out steering (reduction of '{pl['label']}')",
-                                "delegation_index": c_entry["index"], "mode": "analysis"},
+                                "delegation_index": c_entry["index"], "mode": "steering"},
                         subject=c_entry.get("subject") or pl.get("label"),
                         payload={"name": "sharpest change along the control variable",
                                  "value": pl.get("change_point"),

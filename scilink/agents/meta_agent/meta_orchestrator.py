@@ -1562,7 +1562,10 @@ class MetaOrchestratorAgent:
                 for s_ in sorted(declared):
                     src = by_index.get(s_)
                     if src and src.get("mode") == "fusion":
-                        reads += [f for f in (src.get("posted") or []) if f not in reads]
+                        # its claims, and what it read: a fusion that
+                        # produced no claim still showed its inputs.
+                        reads += [f for f in list(src.get("posted") or []) + list(src.get("reads") or [])
+                                  if f not in reads]
                 if reads:
                     entry["reads"] = reads
                     entry["board_version"] = len(self.board)

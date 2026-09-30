@@ -16,6 +16,11 @@ import tempfile
 
 os.environ.setdefault("ANTHROPIC_API_KEY", "sk-dummy")
 
+import sys
+
+# Run as a script, test the checkout, not an installed scilink.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import numpy as np
 import scilink.agents.meta_agent.fanout as fo
 from scilink.agents.meta_agent.meta_orchestrator import MetaOrchestratorAgent, MetaMode
@@ -141,10 +146,11 @@ def main():
     # under techB's entry, read by techA; fusion counts 1 independent of 2.
     a_reads = by_label["techA series"].get("reads") or []
     b_posted = by_label["techB series"].get("posted") or []
-    check("steering hint is a board measurement techA read, owned by techB",
+    check("steering hint is a board measurement techA read, owned by techB (provisional, mode steering)",
           len(a_reads) == 1 and a_reads[0] in b_posted
           and ag.board.get(a_reads[0])["kind"] == "measurement"
-          and ag.board.get(a_reads[0])["status"] == "verified")
+          and ag.board.get(a_reads[0])["status"] == "provisional"
+          and ag.board.get(a_reads[0])["author"]["mode"] == "steering")
     _sup = fused.get("independent_support") or {}
     check("fusion computes independent_support 1 of 2",
           (_sup.get("count"), _sup.get("raw")) == (1, 2)
@@ -202,6 +208,14 @@ def main():
         if not v:
             print("  FAILED:", k)
     raise SystemExit(0 if npass == len(results) else 1)
+
+
+def test_fanout_steering():
+    """pytest entry: the script's checks, as one test."""
+    try:
+        main()
+    except SystemExit as exc:
+        assert exc.code == 0, "see the FAILED lines above"
 
 
 if __name__ == "__main__":

@@ -123,8 +123,9 @@ def normalize_items(items: Any) -> Tuple[List[dict], List[dict]]:
 
 
 def _read_spec(raw: Any) -> Optional[dict]:
-    """What an item asked to read: ``True`` (its subject, verified records)
-    or ``{subject?, kinds?, include_provisional?}``; ``None`` reads nothing."""
+    """What an item asked to read: ``True`` / ``{}`` (verified records on the
+    item's subject — every subject when the item has none) or
+    ``{subject?, kinds?, include_provisional?}``; ``None`` reads nothing."""
     if raw is None or raw is False or raw == "":
         return None
     if not isinstance(raw, dict):
@@ -167,12 +168,15 @@ def _read_board(orch, item: dict, entry: dict) -> str:
             entry["board_read_refused"] = str(exc)
         print(f"  ⚠️  '{item['label']}': board read not possible ({exc}).")
         return ""
+    total = len(view)
+    view = view.newest(board_mod.READ_MAX_RECORDS)     # what is rendered is what is stamped as read
     with orch._fanout_lock:
         entry["reads"] = list(view.ids)
         entry["board_version"] = view.version
         if view.include_provisional:
             entry["reads_provisional"] = True
     print(f"  📋 '{item['label']}' read {len(view)} board finding(s)"
+          + (f" (the newest of {total})" if total > len(view) else "")
           + (" (provisional included)" if view.include_provisional else "") + ".")
     return "\n".join(board_mod.render(view))
 
