@@ -1,8 +1,9 @@
 # Proposal: swarms — concurrent agents that share what they find
 
-Status: stage 0 merged to `main` on 2026-09-29 (head 328bd2bb). Stage 1 is
-PR #697, built as "Starting stage 1" below describes; what changed on the way
-is recorded under the stage in "Build order". Stage 2 (the board) is next. The design notes were
+Status: stage 0 merged to `main` on 2026-09-29 (head 328bd2bb); stage 1
+merged on 2026-09-30 (#697, head bed2f7f8) after three review rounds, built
+as "Starting stage 1" below describes; what changed on the way is recorded
+under the stage in "Build order". Stage 2 (the board) is next. The design notes were
 drafted 2026-09-28 against `main` at b988c7cd (Release 0.0.83), based on a source audit of the meta
 agent (`meta_orchestrator.py`, `meta_orchestrator_tools.py`, `fanout.py`,
 `telemetry.py`), the three mode orchestrators' `run_task`, the executors, the
@@ -798,7 +799,7 @@ can already hit.
    This alone gives parallel cross-mode work, such as an analysis next to a
    simulation.
 
-   **Built in #697 (2026-09-29).** What changed from the plan:
+   **Merged in #697 (2026-09-30).** What changed from the plan:
    - *Process-global state* needed no change for a swarm. A swarm's workers
      all run in one user's session, under that user's consent and
      credentials, so sharing them is correct. The cross-session leak is a
@@ -819,6 +820,19 @@ can already hit.
      proxy client.
    - The tool parameter is `work_items`, not `items`: a property named like
      the JSON-schema keyword is ambiguous to schema tooling.
+   - *From the reviews:* a gate nobody answers is never a human decision
+     (`hitl.last_question_timed_out`; channels with a timeout of their own,
+     the MCP server's, mark it with `hitl.mark_timed_out`, and the planner
+     writes `unattended_gate` instead of `human_review`); questions are shown
+     from a thread of their own (`hitl.QuestionServer`) so the coordinator
+     keeps enforcing budgets and the memory guard; a worker's timeout clock
+     restarts when its question is shown, and time waiting on a person is
+     left out of its budget; cancels reach a parked question, an LLM-slot
+     wait, the backoff sleep and best-of-N candidates
+     (`log_context.register_cancel`, `inherited_context`); the memory guard
+     never cancels an item running alone and waits for a cancelled worker to
+     end (with a deadline) before the rerun; a reviewed skill upgrade refuses
+     a skill that changed during the review (`base_hash`).
    - *Not done:* swarm workers in the Telemetry tab; the web UI and shell
      driven live with worker questions; and HPC submission from meta-driven
      simulations (#696), which a swarm of simulation items needs.
