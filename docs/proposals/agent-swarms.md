@@ -3,7 +3,9 @@
 Status: stage 0 merged to `main` on 2026-09-29 (head 328bd2bb); stage 1
 merged on 2026-09-30 (#697, head bed2f7f8) after three review rounds, built
 as "Starting stage 1" below describes; what changed on the way is recorded
-under the stage in "Build order". Stage 2 (the board) is next. The design notes were
+under the stage in "Build order". Stage 2 (the board) is on its PR, built as
+"Starting stage 2" describes, with what changed on the way under the stage in
+"Build order" and its open items in "After stage 2". The design notes were
 drafted 2026-09-28 against `main` at b988c7cd (Release 0.0.83), based on a source audit of the meta
 agent (`meta_orchestrator.py`, `meta_orchestrator_tools.py`, `fanout.py`,
 `telemetry.py`), the three mode orchestrators' `run_task`, the executors, the
@@ -841,6 +843,50 @@ can already hit.
    - Verified-only propagation and board-blind checks.
    - `independent_support` in fusion.
    - Steering, `fusion_feedback` and `informed_by` rebased onto board reads.
+
+   **Built (PR "Swarm stage 2").** `scilink/agents/meta_agent/board.py`.
+   What changed from the design above:
+   - *A correction is the replacement itself.* The schema listed `supersedes`
+     as a kind; on the board it is a field: the corrected claim is a `claim`
+     that `supersedes` the old id. A bare "supersedes" kind with the content
+     in its payload would make every reader unwrap it. A `retraction` is a
+     record of its own (`target`). The fold marks the old record
+     `superseded` / `retracted` and hides it from reads; nothing revives a
+     record (retracting a correction does not bring the corrected one back).
+   - *Every delegation posts, not only swarm items.* Posting lives in
+     `_close_delegation`, so a direct delegation, a fan-out branch, a swarm
+     item and a fusion all leave records, and the board is the session's
+     record rather than a swarm's. Posting never fails the delegation.
+   - *Workers post through the writer's lock, not a queue.* In one process
+     a lock-serialised `Board.post` that flushes (and fsyncs) before
+     returning is the "one writer, acknowledged after the flush" of the
+     design; the queue-and-drain shape is for process workers (stage 4).
+   - *What each mode verifies:* an analysis claim is verified when its
+     analysis record's status is success (its `[analysis_id]` prefix is
+     evidence, not text), and the approved `scripts/analysis_script.py` is
+     posted as a `recipe`; a plan's findings are verified only under a
+     `human_review` stamp — an unattended gate leaves them provisional — with
+     BO-engine points as verified `parameter_point`s (computed, not
+     authored) and a standing blocking finding as a `hazard` (a hint by
+     type, so it may propagate on the critic's word); a structure is
+     verified when the validator's status is `success`. The planning result
+     now carries `plan_review` and each simulation structure its
+     `validation_status`; nothing else in the modes changed.
+   - *A steering payload is a finding of the companion.* It is filed under
+     the companion's ledger index (author "fan-out steering (reduction of
+     …)"), verified as a deterministic reduction, and the steered branch's
+     entry reads it — which is what makes fusion count 1 of 2. Co-registered
+     operands stay a ledger stamp: a shared dataset is not a finding.
+   - *Fusion's claims are provisional* (a synthesis passes no gate of its
+     own) and read every fused finding, so a re-analysis citing the fusion
+     inherits them as reads and the next fusion counts it dependent.
+   - *A read is once, at the item's start, after admission* — so an item
+     admitted later in a swarm sees what earlier items of the same swarm
+     already posted. The read block is rendered like fan-out steering, with
+     the additive-only rule; the ledger keeps the task as sent.
+   - *Found by the tests:* a post after a torn last line was appended onto
+     the torn text. The writer now starts on a fresh line when the file does
+     not end with one.
 3. **Reactions.** Subscriptions, `task_request`, causal chains and cycle
    refusal, supersede-chain stops, retraction and taint.
 4. **Scheduling.**
@@ -1061,6 +1107,48 @@ references are to `main` at bed2f7f8.
 - *HPC from meta-driven simulations* — #696 (plumbing, a way to connect, and
   long jobs in a swarm). A swarm of simulation items prepares inputs only.
 - *Generated code outside the executor* — #685 (predates the swarm).
+
+## After stage 2: what is on main, and what is open
+
+**What stage 2 adds** (line references to the stage-2 PR head):
+- `scilink/agents/meta_agent/board.py`: `Board` (`post`, `retract`, `fold`,
+  `snapshot`, `read_closure`, `independent_support`, `public`),
+  `BoardReadRefused`, `render`, `records_for` / `post_delegation` (the
+  per-mode translation of a result into records). `KINDS`, `READ_KINDS`.
+- `meta_orchestrator.py`: `self.board`; `_close_delegation` posts;
+  `_open_delegation_locked` turns `fusion_feedback` into `reads`; the
+  checkpoint carries `board_version` and the restore reports it (the file is
+  the record; a shorter file than the checkpoint's version is warned about).
+- `swarm.py`: items take `reads_board` (`{}` or `{subject, kinds,
+  include_provisional}`) and `check`; `_read_board` at the item's start;
+  results carry `reads`, `posted`, `board_read_refused`, `board_version`.
+- `fanout.py`: steering measurements under the companion's index, read by
+  the steered branch; `fuse_delegations` computes `independent_support`,
+  renders it (`INDEPENDENT SUPPORT … n of m`), stores it on the report and
+  the fusion entry, and posts the fused claims with `reads`.
+- `meta_orchestrator_tools.py`: `get_board(subject, kind,
+  include_provisional, limit)`; `run_swarm`'s item schema.
+- `planning_orchestrator.run_task` → `plan_review`;
+  `simulation_orchestrator.run_task` → `structures[].validation_status`.
+- Tests: `tests/test_board.py`; board checks in `tests/test_fanout_steering.py`.
+
+**Open after stage 2:**
+- *No retraction or supersede from the meta's tools.* `Board.retract` and
+  `supersedes` exist and fold correctly, but nothing calls them yet: they
+  are stage 3's (retraction and taint, supersede-chain stops).
+- *Taint is not propagated.* A retracted finding's dependents keep their
+  status; `read_closure` gives stage 3 the graph to taint over.
+- *Reads are once per item.* Stage boundaries inside a mode (the design's
+  optional mid-run read points) are not exposed; an item reads at its start.
+- *Subjects are strings matched case-insensitively.* Two spellings of one
+  sample are two subjects; the meta's prompt asks for one spelling per item.
+  A registry of subjects is stage 5's.
+- *Persistent-specialist delegations read nothing.* `delegate_to_*` posts but
+  has no `reads_board`; the meta threads findings into `context` by hand
+  (`get_board`), which is the design's turn-granularity path.
+- *The Mission Control UI has no board view* (stage 6).
+- Everything open after stage 1 still stands (telemetry, the one-slot web
+  panel, no swarm resume, memory estimated, HPC #696, #685).
 
 ## Starting stage 2 (the board)
 

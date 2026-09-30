@@ -653,9 +653,9 @@ delegations of any mode concurrently, each on an **ephemeral worker**
 (`workers.build_child`, the one constructor behind the persistent specialists
 too) in `<meta_session>/swarm/<NN>_<slug>/`, each an ordinary ledger
 delegation. The design, its stages and what each stage left open are in
-`docs/proposals/agent-swarms.md`; stages 0 and 1 are on `main` (#697), stage 2
-(the shared board) is next. Settled rules, each learned from a live run or a
-review:
+`docs/proposals/agent-swarms.md`; stages 0, 1 (#697) and 2 (the board) are
+built, stage 3 (reactions) is next. Settled rules, each learned from a live
+run or a review:
 
 - **A swarm item is a fresh agent.** It does not remember earlier delegations;
   its task and context carry everything. The persistent specialists stay for
@@ -686,6 +686,20 @@ review:
   never across a backoff); usage is charged per worker; the distill staging,
   graduated skills and instrument homes take a lock for every change, and a
   reviewed skill upgrade refuses a skill that changed during the review.
+- **The board is the record, and independence is a number.** Every finished
+  delegation posts typed, small records to `swarm/board.jsonl`
+  (`meta_agent/board.py`): a claim, a measurement, a recipe or structure by
+  path, a parameter point, a hazard. One writer, never edited in place (a
+  correction `supersedes`, a withdrawal is a `retraction`), and `verified`
+  means the author's own pipeline passed it — an analysis QC, a human-approved
+  plan (an unattended one stays provisional), a validated structure. The board
+  adds no judge. A reader gets verified records only, as hints under the same
+  additive-only rule as steering; a swarm item reads once, at its start
+  (`reads_board`), and a `check` item is refused a read by the API, not by
+  prompt text. Every read is recorded (`reads`), so fusion's
+  `independent_support` is computed from the read graph and rendered, not
+  guessed; a new mode of coupling two delegations becomes a read on the board,
+  not a new prompt caveat.
 - **One PR per stage.** A stage is verified as a whole: the full suite against
   a `main` worktree by failing-test ids, and live checks on Bedrock from a
   frozen snapshot, one heavy run at a time.

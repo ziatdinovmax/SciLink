@@ -411,6 +411,10 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
             entry["parallel_group"] = swarm_id
             if item.get("subject"):
                 entry["subject"] = item["subject"]
+            if item["mode"] == "analysis" and item.get("data_path"):
+                # As _delegate stamps it: a later fuse_delegations re-runs
+                # its complementarity gate from the entries' data paths.
+                entry["data_path"] = str(item["data_path"])
             entry["_budget_s"] = budget
         entries.append(entry)
         channel = (WorkerChannel(queue, item["label"], subject=item.get("subject"), kind="worker",
