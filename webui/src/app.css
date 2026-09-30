@@ -396,6 +396,7 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
    section as a heading line with its emoji and the full text under it. */
 .qs-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; font-size: 15px; }
 .qs-subtitle { font-size: 13px; font-weight: 500; color: var(--text-dim); }
+.qs-asker { display: inline-block; margin-bottom: 6px; padding: 1px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; color: var(--text-dim); background: var(--surface-2, rgba(127,127,127,0.12)); }
 .qs-sections { display: flex; flex-direction: column; font-size: 13.5px; line-height: 1.5; }
 .qs-section { padding: 8px 0; border-top: 1px solid var(--border); }
 .qs-section:first-child { border-top: 0; padding-top: 2px; }

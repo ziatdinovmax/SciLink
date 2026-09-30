@@ -1179,7 +1179,8 @@ function InboxGroup({
                     onClick={async () => {
                       try {
                         await api.memoryApplyUpgrade(g.domain, proposal.staged_ids, proposal.target_domain,
-                          proposal.target_name, editing ? edited : proposal.proposed_content, proposal.builtin_target);
+                          proposal.target_name, editing ? edited : proposal.proposed_content, proposal.builtin_target,
+                          proposal.base_hash);
                         notify("ok", `Upgraded ${proposal.target_domain}/${proposal.target_name} (previous version kept as backup).`);
                         setProposal(null);
                         await onChange();

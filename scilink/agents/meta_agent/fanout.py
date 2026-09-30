@@ -152,13 +152,17 @@ _branch_stop_lock = _threading.Lock()
 
 
 def _register_branch_stop(event) -> None:
+    from ...utils.log_context import register_cancel
     with _branch_stop_lock:
         _branch_stop_events[_threading.get_ident()] = event
+    register_cancel(event)          # waits (a parked question, an LLM slot) poll it
 
 
 def _unregister_branch_stop() -> None:
+    from ...utils.log_context import unregister_cancel
     with _branch_stop_lock:
         _branch_stop_events.pop(_threading.get_ident(), None)
+    unregister_cancel()
 
 
 class _ThreadStopStream:
@@ -197,6 +201,10 @@ def _attributed_branch(fn):
     (#627) — so the worker registers as the coordinator's child for the
     duration of the branch. Routing only: no ``[tag]`` log prefix and no
     panel trimming, so CLI output is unchanged.
+
+    The branch's LLM usage is charged to the same session:
+    ``attributed_to_current`` carries the coordinator's session tag onto the
+    worker thread (the branch adds its own label as the worker).
     """
     from ...utils.log_context import attributed_to_current
     return attributed_to_current(fn)
@@ -814,55 +822,18 @@ def _branch_hitl_enabled(orch) -> bool:
         and orch._enable_human_feedback
 
 
-class _BranchChannel:
-    """Tags a branch's requests with its label, then parks them on the
-    shared queue for the coordinator to serve."""
-
-    def __init__(self, queue_channel, label: str) -> None:
-        self._qch = queue_channel
-        self._label = label
-
-    def ask(self, req):
-        req.origin.setdefault("branch_label", self._label)
-        return self._qch.ask(req)
-
-
-def _inherited_roots(orch):
-    """The parent's fence roots for a child (None keeps the child open)."""
-    fence = getattr(orch, "path_fence", None)
-    return [str(r) for r in fence.roots] if fence is not None else None
-
-
 def _make_ephemeral_analysis_child(orch, base_dir: Path, restore: bool = False):
     """Build an isolated, one-shot analysis orchestrator for one branch.
 
-    NOT registered in ``orch._children`` — these are ephemeral fan-out workers,
-    not the persistent singleton, so they share no mutable state across threads
-    and are never restored by the meta's child-restore path. Resting mode
-    AUTONOMOUS; run_task pins it per call. ``restore=True`` (the resume path)
-    rebuilds the worker IN its original session dir with its own checkpoint,
-    so it comes back holding its per-tool-checkpointed partial progress.
+    An ephemeral worker (``workers.build_child``): NOT registered in
+    ``orch._children``, so it shares no mutable state across threads and is
+    never restored by the meta's child-restore path. Resting mode AUTONOMOUS;
+    run_task pins it per call. ``restore=True`` (the resume path) rebuilds the
+    worker IN its original session dir with its own checkpoint, so it comes
+    back holding its per-tool-checkpointed partial progress.
     """
-    from ..exp_agents.analysis_orchestrator import (
-        AnalysisOrchestratorAgent, AnalysisMode,
-    )
-    base_dir.mkdir(parents=True, exist_ok=True)
-    child = AnalysisOrchestratorAgent(
-        base_dir=str(base_dir),
-        api_key=orch.api_key,
-        model_name=orch.model_name,
-        base_url=orch.base_url,
-        embedding_model=orch.embedding_model,
-        embedding_api_key=orch.embedding_api_key,
-        futurehouse_api_key=orch.futurehouse_api_key,
-        restore_checkpoint=restore,
-        analysis_mode=AnalysisMode.AUTONOMOUS,
-        file_roots=_inherited_roots(orch),
-    )
-    child._agent_label = "Analysis branch"
-    # Share skills / custom tools / MCP servers registered on the meta.
-    orch._propagate_extensions_to_child(child)
-    return child
+    from .workers import build_child
+    return build_child(orch, "analysis", base_dir, restore=restore, label="Analysis branch")
 
 
 def _branch_primary_path(branch: dict) -> str:
@@ -985,8 +956,34 @@ def _mesh_task(branch: dict, companions: List[dict]) -> str:
     return task + "\n".join(block)
 
 
+def human_wait_s(entry: dict, now: Optional[float] = None) -> float:
+    """Seconds this branch or item has spent waiting for the person: past
+    waits summed on the entry, plus the one in progress. Left out of the
+    wall-clock budget, so a question the person is reading never runs an
+    item over."""
+    now = time.monotonic() if now is None else now
+    total = float(entry.get("_human_wait_s") or 0.0)
+    since = entry.get("_waiting_since")
+    if since is not None:
+        total += max(0.0, now - since)
+    return total
+
+
+def note_human_wait(entry: dict):
+    """The ``on_wait`` callback for a worker's channel, writing to ``entry``."""
+    def on_wait(waiting: bool) -> None:
+        if waiting:
+            entry["_waiting_since"] = time.monotonic()
+        else:
+            since = entry.pop("_waiting_since", None)
+            if since is not None:
+                entry["_human_wait_s"] = float(entry.get("_human_wait_s") or 0.0) + (
+                    time.monotonic() - since)
+    return on_wait
+
+
 def _cancel_overdue_branches(orch, pending, fut_entry, fut_stop, fut_label,
-                             budget: float) -> None:
+                             budget: float, noun: str = "analysis branch") -> None:
     """Cancel every pending branch that has outrun the wall-clock budget.
 
     Shared by ``run_fanout`` and ``resume_fanout``: records the entry
@@ -1000,15 +997,17 @@ def _cancel_overdue_branches(orch, pending, fut_entry, fut_stop, fut_label,
             return float(entry.get("_budget_s") or budget)
         except (TypeError, ValueError):
             return budget
+    now = time.monotonic()
     overdue = [f for f in pending
                if fut_entry[f].get("_started_at") is not None
                and fut_entry[f].get("status") == "running"
-               and (time.monotonic() - fut_entry[f]["_started_at"] > _budget_of(fut_entry[f]))]
+               and (now - fut_entry[f]["_started_at"] - human_wait_s(fut_entry[f], now)
+                    > _budget_of(fut_entry[f]))]
     for f in overdue:
         e = fut_entry[f]
         budget = _budget_of(e)      # per-branch value from here on (messages, ledger)
         e["timed_out"] = True
-        print(f"  ⏱️  analysis branch '{fut_label[f]}' exceeded "
+        print(f"  ⏱️  {noun} '{fut_label[f]}' exceeded "
               f"its wall-clock budget ({int(budget)}s) — "
               "cancelling it (degraded, excluded from fusion).")
         logger.warning(
@@ -1058,13 +1057,15 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
     _admit_branch(mem_key, _branch_mem_estimate(branch),
                   branch.get("label") or slug)
     entry["_started_at"] = time.monotonic()
+    entry.pop("_human_wait_s", None)          # a resumed entry may carry stale waits
+    entry.pop("_waiting_since", None)
     entry["_branch_tid"] = threading.get_ident()
     if stop_event is not None:
         _register_branch_stop(stop_event)
     if queue_channel is not None:
-        from ...hitl import set_thread_channel
-        set_thread_channel(_BranchChannel(
-            queue_channel, branch.get("label") or slug))
+        from ...hitl import WorkerChannel, set_thread_channel
+        set_thread_channel(WorkerChannel(queue_channel, branch.get("label") or slug,
+                                         on_wait=note_human_wait(entry)))
     # Bind this worker thread to the META's event log, branch-tagged: the
     # child's own chat() rebinds to the child session's log for the
     # duration of run_task (and restores), so the meta log records the
@@ -1072,12 +1073,18 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
     from ...session_events import append_event, set_thread_event_log
     _branch_label = branch.get("branch_id") or branch.get("label") or slug
     set_thread_event_log(Path(orch.base_dir) / "events.jsonl")
+    from ... import tracing
+    _usage_tag = tracing.attributed(worker=f"fanout:{index:02d}_{slug}")
+    _usage_tag.__enter__()
     # Pre-assigned so the finally block can log even on the one path that
     # propagates (a user-initiated AgentStoppedError re-raised below).
     result: dict = {"status": "error",
                     "error": "branch aborted before completion", "summary": "",
                     "key_findings": [], "files_produced": [],
                     "suggested_followups": [], "warnings": []}
+    child = None
+    from ...hitl import unattended_questions
+    unattended_before = unattended_questions()
     try:
         try:
             from ..exp_agents.analysis_orchestrator import AnalysisMode
@@ -1125,19 +1132,34 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
                       "summary": "", "key_findings": [], "files_produced": [],
                       "suggested_followups": [], "warnings": []}
     finally:
-        if stop_event is not None:
-            _unregister_branch_stop()
-        append_event(
-            "fanout_branch",
-            {"label": branch.get("label") or slug,
-             "data_path": branch.get("data_path"),
-             "session_dir": str(base_dir)},
-            json.dumps(result, default=str), branch=_branch_label)
-        set_thread_event_log(None)
-        if queue_channel is not None:
-            from ...hitl import set_thread_channel
-            set_thread_channel(None)
-        _release_branch(mem_key)
+        n_unattended = unattended_questions() - unattended_before
+        if n_unattended and isinstance(result, dict):
+            result.setdefault("warnings", []).append(
+                f"{n_unattended} question(s) got no answer in time and took their defaults "
+                "(unattended; nothing here counts as a human decision)")
+        try:
+            if child is not None:
+                from .workers import release_child
+                release_child(child)        # the MCP servers this worker opened
+        finally:
+            # Released last and unconditionally: on a Stop, anything above may
+            # raise, and a held memory reservation would outlive the branch.
+            if stop_event is not None:
+                _unregister_branch_stop()
+            try:
+                append_event(
+                    "fanout_branch",
+                    {"label": branch.get("label") or slug,
+                     "data_path": branch.get("data_path"),
+                     "session_dir": str(base_dir)},
+                    json.dumps(result, default=str), branch=_branch_label)
+            finally:
+                set_thread_event_log(None)
+                _usage_tag.__exit__(None, None, None)
+                if queue_channel is not None:
+                    from ...hitl import set_thread_channel
+                    set_thread_channel(None)
+                _release_branch(mem_key)
     if entry.get("timed_out"):
         logger.warning(
             f"fan-out branch {index} finished AFTER its wall-clock budget "
@@ -1911,13 +1933,20 @@ def run_fanout(orch, branches: List[dict],
     queue_channel = None
     branch_autonomy = None
     if _branch_hitl_enabled(orch):
-        from ...hitl import QueueChannel
+        from ...hitl import QueueChannel, question_timeout_s
         from ..exp_agents.analysis_orchestrator import AnalysisMode
-        queue_channel = QueueChannel()
+        queue_channel = QueueChannel(timeout_s=question_timeout_s())
         branch_autonomy = AnalysisMode[orch.meta_mode.name]
 
     pool = ThreadPoolExecutor(max_workers=max_workers)
     _ensure_stop_guard_installed()
+    # Branch questions are shown to the person from a thread of their own, so
+    # this loop keeps enforcing budgets while one is on screen.
+    from ...hitl import QuestionServer
+    server = QuestionServer(queue_channel) if queue_channel is not None else None
+    channel_failed = False
+    if server is not None:
+        server.__enter__()
     try:
         fut_label, fut_entry, fut_stop = {}, {}, {}
         for i in range(follower_start, n_total):
@@ -1947,11 +1976,14 @@ def run_fanout(orch, branches: List[dict],
             t0 = time.monotonic()
             done, pending = wait(pending, timeout=_FANOUT_POLL_S)
             since_tick += time.monotonic() - t0
-            if queue_channel is not None:
-                # Serve queued branch prompts through the coordinator's own
-                # channel (console prompt / UI modal), one at a time.
-                if queue_channel.serve_pending():
-                    since_tick = 0.0  # a served prompt shows the run is alive
+            if server is not None and server.error is not None:
+                from ...ui.output_capture import AgentStoppedError
+                if isinstance(server.error, AgentStoppedError):
+                    raise server.error          # the person's Stop reaches the fan-out
+                if not channel_failed:
+                    channel_failed = True
+                    print(f"  ⚠️  the person's channel raised {type(server.error).__name__}: "
+                          "remaining branch questions take their defaults, unattended.")
             for f in done:
                 f.result()  # _run_one_branch never raises; just surfaces oddities
                 print(f"  ✅ analysis branch finished: {fut_label[f]}  "
@@ -1970,6 +2002,8 @@ def run_fanout(orch, branches: List[dict],
                 print(f"  ⏳ {len(pending)} of {n_total} parallel analyses still "
                       f"running ... (~{elapsed}s elapsed)")
     finally:
+        if server is not None:
+            server.__exit__(None, None, None)
         pool.shutdown(wait=False, cancel_futures=True)
 
     _productive = _branch_productive

@@ -780,7 +780,7 @@ def create_app(session_root: Path, serve_frontend: bool = True,
     def memory_apply_upgrade(domain: str, body: MemoryApplyRequest):
         from .memory_api import apply_upgrade
         return _mem(apply_upgrade, domain, body.ids, body.target_domain,
-                    body.target_name, body.content, body.fork_builtin)
+                    body.target_name, body.content, body.fork_builtin, body.base_hash)
 
     @app.post("/api/v1/memory/check-upgrade")
     def memory_check_upgrade(body: MemoryCheckRequest):

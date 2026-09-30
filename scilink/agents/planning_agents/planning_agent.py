@@ -1860,7 +1860,24 @@ class PlanningAgent(BaseAgent):
         ``status`` is accepted | revised | adopted. The stamp is what lets the
         orchestrator tell a settled plan from a draft: an approved plan is
         reopened only through the reopen gate (``_revision_gate``).
+
+        A gate nobody answered in time (a swarm or fan-out worker's question
+        timing out: ``hitl.last_question_timed_out``) yields the gate's
+        default, which reads as Enter. That is not a human's decision: the
+        plan goes on unattended, with NO ``human_review`` stamp, so it is a
+        draft the agent may still revise, and ``unattended_gate`` says why.
         """
+        from ... import hitl
+        if hitl.last_question_timed_out():
+            print("  ⏱  Nobody answered the review in time: the plan goes on as "
+                  "unattended and is NOT recorded as human-approved.")
+            plan.pop("human_review", None)
+            plan["unattended_gate"] = {"would_have_been": status,
+                                       "iteration": plan.get("iteration"),
+                                       "at": datetime.now().isoformat()}
+            self.state["current_plan"] = plan
+            return
+        plan.pop("unattended_gate", None)
         review = {"status": status, "iteration": plan.get("iteration"),
                   "at": datetime.now().isoformat()}
         plan["human_review"] = review

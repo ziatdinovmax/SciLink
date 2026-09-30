@@ -4616,8 +4616,9 @@ Return JSON with:
         image_config = state.get("locked_analysis_config", {})
 
         import threading as _threading
-        from ....utils.log_context import register_worker, unregister_worker
+        from ....utils.log_context import inherited_context, register_worker, unregister_worker
         _parent_thread = _threading.get_ident()
+        _inherited = inherited_context()   # the item's cancel and usage tags, for the candidates
 
         def _run_candidate(i: int, tagged: bool = True) -> tuple:
             # Shallow-copy state per attempt (cheap; shared fields are
@@ -4636,6 +4637,8 @@ Return JSON with:
             # concurrently (interleaved output needs attribution); a lone
             # candidate keeps clean, unprefixed — but still visible — logs.
             register_worker(_parent_thread, f"cand_{i:02d}", prefix=tagged)
+            _ctx = _inherited.applied()
+            _ctx.__enter__()
             try:
                 # Ensemble diversity: each fan-out candidate (>=1) generates its
                 # OWN independent plan — like running the agent again, divergent
@@ -4654,6 +4657,7 @@ Return JSON with:
                     image_idx=image_idx, is_regime_anchor=is_regime_anchor,
                 )
             finally:
+                _ctx.__exit__(None, None, None)
                 unregister_worker()
             return result, job_state
 

@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 from ...utils.text_io import atomic_write_text
 from ..loader import graduated_skills_dir, load_skill
-from ._graduation import safe_path_component
+from ._graduation import safe_path_component, skill_lock
 
 # Captures the frontmatter body with EXACTLY one trailing newline after the
 # closing fence, so ``text[match.end():]`` preserves the rest of the file
@@ -112,22 +112,23 @@ def _rewrite_frontmatter(md: Path, mutate) -> Dict[str, Any]:
     """Apply ``mutate(meta) -> meta`` to a bundle's YAML frontmatter, leaving
     the body byte-for-byte unchanged; the previous file goes to ``.md.bak``."""
     import yaml
-    text = md.read_text()
-    match = _FRONTMATTER_BLOCK_RE.match(text)
-    meta = (yaml.safe_load(match.group(1)) or {}) if match else {}
-    if not isinstance(meta, dict):
-        meta = {}
-    body = text[match.end():] if match else text
-    meta = mutate(dict(meta))
-    if meta:
-        fm = yaml.safe_dump(meta, default_flow_style=False, sort_keys=False,
-                            allow_unicode=True, width=10_000).strip()
-        new_text = f"---\n{fm}\n---\n{body}"
-    else:
-        new_text = body.lstrip("\n")
-    backup = md.with_name(md.name + ".bak")
-    atomic_write_text(backup, text)
-    atomic_write_text(md, new_text)
+    with skill_lock(md):                 # a graduation may be merging into it
+        text = md.read_text()
+        match = _FRONTMATTER_BLOCK_RE.match(text)
+        meta = (yaml.safe_load(match.group(1)) or {}) if match else {}
+        if not isinstance(meta, dict):
+            meta = {}
+        body = text[match.end():] if match else text
+        meta = mutate(dict(meta))
+        if meta:
+            fm = yaml.safe_dump(meta, default_flow_style=False, sort_keys=False,
+                                allow_unicode=True, width=10_000).strip()
+            new_text = f"---\n{fm}\n---\n{body}"
+        else:
+            new_text = body.lstrip("\n")
+        backup = md.with_name(md.name + ".bak")
+        atomic_write_text(backup, text)
+        atomic_write_text(md, new_text)
     return {"status": "success", "path": str(md), "backup_path": str(backup), "meta": meta}
 
 
@@ -186,9 +187,10 @@ def restore_backup(domain: str, name: str, *, root: Optional[Path] = None) -> Di
             load_skill(str(probe), domain=domain)
         except Exception as exc:  # noqa: BLE001
             raise ValueError(f"The backup does not parse as a skill: {exc}")
-    current = md.read_text()
-    atomic_write_text(md, candidate)
-    atomic_write_text(backup, current)
+    with skill_lock(md):
+        current = md.read_text()
+        atomic_write_text(md, candidate)
+        atomic_write_text(backup, current)
     return {"status": "success", "name": name, "domain": domain, "path": str(md),
             "backup_path": str(backup), "word_count": len(candidate.split())}
 
@@ -222,6 +224,12 @@ def promote_memory(
 
     import yaml
 
+    with skill_lock(md):
+        return _promote_locked(md, root, domain, name, to_domain, yaml)
+
+
+def _promote_locked(md: Path, root: Path, domain: str, name: str,
+                    to_domain: Optional[str], yaml) -> Dict[str, Any]:
     text = md.read_text()
     match = _FRONTMATTER_BLOCK_RE.match(text)
     if not match:
@@ -291,26 +299,27 @@ def demote_memory(domain: str, name: str, *, root: Optional[Path] = None) -> Dic
 
     import yaml
 
-    text = md.read_text()
-    match = _FRONTMATTER_BLOCK_RE.match(text)
-    if match:
-        meta = yaml.safe_load(match.group(1)) or {}
-        if not isinstance(meta, dict):
+    with skill_lock(md):
+        text = md.read_text()
+        match = _FRONTMATTER_BLOCK_RE.match(text)
+        if match:
+            meta = yaml.safe_load(match.group(1)) or {}
+            if not isinstance(meta, dict):
+                meta = {}
+            meta = dict(meta)
+            body = text[match.end():]
+        else:
             meta = {}
-        meta = dict(meta)
-        body = text[match.end():]
-    else:
-        meta = {}
-        body = text
-    meta["provisional"] = True
-    frontmatter = yaml.safe_dump(
-        meta,
-        default_flow_style=False,
-        sort_keys=False,
-        allow_unicode=True,
-        width=10_000,
-    ).strip()
-    atomic_write_text(md, f"---\n{frontmatter}\n---\n{body}")
+            body = text
+        meta["provisional"] = True
+        frontmatter = yaml.safe_dump(
+            meta,
+            default_flow_style=False,
+            sort_keys=False,
+            allow_unicode=True,
+            width=10_000,
+        ).strip()
+        atomic_write_text(md, f"---\n{frontmatter}\n---\n{body}")
     return {
         "status": "success",
         "name": name,
@@ -356,8 +365,9 @@ def edit_memory(domain: str, name: str, content: str, *,
                 "message": "The skill needs at least one '## section' heading."}
 
     backup = md.with_name(md.name + ".bak")
-    atomic_write_text(backup, md.read_text())
-    atomic_write_text(md, content)
+    with skill_lock(md):
+        atomic_write_text(backup, md.read_text())
+        atomic_write_text(md, content)
     return {"status": "success", "path": str(md), "backup_path": str(backup)}
 
 
@@ -448,5 +458,6 @@ def prune_memory(domain: str, name: str, *, root: Optional[Path] = None) -> Dict
     skill_dir = md.parent
     if not skill_dir.is_dir():
         raise FileNotFoundError(f"No skill bundle: {domain}/{name}")
-    shutil.rmtree(skill_dir)
+    with skill_lock(md):
+        shutil.rmtree(skill_dir)
     return {"status": "success", "name": name, "domain": domain, "pruned": True}

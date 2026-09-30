@@ -280,7 +280,7 @@ SEVERITY_ORDER = {"blocking": 0, "critical": 1, "minor": 2}
 # Keys the system stamps onto a plan. They describe one specific version of it,
 # so a pass that re-emits the plan must neither show them to the model nor let
 # an echoed copy survive onto the revision.
-SYSTEM_PLAN_KEYS = ("human_review", "auto_repair")
+SYSTEM_PLAN_KEYS = ("human_review", "auto_repair", "unattended_gate")
 
 # A repair that rewrites more than this share of an experiment is a redesign,
 # not a repair (SequenceMatcher ratio over the experiment's JSON).

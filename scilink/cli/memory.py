@@ -346,7 +346,7 @@ def _cmd_upgrade(args) -> int:
     # 3) apply the approved content (backs up the current file)
     res = _staging.apply_skill_upgrade(
         domain, prop["staged_ids"], target_domain=tdomain, target_name=tname,
-        proposed_content=prop["proposed_content"],
+        proposed_content=prop["proposed_content"], base_hash=prop.get("base_hash"),
     )
     if res.get("status") != "success":
         print(f"❌ {res.get('message', res)}")

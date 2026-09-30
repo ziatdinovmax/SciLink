@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -115,7 +116,11 @@ _off_path = threading.local()
 # the process total is exact — which is the right way round for one server
 # per workspace.
 _usage_sink = None
+_usage_sink_takes_worker = False
 _session_tag = threading.local()
+# The worker (a fan-out branch, a swarm item) a call was made for, tagged on
+# the worker's thread next to its session (``attributed``).
+_worker_tag = threading.local()
 # For a thread that carries no tag (a worker a turn spawned): a resolver the
 # host installs, answering "which ONE session is running work right now" or
 # None. On a server that runs one turn at a time it is exact; with several
@@ -125,14 +130,53 @@ _session_resolver = None
 
 def set_usage_sink(sink) -> None:
     """``sink(model, prompt_tokens, completion_tokens, latency_s, session)``
-    for every completed call; ``None`` removes it. Never raises into a call."""
-    global _usage_sink
+    for every completed call; ``None`` removes it. Never raises into a call.
+    A sink that also takes a ``worker`` keyword is told which worker made it."""
+    global _usage_sink, _usage_sink_takes_worker
     _usage_sink = sink
+    _usage_sink_takes_worker = False
+    if sink is not None:
+        import inspect
+        try:
+            params = inspect.signature(sink).parameters.values()
+            _usage_sink_takes_worker = any(
+                p.name == "worker" or p.kind is inspect.Parameter.VAR_KEYWORD for p in params)
+        except (TypeError, ValueError):
+            pass
 
 
 def bind_session(session_id: Optional[str]) -> None:
     """Tag LLM calls made on THIS thread with a session id (``None`` clears)."""
     _session_tag.value = session_id
+
+
+def current_worker() -> Optional[str]:
+    """The worker this thread's LLM calls are made for, if one is tagged."""
+    return getattr(_worker_tag, "value", None)
+
+
+_KEEP = object()
+
+
+@contextmanager
+def attributed(*, session: Any = _KEEP, worker: Optional[str] = None):
+    """Tag this thread's LLM calls with a worker, and optionally a session,
+    for the block; the previous tags come back after it.
+
+    A worker thread starts with no tags, so a coordinator hands each worker
+    the session it runs for (``current_session()`` on the coordinator's own
+    thread) together with the worker's label.
+    """
+    prev_session = getattr(_session_tag, "value", None)
+    prev_worker = getattr(_worker_tag, "value", None)
+    if session is not _KEEP:
+        _session_tag.value = session
+    _worker_tag.value = worker
+    try:
+        yield
+    finally:
+        _session_tag.value = prev_session
+        _worker_tag.value = prev_worker
 
 
 def set_session_resolver(resolver) -> None:
@@ -180,8 +224,12 @@ def note_llm_call(latency_s: Optional[float] = None,
         sink = _usage_sink
         if sink is not None:
             try:
-                sink(model, int(prompt_tokens or 0), int(completion_tokens or 0),
-                     float(latency_s or 0.0), current_session())
+                args = (model, int(prompt_tokens or 0), int(completion_tokens or 0),
+                        float(latency_s or 0.0), current_session())
+                if _usage_sink_takes_worker:
+                    sink(*args, worker=current_worker())
+                else:
+                    sink(*args)
             except Exception:
                 pass
         if getattr(_off_path, "depth", 0):

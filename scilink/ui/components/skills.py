@@ -511,7 +511,8 @@ def _render_staged_section() -> None:
                         domain, prop["staged_ids"],
                         target_domain=prop["target_domain"],
                         target_name=prop["target_name"],
-                        proposed_content=final_content)
+                        proposed_content=final_content,
+                        base_hash=prop.get("base_hash"))
                     st.session_state.pop(prop_key, None)
                     if res.get("status") == "success":
                         st.success(f"Upgraded {prop['target_domain']}/"

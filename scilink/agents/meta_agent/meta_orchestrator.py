@@ -36,6 +36,7 @@ from ...utils.tool_media import (repair_dangling_tool_calls,
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .meta_orchestrator_tools import MetaOrchestratorTools
+from .workers import build_child
 from scilink.utils.announce import announce_litellm
 
 
@@ -288,6 +289,10 @@ rather than fabricate a result).
   follow-up or refinement delegation can simply reference that prior work
   ("refine the plan you produced last step, but ...", "extend your previous
   analysis to ...") instead of re-deriving it from scratch.
+- `run_swarm(work_items)` runs several delegations of any mode at once, for parts of
+  a request that do not depend on each other. Each item runs on a FRESH agent
+  that does not remember earlier delegations, so its `task` / `context` must
+  carry everything it needs; a step that needs another's result goes after it.
 - `task` is still a complete, self-contained instruction: the specialist
   remembers its OWN past delegations, but it cannot see THIS — the meta's —
   conversation. So anything that lives only here must go into `task` /
@@ -819,21 +824,14 @@ class MetaOrchestratorAgent:
     # Child orchestrators (lazy, persistent, one per mode)
     # =========================================================================
 
-    def _child_roots(self):
-        """This workspace's fence roots for a child (None = open, as here)."""
-        return ([str(r) for r in self.path_fence.roots]
-                if getattr(self, "path_fence", None) is not None else None)
-
     def _get_analysis_child(self):
         """Lazily create (or restore) the persistent analysis child.
 
-        Imported lazily inside the method so importing the meta-agent module
-        does not pull the analysis stack until a delegation actually happens.
+        ``build_child`` imports the analysis stack only when it builds one, so
+        importing the meta-agent module does not pull it in before a
+        delegation actually happens.
         """
         if "analysis" not in self._children:
-            from ..exp_agents.analysis_orchestrator import (
-                AnalysisOrchestratorAgent, AnalysisMode,
-            )
             restore = (self.analysis_dir / "checkpoint.json").exists()
             self.logger.info(
                 f"🧩 {'Restoring' if restore else 'Creating'} analysis child "
@@ -841,24 +839,8 @@ class MetaOrchestratorAgent:
             )
             # Resting mode CO_PILOT; each delegation's run_task sets the
             # autonomy mode for that call to match the meta's.
-            self._children["analysis"] = AnalysisOrchestratorAgent(
-                base_dir=str(self.analysis_dir),
-                api_key=self.api_key,
-                model_name=self.model_name,
-                base_url=self.base_url,
-                embedding_model=self.embedding_model,
-                embedding_api_key=self.embedding_api_key,
-                futurehouse_api_key=self.futurehouse_api_key,
-                restore_checkpoint=restore,
-                analysis_mode=AnalysisMode.CO_PILOT,
-                file_roots=self._child_roots(),
-            )
-            # Label its answers as the specialist's — in the meta's verbose
-            # stream a child's final answer is a delegated deliverable, not the
-            # meta's own user-facing response.
-            self._children["analysis"]._agent_label = "Analysis specialist"
-            # Share skills / custom tools / MCP servers registered on the meta.
-            self._propagate_extensions_to_child(self._children["analysis"])
+            self._children["analysis"] = build_child(
+                self, "analysis", self.analysis_dir, restore=restore, persistent=True)
         return self._children["analysis"]
 
     def _get_planning_child(self):
@@ -872,48 +854,13 @@ class MetaOrchestratorAgent:
         arrive as absolute paths in the delegation `task`.
         """
         if "planning" not in self._children:
-            from ..planning_agents.planning_orchestrator import (
-                DELEGATED_OBJECTIVE, PlanningOrchestratorAgent, AutonomyLevel,
-            )
             restore = (self.planning_dir / "checkpoint.json").exists()
             self.logger.info(
                 f"🧩 {'Restoring' if restore else 'Creating'} planning child "
                 f"at {self.planning_dir}"
             )
-            self._children["planning"] = PlanningOrchestratorAgent(
-                objective=DELEGATED_OBJECTIVE,
-                base_dir=str(self.planning_dir),
-                api_key=self.api_key,
-                model_name=self.model_name,
-                base_url=self.base_url,
-                embedding_model=self.embedding_model,
-                embedding_api_key=self.embedding_api_key,
-                embedding_base_url=self.embedding_base_url,
-                futurehouse_api_key=self.futurehouse_api_key,
-                restore_checkpoint=restore,
-                autonomy_level=AutonomyLevel.CO_PILOT,
-                data_dir=None,
-                file_roots=self._child_roots(),
-                # Explicit stable KB when the caller opted in (CLI
-                # --knowledge-dir / chat-approved attach_knowledge_base),
-                # else session-scoped. Without
-                # the session-scoped default the child inherits
-                # PlanningAgent's cwd-relative default (./kb_storage),
-                # silently loading whatever stale KB the launch directory
-                # holds — and a non-empty index forces query embedding on
-                # every plan, which hard-fails when the embedding provider's
-                # key is absent. The stable-cwd default stays intentional for
-                # standalone use; meta children isolate per session unless
-                # the user explicitly points them at a KB.
-                knowledge_dir=str(self.knowledge_dir
-                                  or self.planning_dir / "knowledge"),
-            )
-            # Label its answers as the specialist's — a delegated child's final
-            # answer is a deliverable in the meta's verbose stream, not the
-            # meta's own user-facing response.
-            self._children["planning"]._agent_label = "Planning specialist"
-            # Share skills / custom tools / MCP servers registered on the meta.
-            self._propagate_extensions_to_child(self._children["planning"])
+            self._children["planning"] = build_child(
+                self, "planning", self.planning_dir, restore=restore, persistent=True)
         return self._children["planning"]
 
     def _get_simulation_child(self):
@@ -923,35 +870,19 @@ class MetaOrchestratorAgent:
         construction — a simulate session starts from a natural-language goal,
         not a data file. Built in the CO_PILOT resting mode; each delegation's
         run_task sets the autonomy for that call to match the meta's. The
-        ``simulation_orchestrator`` import is done HERE (inside the method),
-        not at module scope, because ``scilink.agents.sim_agents`` hard-imports
+        ``simulation_orchestrator`` import is done inside ``build_child``, not
+        at module scope, because ``scilink.agents.sim_agents`` hard-imports
         the optional ``ase`` dependency and the meta module must stay importable
         without it; ``delegate_to_simulation`` guards the ImportError.
         """
         if "simulation" not in self._children:
-            from ..sim_agents.simulation_orchestrator import (
-                SimulationOrchestratorAgent, SimulationMode,
-            )
             restore = (self.simulation_dir / "checkpoint.json").exists()
             self.logger.info(
                 f"🧩 {'Restoring' if restore else 'Creating'} simulation child "
                 f"at {self.simulation_dir}"
             )
-            self._children["simulation"] = SimulationOrchestratorAgent(
-                base_dir=str(self.simulation_dir),
-                api_key=self.api_key,
-                model_name=self.model_name,
-                base_url=self.base_url,
-                futurehouse_api_key=self.futurehouse_api_key,
-                restore_checkpoint=restore,
-                simulation_mode=SimulationMode.CO_PILOT,
-                file_roots=self._child_roots(),
-                # mp_api_key not threaded from the meta (its constructor has
-                # none); MPRester falls back to the MP_API_KEY env var when a
-                # crystal-from-Materials-Project structure is requested.
-            )
-            self._children["simulation"]._agent_label = "Simulation specialist"
-            self._propagate_extensions_to_child(self._children["simulation"])
+            self._children["simulation"] = build_child(
+                self, "simulation", self.simulation_dir, restore=restore, persistent=True)
         return self._children["simulation"]
 
     # =========================================================================

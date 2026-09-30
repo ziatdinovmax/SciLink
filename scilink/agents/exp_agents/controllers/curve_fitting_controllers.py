@@ -6001,8 +6001,9 @@ Return JSON with:
         spectrum_config = state.get("locked_fitting_config", {})
 
         import threading as _threading
-        from ....utils.log_context import register_worker, unregister_worker
+        from ....utils.log_context import inherited_context, register_worker, unregister_worker
         _parent_thread = _threading.get_ident()
+        _inherited = inherited_context()   # the item's cancel and usage tags, for the candidates
 
         def _run_candidate(i: int, tagged: bool = True) -> tuple:
             job_state = dict(state)
@@ -6017,6 +6018,8 @@ Return JSON with:
             # PREFIX is added only when several candidates run concurrently; a
             # lone candidate keeps clean, unprefixed — but still visible — logs.
             register_worker(_parent_thread, f"cand_{i:02d}", prefix=tagged)
+            _ctx = _inherited.applied()
+            _ctx.__enter__()
             try:
                 # Ensemble diversity: each fan-out candidate (>=1) generates its
                 # OWN independent fitting plan — like running the agent again.
@@ -6037,6 +6040,7 @@ Return JSON with:
                     is_regime_anchor=is_regime_anchor,
                 )
             finally:
+                _ctx.__exit__(None, None, None)
                 unregister_worker()
             return result, job_state
 

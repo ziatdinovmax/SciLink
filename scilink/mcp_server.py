@@ -340,6 +340,8 @@ class _MCPChannel:
             logging.warning(
                 f"[hitl] question {req.id} ({req.kind}) unanswered after "
                 f"{self._timeout_s}s — using its default answer")
+            from . import hitl
+            hitl.mark_timed_out()       # the gate must not record this as a decision
             return req.default
         return holder.get("answer", req.default)
 

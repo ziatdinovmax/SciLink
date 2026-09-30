@@ -169,6 +169,19 @@ def _notice(hreq) -> Optional[Dict[str, Any]]:
     return None
 
 
+def question_asker(origin: Dict[str, Any]) -> str:
+    """Who asks, for a question from a concurrent worker (a fan-out branch,
+    a swarm item): the label and the subject it works on, so two workers'
+    plan approvals do not look identical on screen. Empty for the session's
+    own agent."""
+    label = origin.get("branch_label")
+    if not label:
+        return ""
+    kind = origin.get("worker_kind") or "branch"
+    subject = origin.get("work_subject")
+    return f"{kind}: {label}" + (f" · {subject}" if subject else "")
+
+
 def present_question(hreq, context: str, session_dir: str) -> Dict[str, Any]:
     """Build the presented-question payload for one parked FeedbackRequest.
 
@@ -201,6 +214,9 @@ def present_question(hreq, context: str, session_dir: str) -> Dict[str, Any]:
         "origin": dict(hreq.origin),
         "default": hreq.default,
     }
+    asker = question_asker(hreq.origin)
+    if asker:
+        payload["asker"] = asker
     subject = present_subject(hreq.subject, session_dir) if hreq.subject else None
     if subject is not None:
         payload["subject"] = subject

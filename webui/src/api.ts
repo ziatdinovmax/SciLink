@@ -163,6 +163,8 @@ export interface PresentedQuestion {
     | "confirm";
   labels: Record<string, string>;
   prompt: string;
+  /** who asks, when the question comes from a concurrent worker: "worker: Raman A7 · TiO2 batch A7" */
+  asker?: string;
   /** the captured console text: the body of a question whose gate declared no subject */
   context_display: string;
   code_files: { name: string; content: string }[];
@@ -322,6 +324,7 @@ export interface MemoryJob { id: string; kind: string; label: string; status: "r
 export interface MemoryProposal {
   status: string; domain: string; staged_ids: string[]; target_domain: string; target_name: string;
   builtin_target: boolean; existing_content: string; proposed_content: string; warnings: string[]; diff: string;
+  base_hash?: string | null;
 }
 
 export interface SessionSnapshot {
@@ -900,10 +903,10 @@ export const api = {
     req<{ job_id: string; label: string }>(`/memory/inbox/${encodeURIComponent(domain)}/propose-upgrade`,
       { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ids, target_domain, target_name, session_id }) }),
-  memoryApplyUpgrade: (domain: string, ids: string[], target_domain: string, target_name: string, content: string, fork_builtin: boolean) =>
+  memoryApplyUpgrade: (domain: string, ids: string[], target_domain: string, target_name: string, content: string, fork_builtin: boolean, base_hash?: string | null) =>
     req<{ status: string; backup_path: string; n_consumed: number }>(`/memory/inbox/${encodeURIComponent(domain)}/apply-upgrade`,
       { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ids, target_domain, target_name, content, fork_builtin }) }),
+        body: JSON.stringify({ ids, target_domain, target_name, content, fork_builtin, base_hash }) }),
   memoryCheckUpgrade: (existing: string, proposed: string) =>
     req<{ warnings: string[]; diff: string }>("/memory/check-upgrade",
       { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ existing, proposed }) }),
