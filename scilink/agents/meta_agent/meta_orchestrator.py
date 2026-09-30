@@ -1795,12 +1795,13 @@ class MetaOrchestratorAgent:
         # mode already verified is verified there, the rest provisional. The
         # ledger entry stays the result; the board holds what other work may
         # read. Posting never fails the delegation.
-        if status == "success":
+        board = getattr(self, "board", None)
+        if status == "success" and board is not None:
             try:
                 from .board import post_delegation
-                posted = post_delegation(self.board, entry, result)
+                posted = post_delegation(board, entry, result)
             except Exception as e:  # noqa: BLE001
-                self.logger.warning(f"board: could not post delegation {entry.get('index')}: {e}")
+                logging.warning(f"board: could not post delegation {entry.get('index')}: {e}")
                 posted = []
             with self._fanout_lock:
                 # Extend: a fan-out may have filed a record under this entry
@@ -2058,7 +2059,8 @@ class MetaOrchestratorAgent:
                     "children_instantiated": sorted(self._children.keys()),
                     "delegation_ledger": self._ledger_snapshot(),
                     "knowledge_dir": str(self.knowledge_dir) if self.knowledge_dir else None,
-                    "board_version": len(self.board),
+                    "board_version": (len(self.board) if getattr(self, "board", None) is not None
+                                      else None),
                 }
                 atomic_write_json(self.checkpoint_path, checkpoint_data,
                                   indent=2, default=str)
