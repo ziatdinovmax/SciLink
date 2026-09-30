@@ -282,6 +282,18 @@ def test_a_later_item_reads_the_board_and_a_check_is_refused(meta):
         meta.board.snapshot(subject="TiO2 A7", check=True)
 
 
+def test_reads_board_opt_in_forms():
+    """``{}`` is the tool schema's plain opt-in (found live: it read nothing)."""
+    assert swarm._read_spec({}) == {}
+    assert swarm._read_spec(True) == {} and swarm._read_spec("yes") == {}
+    assert swarm._read_spec(None) is None and swarm._read_spec(False) is None
+    assert swarm._read_spec({"kinds": "claim", "include_provisional": True, "subject": " S "}) == {
+        "kinds": ["claim"], "include_provisional": True, "subject": "S"}
+    items, _ = swarm.normalize_items([{"mode": "analysis", "task": "t", "label": "a", "reads_board": {}},
+                                      {"mode": "analysis", "task": "t", "label": "b"}])
+    assert items[0]["reads_board"] == {} and items[1]["reads_board"] is None
+
+
 def test_the_board_survives_the_checkpoint_and_restore(meta, tmp_path):
     swarm.run_swarm(meta, ITEMS)
     ck = json.loads((Path(meta.base_dir) / "checkpoint.json").read_text())

@@ -125,10 +125,12 @@ def normalize_items(items: Any) -> Tuple[List[dict], List[dict]]:
 def _read_spec(raw: Any) -> Optional[dict]:
     """What an item asked to read: ``True`` (its subject, verified records)
     or ``{subject?, kinds?, include_provisional?}``; ``None`` reads nothing."""
-    if not raw:
+    if raw is None or raw is False or raw == "":
         return None
     if not isinstance(raw, dict):
-        return {}
+        return {}                     # true, "yes", 1: the item's subject, verified records
+    # An empty object is the tool schema's plain opt-in; it is falsy in
+    # Python, which is why this does not test ``not raw``.
     spec: dict = {}
     if raw.get("subject"):
         spec["subject"] = str(raw["subject"]).strip()
