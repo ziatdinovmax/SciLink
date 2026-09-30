@@ -1944,6 +1944,7 @@ def run_fanout(orch, branches: List[dict],
     # this loop keeps enforcing budgets while one is on screen.
     from ...hitl import QuestionServer
     server = QuestionServer(queue_channel) if queue_channel is not None else None
+    channel_failed = False
     if server is not None:
         server.__enter__()
     try:
@@ -1975,6 +1976,14 @@ def run_fanout(orch, branches: List[dict],
             t0 = time.monotonic()
             done, pending = wait(pending, timeout=_FANOUT_POLL_S)
             since_tick += time.monotonic() - t0
+            if server is not None and server.error is not None:
+                from ...ui.output_capture import AgentStoppedError
+                if isinstance(server.error, AgentStoppedError):
+                    raise server.error          # the person's Stop reaches the fan-out
+                if not channel_failed:
+                    channel_failed = True
+                    print(f"  ⚠️  the person's channel raised {type(server.error).__name__}: "
+                          "remaining branch questions take their defaults, unattended.")
             for f in done:
                 f.result()  # _run_one_branch never raises; just surfaces oddities
                 print(f"  ✅ analysis branch finished: {fut_label[f]}  "

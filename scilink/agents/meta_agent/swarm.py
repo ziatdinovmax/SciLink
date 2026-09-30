@@ -359,6 +359,7 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
     orch._auto_checkpoint(verbose=False)
     requeue: List[dict] = []
     seen_errors: set = set()
+    channel_warnings: List[str] = []
     pool = ThreadPoolExecutor(max_workers=max(1, plan["workers"]))
     server = QuestionServer(queue) if queue is not None else contextlib.nullcontext()
     fut_entry, fut_stop, fut_label, fut_item = {}, {}, {}, {}
@@ -388,8 +389,10 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
                     raise server.error          # the person's Stop reaches the swarm
                 if server.error not in seen_errors:
                     seen_errors.add(server.error)
-                    print(f"  ⚠️  the person's channel raised {type(server.error).__name__}: "
-                          "remaining questions take their defaults, unattended.")
+                    channel_warnings.append(
+                        f"the person's channel raised {type(server.error).__name__}: "
+                        "remaining questions took their defaults, unattended")
+                    print(f"  ⚠️  {channel_warnings[-1]}.")
             for f in done:
                 f.result()
                 print(f"  ✅ swarm item finished: {fut_label[f]} ({fut_entry[f].get('status')})")
@@ -410,6 +413,10 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
                         f"{int(SWARM_DRAIN_TIMEOUT_S)} s")})
                     print(f"  ⚠️  giving up the rerun of '{item['label']}': its cancelled "
                           "worker has not ended.")
+                for f in draining:
+                    # Its reservation would otherwise hold later swarms and
+                    # fan-outs for as long as the hung thread lives.
+                    fo._release_branch(f"swarm:{fut_entry[f]['index']}")
                 requeue.clear()
                 draining.clear()
                 drain_since = None
@@ -440,6 +447,7 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
         # let go of their memory instead of running on unattended.
         for f, ev in list(fut_stop.items()):
             if not f.done():
+                fut_entry[f]["_cancelled"] = True    # a late end must not overwrite the verdict
                 ev.set()
                 tid = fut_entry[f].get("_branch_tid")
                 if tid:
@@ -459,6 +467,7 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
                 "summary": (e.get("summary") or "")[:600],
                 "key_findings": (e.get("key_findings") or [])[:6],
                 "files_produced": len(e.get("files_produced") or []),
+                "warnings": list(e.get("warnings") or []),
                 "error": e.get("error")} for e in entries]
     ok = [r for r in results if r["status"] == "success"]
     return json.dumps({
@@ -467,6 +476,7 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
         "seconds": round(time.monotonic() - t0),
         "results": results,
         "not_started": refused,
+        "warnings": channel_warnings,
         "message": (f"{len(ok)} of {len(results)} item(s) succeeded. Each is a delegation on the "
                     "ledger: read one with get_delegation_history, thread its findings into a next "
                     "delegation's context, or fuse analysis items with fuse_delegations."),

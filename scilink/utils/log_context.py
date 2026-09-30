@@ -164,6 +164,39 @@ def effective_thread(thread_id: int) -> int:
     return thread_id
 
 
+class inherited_context:
+    """What a thread spawned by hand (a best-of-N candidate that registers
+    itself with ``register_worker``) must carry from its parent: the parent's
+    cancel event, so an item's cancel reaches its candidates, and its usage
+    tags. Made on the parent thread; applied on the child::
+
+        ctx = inherited_context()          # parent thread
+        with ctx.applied():                # child thread
+            ...
+    """
+
+    def __init__(self) -> None:
+        from .. import tracing
+        self.cancel = _CANCEL_EVENTS.get(threading.get_ident())
+        self.session, self.worker = tracing.current_session(), tracing.current_worker()
+
+    def applied(self):
+        from contextlib import contextmanager
+        from .. import tracing
+
+        @contextmanager
+        def _cm():
+            if self.cancel is not None:
+                register_cancel(self.cancel)
+            try:
+                with tracing.attributed(session=self.session, worker=self.worker):
+                    yield
+            finally:
+                if self.cancel is not None:
+                    unregister_cancel()
+        return _cm()
+
+
 def attributed_to_current(fn: Callable, tag: str = "",
                           prefix: bool = False) -> Callable:
     """Wrap ``fn`` so that, wherever it later runs, that thread is attributed

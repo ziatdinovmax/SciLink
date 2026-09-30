@@ -1072,6 +1072,39 @@ def test_fanout_workers_are_log_registered(tmp_path):
     assert attribution == [True, True]
 
 
+def test_candidates_inherit_the_items_cancel_and_usage_tags(tmp_path):
+    """A best-of-N candidate of a cancelled swarm item (or fan-out branch)
+    must see the cancel — it registers itself with register_worker, not
+    through attributed_to_current — and its LLM calls must stay charged to
+    the item."""
+    import threading as th
+    from scilink import tracing
+    from scilink.utils.log_context import cancel_requested, register_cancel, unregister_cancel
+
+    model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
+    c = _controller(tmp_path, model)
+    seen = []
+
+    def stub(state, image_data, data_path, image_name, image_idx,
+             is_regime_anchor=False, reuse_script=None, reuse_source=None):
+        seen.append((cancel_requested(), tracing.current_session(), tracing.current_worker()))
+        tag = state.get("_candidate_tag", "_direct")
+        state["locked_analysis_config"] = {"refined_by": tag}
+        return _canned_result(0.9, True, tag=tag)
+
+    c._execute_and_verify = stub
+    stop = th.Event()
+    stop.set()                                   # the item was cancelled already
+    register_cancel(stop)
+    try:
+        with tracing.attributed(session="s", worker="swarm:01_item"):
+            _run(c, _base_state(2))
+    finally:
+        unregister_cancel()
+    assert seen == [(True, "s", "swarm:01_item")] * 2
+    assert not cancel_requested()                # nothing leaked onto this thread
+
+
 # ---------------------------------------------------------------------------
 # atomic_np_save
 # ---------------------------------------------------------------------------
