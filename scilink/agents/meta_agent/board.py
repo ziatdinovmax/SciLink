@@ -385,17 +385,31 @@ def _analysis_records(entry: Dict[str, Any], result: Dict[str, Any]) -> List[Dic
                                  "gate": "analysis pipeline (QC and verification passed)"
                                  if verified else "analysis not marked successful"}})
     for aid, rec in status_by_id.items():
-        out_dir = rec.get("output_directory")
-        if not out_dir:
-            continue
-        script = Path(out_dir) / "scripts" / "analysis_script.py"
-        if script.is_file():
+        script = _recipe_script(rec.get("output_directory"))
+        if script is not None:
             out.append({"kind": "recipe", "payload": {"path": str(script), "analysis_id": aid,
                                                       "agent": rec.get("agent_name")},
                         "status": "verified" if rec.get("status") == "success" else "provisional",
                         "evidence": {"analysis_ids": [aid], "files": [str(script)],
                                      "gate": "approved analysis script"}})
     return out
+
+
+def _recipe_script(out_dir: Any) -> Optional[Path]:
+    """The approved script an analysis run left under ``scripts/``: the
+    curve agent's ``fitting_script.py`` (a series saves one per spectrum,
+    the same locked model), the image and hyperspectral agents'
+    ``analysis_script.py``; else the first script there."""
+    if not out_dir:
+        return None
+    scripts = Path(out_dir) / "scripts"
+    if not scripts.is_dir():
+        return None
+    for name in ("analysis_script.py", "fitting_script.py"):
+        if (scripts / name).is_file():
+            return scripts / name
+    found = sorted(p for p in scripts.iterdir() if p.suffix == ".py" and p.is_file())
+    return found[0] if found else None
 
 
 def _planning_records(entry: Dict[str, Any], result: Dict[str, Any]) -> List[Dict[str, Any]]:

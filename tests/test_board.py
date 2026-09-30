@@ -426,3 +426,17 @@ def test_planning_run_task_reports_how_the_plan_was_settled(tmp_path, monkeypatc
     r = orch.run_task("plan again")
     assert r["plan_review"]["human_review"] is None and r["plan_review"]["unattended_gate"]["would_have_been"] == "accepted"
     assert r["plan_review"]["blocking_findings"] == []
+
+
+def test_the_recipe_is_the_agents_approved_script(tmp_path):
+    from scilink.agents.meta_agent.board import _recipe_script
+    assert _recipe_script(None) is None and _recipe_script(tmp_path) is None
+    (tmp_path / "scripts").mkdir()
+    assert _recipe_script(tmp_path) is None
+    (tmp_path / "scripts" / "spectrum_0001.py").write_text("")       # a series: one per spectrum
+    (tmp_path / "scripts" / "spectrum_0000.py").write_text("")
+    assert _recipe_script(tmp_path).name == "spectrum_0000.py"
+    (tmp_path / "scripts" / "fitting_script.py").write_text("")      # the curve agent's single fit
+    assert _recipe_script(tmp_path).name == "fitting_script.py"
+    (tmp_path / "scripts" / "analysis_script.py").write_text("")     # the image agent's
+    assert _recipe_script(tmp_path).name == "analysis_script.py"
