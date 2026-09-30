@@ -887,6 +887,15 @@ can already hit.
    - *Found by the tests:* a post after a torn last line was appended onto
      the torn text. The writer now starts on a fresh line when the file does
      not end with one.
+   - *Found live:* the curve agent's approved script is
+     `scripts/fitting_script.py` (a series: one per spectrum), the image
+     agent's `analysis_script.py` — the recipe takes the folder's
+     representative script (`_recipe_script`). `reads_board: {}`, the tool
+     schema's plain opt-in, is falsy in Python and was read as "nothing".
+     A planning `run_task`'s `key_findings` are the campaign configuration
+     (targets, TEA), so a short plan posted nothing: `plan_review` now
+     carries one line per proposed experiment or portfolio direction
+     (`hypotheses`), and those are the plan's claims on the board.
 3. **Reactions.** Subscriptions, `task_request`, causal chains and cycle
    refusal, supersede-chain stops, retraction and taint.
 4. **Scheduling.**
@@ -1128,7 +1137,8 @@ references are to `main` at bed2f7f8.
   the fusion entry, and posts the fused claims with `reads`.
 - `meta_orchestrator_tools.py`: `get_board(subject, kind,
   include_provisional, limit)`; `run_swarm`'s item schema.
-- `planning_orchestrator.run_task` → `plan_review`;
+- `planning_orchestrator.run_task` → `plan_review` (`human_review`,
+  `unattended_gate`, `blocking_findings`, `hypotheses`, `iteration`);
   `simulation_orchestrator.run_task` → `structures[].validation_status`.
 - Tests: `tests/test_board.py`; board checks in `tests/test_fanout_steering.py`.
 
