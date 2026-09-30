@@ -22,6 +22,7 @@ from typing import Dict, Iterator, Optional, Tuple
 
 LLM_MAX_INFLIGHT = 16
 _WAIT_LOG_S = 10.0
+_WAIT_SLICE_S = 1.0
 
 _logger = logging.getLogger(__name__)
 _slots: Dict[Tuple[str, int], threading.BoundedSemaphore] = {}
@@ -55,9 +56,11 @@ def llm_slot(model: Optional[str]) -> Iterator[None]:
     """Hold one of the model's in-flight slots for the block.
 
     A caller that has to wait says so in the log, and again every few
-    seconds: a Stop requested for its worker lands on a log line, so the
-    wait stays interruptible.
+    seconds; while it waits it checks for a cancel of its worker (a budget or
+    memory cancel, the turn's Stop) once a second, so a cancelled worker
+    stops here instead of taking the slot and making one more call.
     """
+    from ..utils.log_context import raise_if_cancelled
     cap = llm_max_inflight()
     if cap is None:
         yield
@@ -65,8 +68,14 @@ def llm_slot(model: Optional[str]) -> Iterator[None]:
     sem = _semaphore(model or "unknown", cap)
     if not sem.acquire(blocking=False):
         _logger.warning(f"Waiting for an LLM slot: {cap} calls to {model} are already in flight.")
-        while not sem.acquire(timeout=_WAIT_LOG_S):
-            _logger.info(f"Still waiting for an LLM slot for {model}.")
+        waited = 0.0
+        while True:
+            raise_if_cancelled()
+            if sem.acquire(timeout=_WAIT_SLICE_S):
+                break
+            waited += _WAIT_SLICE_S
+            if waited % _WAIT_LOG_S < _WAIT_SLICE_S:
+                _logger.info(f"Still waiting for an LLM slot for {model}.")
     try:
         yield
     finally:

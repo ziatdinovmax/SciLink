@@ -20,25 +20,32 @@ The coordinator is deterministic, with no model call:
   equals) is cancelled and queued to run again, alone, once;
 - a wall-clock **budget** per item, as in the fan-out;
 - one **question queue**: in autopilot each worker's questions are tagged with
-  who asks and about what, served to the person one at a time, and time out
-  to the gate's default (``hitl.question_timeout_s``).
+  who asks and about what, served to the person one at a time from a thread
+  of their own (``hitl.QuestionServer``, so the coordinator keeps polling
+  while a question is on screen), and time out to the gate's default
+  (``hitl.question_timeout_s``) — a timeout the gate can tell from an answer.
+
+There is no swarm resume: after a Stop, items still queued are left
+``running`` on the ledger until the next turn's sweep marks them interrupted.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from ...hitl import (QueueChannel, WorkerChannel, question_timeout_s, request_human_feedback,
-                     set_thread_channel, subject_block, make_subject)
+from ...hitl import (QueueChannel, QuestionServer, WorkerChannel, question_timeout_s,
+                     request_human_feedback, set_thread_channel, subject_block, make_subject)
 from ...utils.workers import resolve_workers
 from . import fanout as fo
-from .workers import MODES, build_child
+from .workers import MODES, build_child, release_child
 
 SWARM_MAX_ITEMS = 8
 SWARM_MAX_WORKERS = resolve_workers(None, "SCILINK_SWARM_MAX_WORKERS", 3)
@@ -212,6 +219,7 @@ def _run_item(orch, item: dict, entry: dict, channel, autonomy: str, stop_event)
     tag = tracing.attributed(worker=f"swarm:{index:02d}_{item['slug']}")
     tag.__enter__()
     result = _error_result("item aborted before completion")
+    child = None
     try:
         try:
             child = build_child(orch, item["mode"], base_dir, label=f"Swarm: {item['label']}")
@@ -226,6 +234,8 @@ def _run_item(orch, item: dict, entry: dict, channel, autonomy: str, stop_event)
                 raise
             result = _error_result(entry.get("_cancel_reason") or "cancelled", status="cancelled")
     finally:
+        if child is not None:
+            release_child(child)
         fo._unregister_branch_stop()
         tag.__exit__(None, None, None)
         append_event("swarm_item", {"label": item["label"], "mode": item["mode"],
@@ -252,7 +262,10 @@ def _guard_memory(orch, running: Dict[Any, dict], fut_item: Dict[Any, dict], fut
         return None
     live = [(f, e) for f, e in running.items()
             if e.get("status") == "running" and e.get("_started_at") and not e.get("_cancelled")]
-    if not live:
+    if len(live) < 2:
+        # The guard is against overcommitting by several items at once. One
+        # item alone is an ordinary delegation's risk, and cancelling it to
+        # run it alone again would change nothing.
         return None
     fut, entry = max(live, key=lambda fe: (fut_item[fe[0]]["_mem_est"], fe[1]["_started_at"]))
     item = fut_item[fut]
@@ -261,7 +274,7 @@ def _guard_memory(orch, running: Dict[Any, dict], fut_item: Dict[Any, dict], fut
               f"{floor / 1e9:.2f} GB floor")
     entry["_cancel_reason"] = reason
     print(f"  🧯 free memory is low ({avail / 1e9:.2f} GB) — cancelling '{item['label']}' "
-          + ("and running it again alone afterwards" if not item.get("_retried") else "(already retried once)"))
+          + ("and running it again alone afterwards" if not item.get("_retried") else "(already run again once)"))
     fut_stop[fut].set()
     tid = entry.get("_branch_tid")
     if tid:
@@ -282,6 +295,10 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
     if not valid:
         return json.dumps({"status": "error", "message": "No runnable items.",
                            "not_started": refused})
+    if len(valid) == 1:
+        return json.dumps({"status": "error", "not_started": refused, "message": (
+            "A swarm needs at least two items; one item is an ordinary delegation "
+            "(delegate_to_analysis / delegate_to_planning / delegate_to_simulation).")})
     plan = capacity_plan(valid)
     refused += plan["refused"]
     if not plan["run"]:
@@ -292,8 +309,9 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
         return json.dumps({"status": "declined", "message": "The user declined the swarm.",
                            "not_started": refused})
 
-    budget = float(item_time_budget_s) if item_time_budget_s else SWARM_ITEM_TIME_BUDGET_S
-    swarm_id = f"swarm_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    budget = (float(item_time_budget_s) if item_time_budget_s is not None
+              else SWARM_ITEM_TIME_BUDGET_S)                 # <= 0 disables it
+    swarm_id = f"swarm_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     autonomy = orch.meta_mode.name
     queue = QueueChannel(timeout_s=question_timeout_s()) if attended else None
     fo._ensure_stop_guard_installed()
@@ -310,7 +328,8 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
                 entry["subject"] = item["subject"]
             entry["_budget_s"] = budget
         entries.append(entry)
-        channel = (WorkerChannel(queue, item["label"], subject=item.get("subject"), kind="worker")
+        channel = (WorkerChannel(queue, item["label"], subject=item.get("subject"), kind="worker",
+                                 on_wait=fo.note_human_wait(entry))
                    if queue is not None else _Unattended())
         stop_ev = threading.Event()
         fut = pool.submit(fo._attributed_branch(_run_item), orch, item, entry, channel,
@@ -321,7 +340,9 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
     orch._auto_checkpoint(verbose=False)
     requeue: List[dict] = []
     pool = ThreadPoolExecutor(max_workers=max(1, plan["workers"]))
+    server = QuestionServer(queue) if queue is not None else contextlib.nullcontext()
     try:
+        server.__enter__()
         fut_entry, fut_stop, fut_label, fut_item = {}, {}, {}, {}
         for item in plan["run"]:
             fut, entry, stop_ev = launch(pool, item)
@@ -329,12 +350,14 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
             fut_item[fut] = item
         pending, since_tick = set(fut_entry), 0.0
         draining: set = set()     # cancelled for memory, not yet ended
-        while pending:
+        while pending or requeue:
             t_poll = time.monotonic()
-            done, pending = wait(pending, timeout=_POLL_S)
+            if pending:
+                done, pending = wait(pending, timeout=_POLL_S)
+            else:                 # only a rerun is left, waiting for the cancelled worker to end
+                done = set()
+                wait(draining, timeout=_POLL_S)
             since_tick += time.monotonic() - t_poll
-            if queue is not None and queue.serve_pending():
-                since_tick = 0.0
             for f in done:
                 f.result()
                 print(f"  ✅ swarm item finished: {fut_label[f]} ({fut_entry[f].get('status')})")
@@ -351,8 +374,9 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
             if budget > 0:
                 fo._cancel_overdue_branches(orch, pending, fut_entry, fut_stop, fut_label,
                                             budget, noun="swarm item")
-            if not pending and requeue:
-                # A cancelled item runs again once the others are done: alone.
+            if not pending and requeue and not draining:
+                # A cancelled item runs again once the others are done AND the
+                # cancelled worker has ended: alone.
                 item = requeue.pop(0)
                 print(f"  🔁 running '{item['label']}' again, alone")
                 fut, entry, stop_ev = launch(pool, item)
@@ -363,6 +387,7 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
                 since_tick = 0.0
                 print(f"  ⏳ {len(pending)} swarm item(s) still running ...")
     finally:
+        server.__exit__(None, None, None)
         pool.shutdown(wait=False, cancel_futures=True)
         orch._auto_checkpoint(verbose=False)
 

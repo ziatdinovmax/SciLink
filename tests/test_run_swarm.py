@@ -127,10 +127,17 @@ def test_bad_items_are_refused_with_reasons(meta, monkeypatch):
     _workers(monkeypatch)
     res = json.loads(swarm.run_swarm(meta, [{"mode": "optimize", "task": "x", "label": "a"},
                                             {"mode": "analysis", "task": " ", "label": "b"},
-                                            {"mode": "planning", "task": "ok", "label": "c"}]))
-    assert [r["label"] for r in res["results"]] == ["c"]
+                                            {"mode": "planning", "task": "ok", "label": "c"},
+                                            {"mode": "planning", "task": "ok too", "label": "d"}]))
+    assert [r["label"] for r in res["results"]] == ["c", "d"]
     reasons = {r["label"]: r["reason"] for r in res["not_started"]}
     assert "mode must be one of" in reasons["a"] and reasons["b"] == "empty task"
+
+
+def test_one_item_is_not_a_swarm(meta, monkeypatch):
+    built = _workers(monkeypatch)
+    res = json.loads(swarm.run_swarm(meta, [{"mode": "planning", "task": "t", "label": "only"}]))
+    assert res["status"] == "error" and "at least two" in res["message"] and built == []
 
 
 def test_more_items_than_the_limit_are_not_started(meta, monkeypatch):
@@ -258,7 +265,7 @@ def test_usage_is_charged_to_each_item_under_the_coordinators_session(meta, monk
         tracing.set_usage_sink(None)
         tracing.bind_session(None)
     s = led.summary()
-    assert set(s["by_worker"]) == {"swarm:01_raman_a7", "swarm:02_anatase_cell"}
+    assert set(s["by_worker"]) == {"meta-session/swarm:01_raman_a7", "meta-session/swarm:02_anatase_cell"}
     assert s["by_session"] == {"meta-session": {"calls": 2, "prompt_tokens": 200, "completion_tokens": 2}}
 
 
@@ -268,18 +275,53 @@ def test_the_meta_offers_run_swarm(meta):
     assert "FRESH agent" in meta.messages[0]["content"]
 
 
-def test_the_guard_keeps_cancelling_while_memory_stays_critical(meta, monkeypatch, capsys):
-    """An outside program can hold the memory: the guard then goes on, one
-    item at a time, heaviest first, rather than let the machine freeze."""
+def test_an_item_running_alone_is_never_cancelled_by_the_guard(meta, monkeypatch, capsys):
+    """The guard is against several items overcommitting together. Once one
+    item is alone it runs on, even with memory still low, and a cancelled
+    item's rerun waits for the cancelled worker to end before it starts."""
     monkeypatch.setitem(swarm._MODE_MEM_FLOOR, "analysis", 2e9)
-    _workers(monkeypatch, lambda task: {"until_stopped": True, "seconds": 0.2})
-    monkeypatch.setattr(swarm, "_memory", lambda: {"total": 16e9, "available": 1e8})
+    runs = {"heavy": 0}
+
+    def behaviour(task):
+        if task == "heavy":
+            runs["heavy"] += 1
+            return {"until_stopped": runs["heavy"] == 1, "seconds": 0.3}
+        return {"seconds": 0.6}
+    _workers(monkeypatch, behaviour)
+    monkeypatch.setattr(swarm, "_memory", lambda: {"total": 16e9, "available": 1e8})   # low throughout
     res = json.loads(swarm.run_swarm(meta, [
         {"mode": "planning", "task": "light", "label": "light"},
         {"mode": "analysis", "task": "heavy", "label": "heavy"}]))
-    assert all(r["status"] == "cancelled" for r in res["results"])
-    assert len(res["results"]) == 4                                   # each retried once
-    out = capsys.readouterr().out
-    order = [line.split("cancelling '")[1].split("'")[0] for line in out.splitlines()
-             if "cancelling '" in line]
-    assert order[:2] == ["heavy", "light"]                            # heaviest first
+    assert [(r["label"], r["status"]) for r in res["results"]] == [
+        ("light", "success"), ("heavy", "cancelled"), ("heavy", "success")]
+    assert capsys.readouterr().out.count("cancelling '") == 1
+
+
+def test_budgets_keep_firing_while_a_question_is_on_screen(meta, attended, monkeypatch):
+    """The person takes 2 s over one worker's question; another item with a
+    0.5 s budget must be cancelled meanwhile, not after the answer."""
+    marks = {}
+    real_ask = attended.ask
+
+    def slow_ask(req):
+        if req.kind != "confirm":
+            time.sleep(2.0)
+            marks["answered_at"] = time.time()
+        return real_ask(req)
+    attended.ask = slow_ask
+    real_cancel = swarm.fo._cancel_overdue_branches
+
+    def cancel(*args, **kwargs):
+        before = {id(e) for e in args[2].values() if e.get("timed_out")}
+        real_cancel(*args, **kwargs)
+        if any(e.get("timed_out") and id(e) not in before for e in args[2].values()):
+            marks.setdefault("cancelled_at", time.time())
+    monkeypatch.setattr(swarm.fo, "_cancel_overdue_branches", cancel)
+    _workers(monkeypatch, lambda task: {"ask": task == "asks", "until_stopped": task == "slow",
+                                        "seconds": 0.2})
+    res = json.loads(swarm.run_swarm(meta, [
+        {"mode": "planning", "task": "asks", "label": "asker"},
+        {"mode": "planning", "task": "slow", "label": "slow one"}], item_time_budget_s=0.5))
+    status = {r["label"]: r["status"] for r in res["results"]}
+    assert status == {"asker": "success", "slow one": "error"}
+    assert marks["cancelled_at"] < marks["answered_at"]

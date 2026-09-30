@@ -110,8 +110,11 @@ export function FeedbackPanel({
           : [subject.title.slice(0, i), subject.title.slice(i + 3)];
       })()
     : ["", ""];
+  // A question from one of several concurrent workers says who asks first.
+  const asker = question.asker ? <div className="qs-asker">{question.asker}</div> : null;
   const body = subject ? (
     <>
+      {asker}
       {title && (
         <h4 className="qs-title">
           {title}
@@ -131,6 +134,7 @@ export function FeedbackPanel({
     </>
   ) : (
     <>
+      {asker}
       {notice}
       {codeFiles}
       {consoleText}

@@ -172,9 +172,9 @@ def test_calls_made_for_a_worker_are_charged_to_it(ledger, tmp_path):
     [t.start() for t in threads]
     [t.join() for t in threads]
     s = ledger.summary()
-    assert s["by_worker"]["w0"] == {"calls": 1, "prompt_tokens": 100, "completion_tokens": 10}
-    assert s["by_worker"]["w1"] == {"calls": 1, "prompt_tokens": 100, "completion_tokens": 10}
-    assert set(s["by_worker"]) == {"w0", "w1"}
+    assert s["by_worker"]["s1/w0"] == {"calls": 1, "prompt_tokens": 100, "completion_tokens": 10}
+    assert s["by_worker"]["s1/w1"] == {"calls": 1, "prompt_tokens": 100, "completion_tokens": 10}
+    assert set(s["by_worker"]) == {"s1/w0", "s1/w1"}
     assert s["by_session"]["s1"]["calls"] == 3
     assert s["by_session"]["unattributed"]["calls"] == 2
     again = UsageLedger(tmp_path / "usage.jsonl")                             # a redeploy
@@ -214,3 +214,81 @@ def test_a_fanout_branch_runs_under_the_coordinators_session():
     t.start()
     t.join()
     assert out["tags"] == ("meta-session", None)
+
+
+def test_a_cancelled_worker_does_not_take_the_slot_it_waited_for(monkeypatch, cap):
+    from scilink.utils.log_context import register_cancel, unregister_cancel
+    from scilink.ui.output_capture import AgentStoppedError
+    cap(1)
+    gauge = Gauge(seconds=1.5)
+    monkeypatch.setattr(lw.litellm, "completion", gauge)
+    monkeypatch.setattr(llm_limiter, "_WAIT_SLICE_S", 0.1)
+    holder = threading.Thread(target=lambda: lw._completion_with_retries(0, model="m", messages=[]))
+    holder.start()
+    time.sleep(0.2)                                  # the slot is taken
+    stop, out = threading.Event(), {}
+
+    def waiter():
+        register_cancel(stop)
+        try:
+            lw._completion_with_retries(0, model="m", messages=[])
+            out["r"] = "called"
+        except AgentStoppedError:
+            out["r"] = "stopped"
+        finally:
+            unregister_cancel()
+    w = threading.Thread(target=waiter)
+    w.start()
+    time.sleep(0.3)
+    stop.set()                                       # cancelled while waiting
+    w.join(5)
+    holder.join(5)
+    assert out["r"] == "stopped" and gauge.calls == 1
+
+
+def test_the_proxy_client_retries_transient_errors_itself_with_the_slot_released(monkeypatch, cap):
+    """The SDK's own retries are off (they would sleep inside the slot); a
+    503 is retried by SciLink's policy, a 400 is not."""
+    import openai
+    import httpx
+    cap(1)
+    monkeypatch.setattr(lw, "_backoff_s", lambda attempt: 0.2)
+
+    class Raw:
+        def __init__(self):
+            self.max_retries = 2
+            self.calls = []
+
+    def status_error(code):
+        resp = httpx.Response(code, request=httpx.Request("POST", "http://proxy/v1/chat"))
+        return openai.APIStatusError("boom", response=resp, body=None)
+
+    raw = Raw()
+    seen = {"n": 0}
+
+    def create(**kwargs):
+        seen["n"] += 1
+        if seen["n"] == 1:
+            raise status_error(503)
+        return SimpleNamespace(choices=[], usage=None)
+    raw.chat = SimpleNamespace(completions=SimpleNamespace(create=create))
+    client = portable_openai_client(raw, "proxy-model")
+    assert raw.max_retries == 0
+    # another call gets the single slot during the backoff sleep
+    order = []
+    other_raw = SimpleNamespace(max_retries=2, chat=SimpleNamespace(completions=SimpleNamespace(
+        create=lambda **kw: order.append("other") or SimpleNamespace(choices=[], usage=None))))
+    other = portable_openai_client(other_raw, "proxy-model")
+    t = threading.Thread(target=lambda: client.chat.completions.create(model="proxy-model", messages=[]))
+    t.start()
+    time.sleep(0.05)
+    other.chat.completions.create(model="proxy-model", messages=[])
+    t.join(5)
+    assert seen["n"] == 2 and order == ["other"]
+
+    def bad(**kwargs):
+        raise status_error(400)
+    raw.chat = SimpleNamespace(completions=SimpleNamespace(create=bad))
+    client = portable_openai_client(raw, "proxy-model")
+    with pytest.raises(openai.APIStatusError):
+        client.chat.completions.create(model="proxy-model", messages=[])

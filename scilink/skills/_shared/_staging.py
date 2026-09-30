@@ -19,6 +19,7 @@ helper + the loader, same as ``_memory``.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from pathlib import Path
@@ -526,6 +527,10 @@ def propose_skill_upgrade(
     proposed_content = _preserve_structure(existing_content, result["content"])
     return {
         "status": "success",
+        # What the merge was made against. A human review sits between this
+        # and the apply; a worker's graduation in that time would otherwise be
+        # overwritten. apply_skill_upgrade refuses a different base.
+        "base_hash": content_hash(existing_content),
         "action": "proposed",
         "proposed_content": proposed_content,
         "existing_content": existing_content,
@@ -539,6 +544,10 @@ def propose_skill_upgrade(
     }
 
 
+def content_hash(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:16]
+
+
 def apply_skill_upgrade(
     domain: str,
     staged_ids: List[str],
@@ -546,6 +555,7 @@ def apply_skill_upgrade(
     target_domain: str,
     target_name: str,
     proposed_content: str,
+    base_hash: Optional[str] = None,
     root: Optional[Path] = None,
     skills_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
@@ -553,22 +563,31 @@ def apply_skill_upgrade(
 
     The pre-upgrade skill is copied to ``<name>.md.bak`` (so an upgrade can be
     reverted), the approved ``proposed_content`` is written, and the consumed
-    staged records are removed.
+    staged records are removed. ``base_hash`` is the proposal's: when the
+    skill on disk no longer matches it (another session or a worker wrote it
+    during the review), nothing is written and the caller is told to propose
+    again against the current version.
     """
     target_md = _skill_md_path(target_domain, target_name, skills_root)
     with _domain_lock(domain, root=root), skill_lock(target_md):
         return _apply_skill_upgrade_unlocked(
             domain, staged_ids, target_domain=target_domain, target_name=target_name,
-            proposed_content=proposed_content, root=root, skills_root=skills_root)
+            proposed_content=proposed_content, base_hash=base_hash, root=root,
+            skills_root=skills_root)
 
 
 def _apply_skill_upgrade_unlocked(domain: str, staged_ids: List[str], *, target_domain: str,
                                   target_name: str, proposed_content: str,
-                                  root: Optional[Path], skills_root: Optional[Path]
-                                  ) -> Dict[str, Any]:
+                                  root: Optional[Path], skills_root: Optional[Path],
+                                  base_hash: Optional[str] = None) -> Dict[str, Any]:
     target_md = _skill_md_path(target_domain, target_name, skills_root)
     if not target_md.exists():
         return _missing_target_error(target_domain, target_name)
+    if base_hash and content_hash(target_md.read_text()) != base_hash:
+        return {"status": "error", "changed_since_proposal": True,
+                "message": (f"'{target_domain}/{target_name}' changed since this proposal was "
+                            "made (another session or worker wrote it). Propose the upgrade "
+                            "again to merge into the current version.")}
     # Back up the current version (single last-version undo; .bak is ignored by
     # the loader, which only discovers <name>.md).
     backup = target_md.with_name(target_md.name + ".bak")
@@ -620,7 +639,7 @@ def upgrade_skill_from_staged(
         return _apply_skill_upgrade_unlocked(
             domain, prop["staged_ids"], target_domain=target_domain,
             target_name=target_name, proposed_content=prop["proposed_content"],
-            root=root, skills_root=skills_root)
+            base_hash=prop.get("base_hash"), root=root, skills_root=skills_root)
 
 
 # ──────────────────────────────────────────────────────────────

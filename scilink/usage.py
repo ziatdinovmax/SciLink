@@ -59,7 +59,8 @@ class UsageLedger:
         tables = [(self.by_model, rec.get("model") or "unknown"),
                   (self.by_session, rec.get("session") or "unattributed")]
         if rec.get("worker"):
-            tables.append((self.by_worker, rec["worker"]))
+            # Keyed within the session: two sessions' workers may share a label.
+            tables.append((self.by_worker, f"{rec.get('session') or 'unattributed'}/{rec['worker']}"))
         for table, key in tables:
             row = table[str(key)]
             row["calls"] += 1

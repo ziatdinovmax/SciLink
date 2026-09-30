@@ -46,6 +46,11 @@ _FILTER_INSTALLED = False
 # A stopped parent stays flagged until its last worker unregisters, so a
 # straggler is stopped by its next print OR log record regardless of route.
 _STOPPED_PARENTS: set = set()
+# A per-thread cancel: the stop event of a fan-out branch or a swarm item,
+# registered by the thread that runs it. ``raise_if_stopped_worker`` honours
+# it beside the turn-level Stop, so a wait that polls it (a parked question,
+# an LLM slot) ends when the item is cancelled instead of on its next print.
+_CANCEL_EVENTS: Dict[int, threading.Event] = {}
 
 
 def register_worker(parent_thread_id: int, tag: str, prefix: bool = True) -> None:
@@ -94,10 +99,41 @@ def worker_stopped(thread_id: int) -> bool:
     return root != thread_id and root in _STOPPED_PARENTS
 
 
+def register_cancel(event: threading.Event) -> None:
+    """Make ``event`` the CURRENT thread's cancel signal (a branch's or an
+    item's stop event); ``unregister_cancel`` when the work ends."""
+    with _LOCK:
+        _CANCEL_EVENTS[threading.get_ident()] = event
+
+
+def unregister_cancel() -> None:
+    with _LOCK:
+        _CANCEL_EVENTS.pop(threading.get_ident(), None)
+
+
+def cancel_requested(thread_id: Optional[int] = None) -> bool:
+    """True when the thread's registered cancel event is set."""
+    ev = _CANCEL_EVENTS.get(threading.get_ident() if thread_id is None else thread_id)
+    return ev is not None and ev.is_set()
+
+
 def raise_if_stopped_worker() -> None:
+    """The turn's Stop, for a print or a log record (every log record passes
+    through here; a worker's own cancel is deliberately NOT raised on the
+    logging path, so a cancelled branch can still log while it winds down)."""
     if worker_stopped(threading.get_ident()):
         from scilink.ui.output_capture import AgentStoppedError
         raise AgentStoppedError("Agent stopped by user")
+
+
+def raise_if_cancelled() -> None:
+    """For a wait a worker sits in (a parked question, an LLM slot): ends it
+    on the worker's own cancel (a budget, memory or coordinator cancel) as
+    well as on the turn's Stop."""
+    if cancel_requested():
+        from scilink.ui.output_capture import AgentStoppedError
+        raise AgentStoppedError("cancelled")
+    raise_if_stopped_worker()
 
 
 # Longest worker chain resolved by ``effective_thread`` — a bound, not a
@@ -133,12 +169,18 @@ def attributed_to_current(fn: Callable, tag: str = "",
     unchanged (a pool future must still see them).
     """
     parent = effective_thread(threading.get_ident())
+    # Usage attribution rides along: the session and worker tags are
+    # thread-local, so a pool thread would otherwise report its LLM calls
+    # under no session and no worker (best-of-N candidates, pooled helpers).
+    from .. import tracing
+    session, worker = tracing.current_session(), tracing.current_worker()
 
     @functools.wraps(fn)
     def _attributed(*args, **kwargs):
         register_worker(parent, tag, prefix=prefix)
         try:
-            return fn(*args, **kwargs)
+            with tracing.attributed(session=session, worker=worker):
+                return fn(*args, **kwargs)
         finally:
             unregister_worker()
 

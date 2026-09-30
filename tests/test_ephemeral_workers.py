@@ -16,8 +16,6 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("ase")
-
 from scilink.agents.meta_agent.meta_orchestrator import MetaMode, MetaOrchestratorAgent
 from scilink.agents.meta_agent.workers import MODES, build_child
 from scilink.agents.meta_agent import fanout
@@ -30,6 +28,11 @@ def meta(tmp_path, monkeypatch):
     return MetaOrchestratorAgent(base_dir=str(tmp_path / "meta"),
                                  model_name="anthropic/claude-sonnet-4-5",
                                  meta_mode=MetaMode.AUTONOMOUS, launch_dir=str(tmp_path))
+
+
+def _needs(mode):
+    if mode == "simulation":
+        pytest.importorskip("ase")
 
 
 def _persistent(meta, mode):
@@ -46,6 +49,7 @@ def _resting(child):
 
 @pytest.mark.parametrize("mode", MODES)
 def test_a_worker_is_built_like_the_specialist(meta, tmp_path, mode):
+    _needs(mode)
     skill = tmp_path / "my_skill.md"
     skill.write_text("---\ndescription: a user skill\n---\n\n## overview\n\nA user skill.\n")
     meta._shared_extensions.append({"kind": "skill", "skill_path": str(skill)})
@@ -69,9 +73,14 @@ def test_a_worker_is_built_like_the_specialist(meta, tmp_path, mode):
 def test_a_planning_worker_uses_the_attached_kb_or_its_own(meta, tmp_path):
     own = build_child(meta, "planning", tmp_path / "w1")
     assert Path(own.knowledge_dir) == tmp_path / "w1" / "knowledge"
-    meta.knowledge_dir = tmp_path / "kb"
+    store = tmp_path / "kb"                       # a store KB: it has a manifest
+    store.mkdir()
+    (store / "manifest.json").write_text('{"name": "kb", "embedding_model": "m", "sources": []}')
+    (store / "default_kb_docs.faiss").write_bytes(b"INDEX")
+    (store / "default_kb_docs.json").write_text("[]")
+    meta.knowledge_dir = store
     attached = build_child(meta, "planning", tmp_path / "w2")
-    assert Path(attached.knowledge_dir) == tmp_path / "kb"
+    assert Path(attached.knowledge_dir) == store   # the planner copies a store KB into its kb_cache
 
 
 def test_the_fanout_branch_is_an_analysis_worker(meta, tmp_path):
@@ -122,6 +131,8 @@ def _own(result, tag):
 @pytest.mark.parametrize("pair", list(itertools.combinations_with_replacement(MODES, 2)),
                          ids=lambda p: "+".join(p))
 def test_two_workers_at_once_each_report_only_their_own_output(meta, tmp_path, pair):
+    for mode in pair:
+        _needs(mode)
     barrier = threading.Barrier(2)
     started = threading.Event()
     jobs = []
@@ -154,3 +165,20 @@ def test_two_workers_at_once_each_report_only_their_own_output(meta, tmp_path, p
             assert res["key_findings"] == [f"[{tag}] claim from {tag}"]
         if mode == "simulation":
             assert [s["slug"] for s in res["structures"]] == [tag]
+
+
+def test_a_planning_worker_gets_its_own_copy_of_a_plain_folder_kb(meta, tmp_path):
+    """A store KB is copied by the planner itself; a plain folder KB is an
+    index the planner appends to in place, so a worker gets a copy too."""
+    plain = tmp_path / "kb_storage"
+    plain.mkdir()
+    (plain / "default_kb_docs.faiss").write_bytes(b"INDEX")
+    (plain / "default_kb_docs.json").write_text("[]")
+    meta.knowledge_dir = plain
+    w1 = build_child(meta, "planning", tmp_path / "w1")
+    w2 = build_child(meta, "planning", tmp_path / "w2")
+    assert Path(w1.knowledge_dir) == tmp_path / "w1" / "knowledge"
+    assert Path(w2.knowledge_dir) == tmp_path / "w2" / "knowledge"
+    assert (tmp_path / "w1" / "knowledge" / "default_kb_docs.faiss").read_bytes() == b"INDEX"
+    specialist = meta._get_planning_child()
+    assert Path(specialist.knowledge_dir) == plain                     # the specialist keeps the folder

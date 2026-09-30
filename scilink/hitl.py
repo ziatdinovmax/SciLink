@@ -34,8 +34,10 @@ __all__ = [
     "FeedbackChannel",
     "ConsoleChannel",
     "QueueChannel",
+    "QuestionServer",
     "WorkerChannel",
     "question_timeout_s",
+    "last_question_timed_out",
     "request_human_feedback",
     "get_channel",
     "set_default_channel",
@@ -147,9 +149,17 @@ class ConsoleChannel:
 QUESTION_TIMEOUT_S = 1800.0
 
 
+#: Longest timeout honoured (a week): ``Event.wait`` overflows on larger values.
+_QUESTION_TIMEOUT_MAX_S = 7 * 24 * 3600.0
+#: How often a parked worker looks up from its wait to check for a cancel.
+_WAIT_SLICE_S = 1.0
+
+
 def question_timeout_s() -> Optional[float]:
     """The worker question timeout: ``SCILINK_QUESTION_TIMEOUT_S`` seconds,
-    else :data:`QUESTION_TIMEOUT_S`. ``0`` (or ``none``) waits without limit."""
+    else :data:`QUESTION_TIMEOUT_S`. ``0`` (or ``none``) waits without limit;
+    anything unreadable or negative is the default."""
+    import math
     import os
     raw = (os.environ.get("SCILINK_QUESTION_TIMEOUT_S") or "").strip().lower()
     if not raw:
@@ -160,7 +170,9 @@ def question_timeout_s() -> Optional[float]:
         value = float(raw)
     except ValueError:
         return QUESTION_TIMEOUT_S
-    return value if value > 0 else None
+    if math.isnan(value) or value <= 0:
+        return QUESTION_TIMEOUT_S
+    return min(value, _QUESTION_TIMEOUT_MAX_S)
 
 
 class QueueChannel:
@@ -173,11 +185,17 @@ class QueueChannel:
     request through the coordinator's own active channel (console prompt, UI
     modal, ...) one at a time. ``pending()`` says who is waiting, and on what.
 
-    ``timeout_s`` bounds how long a worker waits for an answer; on timeout
-    the request's ``default`` answer is returned, the question is withdrawn
-    (a person is never asked something nobody waits for any more) and the
-    worker's feedback log records ``timed_out``, so an unattended worker
-    degrades to the gate's default instead of hanging forever.
+    ``timeout_s`` bounds how long a worker waits: at most that long in the
+    queue behind other workers, and at most that long again once its question
+    is in front of the person (the clock restarts when serving begins, so a
+    question being read is not pulled away because others were read first).
+    On timeout the request's ``default`` answer is returned, the question is
+    withdrawn (a person is never asked something nobody waits for any more)
+    and the worker's feedback log records ``timed_out`` — the gate that asked
+    can tell through ``last_question_timed_out()`` and must not record the
+    default as a human's decision. A worker whose item is cancelled while it
+    waits (its stop event, or the turn's Stop) withdraws its question and
+    raises, like a print would.
     """
 
     def __init__(self, timeout_s: Optional[float] = None) -> None:
@@ -186,23 +204,53 @@ class QueueChannel:
         self.timeout_s = timeout_s
 
     def ask(self, req: FeedbackRequest) -> str:
+        from .utils.log_context import raise_if_cancelled
         item: Dict[str, Any] = {"req": req, "event": threading.Event(),
-                                "state": "waiting", "answer": None}
+                                "state": "waiting", "answer": None, "served_at": None}
         with self._lock:
             self._items.append(item)
-        answered = item["event"].wait(self.timeout_s)
+        timeout = self.timeout_s
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            try:
+                raise_if_cancelled()
+            except BaseException:
+                self._withdraw(item, "cancelled")
+                raise
+            slice_s = (_WAIT_SLICE_S if deadline is None
+                       else max(0.0, min(_WAIT_SLICE_S, deadline - time.monotonic())))
+            if item["event"].wait(slice_s):
+                return item["answer"] if item["answer"] is not None else req.default
+            if deadline is None:
+                continue
+            now = time.monotonic()
+            if now < deadline:
+                continue
+            with self._lock:
+                if item["event"].is_set():
+                    continue
+                served_at = item["served_at"]
+                if served_at is not None and served_at + timeout > now:
+                    deadline = served_at + timeout      # a full clock from when it was shown
+                    continue
+            if self._withdraw(item, "timed_out"):
+                _thread_local.last_timed_out = True
+                log = get_thread_feedback_log()
+                if log:
+                    _append_record(log, {"id": req.id, "event": "timed_out",
+                                         "default": req.default, "after_s": timeout,
+                                         "shown": item["served_at"] is not None})
+                return req.default
+
+    def _withdraw(self, item: Dict[str, Any], state: str) -> bool:
+        """Take the question back. False when it was answered meanwhile."""
         with self._lock:
-            if not answered and not item["event"].is_set():
-                item["state"] = "timed_out"
-                if item in self._items:
-                    self._items.remove(item)
-        if item["state"] == "timed_out":
-            log = get_thread_feedback_log()
-            if log:
-                _append_record(log, {"id": req.id, "event": "timed_out",
-                                     "default": req.default, "after_s": self.timeout_s})
-            return req.default
-        return item["answer"] if item["answer"] is not None else req.default
+            if item["event"].is_set():
+                return False
+            item["state"] = state
+            if item in self._items:
+                self._items.remove(item)
+            return True
 
     def pending(self) -> List[Dict[str, Any]]:
         """The questions waiting now, oldest first: who asks, about what."""
@@ -228,7 +276,7 @@ class QueueChannel:
                 item = next((it for it in self._items if it["state"] == "waiting"), None)
                 if item is None:
                     return served
-                item["state"] = "serving"
+                item["state"], item["served_at"] = "serving", time.monotonic()
             req = item["req"]
             to_serve = replace(req, prompt=_asker_prefix(req.origin) + req.prompt)
             try:
@@ -237,8 +285,8 @@ class QueueChannel:
                 self._finish(item, req.default)
                 raise
             if not self._finish(item, answer):
-                print("  ⏱  that worker stopped waiting and went on with the default; "
-                      "this answer was not used.")
+                print("  ⏱  that worker stopped waiting and went on without an answer; "
+                      "this one was not used.")
             served += 1
 
     def _finish(self, item: Dict[str, Any], answer: str) -> bool:
@@ -246,11 +294,61 @@ class QueueChannel:
         with self._lock:
             if item in self._items:
                 self._items.remove(item)
-            if item["state"] == "timed_out":
+            if item["state"] in ("timed_out", "cancelled"):
                 return False
             item["state"], item["answer"] = "answered", answer
             item["event"].set()
             return True
+
+
+class QuestionServer:
+    """Serves a :class:`QueueChannel` to the person on a thread of its own.
+
+    The coordinator that owns the human must keep polling its workers (memory
+    guard, budgets, completions); a question shown to the person blocks until
+    they answer, so it is shown from here, not from the poll loop. The serving
+    channel is captured on the coordinator's thread (a thread-local override
+    would not be seen from the server thread) and the thread is attributed to
+    the coordinator's session so its prompts reach the same screen.
+
+    Used as a context manager around the coordinator's wait loop. On exit the
+    server stops taking new questions; a question already in front of the
+    person stays until they answer it (the thread is a daemon), and the
+    worker that asked has usually gone on with its default by then.
+    """
+
+    def __init__(self, queue: QueueChannel, through: Optional[FeedbackChannel] = None,
+                 poll_s: float = 0.25) -> None:
+        self._queue, self._through, self._poll_s = queue, through or get_channel(), poll_s
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self.served = 0
+        self.error: Optional[BaseException] = None
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.served += self._queue.serve_pending(through=self._through)
+            except BaseException as exc:  # noqa: BLE001 - the person's channel raised (EOF, Stop)
+                self.error = exc
+                return
+            self._stop.wait(self._poll_s)
+
+    def __enter__(self) -> "QuestionServer":
+        from .utils.log_context import start_attributed_thread
+        self._thread = start_attributed_thread(self._run, name="question-server")
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        self._stop.set()
+        return False
+
+
+def last_question_timed_out() -> bool:
+    """Whether the most recent question asked on this thread got its default
+    because nobody answered in time. A gate that treats an empty answer as
+    approval checks this before recording a human decision."""
+    return bool(getattr(_thread_local, "last_timed_out", False))
 
 
 def _asker_prefix(origin: Dict[str, Any]) -> str:
@@ -266,18 +364,28 @@ class WorkerChannel:
     (and the subject it works on), then parks it on the coordinator's queue.
 
     ``kind`` names what the worker is on the prompt ("branch" for a fan-out
-    branch, "worker" for a swarm item)."""
+    branch, "worker" for a swarm item). ``on_wait(True)`` / ``on_wait(False)``
+    bracket every wait for the person, so a coordinator can leave that time
+    out of the worker's wall-clock budget."""
 
     def __init__(self, queue_channel: QueueChannel, label: str, *,
-                 subject: Optional[str] = None, kind: str = "branch") -> None:
+                 subject: Optional[str] = None, kind: str = "branch",
+                 on_wait: Optional[Any] = None) -> None:
         self._qch, self._label, self._subject, self._kind = queue_channel, label, subject, kind
+        self._on_wait = on_wait
 
     def ask(self, req: FeedbackRequest) -> str:
         req.origin.setdefault("branch_label", self._label)
         req.origin.setdefault("worker_kind", self._kind)
         if self._subject:
             req.origin.setdefault("work_subject", self._subject)
-        return self._qch.ask(req)
+        if self._on_wait is not None:
+            self._on_wait(True)
+        try:
+            return self._qch.ask(req)
+        finally:
+            if self._on_wait is not None:
+                self._on_wait(False)
 
 
 _default_channel: FeedbackChannel = ConsoleChannel()
@@ -419,6 +527,7 @@ def request_human_feedback(
                              "t": req.created_at})
         pending = _Path(log).parent / "pending_question.json"
         _write_pending(pending, req)
+    _thread_local.last_timed_out = False
     try:
         answer = get_channel().ask(req)
     except BaseException as exc:
@@ -434,5 +543,6 @@ def request_human_feedback(
     if log:
         _append_record(log, {
             "id": req.id, "event": "answered", "answer": answer,
-            "elapsed_s": round(time.time() - req.created_at, 3)})
+            "elapsed_s": round(time.time() - req.created_at, 3),
+            **({"unattended": True} if last_question_timed_out() else {})})
     return answer

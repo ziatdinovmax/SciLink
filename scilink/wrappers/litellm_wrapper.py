@@ -377,6 +377,17 @@ def _retry_class(exc: BaseException) -> Optional[str]:
         ) if isinstance(c, type))
         if full and isinstance(exc, full):
             return "full"
+    # The internal-proxy path raises the OpenAI SDK's own errors (LiteLLM's
+    # subclass them, so those were classified above).
+    try:
+        import openai as _openai
+    except ImportError:                    # pragma: no cover
+        _openai = None
+    if _openai is not None:
+        if isinstance(exc, _openai.APITimeoutError):
+            return "once"
+        if isinstance(exc, _openai.APIConnectionError):
+            return "full"
     if _http_status(exc) in _TRANSIENT_STATUS:
         return "full"
     return None
@@ -443,20 +454,17 @@ def _embedding(**kwargs):
         return litellm.embedding(**kwargs)
 
 
-def _completion_with_retries(retries: Optional[int], **kwargs):
-    """``litellm.completion`` with SciLink's retry policy (see above).
-
-    Only creating a stream is retried; an error while iterating one is the
-    caller's (no SciLink caller streams today).
-    """
+def call_with_retries(call, retries: Optional[int], *, model: Optional[str] = None):
+    """Run ``call()`` (one provider request) under SciLink's retry policy (see
+    above), inside the model's in-flight slot for the request only, never
+    across the backoff sleep. Shared by the LiteLLM path and the internal
+    proxy's client, whose own SDK retries are turned off."""
     retries = llm_retries() if retries is None else max(0, int(retries))
-    kwargs["num_retries"] = 0
     once_used = False
     for attempt in range(retries + 1):
         try:
-            # The slot is held for the call only, not across the backoff below.
-            with llm_slot(kwargs.get("model")):
-                return litellm.completion(**kwargs)
+            with llm_slot(model):
+                return call()
         except Exception as exc:
             kind = _retry_class(exc)
             if attempt >= retries or kind is None:
@@ -477,6 +485,17 @@ def _completion_with_retries(retries: Optional[int], **kwargs):
                 f"in {delay:.1f}s")
             time.sleep(delay)
             _logger.info(f"Retrying the LLM call (attempt {attempt + 2} of {retries + 1}).")
+
+
+def _completion_with_retries(retries: Optional[int], **kwargs):
+    """``litellm.completion`` under :func:`call_with_retries`.
+
+    Only creating a stream is retried; an error while iterating one is the
+    caller's (no SciLink caller streams today).
+    """
+    kwargs["num_retries"] = 0
+    return call_with_retries(lambda: litellm.completion(**kwargs), retries,
+                             model=kwargs.get("model"))
 
 
 def litellm_completion(*args, **kwargs):

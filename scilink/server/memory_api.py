@@ -694,13 +694,14 @@ def start_propose_upgrade(domain: str, ids: List[str], target_domain: str,
             "builtin_target": builtin_target,
             "existing_content": prop["existing_content"],
             "proposed_content": prop["proposed_content"],
+            "base_hash": prop.get("base_hash"),
             "warnings": warnings, "diff": check["diff"],
         }
     return _start_job("upgrade", _work, f"{len(ids)} → {target_domain}/{target_name}")
 
 
 def apply_upgrade(domain: str, ids: List[str], target_domain: str, target_name: str,
-                  content: str, fork_first: bool) -> Dict[str, Any]:
+                  content: str, fork_first: bool, base_hash: Optional[str] = None) -> Dict[str, Any]:
     """Write a reviewed (possibly edited) proposal: fork the built-in first
     when the target was one, back up the current file, write, consume the
     records."""
@@ -714,7 +715,9 @@ def apply_upgrade(domain: str, ids: List[str], target_domain: str, target_name: 
             raise MemoryError(409, out.get("message") or "Fork failed.")
     res = _staging.apply_skill_upgrade(
         domain, list(ids), target_domain=target_domain, target_name=target_name,
-        proposed_content=content if content.endswith("\n") else content + "\n")
+        proposed_content=content if content.endswith("\n") else content + "\n",
+        base_hash=base_hash)
     if res.get("status") != "success":
-        raise MemoryError(400, res.get("message") or "Apply failed.")
+        raise MemoryError(409 if res.get("changed_since_proposal") else 400,
+                          res.get("message") or "Apply failed.")
     return res

@@ -269,9 +269,14 @@ def test_a_failed_copy_out_leaves_nothing_a_later_run_would_mistake_for_a_copy(t
     assert not any(p.name.endswith(".partial") for p in dest.parent.iterdir())
 
 
-def test_forgetting_an_instrument_removes_it_lock_file_and_all(tmp_path):
+def test_forgetting_an_instrument_removes_its_folder_and_keeps_the_lock_outside_it(tmp_path):
     home, _ = _home_with_recipe(tmp_path)
-    assert (home.dir / "recipes.lock").exists()
+    assert (tmp_path / ".locks" / "scope-1.lock").exists() and not list(home.dir.glob("*.lock"))
     assert [i["id"] for i in ih.known_instruments(str(tmp_path))] == ["scope-1"]
     assert ih.forget_instrument("scope-1", root=str(tmp_path))
     assert not home.dir.exists()
+    from scilink.utils.file_lock import is_locked
+    with ih._home_lock(tmp_path / "scope-1"):                          # the lock outlives the home
+        assert is_locked(tmp_path / ".locks" / "scope-1")
+    ih.InstrumentHome({"id": "scope-1"}, root=str(tmp_path))          # re-created cleanly
+    assert [i["id"] for i in ih.known_instruments(str(tmp_path))] == ["scope-1"]

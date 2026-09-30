@@ -96,15 +96,83 @@ def test_an_unanswered_worker_goes_on_with_the_default_and_the_question_is_withd
 
 
 def test_an_answer_that_comes_after_the_worker_gave_up_is_not_used(capsys):
-    qch, answers = QueueChannel(timeout_s=0.2), {}
+    qch, answers = QueueChannel(timeout_s=0.3), {}
     t = _worker(qch, "slow", None, answers)
     t.start()
     _wait_for(lambda: qch.pending())
-    person = ByAsker(delay=0.5)            # still reading when the worker gives up
+    person = ByAsker(delay=1.0)            # far past the clock the showing started
     assert qch.serve_pending(through=person) == 1
     t.join(5)
     assert answers == {"slow": ""}
     assert "was not used" in capsys.readouterr().out
+
+
+def test_a_question_being_read_gets_a_full_clock_of_its_own(tmp_path):
+    """The worker waited almost the whole timeout in the queue; once shown, the
+    person still has the whole timeout to answer."""
+    qch, answers = QueueChannel(timeout_s=0.6), {}
+    log = tmp_path / "feedback_log.jsonl"
+    t = _worker(qch, "patient", None, answers, log=log)
+    t.start()
+    _wait_for(lambda: qch.pending())
+    time.sleep(0.45)                       # queued behind others
+    person = ByAsker(delay=0.4)            # 0.45 + 0.4 > 0.6, but within 0.6 of being shown
+    assert qch.serve_pending(through=person) == 1
+    t.join(5)
+    assert answers == {"patient": "answer for patient"}
+    assert "timed_out" not in log.read_text()
+
+
+def test_the_gate_can_tell_a_timeout_from_an_answer(tmp_path):
+    qch, answers = QueueChannel(timeout_s=0.2), {}
+    log = tmp_path / "feedback_log.jsonl"
+    seen = {}
+
+    def run():
+        set_thread_channel(WorkerChannel(qch, "w", kind="worker"))
+        try:
+            with use_feedback_log(log):
+                answers["w"] = request_human_feedback("\nApprove? ", kind="approve_or_revise", default="")
+                seen["timed_out"] = hitl.last_question_timed_out()
+        finally:
+            set_thread_channel(None)
+    t = threading.Thread(target=run)
+    t.start()
+    t.join(5)
+    assert answers == {"w": ""} and seen["timed_out"] is True
+    answered = [json.loads(l) for l in log.read_text().splitlines()][-1]
+    assert answered["event"] == "answered" and answered.get("unattended") is True
+    # an answered question leaves the marker clear
+    qch2 = QueueChannel(timeout_s=5)
+    t2 = _worker(qch2, "ok", None, answers)
+    t2.start()
+    _wait_for(lambda: qch2.pending())
+    qch2.serve_pending(through=ByAsker())
+    t2.join(5)
+
+
+def test_a_cancelled_worker_withdraws_its_question_and_stops():
+    from scilink.utils.log_context import register_cancel, unregister_cancel
+    from scilink.ui.output_capture import AgentStoppedError
+    qch, out = QueueChannel(timeout_s=30), {}
+    stop = threading.Event()
+
+    def run():
+        register_cancel(stop)
+        try:
+            WorkerChannel(qch, "w").ask(FeedbackRequest(prompt="p", default="d"))
+            out["result"] = "returned"
+        except AgentStoppedError:
+            out["result"] = "stopped"
+        finally:
+            unregister_cancel()
+    t = threading.Thread(target=run)
+    t.start()
+    _wait_for(lambda: qch.pending())
+    stop.set()
+    t.join(5)
+    assert out["result"] == "stopped" and qch.pending() == []
+    assert qch.serve_pending(through=ByAsker()) == 0
 
 
 def test_a_worker_answered_in_time_is_not_timed_out(tmp_path):
@@ -137,7 +205,8 @@ def test_a_fanout_branch_keeps_its_prompt_label():
 
 @pytest.mark.parametrize("raw,expected", [
     (None, hitl.QUESTION_TIMEOUT_S), ("", hitl.QUESTION_TIMEOUT_S), ("90", 90.0),
-    ("0", None), ("none", None), ("-5", None), ("soon", hitl.QUESTION_TIMEOUT_S)])
+    ("0", None), ("none", None), ("-5", hitl.QUESTION_TIMEOUT_S), ("soon", hitl.QUESTION_TIMEOUT_S),
+    ("inf", hitl._QUESTION_TIMEOUT_MAX_S), ("1e10", hitl._QUESTION_TIMEOUT_MAX_S)])
 def test_the_question_timeout_comes_from_the_environment(monkeypatch, raw, expected):
     if raw is None:
         monkeypatch.delenv("SCILINK_QUESTION_TIMEOUT_S", raising=False)
@@ -152,3 +221,31 @@ def test_fanout_parks_branch_questions_with_the_timeout():
     src = inspect.getsource(fanout)
     assert "QueueChannel(timeout_s=question_timeout_s())" in src
     assert "WorkerChannel(queue_channel" in src
+
+
+# ------------------------------------------------------------ the planning gate
+
+def test_a_timed_out_plan_review_is_not_recorded_as_a_human_decision(tmp_path):
+    """A swarm worker's plan gate that nobody answers gets the default, which
+    reads as Enter. The planner must not stamp that as human approval: the
+    plan stays a draft the agent may revise."""
+    from types import SimpleNamespace
+    from scilink.agents.planning_agents.base_agent import BaseAgent
+    from scilink.agents.planning_agents.planning_agent import PlanningAgent
+
+    a = PlanningAgent.__new__(PlanningAgent)
+    BaseAgent.__init__(a, str(tmp_path))
+    a.agent_type = "planning"
+    a.state = {"plan_history": []}
+    plan = {"iteration": 1, "stage": "Initial", "proposed_experiments": [{"name": "x"}]}
+
+    hitl._thread_local.last_timed_out = True
+    try:
+        a._stamp_human_review(plan, "accepted")
+    finally:
+        hitl._thread_local.last_timed_out = False
+    assert "human_review" not in plan
+    assert plan["unattended_gate"]["would_have_been"] == "accepted"
+
+    a._stamp_human_review(plan, "accepted")            # a real Enter, later
+    assert plan["human_review"]["status"] == "accepted" and "unattended_gate" not in plan

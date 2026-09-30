@@ -140,6 +140,7 @@ class MemoryApplyRequest(BaseModel):
     target_name: str
     content: str
     fork_builtin: bool = False
+    base_hash: Optional[str] = None      # the proposal's; a changed skill is refused
 
 
 class MemoryCheckRequest(BaseModel):

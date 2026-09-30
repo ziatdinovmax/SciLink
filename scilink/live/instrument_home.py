@@ -22,8 +22,10 @@ summary. Nothing here imports the server, chat or an orchestrator.
 
 Several loops can serve one instrument at once (two sessions, a swarm, the
 tab and a script), so every change to a home is made under one lock per
-instrument (``<id>/recipes.lock``), and every record is replaced whole. Reads
-take no lock: they see a record before or after a change, never half of one.
+instrument (``instruments/.locks/<id>.lock``, beside the homes rather than
+inside one, so forgetting an instrument removes its folder whole), and every
+record is replaced whole. Reads take no lock: they see a record before or
+after a change, never half of one.
 
 Opt-in on purpose: a recipe verified on one sample is a hypothesis about the
 next, which is why a recalled recipe is replayed and judged before it is used,
@@ -58,7 +60,8 @@ def instruments_root(root: Optional[str] = None) -> Path:
 
 def _home_lock(home_dir: Path):
     """The lock every change to one instrument's home is made under."""
-    return path_lock(Path(home_dir) / "recipes", label=f"instrument {Path(home_dir).name}")
+    home_dir = Path(home_dir)
+    return path_lock(home_dir.parent / ".locks" / home_dir.name, label=f"instrument {home_dir.name}")
 
 
 def _write_json(path: Path, obj: Dict[str, Any]) -> None:
@@ -282,18 +285,8 @@ def forget_instrument(instrument: str, root: Optional[str] = None) -> bool:
     if match is None:
         return False
     target = instruments_root(root) / match["key"]
-    lock_file = target / "recipes.lock"
     with _home_lock(target):
-        # Everything but the lock file, which Windows will not delete while
-        # it is held open; the emptied folder goes after the lock is released.
-        for child in list(target.iterdir()):
-            if child == lock_file:
-                continue
-            if child.is_dir():
-                shutil.rmtree(child, ignore_errors=True)
-            else:
-                child.unlink(missing_ok=True)
-    shutil.rmtree(target, ignore_errors=True)
+        shutil.rmtree(target, ignore_errors=True)
     return not target.exists()
 
 

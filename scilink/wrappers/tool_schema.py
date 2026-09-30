@@ -231,9 +231,11 @@ class _PortableCompletions:
             if openai_tools_need_no_reasoning(model) and "reasoning_effort" not in kwargs:
                 kwargs["reasoning_effort"] = "none"
         _t0 = time.perf_counter()
-        from .llm_limiter import llm_slot
-        with llm_slot(kwargs.get("model") or self._default_model):
-            response = self._raw.create(*args, **kwargs)
+        # SciLink's retry policy (transient errors only, backoff outside the
+        # in-flight slot); the SDK's own retries are off on this client.
+        from .litellm_wrapper import call_with_retries
+        model = kwargs.get("model") or self._default_model
+        response = call_with_retries(lambda: self._raw.create(*args, **kwargs), None, model=model)
         # The proxy path's chat loops call this shim directly: count the
         # call (and trace it when tracing is on) like the wrapper classes.
         try:
@@ -268,6 +270,12 @@ class PortableOpenAIClient:
 
     def __init__(self, raw_client, default_model=None):
         self._raw = raw_client
+        # Retries are SciLink's (``call_with_retries``): the SDK's would sleep
+        # its backoff, up to a minute on Retry-After, inside the LLM slot.
+        try:
+            raw_client.max_retries = 0
+        except Exception:  # noqa: BLE001 - a client that cannot be told keeps its own
+            pass
         self.chat = _PortableChat(raw_client.chat, default_model)
 
     def __getattr__(self, name):

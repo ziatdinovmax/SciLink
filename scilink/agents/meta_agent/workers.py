@@ -22,6 +22,32 @@ from typing import Any, Optional
 MODES = ("analysis", "planning", "simulation")
 
 
+def _worker_knowledge_dir(orch: Any, base_dir: Path, persistent: bool) -> Path:
+    """The knowledge directory a planning child is built with.
+
+    The persistent specialist uses what the meta attached (or its own
+    folder). A worker gets the same store KB (the planner copies a store KB
+    into the worker's own ``kb_cache``), but a PLAIN folder KB — a
+    ``--knowledge-dir`` path, a launch folder's ``kb_storage`` — is an index
+    the planner appends to in place, so two workers would write one faiss
+    file at once. Its ``default_kb_*`` files are copied into the worker's
+    own ``knowledge/`` instead, one consistent generation.
+    """
+    attached = orch.knowledge_dir
+    own = Path(base_dir) / "knowledge"
+    if not attached:
+        return own
+    if persistent:
+        return Path(attached)
+    from ...knowledge.kb_store import read_manifest, snapshot_kb
+    attached = Path(attached)
+    if read_manifest(attached):                 # a store KB: the planner copies it itself
+        return attached
+    if attached.is_dir() and any(attached.glob("default_kb_*")):
+        snapshot_kb(attached, own)
+    return own
+
+
 def build_child(orch: Any, mode: str, base_dir: Path, *, restore: bool = False,
                 persistent: bool = False, label: Optional[str] = None) -> Any:
     """A mode orchestrator in ``base_dir``, sharing the meta's credentials,
@@ -88,10 +114,11 @@ def build_child(orch: Any, mode: str, base_dir: Path, *, restore: bool = False,
             # every plan, which hard-fails when the embedding provider's
             # key is absent. The stable-cwd default stays intentional for
             # standalone use; meta children isolate per session unless
-            # the user explicitly points them at a KB. A worker copies a
-            # store KB into its own directory (``kb_cache``), so workers
-            # never share index files.
-            knowledge_dir=str(orch.knowledge_dir or base_dir / "knowledge"),
+            # the user explicitly points them at a KB. Workers never share
+            # index files: a store KB is copied into each worker's
+            # ``kb_cache`` by the planner itself, a plain folder KB is
+            # copied by ``_worker_knowledge_dir`` here.
+            knowledge_dir=str(_worker_knowledge_dir(orch, base_dir, persistent)),
         )
     else:
         from ..sim_agents.simulation_orchestrator import (
@@ -118,3 +145,13 @@ def build_child(orch: Any, mode: str, base_dir: Path, *, restore: bool = False,
     # Share skills / custom tools / MCP servers registered on the meta.
     orch._propagate_extensions_to_child(child)
     return child
+
+
+def release_child(child: Any) -> None:
+    """What a finished worker must let go of: the MCP servers it connected
+    (each worker opens its own; nothing else closes them)."""
+    for name in list(getattr(child, "_mcp_connections", {}) or {}):
+        try:
+            child.disconnect_mcp_server(name)
+        except Exception:  # noqa: BLE001 - cleanup never fails a result
+            pass
