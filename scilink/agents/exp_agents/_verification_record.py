@@ -285,5 +285,19 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
                     + (f": {qh.get('stopped_by')}" if qh.get("stopped_by") else "")}
         if not qh.get("approved"):
             return {"verified": False, "reason": f"the verifier did not approve the result{where}"}
-    return {"verified": True, "reason": "approved by the analysis verifier"}
+        # A verifier may approve a fit below the numeric threshold on physics
+        # grounds: that is the pipeline's gate and it counts. A run whose
+        # verification was bypassed (max_verification_iterations=0: the image
+        # agent stamps "bypass", the curve agent "verifier" with no iteration)
+        # passed no gate unless the metric itself met the threshold.
+        metric = next((qh.get(k) for k in ("final_r2", "final_score", "final_passed_fraction")
+                       if isinstance(qh.get(k), (int, float))), None)
+        no_pass = qh.get("approved_by") == "bypass" or (
+            qh.get("approved_by") == "verifier" and not qh.get("verification_iterations"))
+        if no_pass and metric is not None and qh.get("threshold") is not None and metric < qh["threshold"]:
+            return {"verified": False, "reason": f"verification bypassed and the metric is below "
+                                                  f"its threshold{where}"}
+    return {"verified": True, "reason": "approved by the analysis verifier"
+            if any(qh.get("verification_iterations") for _, qh in histories if isinstance(qh, dict))
+            else "met the acceptance threshold"}
 

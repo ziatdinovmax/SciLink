@@ -476,12 +476,25 @@ def test_a_salvaged_or_unverified_analysis_stays_provisional(tmp_path):
     (review of #702). The row's verdict decides, never the status."""
     from scilink.agents.exp_agents._verification_record import analysis_verdict
     ok = {"status": "success", "quality_history": {"approved": True}}
-    assert analysis_verdict(ok) == {"verified": True, "reason": "approved by the analysis verifier"}
+    assert analysis_verdict(ok) == {"verified": True, "reason": "met the acceptance threshold"}
     assert not analysis_verdict({**ok, "quality_warning": "below threshold"})["verified"]
     assert "did not finish" in analysis_verdict(
         {"status": "success", "quality_history": {"approved": False, "unverified": True, "stopped_by": "time_budget"}})["reason"]
     assert "did not approve" in analysis_verdict({"status": "success", "quality_history": {"approved": False}})["reason"]
     assert "no verification record" in analysis_verdict({"status": "success"})["reason"]
+    # a verifier may approve below the numeric threshold on physics grounds (seen live): verified
+    physics = {"status": "success", "quality_history": {"final_r2": 0.98, "threshold": 0.99999, "approved": True,
+                                                        "approved_by": "verifier",
+                                                        "verification_iterations": [{"r_squared": 0.98}]}}
+    assert analysis_verdict(physics) == {"verified": True, "reason": "approved by the analysis verifier"}
+    # a bypassed verification with the metric below its threshold: nobody looked
+    bypass = {"status": "success", "quality_history": {"final_r2": 0.98, "threshold": 0.99, "approved": True,
+                                                       "approved_by": "verifier", "verification_iterations": []}}
+    assert "bypassed" in analysis_verdict(bypass)["reason"]
+    bypass["quality_history"]["approved_by"] = "bypass"
+    assert "bypassed" in analysis_verdict(bypass)["reason"]
+    bypass["quality_history"]["final_r2"] = 0.995                       # the metric met the threshold: verified
+    assert analysis_verdict(bypass) == {"verified": True, "reason": "met the acceptance threshold"}
     assert "reused script" in analysis_verdict({**ok, "reuse_validity": {"reused": True, "verdict": "poor"}})["reason"]
     assert analysis_verdict({**ok, "reuse_validity": {"reused": True, "verdict": "good"}})["verified"]
     assert analysis_verdict({"status": "partial", "quality_history": {"approved": True}})["reason"] == "status 'partial'"
