@@ -483,8 +483,25 @@ def call_with_retries(call, retries: Optional[int], *, model: Optional[str] = No
                 f"LLM call failed ({type(exc).__name__}, status "
                 f"{getattr(exc, 'status_code', '?')}); retry {attempt + 1}/{retries} "
                 f"in {delay:.1f}s")
-            time.sleep(delay)
+            _sleep_unless_cancelled(delay)
             _logger.info(f"Retrying the LLM call (attempt {attempt + 2} of {retries + 1}).")
+
+
+def _sleep_unless_cancelled(seconds: float) -> None:
+    """A backoff sleep that ends early when the worker is cancelled (a budget
+    or memory cancel, the turn's Stop): up to a minute would otherwise pass
+    before the cancel could land."""
+    from ..utils.log_context import cancel_watched, raise_if_cancelled
+    if not cancel_watched():           # nothing can cancel this thread: one plain sleep
+        time.sleep(max(0.0, seconds))
+        return
+    deadline = time.monotonic() + max(0.0, seconds)
+    while True:
+        raise_if_cancelled()
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return
+        time.sleep(min(1.0, left))
 
 
 def _completion_with_retries(retries: Optional[int], **kwargs):

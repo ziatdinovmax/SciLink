@@ -153,5 +153,5 @@ def release_child(child: Any) -> None:
     for name in list(getattr(child, "_mcp_connections", {}) or {}):
         try:
             child.disconnect_mcp_server(name)
-        except Exception:  # noqa: BLE001 - cleanup never fails a result
-            pass
+        except BaseException:  # noqa: BLE001 - cleanup never fails a result; on a Stop the
+            pass               # disconnect's own log line raises AgentStoppedError

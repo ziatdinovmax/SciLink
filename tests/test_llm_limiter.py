@@ -292,3 +292,35 @@ def test_the_proxy_client_retries_transient_errors_itself_with_the_slot_released
     client = portable_openai_client(raw, "proxy-model")
     with pytest.raises(openai.APIStatusError):
         client.chat.completions.create(model="proxy-model", messages=[])
+
+
+def test_a_pool_thread_of_a_cancelled_worker_is_cancelled_too():
+    from scilink.utils.log_context import (attributed_to_current, cancel_requested,
+                                           register_cancel, unregister_cancel)
+    stop = threading.Event()
+    register_cancel(stop)
+    try:
+        wrapped = attributed_to_current(lambda: cancel_requested())
+    finally:
+        unregister_cancel()
+    stop.set()
+    out = {}
+    t = threading.Thread(target=lambda: out.setdefault("v", wrapped()))
+    t.start()
+    t.join(5)
+    assert out["v"] is True
+
+
+def test_the_backoff_sleep_ends_on_a_cancel():
+    from scilink.utils.log_context import register_cancel, unregister_cancel
+    from scilink.ui.output_capture import AgentStoppedError
+    stop = threading.Event()
+    register_cancel(stop)
+    try:
+        threading.Timer(0.2, stop.set).start()
+        t0 = time.time()
+        with pytest.raises(AgentStoppedError):
+            lw._sleep_unless_cancelled(30.0)
+        assert time.time() - t0 < 5.0
+    finally:
+        unregister_cancel()

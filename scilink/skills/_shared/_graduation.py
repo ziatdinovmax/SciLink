@@ -376,7 +376,13 @@ def graduate_to_skill_file(
         knowledge_text = _format_knowledge(knowledge_entry)
 
         is_update = skill_path.exists()
+        existing_text = None
         if is_update:
+            # Read before parsing: a proposal hashes THIS text, so an apply
+            # can tell when the skill moved on during the review. The parse
+            # reads the file again; a write between the two reads makes the
+            # hash older than the merge, which an apply then refuses (safe).
+            existing_text = skill_path.read_text()
             existing_data = _read_skill_as_dict(skill_path, domain=domain)
             prompt = update_template.format(
                 skill_name=skill_name,
@@ -435,6 +441,7 @@ def graduate_to_skill_file(
                 "domain": domain,
                 "skill_path": str(skill_path),
                 "content": skill_content,
+                "existing_content": existing_text,
                 "word_count": len(skill_content.split()),
             }
 

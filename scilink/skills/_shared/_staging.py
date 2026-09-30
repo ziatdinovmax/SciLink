@@ -523,7 +523,12 @@ def propose_skill_upgrade(
     )
     if result.get("status") != "success":
         return result
-    existing_content = target_md.read_text()
+    # The text the merge was made against (read inside graduate_to_skill_file),
+    # not a fresh read: a graduation landing during the model call must make
+    # the apply refuse, not slip into the hash.
+    existing_content = result.get("existing_content")
+    if existing_content is None:
+        existing_content = target_md.read_text()
     proposed_content = _preserve_structure(existing_content, result["content"])
     return {
         "status": "success",

@@ -299,26 +299,27 @@ def demote_memory(domain: str, name: str, *, root: Optional[Path] = None) -> Dic
 
     import yaml
 
-    text = md.read_text()
-    match = _FRONTMATTER_BLOCK_RE.match(text)
-    if match:
-        meta = yaml.safe_load(match.group(1)) or {}
-        if not isinstance(meta, dict):
+    with skill_lock(md):
+        text = md.read_text()
+        match = _FRONTMATTER_BLOCK_RE.match(text)
+        if match:
+            meta = yaml.safe_load(match.group(1)) or {}
+            if not isinstance(meta, dict):
+                meta = {}
+            meta = dict(meta)
+            body = text[match.end():]
+        else:
             meta = {}
-        meta = dict(meta)
-        body = text[match.end():]
-    else:
-        meta = {}
-        body = text
-    meta["provisional"] = True
-    frontmatter = yaml.safe_dump(
-        meta,
-        default_flow_style=False,
-        sort_keys=False,
-        allow_unicode=True,
-        width=10_000,
-    ).strip()
-    atomic_write_text(md, f"---\n{frontmatter}\n---\n{body}")
+            body = text
+        meta["provisional"] = True
+        frontmatter = yaml.safe_dump(
+            meta,
+            default_flow_style=False,
+            sort_keys=False,
+            allow_unicode=True,
+            width=10_000,
+        ).strip()
+        atomic_write_text(md, f"---\n{frontmatter}\n---\n{body}")
     return {
         "status": "success",
         "name": name,

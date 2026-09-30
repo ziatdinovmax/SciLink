@@ -80,12 +80,14 @@ class InstrumentHome:
             raise ValueError("an instrument home needs the instrument's id (Instrument.describe()['id'])")
         self.info = dict(info)
         self.dir = instruments_root(root) / _safe(info["id"])
-        (self.dir / "recipes").mkdir(parents=True, exist_ok=True)
         self._touch()
 
     def _touch(self) -> None:
         path = self.dir / "instrument.json"
         with _home_lock(self.dir):
+            # Made under the lock: a concurrent forget removes the folder
+            # whole, so a waiter must create it again once it holds the lock.
+            (self.dir / "recipes").mkdir(parents=True, exist_ok=True)
             try:
                 known = json.loads(path.read_text())
             except Exception:  # noqa: BLE001

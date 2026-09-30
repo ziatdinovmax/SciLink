@@ -325,3 +325,85 @@ def test_budgets_keep_firing_while_a_question_is_on_screen(meta, attended, monke
     status = {r["label"]: r["status"] for r in res["results"]}
     assert status == {"asker": "success", "slow one": "error"}
     assert marks["cancelled_at"] < marks["answered_at"]
+
+
+def test_an_unanswered_worker_question_is_a_warning_on_its_result(meta, attended, monkeypatch):
+    class Nobody:
+        def ask(self, req):
+            return "y" if req.kind == "confirm" else (_ for _ in ()).throw(AssertionError("asked"))
+    monkeypatch.setattr(swarm, "question_timeout_s", lambda: 0.3)
+    hitl.set_default_channel(Nobody())
+    _workers(monkeypatch, lambda task: {"ask": True, "seconds": 0.1})
+    res = json.loads(swarm.run_swarm(meta, ITEMS[:2]))
+    entry = meta._delegation_ledger[0]
+    assert any("unattended" in w for w in entry.get("warnings") or []), entry.get("warnings")
+
+
+def test_a_stop_on_the_persons_channel_stops_the_swarm(meta, attended, monkeypatch):
+    from scilink.ui.output_capture import AgentStoppedError
+
+    class StopsMidway:
+        def ask(self, req):
+            if req.kind == "confirm":
+                return "y"
+            raise AgentStoppedError("Agent stopped by user")
+    hitl.set_default_channel(StopsMidway())
+    _workers(monkeypatch, lambda task: {"ask": True, "seconds": 0.1})
+    with pytest.raises(AgentStoppedError):
+        swarm.run_swarm(meta, ITEMS[:2])
+    deadline = time.time() + 5                      # the workers wind down and let go
+    while swarm.fo._mem_running and time.time() < deadline:
+        time.sleep(0.05)
+    assert not swarm.fo._mem_running
+
+
+def test_a_stop_during_cleanup_still_releases_the_memory_reservation(meta, monkeypatch):
+    from scilink.ui.output_capture import AgentStoppedError
+
+    class Stubborn(FakeWorker):
+        _mcp_connections = {"srv": object()}
+
+        def disconnect_mcp_server(self, name):
+            raise AgentStoppedError("Agent stopped by user")   # a log line raising on Stop
+    built = []
+
+    def build(orch, mode, base_dir, **kw):
+        Path(base_dir).mkdir(parents=True, exist_ok=True)
+        w = Stubborn(mode, base_dir, lambda task: {})
+        built.append(w)
+        return w
+    monkeypatch.setattr(swarm, "build_child", build)
+    res = json.loads(swarm.run_swarm(meta, ITEMS[:2]))
+    assert all(r["status"] == "success" for r in res["results"])
+    assert not swarm.fo._mem_running
+
+
+def test_a_rerun_is_given_up_when_the_cancelled_worker_never_ends(meta, monkeypatch, capsys):
+    monkeypatch.setitem(swarm._MODE_MEM_FLOOR, "analysis", 2e9)
+    monkeypatch.setattr(swarm, "SWARM_DRAIN_TIMEOUT_S", 0.6)
+
+    def behaviour(task):
+        if task == "hung":
+            return {"hung": True}
+        return {"seconds": 0.3}
+    real_run = FakeWorker.run_task
+
+    def run_task(self, task, context=None, autonomy=None):
+        if self.behaviour(task).get("hung"):
+            time.sleep(3.0)                     # never prints, never notices the cancel
+            return {"status": "success", "summary": "late", "key_findings": [],
+                    "files_produced": [], "suggested_followups": [], "warnings": []}
+        return real_run(self, task, context, autonomy)
+    monkeypatch.setattr(FakeWorker, "run_task", run_task)
+    _workers(monkeypatch, behaviour)
+    low = {"on": False}
+    monkeypatch.setattr(swarm, "_memory", lambda: {"total": 16e9, "available": 1e8 if low["on"] else 8e9})
+    threading.Timer(0.15, lambda: low.update(on=True)).start()
+    t0 = time.time()
+    res = json.loads(swarm.run_swarm(meta, [
+        {"mode": "planning", "task": "light", "label": "light"},
+        {"mode": "analysis", "task": "hung", "label": "hung"}]))
+    assert time.time() - t0 < 2.5                               # did not wait the worker out
+    assert [(r["label"], r["status"]) for r in res["results"]] == [("light", "success"), ("hung", "cancelled")]
+    assert res["not_started"] and "rerun abandoned" in res["not_started"][0]["reason"]
+    assert "giving up the rerun" in capsys.readouterr().out

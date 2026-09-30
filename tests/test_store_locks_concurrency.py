@@ -280,3 +280,47 @@ def test_forgetting_an_instrument_removes_its_folder_and_keeps_the_lock_outside_
         assert is_locked(tmp_path / ".locks" / "scope-1")
     ih.InstrumentHome({"id": "scope-1"}, root=str(tmp_path))          # re-created cleanly
     assert [i["id"] for i in ih.known_instruments(str(tmp_path))] == ["scope-1"]
+
+
+def test_a_reviewed_upgrade_refuses_a_skill_that_changed_during_the_review(tmp_path):
+    """propose → (a worker's graduation lands) → apply: the apply must not
+    overwrite the graduation. The hash is of the text the merge read, so a
+    graduation during the model call is caught too."""
+    staging, skills = tmp_path / "staging", tmp_path / "skills"
+    _graduation.graduate_to_skill_file(
+        knowledge_entry={"note": "BASE"}, skill_name="auto_xps", domain="curve_fitting",
+        llm_call=_merging_model(delay=0), fresh_template=FRESH, update_template=UPDATE,
+        skills_root=skills)
+    ids = _stage(staging, 1, technique="other")
+    path = skills / "curve_fitting" / "auto_xps" / "auto_xps.md"
+
+    def model_while_another_graduates(prompt):
+        # a graduation lands DURING the proposal's model call
+        _graduation.graduate_to_skill_file(
+            knowledge_entry={"note": "LANDED"}, skill_name="auto_xps", domain="curve_fitting",
+            llm_call=_merging_model(delay=0), fresh_template=FRESH, update_template=UPDATE,
+            skills_root=skills)
+        return _merging_model(delay=0)(prompt)
+
+    prop = _staging.propose_skill_upgrade(
+        "curve_fitting", ids, target_domain="curve_fitting", target_name="auto_xps",
+        llm_call=model_while_another_graduates, fresh_template=FRESH, update_template=UPDATE,
+        root=staging, skills_root=skills)
+    assert prop["status"] == "success" and prop["base_hash"]
+    res = _staging.apply_skill_upgrade(
+        "curve_fitting", prop["staged_ids"], target_domain="curve_fitting", target_name="auto_xps",
+        proposed_content=prop["proposed_content"], base_hash=prop["base_hash"],
+        root=staging, skills_root=skills)
+    assert res["status"] == "error" and res.get("changed_since_proposal")
+    assert "LANDED" in path.read_text()                       # the graduation survived
+    assert _staging.list_staged("curve_fitting", root=staging)   # nothing consumed
+    # proposed again against the current version, it applies
+    prop2 = _staging.propose_skill_upgrade(
+        "curve_fitting", ids, target_domain="curve_fitting", target_name="auto_xps",
+        llm_call=_merging_model(delay=0), fresh_template=FRESH, update_template=UPDATE,
+        root=staging, skills_root=skills)
+    res2 = _staging.apply_skill_upgrade(
+        "curve_fitting", prop2["staged_ids"], target_domain="curve_fitting", target_name="auto_xps",
+        proposed_content=prop2["proposed_content"], base_hash=prop2["base_hash"],
+        root=staging, skills_root=skills)
+    assert res2["status"] == "success"

@@ -52,6 +52,10 @@ SWARM_MAX_WORKERS = resolve_workers(None, "SCILINK_SWARM_MAX_WORKERS", 3)
 SWARM_ITEM_TIME_BUDGET_S = 3600.0
 #: Below this much free memory the guard cancels the newest running item.
 SWARM_MEMORY_FLOOR_BYTES = 7.5e8
+#: How long the coordinator waits for a cancelled worker to end before it
+#: gives up that item's rerun (a hung call never prints, so the cancel may
+#: never land).
+SWARM_DRAIN_TIMEOUT_S = 600.0
 _POLL_S = 5
 _HEARTBEAT_S = 60
 
@@ -212,6 +216,8 @@ def _run_item(orch, item: dict, entry: dict, channel, autonomy: str, stop_event)
     mem_key = f"swarm:{index}"
     fo._admit_branch(mem_key, item["_mem_est"], item["label"])
     entry["_started_at"] = time.monotonic()
+    entry.pop("_human_wait_s", None)          # a restored entry may carry stale waits
+    entry.pop("_waiting_since", None)
     entry["_branch_tid"] = threading.get_ident()
     fo._register_branch_stop(stop_event)
     set_thread_channel(channel)
@@ -220,6 +226,8 @@ def _run_item(orch, item: dict, entry: dict, channel, autonomy: str, stop_event)
     tag.__enter__()
     result = _error_result("item aborted before completion")
     child = None
+    from ...hitl import unattended_questions
+    unattended_before = unattended_questions()
     try:
         try:
             child = build_child(orch, item["mode"], base_dir, label=f"Swarm: {item['label']}")
@@ -234,17 +242,28 @@ def _run_item(orch, item: dict, entry: dict, channel, autonomy: str, stop_event)
                 raise
             result = _error_result(entry.get("_cancel_reason") or "cancelled", status="cancelled")
     finally:
-        if child is not None:
-            release_child(child)
-        fo._unregister_branch_stop()
-        tag.__exit__(None, None, None)
-        append_event("swarm_item", {"label": item["label"], "mode": item["mode"],
-                                    "session_dir": str(base_dir)},
-                     json.dumps({"status": result.get("status")}, default=str),
-                     branch=item["label"])
-        set_thread_event_log(None)
-        set_thread_channel(None)
-        fo._release_branch(mem_key)
+        n_unattended = unattended_questions() - unattended_before
+        if n_unattended and isinstance(result, dict):
+            result.setdefault("warnings", []).append(
+                f"{n_unattended} question(s) got no answer in time and took their defaults "
+                "(unattended; nothing here counts as a human decision)")
+        try:
+            if child is not None:
+                release_child(child)
+        finally:
+            # Released last and unconditionally: on a Stop, anything above may
+            # raise, and a held memory reservation would outlive the item.
+            fo._unregister_branch_stop()
+            tag.__exit__(None, None, None)
+            try:
+                append_event("swarm_item", {"label": item["label"], "mode": item["mode"],
+                                            "session_dir": str(base_dir)},
+                             json.dumps({"status": result.get("status")}, default=str),
+                             branch=item["label"])
+            finally:
+                set_thread_event_log(None)
+                set_thread_channel(None)
+                fo._release_branch(mem_key)
     if entry.get("timed_out") or entry.get("_cancelled"):
         entry["late_result"] = {"status": result.get("status")}
         return
@@ -339,17 +358,19 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
     print(f"  🐝 {swarm_id}: {len(plan['run'])} item(s), up to {plan['workers']} at a time")
     orch._auto_checkpoint(verbose=False)
     requeue: List[dict] = []
+    seen_errors: set = set()
     pool = ThreadPoolExecutor(max_workers=max(1, plan["workers"]))
     server = QuestionServer(queue) if queue is not None else contextlib.nullcontext()
+    fut_entry, fut_stop, fut_label, fut_item = {}, {}, {}, {}
     try:
         server.__enter__()
-        fut_entry, fut_stop, fut_label, fut_item = {}, {}, {}, {}
         for item in plan["run"]:
             fut, entry, stop_ev = launch(pool, item)
             fut_entry[fut], fut_stop[fut], fut_label[fut] = entry, stop_ev, item["label"]
             fut_item[fut] = item
         pending, since_tick = set(fut_entry), 0.0
         draining: set = set()     # cancelled for memory, not yet ended
+        drain_since: Optional[float] = None
         while pending or requeue:
             t_poll = time.monotonic()
             if pending:
@@ -357,7 +378,18 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
             else:                 # only a rerun is left, waiting for the cancelled worker to end
                 done = set()
                 wait(draining, timeout=_POLL_S)
+                # This print is also where a user's Stop lands on this thread.
+                print(f"  ⏳ waiting for the cancelled worker to end before the rerun "
+                      f"({int(time.monotonic() - (drain_since or t_poll))} s) ...")
             since_tick += time.monotonic() - t_poll
+            if server is not None and getattr(server, "error", None) is not None:
+                from ...ui.output_capture import AgentStoppedError
+                if isinstance(server.error, AgentStoppedError):
+                    raise server.error          # the person's Stop reaches the swarm
+                if server.error not in seen_errors:
+                    seen_errors.add(server.error)
+                    print(f"  ⚠️  the person's channel raised {type(server.error).__name__}: "
+                          "remaining questions take their defaults, unattended.")
             for f in done:
                 f.result()
                 print(f"  ✅ swarm item finished: {fut_label[f]} ({fut_entry[f].get('status')})")
@@ -365,6 +397,22 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
             # One cancellation at a time: memory is read again only once the
             # cancelled worker has actually ended and let go of what it held.
             draining = {f for f in draining if not f.done()}
+            if draining and drain_since is None:
+                drain_since = time.monotonic()
+            elif not draining:
+                drain_since = None
+            if draining and time.monotonic() - drain_since > SWARM_DRAIN_TIMEOUT_S:
+                # A hung worker (a call that never returns, compute that never
+                # prints) never lets go: give the rerun up rather than wait forever.
+                for item in requeue:
+                    refused.append({"label": item["label"], "reason": (
+                        f"rerun abandoned: the cancelled worker had not ended after "
+                        f"{int(SWARM_DRAIN_TIMEOUT_S)} s")})
+                    print(f"  ⚠️  giving up the rerun of '{item['label']}': its cancelled "
+                          "worker has not ended.")
+                requeue.clear()
+                draining.clear()
+                drain_since = None
             if not draining:
                 cancelled = _guard_memory(orch, {f: fut_entry[f] for f in pending}, fut_item,
                                           fut_stop, requeue, SWARM_MEMORY_FLOOR_BYTES)
@@ -386,6 +434,21 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
             if pending and since_tick >= _HEARTBEAT_S:
                 since_tick = 0.0
                 print(f"  ⏳ {len(pending)} swarm item(s) still running ...")
+    except BaseException:
+        # A Stop (or any failure of the coordinator): the items still running
+        # are cancelled the way a budget cancels them, so they wind down and
+        # let go of their memory instead of running on unattended.
+        for f, ev in list(fut_stop.items()):
+            if not f.done():
+                ev.set()
+                tid = fut_entry[f].get("_branch_tid")
+                if tid:
+                    try:
+                        from ...executors import kill_subprocesses_for_thread
+                        kill_subprocesses_for_thread(tid)
+                    except Exception:  # noqa: BLE001
+                        pass
+        raise
     finally:
         server.__exit__(None, None, None)
         pool.shutdown(wait=False, cancel_futures=True)

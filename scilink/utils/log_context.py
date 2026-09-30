@@ -111,6 +111,13 @@ def unregister_cancel() -> None:
         _CANCEL_EVENTS.pop(threading.get_ident(), None)
 
 
+def cancel_watched() -> bool:
+    """Whether a cancel can reach the current thread at all: it carries a
+    cancel event, or it is an attributed worker whose turn may be stopped."""
+    tid = threading.get_ident()
+    return tid in _CANCEL_EVENTS or tid in _WORKERS
+
+
 def cancel_requested(thread_id: Optional[int] = None) -> bool:
     """True when the thread's registered cancel event is set."""
     ev = _CANCEL_EVENTS.get(threading.get_ident() if thread_id is None else thread_id)
@@ -172,16 +179,22 @@ def attributed_to_current(fn: Callable, tag: str = "",
     # Usage attribution rides along: the session and worker tags are
     # thread-local, so a pool thread would otherwise report its LLM calls
     # under no session and no worker (best-of-N candidates, pooled helpers).
+    # So does the cancel: a candidate of a cancelled item must stop too.
     from .. import tracing
     session, worker = tracing.current_session(), tracing.current_worker()
+    cancel = _CANCEL_EVENTS.get(threading.get_ident())
 
     @functools.wraps(fn)
     def _attributed(*args, **kwargs):
         register_worker(parent, tag, prefix=prefix)
+        if cancel is not None:
+            register_cancel(cancel)
         try:
             with tracing.attributed(session=session, worker=worker):
                 return fn(*args, **kwargs)
         finally:
+            if cancel is not None:
+                unregister_cancel()
             unregister_worker()
 
     return _attributed

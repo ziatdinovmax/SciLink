@@ -1057,6 +1057,8 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
     _admit_branch(mem_key, _branch_mem_estimate(branch),
                   branch.get("label") or slug)
     entry["_started_at"] = time.monotonic()
+    entry.pop("_human_wait_s", None)          # a resumed entry may carry stale waits
+    entry.pop("_waiting_since", None)
     entry["_branch_tid"] = threading.get_ident()
     if stop_event is not None:
         _register_branch_stop(stop_event)
@@ -1081,6 +1083,8 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
                     "key_findings": [], "files_produced": [],
                     "suggested_followups": [], "warnings": []}
     child = None
+    from ...hitl import unattended_questions
+    unattended_before = unattended_questions()
     try:
         try:
             from ..exp_agents.analysis_orchestrator import AnalysisMode
@@ -1128,23 +1132,34 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
                       "summary": "", "key_findings": [], "files_produced": [],
                       "suggested_followups": [], "warnings": []}
     finally:
-        if child is not None:
-            from .workers import release_child
-            release_child(child)            # the MCP servers this worker opened
-        if stop_event is not None:
-            _unregister_branch_stop()
-        append_event(
-            "fanout_branch",
-            {"label": branch.get("label") or slug,
-             "data_path": branch.get("data_path"),
-             "session_dir": str(base_dir)},
-            json.dumps(result, default=str), branch=_branch_label)
-        set_thread_event_log(None)
-        _usage_tag.__exit__(None, None, None)
-        if queue_channel is not None:
-            from ...hitl import set_thread_channel
-            set_thread_channel(None)
-        _release_branch(mem_key)
+        n_unattended = unattended_questions() - unattended_before
+        if n_unattended and isinstance(result, dict):
+            result.setdefault("warnings", []).append(
+                f"{n_unattended} question(s) got no answer in time and took their defaults "
+                "(unattended; nothing here counts as a human decision)")
+        try:
+            if child is not None:
+                from .workers import release_child
+                release_child(child)        # the MCP servers this worker opened
+        finally:
+            # Released last and unconditionally: on a Stop, anything above may
+            # raise, and a held memory reservation would outlive the branch.
+            if stop_event is not None:
+                _unregister_branch_stop()
+            try:
+                append_event(
+                    "fanout_branch",
+                    {"label": branch.get("label") or slug,
+                     "data_path": branch.get("data_path"),
+                     "session_dir": str(base_dir)},
+                    json.dumps(result, default=str), branch=_branch_label)
+            finally:
+                set_thread_event_log(None)
+                _usage_tag.__exit__(None, None, None)
+                if queue_channel is not None:
+                    from ...hitl import set_thread_channel
+                    set_thread_channel(None)
+                _release_branch(mem_key)
     if entry.get("timed_out"):
         logger.warning(
             f"fan-out branch {index} finished AFTER its wall-clock budget "

@@ -249,3 +249,81 @@ def test_a_timed_out_plan_review_is_not_recorded_as_a_human_decision(tmp_path):
 
     a._stamp_human_review(plan, "accepted")            # a real Enter, later
     assert plan["human_review"]["status"] == "accepted" and "unattended_gate" not in plan
+
+
+# --------------------------------------------------- channels with their own timeout
+
+def test_a_channel_that_times_out_on_its_own_marks_it_and_the_gate_sees_it(tmp_path):
+    """The MCP server's channel gives the default after ITS timeout: the
+    worker behind the queue must learn that nobody answered."""
+    class SlowMCP:
+        def ask(self, req):
+            hitl.mark_timed_out()
+            return req.default
+
+    qch, answers, seen = QueueChannel(timeout_s=30), {}, {}
+    log = tmp_path / "feedback_log.jsonl"
+
+    def run():
+        set_thread_channel(WorkerChannel(qch, "w", kind="worker"))
+        try:
+            with use_feedback_log(log):
+                answers["w"] = request_human_feedback("\nApprove? ", kind="approve_or_revise", default="")
+                seen["timed_out"] = hitl.last_question_timed_out()
+                seen["count"] = hitl.unattended_questions()
+        finally:
+            set_thread_channel(None)
+    t = threading.Thread(target=run)
+    t.start()
+    _wait_for(lambda: qch.pending())
+    assert qch.serve_pending(through=SlowMCP()) == 1
+    t.join(5)
+    assert answers == {"w": ""} and seen["timed_out"] is True and seen["count"] == 1
+    events = [json.loads(l) for l in log.read_text().splitlines()]
+    assert [e["event"] for e in events] == ["asked", "timed_out", "answered"]
+    assert events[1]["by"] == "channel" and events[2]["unattended"] is True
+
+
+def test_the_mcp_channel_marks_its_own_timeout(monkeypatch):
+    from scilink import mcp_server
+    monkeypatch.setattr(mcp_server, "_persist_jobs", lambda state: None)
+    ch = mcp_server._MCPChannel({"pending": {}}, timeout_s=0.05)
+    hitl._thread_local.last_timed_out = False
+    assert ch.ask(FeedbackRequest(prompt="p", kind="approve_or_revise", default="")) == ""
+    assert hitl.last_question_timed_out()
+    hitl._thread_local.last_timed_out = False
+
+
+def test_when_the_persons_channel_dies_workers_get_unattended_defaults_at_once():
+    """EOF or a Stop on the person's channel: the question on screen and every
+    later one take their defaults now, as unattended, never as answers."""
+    class Dead:
+        def ask(self, req):
+            raise EOFError
+
+    qch, seen = QueueChannel(timeout_s=30), {}
+
+    def worker(label):
+        set_thread_channel(WorkerChannel(qch, label, kind="worker"))
+        try:
+            request_human_feedback("\nApprove? ", kind="approve_or_revise", default="")
+            seen[label] = hitl.last_question_timed_out()
+        finally:
+            set_thread_channel(None)
+    t1 = threading.Thread(target=worker, args=("first",))
+    t1.start()
+    _wait_for(lambda: qch.pending())
+    with hitl.QuestionServer(qch, through=Dead(), poll_s=0.05) as server:
+        _wait_for(lambda: server.error is not None)
+    t1.join(5)
+    assert seen == {"first": True} and isinstance(server.error, EOFError)
+    assert qch.closed
+    t2 = threading.Thread(target=worker, args=("later",))
+    t2.start()
+    t2.join(5)                                          # no 30 s wait
+    assert seen["later"] is True
+
+
+def test_zero_point_zero_also_disables_the_timeout(monkeypatch):
+    monkeypatch.setenv("SCILINK_QUESTION_TIMEOUT_S", "0.0")
+    assert question_timeout_s() is None

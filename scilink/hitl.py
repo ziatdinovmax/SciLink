@@ -38,6 +38,8 @@ __all__ = [
     "WorkerChannel",
     "question_timeout_s",
     "last_question_timed_out",
+    "mark_timed_out",
+    "unattended_questions",
     "request_human_feedback",
     "get_channel",
     "set_default_channel",
@@ -157,8 +159,9 @@ _WAIT_SLICE_S = 1.0
 
 def question_timeout_s() -> Optional[float]:
     """The worker question timeout: ``SCILINK_QUESTION_TIMEOUT_S`` seconds,
-    else :data:`QUESTION_TIMEOUT_S`. ``0`` (or ``none``) waits without limit;
-    anything unreadable or negative is the default."""
+    else :data:`QUESTION_TIMEOUT_S`. ``0`` (or ``none``) waits without limit
+    — which removes the only bound on a parked worker; anything unreadable
+    or negative is the default, and a week is the most honoured."""
     import math
     import os
     raw = (os.environ.get("SCILINK_QUESTION_TIMEOUT_S") or "").strip().lower()
@@ -170,8 +173,10 @@ def question_timeout_s() -> Optional[float]:
         value = float(raw)
     except ValueError:
         return QUESTION_TIMEOUT_S
-    if math.isnan(value) or value <= 0:
+    if math.isnan(value) or value < 0:
         return QUESTION_TIMEOUT_S
+    if value == 0:
+        return None
     return min(value, _QUESTION_TIMEOUT_MAX_S)
 
 
@@ -202,13 +207,28 @@ class QueueChannel:
         self._items: List[Dict[str, Any]] = []
         self._lock = threading.Lock()
         self.timeout_s = timeout_s
+        self.closed: Optional[str] = None      # why nobody will answer any more
+
+    def close(self, reason: str = "closed") -> None:
+        """Nobody will serve this queue any more (the person's channel raised,
+        the coordinator returned): every waiting worker gets its default now,
+        as unattended, and later asks do too instead of waiting out a timeout."""
+        with self._lock:
+            self.closed = reason
+            waiting = [it for it in self._items if it["state"] in ("waiting", "serving")]
+        for it in waiting:
+            self._finish(it, it["req"].default, unattended=True)
 
     def ask(self, req: FeedbackRequest) -> str:
         from .utils.log_context import raise_if_cancelled
         item: Dict[str, Any] = {"req": req, "event": threading.Event(),
                                 "state": "waiting", "answer": None, "served_at": None}
         with self._lock:
-            self._items.append(item)
+            if self.closed:
+                item["state"], item["unattended"] = "answered", True
+                item["event"].set()
+            else:
+                self._items.append(item)
         timeout = self.timeout_s
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
@@ -220,6 +240,16 @@ class QueueChannel:
             slice_s = (_WAIT_SLICE_S if deadline is None
                        else max(0.0, min(_WAIT_SLICE_S, deadline - time.monotonic())))
             if item["event"].wait(slice_s):
+                if item.get("unattended"):
+                    # The serving channel (or the queue's closing) gave the
+                    # default because nobody answered: not a decision.
+                    mark_timed_out()
+                    log = get_thread_feedback_log()
+                    if log:
+                        _append_record(log, {"id": req.id, "event": "timed_out",
+                                             "default": req.default, "by": "channel",
+                                             "shown": item["served_at"] is not None})
+                    return req.default
                 return item["answer"] if item["answer"] is not None else req.default
             if deadline is None:
                 continue
@@ -234,7 +264,7 @@ class QueueChannel:
                     deadline = served_at + timeout      # a full clock from when it was shown
                     continue
             if self._withdraw(item, "timed_out"):
-                _thread_local.last_timed_out = True
+                mark_timed_out()
                 log = get_thread_feedback_log()
                 if log:
                     _append_record(log, {"id": req.id, "event": "timed_out",
@@ -279,24 +309,31 @@ class QueueChannel:
                 item["state"], item["served_at"] = "serving", time.monotonic()
             req = item["req"]
             to_serve = replace(req, prompt=_asker_prefix(req.origin) + req.prompt)
+            _thread_local.last_timed_out = False
             try:
                 answer = (through or get_channel()).ask(to_serve)
             except BaseException:
-                self._finish(item, req.default)
+                # The person's channel is gone (EOF, Stop): the worker gets
+                # its default, but as unattended, never as an acceptance.
+                self._finish(item, req.default, unattended=True)
                 raise
-            if not self._finish(item, answer):
+            # A channel with a timeout of its own (the MCP server's) says so
+            # through mark_timed_out(); that travels to the asking worker.
+            if not self._finish(item, answer, unattended=last_question_timed_out()):
                 print("  ⏱  that worker stopped waiting and went on without an answer; "
                       "this one was not used.")
             served += 1
 
-    def _finish(self, item: Dict[str, Any], answer: str) -> bool:
+    def _finish(self, item: Dict[str, Any], answer: str, unattended: bool = False) -> bool:
         """Hand ``answer`` to the waiting worker. False when it already gave up."""
         with self._lock:
             if item in self._items:
                 self._items.remove(item)
-            if item["state"] in ("timed_out", "cancelled"):
+            if item["state"] in ("timed_out", "cancelled") or item["event"].is_set():
                 return False
             item["state"], item["answer"] = "answered", answer
+            if unattended:
+                item["unattended"] = True
             item["event"].set()
             return True
 
@@ -331,6 +368,9 @@ class QuestionServer:
                 self.served += self._queue.serve_pending(through=self._through)
             except BaseException as exc:  # noqa: BLE001 - the person's channel raised (EOF, Stop)
                 self.error = exc
+                # Nobody will answer from here on: the workers get their
+                # defaults now, as unattended, instead of waiting out a timeout.
+                self._queue.close(f"the person's channel raised {type(exc).__name__}")
                 return
             self._stop.wait(self._poll_s)
 
@@ -341,7 +381,23 @@ class QuestionServer:
 
     def __exit__(self, *exc) -> bool:
         self._stop.set()
+        self._queue.close("the coordinator returned")
         return False
+
+
+def mark_timed_out() -> None:
+    """A channel that gave a question's default because nobody answered in
+    time calls this (on the asking thread) before returning it, so the gate
+    can tell (``last_question_timed_out``) and never records the default as a
+    human's decision."""
+    _thread_local.last_timed_out = True
+
+
+def unattended_questions() -> int:
+    """How many questions asked on this thread so far got their default
+    because nobody answered in time. A worker reports the change over its
+    run as a warning on its result."""
+    return int(getattr(_thread_local, "unattended", 0) or 0)
 
 
 def last_question_timed_out() -> bool:
@@ -530,6 +586,8 @@ def request_human_feedback(
     _thread_local.last_timed_out = False
     try:
         answer = get_channel().ask(req)
+        if last_question_timed_out():
+            _thread_local.unattended = unattended_questions() + 1
     except BaseException as exc:
         if log:
             _append_record(log, {
