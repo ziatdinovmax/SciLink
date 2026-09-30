@@ -1651,6 +1651,20 @@ class PlanningOrchestratorAgent:
         for _c in format_auto_repair(_plan.get("auto_repair")):
             warnings.append(f"Plan auto-repair — {_c}")
 
+        # How the plan was settled, for a caller that must tell a human
+        # decision from a draft (the meta's board posts a plan's findings as
+        # verified only when a human approved it): the review stamp, an
+        # unattended gate, and any blocking finding still standing.
+        from .planning_rag import blocking_findings
+        plan_review = {
+            "human_review": _plan.get("human_review") or None,
+            "unattended_gate": _plan.get("unattended_gate") or None,
+            "iteration": _plan.get("iteration"),
+            "blocking_findings": [{"issue": f.get("issue"), "conflict": f.get("conflict")}
+                                  for f in blocking_findings(_plan.get("critic_findings"))],
+            "files": [f for f in files_produced if str(f).endswith("plan.json")][:3],
+        }
+
         result = {
             "status": status,
             "task": task,
@@ -1665,6 +1679,7 @@ class PlanningOrchestratorAgent:
                 "target_directions": self.target_directions,
                 "data_points_collected": data_points,
             },
+            "plan_review": plan_review,
             "warnings": warnings,
         }
         if error_msg:

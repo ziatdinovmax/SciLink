@@ -676,6 +676,9 @@ class SimulationOrchestratorAgent:
                     "description": s.get("description"),
                     "structure_path": s.get("structure_path"),
                     "input_files": s.get("input_files") or {},
+                    # The validator's verdict, so a caller can tell a
+                    # validated structure from one that was only built.
+                    "validation_status": (s.get("validation") or {}).get("status"),
                 } for s in new_structures
             ],
             "warnings": warnings,

@@ -1,12 +1,16 @@
 """Run several delegations of any mode at once: ``run_swarm``.
 
 A swarm here is a list of work items, each ``{mode, task, context?, subject?,
-label?, data_path?}``, run concurrently on ephemeral workers
-(``workers.build_child``) in ``<meta_session>/swarm/<NN>_<slug>/``. Each item
-is an ordinary delegation on the ledger (``swarm`` / ``parallel_group`` name
-the run), so its result is read, threaded and fused like any other. Items do
-not see each other's results: there is no shared board yet (stage 2 of
-docs/proposals/agent-swarms.md), and no item starts another.
+label?, data_path?, reads_board?, check?}``, run concurrently on ephemeral
+workers (``workers.build_child``) in ``<meta_session>/swarm/<NN>_<slug>/``.
+Each item is an ordinary delegation on the ledger (``swarm`` /
+``parallel_group`` name the run), so its result is read, threaded and fused
+like any other, and its findings are posted on the board when it finishes
+(``board.py``, through ``_close_delegation``). An item that opts in with
+``reads_board`` reads the board ONCE, when it starts (after admission), and
+gets the verified findings on its subject rendered into its task as hints;
+the ids it saw are stamped on its ledger entry as ``reads``. An item tagged
+``check`` is refused a read by the board itself. No item starts another.
 
 The coordinator is deterministic, with no model call:
 
@@ -107,6 +111,8 @@ def normalize_items(items: Any) -> Tuple[List[dict], List[dict]]:
             continue
         ok.append({**raw, "mode": mode, "task": task, "label": label,
                    "subject": (str(raw.get("subject")).strip() if raw.get("subject") else None),
+                   "reads_board": _read_spec(raw.get("reads_board")),
+                   "check": bool(raw.get("check")),
                    "slug": fo._slug(label)})
     if len(ok) > SWARM_MAX_ITEMS:
         for it in ok[SWARM_MAX_ITEMS:]:
@@ -114,6 +120,59 @@ def normalize_items(items: Any) -> Tuple[List[dict], List[dict]]:
                             "reason": f"over the limit of {SWARM_MAX_ITEMS} items per swarm"})
         ok = ok[:SWARM_MAX_ITEMS]
     return ok, refused
+
+
+def _read_spec(raw: Any) -> Optional[dict]:
+    """What an item asked to read: ``True`` (its subject, verified records)
+    or ``{subject?, kinds?, include_provisional?}``; ``None`` reads nothing."""
+    if not raw:
+        return None
+    if not isinstance(raw, dict):
+        return {}
+    spec: dict = {}
+    if raw.get("subject"):
+        spec["subject"] = str(raw["subject"]).strip()
+    kinds = raw.get("kinds") or raw.get("kind")
+    if kinds:
+        spec["kinds"] = [str(k).strip().lower() for k in
+                         (kinds if isinstance(kinds, (list, tuple)) else [kinds])]
+    if raw.get("include_provisional"):
+        spec["include_provisional"] = True
+    return spec
+
+
+def _read_board(orch, item: dict, entry: dict) -> str:
+    """The item's one board read, at its start. Returns the block to append
+    to the task (empty when nothing was read); stamps ``reads`` and
+    ``board_version`` on the entry, or ``board_read_refused`` for a check."""
+    from . import board as board_mod
+    spec = item.get("reads_board")
+    board = getattr(orch, "board", None)
+    if spec is None or board is None:
+        return ""
+    try:
+        view = board.snapshot(subject=spec.get("subject") or item.get("subject"),
+                              kind=spec.get("kinds"),
+                              include_provisional=bool(spec.get("include_provisional")),
+                              check=bool(item.get("check")))
+    except board_mod.BoardReadRefused as exc:
+        with orch._fanout_lock:
+            entry["board_read_refused"] = str(exc)
+        print(f"  🙈 '{item['label']}' is a check: its board read was refused.")
+        return ""
+    except ValueError as exc:
+        with orch._fanout_lock:
+            entry["board_read_refused"] = str(exc)
+        print(f"  ⚠️  '{item['label']}': board read not possible ({exc}).")
+        return ""
+    with orch._fanout_lock:
+        entry["reads"] = list(view.ids)
+        entry["board_version"] = view.version
+        if view.include_provisional:
+            entry["reads_provisional"] = True
+    print(f"  📋 '{item['label']}' read {len(view)} board finding(s)"
+          + (" (provisional included)" if view.include_provisional else "") + ".")
+    return "\n".join(board_mod.render(view))
 
 
 def capacity_plan(items: List[dict], memory: Optional[Dict[str, Optional[float]]] = None) -> dict:
@@ -230,8 +289,15 @@ def _run_item(orch, item: dict, entry: dict, channel, autonomy: str, stop_event)
     unattended_before = unattended_questions()
     try:
         try:
+            # The read comes after admission, so a later-admitted item sees
+            # what earlier items of the same swarm have already posted. The
+            # ledger keeps the task as actually sent, block included.
+            task = item["task"] + _read_board(orch, item, entry)
+            if task != item["task"]:
+                with orch._fanout_lock:
+                    entry["task"] = task
             child = build_child(orch, item["mode"], base_dir, label=f"Swarm: {item['label']}")
-            result = child.run_task(item["task"], context=item.get("context"),
+            result = child.run_task(task, context=item.get("context"),
                                     autonomy=_autonomy_enum(item["mode"])[autonomy])
         except Exception as exc:  # noqa: BLE001
             fo.logger.exception(f"swarm item {index} failed: {exc}")
@@ -468,6 +534,9 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
                 "key_findings": (e.get("key_findings") or [])[:6],
                 "files_produced": len(e.get("files_produced") or []),
                 "warnings": list(e.get("warnings") or []),
+                "reads": list(e.get("reads") or []),
+                "board_read_refused": e.get("board_read_refused"),
+                "posted": list(e.get("posted") or []),
                 "error": e.get("error")} for e in entries]
     ok = [r for r in results if r["status"] == "success"]
     return json.dumps({
@@ -477,7 +546,10 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
         "results": results,
         "not_started": refused,
         "warnings": channel_warnings,
+        "board_version": len(orch.board) if getattr(orch, "board", None) is not None else None,
         "message": (f"{len(ok)} of {len(results)} item(s) succeeded. Each is a delegation on the "
                     "ledger: read one with get_delegation_history, thread its findings into a next "
-                    "delegation's context, or fuse analysis items with fuse_delegations."),
+                    "delegation's context, or fuse analysis items with fuse_delegations. Their "
+                    "verified findings are on the board (get_board); a next swarm's items read "
+                    "them with reads_board."),
     }, default=str)

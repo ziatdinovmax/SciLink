@@ -293,6 +293,12 @@ rather than fabricate a result).
   a request that do not depend on each other. Each item runs on a FRESH agent
   that does not remember earlier delegations, so its `task` / `context` must
   carry everything it needs; a step that needs another's result goes after it.
+- The session has a BOARD of typed findings that every finished delegation
+  posts (`get_board`): verified ones passed the author's own checks, the rest
+  are provisional. Between runs, read it to choose the next work; a swarm item
+  with `reads_board` gets the verified findings on its subject as hints when it
+  starts, and an item that checks other work is tagged `check` and reads
+  nothing. A board finding is context for a delegation, never its target.
 - `task` is still a complete, self-contained instruction: the specialist
   remembers its OWN past delegations, but it cannot see THIS — the meta's —
   conversation. So anything that lives only here must go into `task` /
@@ -547,6 +553,11 @@ class MetaOrchestratorAgent:
         # from the persistent analysis/ and planning/ children. See fanout.py.
         self.fanout_dir = self.base_dir / "fanout"
         self.fusion_dir = self.base_dir / "fusion"
+        # The board (board.py): the typed findings every finished delegation
+        # posts, at swarm/board.jsonl. Loaded from the file, so a restore
+        # needs nothing from the checkpoint but the version to check against.
+        from .board import Board
+        self.board = Board(self.base_dir)
         # Where this workspace may read and write; children inherit it.
         self.file_roots = list(file_roots) if file_roots else None
         self.path_fence = PathFence.build(self.base_dir, file_roots,
@@ -1543,6 +1554,18 @@ class MetaOrchestratorAgent:
             if fused_labels:
                 entry["informed_by"] = fused_labels
                 entry["informed_via"] = "fusion_feedback"
+                # On the board the same fact is a read: the re-analysis has
+                # seen the fusion's claims, and through their reads every
+                # fused branch's findings. Fusion counts independence from
+                # this (board.independent_support), not from the stamp.
+                reads = []
+                for s_ in sorted(declared):
+                    src = by_index.get(s_)
+                    if src and src.get("mode") == "fusion":
+                        reads += [f for f in (src.get("posted") or []) if f not in reads]
+                if reads:
+                    entry["reads"] = reads
+                    entry["board_version"] = len(self.board)
         self._delegation_ledger.append(entry)
         return entry
 
@@ -1768,6 +1791,21 @@ class MetaOrchestratorAgent:
                 "recommended_parameters": recommended_parameters,
                 "recommended_values": recommended_values,
             })
+        # Its findings go on the board as typed records (board.py): what the
+        # mode already verified is verified there, the rest provisional. The
+        # ledger entry stays the result; the board holds what other work may
+        # read. Posting never fails the delegation.
+        if status == "success":
+            try:
+                from .board import post_delegation
+                posted = post_delegation(self.board, entry, result)
+            except Exception as e:  # noqa: BLE001
+                self.logger.warning(f"board: could not post delegation {entry.get('index')}: {e}")
+                posted = []
+            with self._fanout_lock:
+                # Extend: a fan-out may have filed a record under this entry
+                # at launch (a steering reduction of its series).
+                entry["posted"] = [f for f in (entry.get("posted") or [])] + posted
         # A completed delegation is the ledger state worth preserving — the
         # every-N-messages auto-save left short sessions (fewer than
         # CHECKPOINT_INTERVAL turns) with no checkpoint at all, making them
@@ -1960,6 +1998,12 @@ class MetaOrchestratorAgent:
             print(f"    ✅ Restored state:")
             print(f"       - Meta mode: {self.meta_mode.value}")
             print(f"       - Delegations: {len(self._delegation_ledger)}")
+            if len(self.board) or state.get("board_version"):
+                print(f"       - Board: {len(self.board)} record(s)")
+                if len(self.board) < int(state.get("board_version") or 0):
+                    print(f"       - ⚠️ the board file holds fewer records "
+                          f"({len(self.board)}) than the checkpoint recorded "
+                          f"({state.get('board_version')}); later reads may miss findings.")
 
             # Surface interrupted fan-out branches so the user (and the LLM,
             # which sees the resume_fanout tool) knows unfinished parallel
@@ -2014,6 +2058,7 @@ class MetaOrchestratorAgent:
                     "children_instantiated": sorted(self._children.keys()),
                     "delegation_ledger": self._ledger_snapshot(),
                     "knowledge_dir": str(self.knowledge_dir) if self.knowledge_dir else None,
+                    "board_version": len(self.board),
                 }
                 atomic_write_json(self.checkpoint_path, checkpoint_data,
                                   indent=2, default=str)

@@ -137,6 +137,19 @@ def main():
           any("steered at launch" in str(c) for c in fused.get("caveats") or []))
     report = json.load(open(fused["report_path"]))
     check("report persists independence", report.get("independence") is not None)
+    # Board (swarm stage 2): the hint is a measurement of techB's series filed
+    # under techB's entry, read by techA; fusion counts 1 independent of 2.
+    a_reads = by_label["techA series"].get("reads") or []
+    b_posted = by_label["techB series"].get("posted") or []
+    check("steering hint is a board measurement techA read, owned by techB",
+          len(a_reads) == 1 and a_reads[0] in b_posted
+          and ag.board.get(a_reads[0])["kind"] == "measurement"
+          and ag.board.get(a_reads[0])["status"] == "verified")
+    check("fusion computes independent_support 1 of 2",
+          fused.get("independent_support") == {"count": 1, "raw": 2,
+                                               "dependent": {"techA series": ["techB series"]}})
+    check("fusion prompt renders the computed count",
+          "INDEPENDENT SUPPORT" in prompt and "1 of 2 branches" in prompt)
 
     # 2) No steer flag -> nothing changes (no block, no informed_by,
     #    no independence in fusion).
