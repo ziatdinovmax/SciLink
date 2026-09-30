@@ -268,6 +268,19 @@ class Board:
                          version=version, subject=subject, kinds=kinds,
                          include_provisional=include_provisional)
 
+    def subjects(self) -> List[Dict[str, Any]]:
+        """The subjects records were filed under, with counts, most first.
+        Subjects are free strings the items gave, so a reader that guesses
+        one is shown what exists instead of an empty answer."""
+        counts: Dict[str, int] = {}
+        with self._lock:
+            for r in self._records:
+                if r.get("kind") == "retraction" or not r.get("subject"):
+                    continue
+                counts[r["subject"]] = counts.get(r["subject"], 0) + 1
+        return [{"subject": k, "records": v} for k, v in
+                sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+
     def public(self, record: Dict[str, Any]) -> Dict[str, Any]:
         """A record for a model or a UI: private fields (``_``-prefixed) dropped."""
         return {k: v for k, v in record.items() if not str(k).startswith("_")}

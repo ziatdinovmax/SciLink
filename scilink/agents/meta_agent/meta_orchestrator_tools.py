@@ -879,16 +879,27 @@ class MetaOrchestratorTools:
         def get_board(subject: str = None, kind: str = None,
                       include_provisional: bool = False, limit: int = 40) -> str:
             board = self.orch.board
+            subject_note = None
             try:
                 view = board.snapshot(subject=subject, kind=kind or None,
                                       include_provisional=bool(include_provisional))
+                if subject and not view.records and board.snapshot(
+                        kind=kind or None, include_provisional=bool(include_provisional)).records:
+                    # Subjects are the items' own strings; a guessed spelling
+                    # matches nothing. Show every subject rather than an empty
+                    # board (found live: "anatase sample" vs "TiO2 nanopowder A7").
+                    view = board.snapshot(kind=kind or None,
+                                          include_provisional=bool(include_provisional))
+                    subject_note = (f"no records are filed under {subject!r}; showing every "
+                                    "subject — the ones on the board are listed in `subjects`")
             except ValueError as exc:
                 return json.dumps({"status": "error", "message": str(exc)})
             lim = max(1, int(limit or 40))
             recs = [board.public(r) for r in view.records[-lim:]]
             return json.dumps({
                 "status": "success", "board_version": view.version,
-                "subject": subject, "kinds": list(view.kinds),
+                "subject": view.subject, "subject_note": subject_note,
+                "subjects": board.subjects(), "kinds": list(view.kinds),
                 "include_provisional": bool(include_provisional),
                 "count": len(view), "shown": len(recs), "findings": recs,
                 "note": ("verified = the author's own pipeline passed it (an analysis QC, a "
@@ -911,8 +922,9 @@ class MetaOrchestratorTools:
             ),
             parameters={
                 "subject": {"type": "string",
-                            "description": "Optional: only findings on this subject "
-                                           "(as given on the items)."},
+                            "description": "Optional: only findings on this subject, spelled "
+                                           "as the items gave it (the result lists the "
+                                           "subjects on the board; an unknown one shows all)."},
                 "kind": {"type": "string",
                          "enum": ["claim", "measurement", "recipe", "structure",
                                   "parameter_point", "hazard"],

@@ -316,6 +316,11 @@ def test_get_board_tool_shows_public_records(meta):
     out = json.loads(fn(subject="TiO2 A7", include_provisional=True, kind="claim"))
     assert out["count"] == 6 and {r["status"] for r in out["findings"]} == {"verified", "provisional"}
     assert json.loads(fn(kind="hunch"))["status"] == "error"
+    # a guessed subject shows every subject, and says so (found live)
+    out = json.loads(fn(subject="anatase sample"))
+    assert out["count"] == 4 and out["subject"] is None and "anatase sample" in out["subject_note"]
+    assert out["subjects"] == [{"subject": "TiO2 A7", "records": 8}]
+    assert json.loads(fn(subject="TiO2 A7"))["subject_note"] is None
 
 
 # ---------------------------------------------------------------- fusion
