@@ -2128,6 +2128,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "locked_model_type": r.get("locked_model_type"),
                     "quality_history": r.get("quality_history"),
                     "reuse_validity": r.get("reuse_validity"),
+                    # The unit's own salvage markers (a series anchor that fell
+                    # back to the judge or best-available), so a caller can
+                    # tell an approved anchor from a salvaged one: the
+                    # top-level quality_warning is the single-spectrum field.
+                    **({"quality_warning": r["quality_warning"]} if r.get("quality_warning") else {}),
+                    **({"judge_warning": r["judge_warning"]} if r.get("judge_warning") else {}),
                 }
                 for r in series_results
             ]

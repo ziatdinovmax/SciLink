@@ -391,6 +391,8 @@ def _clip(text: Any, n: int) -> str:
     """One line, whitespace collapsed, at most ``n`` characters: board text is
     quoted data in a prompt and must not carry line breaks of its own."""
     t = " ".join(str(text if text is not None else "").split())
+    # a record cannot close or open the data fence from inside it
+    t = t.replace("<<<", "‹‹‹").replace(">>>", "›››")
     return t if len(t) <= n else t[: n - 1] + "…"
 
 
@@ -470,7 +472,7 @@ def _analysis_records(entry: Dict[str, Any], result: Dict[str, Any]) -> List[Dic
                     "status": "verified" if verified else "provisional",
                     "evidence": {"analysis_ids": [aid] if aid else [], "gate": why}})
     for aid, rec in status_by_id.items():
-        script = _recipe_script(rec.get("output_directory"))
+        script = _recipe_script(rec.get("output_directory"), rec.get("recipe_unit"))
         if script is not None:
             verified, why = _analysis_verified(rec)
             out.append({"kind": "recipe", "payload": {"path": str(script), "analysis_id": aid,
@@ -495,21 +497,30 @@ def _analysis_verified(row: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
                    f"analysis {row.get('analysis_id')} did not succeed (status {row.get('status')!r})")
 
 
-def _recipe_script(out_dir: Any) -> Optional[Path]:
+def _recipe_script(out_dir: Any, unit: Optional[str] = None) -> Optional[Path]:
     """The approved recipe an analysis run left behind: the curve agent's
-    ``scripts/fitting_script.py`` (a series saves one copy of the same
-    locked model per spectrum, so the first is the recipe), the image
-    agent's ``scripts/analysis_script.py``, the hyperspectral agent's
+    ``scripts/fitting_script.py`` (a single spectrum) or, for a series, the
+    ANCHOR's unit script ``scripts/<unit>.py`` (``unit`` comes from the run's
+    row, the anchor's name — an adaptive refit or another regime saves a
+    different script under its own name); the image agent's
+    ``scripts/analysis_script.py``; the hyperspectral agent's
     ``dynamic_analysis_records.json`` (the locked script travels inside it,
-    and is what a replay is pointed at); else the first script there."""
+    and is what a replay is pointed at; a hyperspectral SERIES keeps them per
+    dataset, so it has no root-level recipe and posts none)."""
     if not out_dir:
         return None
-    records = Path(out_dir) / "dynamic_analysis_records.json"
+    out = Path(out_dir)
+    records = out / "dynamic_analysis_records.json"
     if records.is_file():
         return records
-    scripts = Path(out_dir) / "scripts"
+    scripts = out / "scripts"
     if not scripts.is_dir():
         return None
+    if unit:
+        safe = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in str(unit))
+        if (scripts / f"{safe}.py").is_file():
+            return scripts / f"{safe}.py"
+        return None                      # a series whose anchor script is not there: no recipe
     for name in ("analysis_script.py", "fitting_script.py"):
         if (scripts / name).is_file():
             return scripts / name
@@ -547,16 +558,17 @@ def _planning_records(entry: Dict[str, Any], result: Dict[str, Any]) -> List[Dic
         if isinstance(point, dict) and point:
             out.append({"kind": "parameter_point", "payload": {"point": point},
                         "status": "provisional", "evidence": {"gate": "BO engine recommendation (no gate)"}})
-    # A standing blocking finding: the critic's word, a hint by type, so it
-    # propagates without a human's review — but a human who approved the
-    # plan over it has settled it (planning's _standing_blocker), and it is
-    # not posted.
-    if not approved:
+    # A standing blocking finding: the critic's word — advisory, not a gate,
+    # so provisional — posted with the plan it concerns (once: the
+    # delegation that wrote it) unless a human approved the plan over it,
+    # which settles it (planning's _standing_blocker).
+    if not approved and review.get("written_here", True):
         for h in review.get("blocking_findings") or []:
             if isinstance(h, dict) and h.get("issue"):
                 out.append({"kind": "hazard", "payload": {"issue": str(h["issue"])[:600],
                                                           "conflict": str(h.get("conflict") or "")[:400]},
-                            "status": "verified", "evidence": {"gate": "plan critic, blocking tier"}})
+                            "status": "provisional",
+                            "evidence": {"gate": "plan critic, blocking tier (advisory, no gate)"}})
     return out
 
 

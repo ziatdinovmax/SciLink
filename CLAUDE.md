@@ -693,11 +693,16 @@ run or a review:
   correction `supersedes`, a withdrawal is a `retraction`, and neither takes
   effect from an unchecked record of another author), and `verified` means a
   GATE the author's own pipeline runs passed it — the analysis verifier's
-  approval (`analysis_verdict`: a salvaged, unverified or unapproved result is
-  "success" too, and stays provisional), a human-approved plan (an unattended
-  one stays provisional; only the delegation that wrote or settled the plan
-  posts it), the structure validator. Engine output that passed no gate — a BO
-  point, a steering reduction, a TEA summary — is provisional. The board adds
+  approval (`analysis_verdict`, read from the shapes the agents write: a
+  salvaged, unverified or unapproved result is "success" too and stays
+  provisional; a series needs its anchors approved and its followers verified,
+  a failed unit the agent already excluded does not block; a verifier's
+  physics approval inside the gate's soft band counts, a bypassed verification
+  below threshold does not), a human-approved plan (an unattended one stays
+  provisional; only the delegation that wrote or settled the plan posts it),
+  the structure validator. Engine output and advice that passed no gate — a BO
+  point, a steering reduction, a TEA summary, a critic's blocking finding — is
+  provisional. The board adds
   no judge. A reader gets verified records only, as quoted data between markers,
   clipped and budgeted, under the same additive-only rule as steering; a swarm
   item reads once, at its start (`reads_board`, the newest 24), and a `check`

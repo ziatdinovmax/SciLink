@@ -36,6 +36,7 @@ sibling helper to the orchestrator.
 import glob
 from scilink.utils import path_fence as _path_fence
 import io
+import itertools
 import json
 import logging
 import os
@@ -2841,12 +2842,17 @@ def _ledger_dependents(ledger: List[dict], indices: List[int]) -> Dict[int, set]
     (labels), closed transitively over every entry (a fusion's
     ``context_from`` is what it fused). Keyed by index: labels repeat
     (every fusion is "cross-dataset fusion") and a re-analysis may reuse
-    its branch's label."""
+    its branch's label.
+
+    Two stamps are NOT edges: ``informed_via`` co-registered operands (a
+    shared dataset is not a finding: three meshed branches are three
+    observations), and a label that only matches a LATER entry (an earlier
+    branch cannot have read a run that did not exist). A label resolves to
+    earlier entries of the same ``parallel_group`` when the entry has one,
+    else to earlier entries of the set being fused.
+    """
     by_index = {e["index"]: e for e in ledger if isinstance(e.get("index"), int)}
-    by_label: Dict[str, List[int]] = {}
-    for e in ledger:
-        if e.get("label"):
-            by_label.setdefault(str(e["label"]), []).append(e["index"])
+    wanted = set(indices)
 
     def parents(i: int) -> set:
         e = by_index.get(i) or {}
@@ -2856,12 +2862,20 @@ def _ledger_dependents(ledger: List[dict], indices: List[int]) -> Dict[int, set]
                 out.add(int(c))
             except (TypeError, ValueError):
                 pass
-        for lbl in e.get("informed_by") or []:
-            out.update(by_label.get(str(lbl), []))
+        via = str(e.get("informed_via") or "")
+        if e.get("informed_by") and "co_registered_operands" not in via:
+            group = e.get("parallel_group")
+            for lbl in e["informed_by"]:
+                for j, other in by_index.items():
+                    if j >= i or str(other.get("label")) != str(lbl):
+                        continue
+                    if group and other.get("parallel_group") == group:
+                        out.add(j)
+                    elif not group and j in wanted:
+                        out.add(j)
         out.discard(i)
         return out
 
-    wanted = set(indices)
     result: Dict[int, set] = {}
     for i in indices:
         seen, stack = set(), list(parents(i))
@@ -2879,7 +2893,14 @@ def independent_support_of(board, ledger: List[dict], entries: List[dict]) -> Di
     """Fusion's independence count over ``entries`` (the agreeing set):
     the board's read graph (``board.independent_support``) joined with the
     ledger's own coupling edges. Keyed by delegation index; ``dependent``
-    is rendered as ``label (#index)`` for the prompt and the report."""
+    is rendered as ``'label' (#index)`` for the prompt and the report.
+
+    ``count`` is the size of the largest set of supporters with no coupling
+    between any two of them (a maximum independent set of the undirected
+    coupling graph): three meshed or mutually informed branches count once,
+    never zero; two independent branches plus a re-analysis that read both
+    count two.
+    """
     idx = [e["index"] for e in entries]
     disp = {e["index"]: f"'{e.get('label') or 'delegation'}' (#{e['index']})" for e in entries}
     on_board = board.independent_support({e["index"]: list(e.get("posted") or []) for e in entries},
@@ -2889,8 +2910,25 @@ def independent_support_of(board, ledger: List[dict], entries: List[dict]) -> Di
         deps[int(k)].update(int(o) for o in others)
     for i, others in _ledger_dependents(ledger, idx).items():
         deps[i].update(others)
+    coupled = {(a, b) for a in idx for b in deps[a]} | {(b, a) for a in idx for b in deps[a]}
+
+    def independent(subset) -> bool:
+        return not any((a, b) in coupled for a, b in itertools.combinations(subset, 2))
+
+    count = 0
+    if len(idx) <= 12:
+        for n in range(len(idx), 0, -1):
+            if any(independent(c) for c in itertools.combinations(idx, n)):
+                count = n
+                break
+    else:                                   # greedy: fewest couplings first
+        chosen: List[int] = []
+        for i in sorted(idx, key=lambda k: sum(1 for j in idx if (k, j) in coupled)):
+            if independent(chosen + [i]):
+                chosen.append(i)
+        count = len(chosen)
     dependent = {disp[i]: [disp[j] for j in sorted(o)] for i, o in deps.items() if o}
-    return {"count": len(idx) - len(dependent), "raw": len(idx), "dependent": dependent,
+    return {"count": count, "raw": len(idx), "dependent": dependent,
             "by_index": {str(i): sorted(o) for i, o in deps.items() if o}}
 
 

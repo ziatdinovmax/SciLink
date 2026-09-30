@@ -1819,6 +1819,13 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                         if r.get("quality_history") else None
                     ),
                     "reuse_validity": r.get("reuse_validity"),
+                    # The unit's verification record and salvage markers, as
+                    # the curve agent reports them: what tells an approved
+                    # anchor from a salvaged one and a replayed follower from
+                    # an unverified one.
+                    "quality_history": r.get("quality_history"),
+                    **({"quality_warning": r["quality_warning"]} if r.get("quality_warning") else {}),
+                    **({"judge_warning": r["judge_warning"]} if r.get("judge_warning") else {}),
                 }
                 for r in series_results
             ]

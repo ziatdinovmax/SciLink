@@ -246,58 +246,152 @@ def build_verification_prompt_history(
 # the verdict a caller may rely on
 # ---------------------------------------------------------------------------
 
+def _has_record(qh: Any) -> bool:
+    """A real verification record, as the QC engine writes it (``approved``
+    present) — not the bare ``{"produced_under_profile": …}`` stamp a series
+    follower carries."""
+    return isinstance(qh, dict) and "approved" in qh
+
+
+def _unit_verdict(item: dict, *, where: str) -> Optional[Dict[str, Any]]:
+    """Why one verified-by-record unit (a single run, a series anchor, a
+    regime anchor, a refit) is NOT verified, else None."""
+    qh = item.get("quality_history") or {}
+    if item.get("quality_warning"):
+        return {"verified": False, "reason": f"salvaged best-available result{where}"}
+    if item.get("judge_warning"):
+        return {"verified": False, "reason": f"the judge found no acceptable fit{where}"}
+    if qh.get("unverified"):
+        return {"verified": False, "reason": f"verification did not finish{where}"
+                + (f": {qh.get('stopped_by')}" if qh.get("stopped_by") else "")}
+    if qh.get("verifier_rejected"):
+        return {"verified": False, "reason": f"the verifier still rejected the result at the cap{where}"}
+    if not qh.get("approved"):
+        # a locked replay is judged by the replay gate, not a verifier (the
+        # image agent stamps approved_by only when the gate passed)
+        replay = qh.get("approved_by") == "replay_gate" or (item.get("reuse_validity") or {}).get("reused")
+        return {"verified": False, "reason": (f"the replay gate rejected the result{where}" if replay
+                                              else f"the verifier did not approve the result{where}")}
+    # A verifier may approve a fit below the numeric threshold on physics
+    # grounds (inside the gate's soft band): that is the pipeline's gate and
+    # it counts. A run whose verification was bypassed
+    # (max_verification_iterations=0: the image agent stamps "bypass", the
+    # curve agent "verifier" with no iteration) passed no gate unless the
+    # metric itself met the threshold.
+    metric = next((qh.get(k) for k in ("final_r2", "final_score", "final_passed_fraction")
+                   if isinstance(qh.get(k), (int, float))), None)
+    no_pass = qh.get("approved_by") == "bypass" or (
+        qh.get("approved_by") == "verifier" and not qh.get("verification_iterations"))
+    if no_pass and metric is not None and qh.get("threshold") is not None and metric < qh["threshold"]:
+        return {"verified": False, "reason": f"verification bypassed and the metric is below its threshold{where}"}
+    return None
+
+
 def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
     """Did this analysis pass its own pipeline's checks?
 
     A run's ``status`` says whether it produced a result, not whether the
     result was approved: the curve and image agents return ``success`` for a
     salvaged best-available fit (``quality_warning``), for a run whose
-    verification did not finish (``quality_history.unverified``) and for a
-    result the verifier never approved (``approved`` false); hyperspectral
-    reports ``partial``. This reads those signals, per item for a series,
-    and gives one answer with the reason — for the board, which posts only
-    what an agent verified as verified, and for any caller that must not
-    mistake a produced result for an approved one.
+    verification did not finish (``quality_history.unverified``), for a
+    result the verifier never approved (``approved`` false) and for one the
+    judge picked as best available (``judge_warning``); hyperspectral reports
+    ``partial``. This reads those signals in the shapes the agents write and
+    gives one answer with the reason — for the board, which posts only what
+    an agent verified as verified, and for any caller that must not mistake
+    a produced result for an approved one.
+
+    Shapes:
+
+    - a single curve or image run: the top-level ``quality_history`` (and
+      ``quality_warning`` / ``judge_warning``);
+    - a curve or image series (``individual_results``): the units that went
+      through the QC engine — the anchor, a regime anchor, a refit — carry a
+      verification record and must be approved with no salvage marker; the
+      followers (a locked replay, no record beyond the profile stamp) must
+      have succeeded and not be ``unverified``. A unit that FAILED is not in
+      the feature table (the agent flags it and says so), so it does not
+      block; a unit that succeeded unverified IS in the table, so it does.
+    - a hyperspectral cube (``dynamic_analysis_records``): ``success``
+      status, and every target that produced a script approved
+      (``task_success``), none salvaged;
+    - a hyperspectral series: every successful row's own ``verified``.
     """
     full = full_result or {}
     status = full.get("status")
     if status != "success":
         return {"verified": False, "reason": f"status {status!r}"}
-    if full.get("quality_warning"):
-        return {"verified": False, "reason": "salvaged best-available result (quality_warning)"}
     rv = full.get("reuse_validity") or {}
     if rv.get("reused") and rv.get("verdict") not in (None, "good"):
         return {"verified": False, "reason": f"reused script verdict {rv.get('verdict')!r}"}
+
     items = full.get("individual_results")
+    hs_records = full.get("dynamic_analysis_records")
+
     if isinstance(items, list) and items:
-        histories = [(it.get("name") or it.get("index"), it.get("quality_history"))
-                     for it in items if isinstance(it, dict) and it.get("success")]
-        if not histories:
-            return {"verified": False, "reason": "no item succeeded"}
-    else:
-        histories = [(None, full.get("quality_history"))]
-    for name, qh in histories:
-        where = f" (item {name})" if name is not None else ""
-        if not isinstance(qh, dict) or not qh:
-            return {"verified": False, "reason": f"no verification record{where}"}
-        if qh.get("unverified"):
-            return {"verified": False, "reason": f"verification did not finish{where}"
-                    + (f": {qh.get('stopped_by')}" if qh.get("stopped_by") else "")}
-        if not qh.get("approved"):
-            return {"verified": False, "reason": f"the verifier did not approve the result{where}"}
-        # A verifier may approve a fit below the numeric threshold on physics
-        # grounds: that is the pipeline's gate and it counts. A run whose
-        # verification was bypassed (max_verification_iterations=0: the image
-        # agent stamps "bypass", the curve agent "verifier" with no iteration)
-        # passed no gate unless the metric itself met the threshold.
-        metric = next((qh.get(k) for k in ("final_r2", "final_score", "final_passed_fraction")
-                       if isinstance(qh.get(k), (int, float))), None)
-        no_pass = qh.get("approved_by") == "bypass" or (
-            qh.get("approved_by") == "verifier" and not qh.get("verification_iterations"))
-        if no_pass and metric is not None and qh.get("threshold") is not None and metric < qh["threshold"]:
-            return {"verified": False, "reason": f"verification bypassed and the metric is below "
-                                                  f"its threshold{where}"}
+        ok_items = [it for it in items if isinstance(it, dict) and it.get("success")]
+        if not ok_items:
+            return {"verified": False, "reason": "no unit succeeded"}
+        anchors = 0
+        for it in ok_items:
+            name = it.get("name") or it.get("index")
+            where = f" (unit {name})"
+            if "verified" in it and "quality_history" not in it:
+                # a hyperspectral series row: the driver's own verdict
+                if it.get("verified") is False:
+                    return {"verified": False, "reason": f"unit not verified by the series driver{where}"}
+                anchors += 1 if it.get("role") == "anchor" else 0
+                continue
+            if _has_record(it.get("quality_history")):
+                anchors += 1
+                bad = _unit_verdict(it, where=where)
+                if bad:
+                    return bad
+            else:
+                if (it.get("quality_history") or {}).get("unverified"):
+                    return {"verified": False, "reason": f"follower unverified{where}"}
+        if anchors == 0 and not any("verified" in it for it in ok_items):
+            return {"verified": False, "reason": "no unit carries a verification record"}
+        failed = len(items) - len(ok_items)
+        return {"verified": True, "reason": "series anchors approved and every follower verified"
+                + (f" ({failed} failed unit(s) excluded by the agent)" if failed else "")}
+
+    if isinstance(hs_records, list) and hs_records:
+        scripted = [r for r in hs_records if isinstance(r, dict) and (r.get("script") or r.get("task_success"))]
+        for r in scripted:
+            where = f" (target {r.get('target')})"
+            if r.get("salvaged"):
+                return {"verified": False, "reason": f"salvaged target{where}"}
+            if not r.get("task_success") or not (r.get("quality_history") or {}).get("approved", True):
+                return {"verified": False, "reason": f"target did not pass verification{where}"}
+        if not scripted:
+            return {"verified": False, "reason": "no target produced an approved script"}
+        return {"verified": True, "reason": "every target passed verification"}
+
+    if full.get("quality_warning") and not _has_record(full.get("quality_history")):
+        return {"verified": False, "reason": "salvaged best-available result (quality_warning)"}
+    qh = full.get("quality_history")
+    if not _has_record(qh):
+        if rv.get("reused") and rv.get("verdict") == "good":
+            return {"verified": True, "reason": "locked-script reuse passed the replay gate"}
+        return {"verified": False, "reason": "no verification record"}
+    bad = _unit_verdict(full, where="")
+    if bad:
+        return bad
     return {"verified": True, "reason": "approved by the analysis verifier"
-            if any(qh.get("verification_iterations") for _, qh in histories if isinstance(qh, dict))
-            else "met the acceptance threshold"}
+            if qh.get("verification_iterations") else "met the acceptance threshold"}
+
+
+def series_anchor_unit(full_result: Optional[dict]) -> Optional[str]:
+    """The name of a series' anchor unit — the first successful unit that
+    went through the QC engine and is not a refit — whose ``scripts/<name>.py``
+    is the locked recipe. None for a single run."""
+    items = (full_result or {}).get("individual_results")
+    if not isinstance(items, list) or not items:
+        return None
+    for it in items:
+        if (isinstance(it, dict) and it.get("success") and not it.get("adaptively_refitted")
+                and _has_record(it.get("quality_history")) and it.get("name")):
+            return str(it["name"])
+    return None
 

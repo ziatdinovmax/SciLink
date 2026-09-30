@@ -874,9 +874,10 @@ can already hit.
      `validation_status`; nothing else in the modes changed.
    - *A steering payload is a finding of the companion.* It is filed under
      the companion's ledger index (author "fan-out steering (reduction of
-     …)"), verified as a deterministic reduction, and the steered branch's
-     entry reads it — which is what makes fusion count 1 of 2. Co-registered
-     operands stay a ledger stamp: a shared dataset is not a finding.
+     …)", mode `steering`), provisional — a deterministic reduction, but no
+     gate passed it — and the steered branch's entry reads it, which is what
+     makes fusion count 1 of 2. Co-registered operands stay a ledger stamp:
+     a shared dataset is not a finding, and the count skips that stamp.
    - *Fusion's claims are provisional* (a synthesis passes no gate of its
      own) and read every fused finding, so a re-analysis citing the fusion
      inherits them as reads and the next fusion counts it dependent.
@@ -911,6 +912,27 @@ can already hit.
      seen; subjects are NFKC-normalised. A re-analysis citing a fusion
      inherits the fusion's reads as well as its claims. The hyperspectral
      recipe is `dynamic_analysis_records.json`.
+   - *Round 2 of the review:* `analysis_verdict` reads the shapes the
+     agents write, not one field: a series' anchors, regime anchors and
+     refits (the units with a QC-engine record) must be approved with no
+     salvage marker (`quality_warning` / `judge_warning`, now carried on the
+     curve and image `individual_results`), its followers must have
+     succeeded and not be `unverified`, and a FAILED unit does not block
+     (the agent excludes it from the table and flags it; an unverified
+     success is in the table, so it does); a hyperspectral cube needs
+     `success` and every scripted target `task_success` and not `salvaged`;
+     a hyperspectral series reads each row's `verified`; a good-verdict
+     locked reuse is verified by the replay gate. Fusion's count is the
+     largest set of supporters with no coupling between any two (three
+     meshed or mutually informed branches count once, never zero; two
+     branches plus a re-analysis of both count two); a co-registered-operand
+     stamp is not an edge; a label binds only to an earlier entry of the same
+     group; `_analysis_ids_of` accepts only an analysis folder name. A plan
+     is "written here" when its hypotheses, iteration or review stamp
+     changed, not on any edit; a blocking finding is provisional (the critic
+     is advisory) and posted once. The series recipe is the anchor's unit
+     script (`recipe_unit` on the row); a hyperspectral series posts none.
+     Fence markers inside a record are neutralised.
    - *Found live:* the curve agent's approved script is
      `scripts/fitting_script.py` (a series: one per spectrum), the image
      agent's `analysis_script.py` — the recipe takes the folder's

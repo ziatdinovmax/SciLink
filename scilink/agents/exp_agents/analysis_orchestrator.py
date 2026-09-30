@@ -13,7 +13,7 @@ import inspect
 import json
 from scilink.utils.text_io import atomic_write_json
 import logging
-from ._verification_record import analysis_verdict
+from ._verification_record import analysis_verdict, series_anchor_unit
 import os
 import time
 from pathlib import Path
@@ -1707,6 +1707,8 @@ class AnalysisOrchestratorAgent:
                     # result (a salvaged or unverified run is still
                     # status "success"): what the board calls verified.
                     **analysis_verdict(rec.get("full_result")),
+                    # a series' locked recipe is the anchor's unit script
+                    "recipe_unit": series_anchor_unit(rec.get("full_result")),
                 } for rec in new_analyses
             ],
             "warnings": warnings,

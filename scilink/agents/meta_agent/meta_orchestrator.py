@@ -1607,12 +1607,17 @@ class MetaOrchestratorAgent:
     _NUM_RE = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
     _FINDING_MIN_CHARS = 40
 
-    @staticmethod
-    def _analysis_ids_of(entry: Dict[str, Any]) -> List[str]:
+    #: An analysis output folder: ``analysis_<stem>_<Agent>_<YYYYMMDD>_<HHMMSS>_<NNN>``.
+    #: A file name such as ``analysis_results.json`` is not one (it would
+    #: infer a dependency on every analysis that wrote that file).
+    _ANALYSIS_DIR_RE = re.compile(r"^analysis_.+_\d{8}_\d{6}_\d{3}$")
+
+    @classmethod
+    def _analysis_ids_of(cls, entry: Dict[str, Any]) -> List[str]:
         ids = [str(a) for a in (entry.get("analysis_ids") or []) if a]
         for f in entry.get("files_produced") or []:
             for part in str(f).replace("\\", "/").split("/"):
-                if part.startswith("analysis_") and len(part) >= 12 and part not in ids:
+                if cls._ANALYSIS_DIR_RE.match(part) and part not in ids:
                     ids.append(part)
         return ids
 

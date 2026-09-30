@@ -1447,6 +1447,41 @@ class PlanningOrchestratorAgent:
             self._last_chat_error = str(e)
             return f"❌ Error: {e}\n\n(Emergency checkpoint saved to {self.checkpoint_path})"
 
+    @staticmethod
+    def _plan_hypotheses(plan: Optional[Dict[str, Any]]) -> List[str]:
+        """The plan's substance in one line each: an experiment's hypothesis,
+        a portfolio's direction. ``key_findings`` is the campaign
+        configuration; these are what a later task can be told."""
+        from .parser_utils import plan_directions, plan_is_portfolio
+        plan = plan or {}
+        out: List[str] = []
+        if plan_is_portfolio(plan):
+            for d in plan_directions(plan):
+                text = str(d.get("hypothesis") or d.get("title") or "").strip()
+                if text:
+                    out.append(f"Direction: {text}")
+        else:
+            for exp in plan.get("proposed_experiments") or []:
+                if not isinstance(exp, dict):
+                    continue
+                name = str(exp.get("experiment_name") or exp.get("name") or exp.get("title") or "").strip()
+                hyp = str(exp.get("hypothesis") or "").strip()
+                if hyp or name:
+                    out.append(f"Experiment{' ' + repr(name) if name else ''}: {hyp or 'no hypothesis stated'}")
+        return out
+
+    @classmethod
+    def _plan_identity(cls, plan: Optional[Dict[str, Any]]) -> str:
+        """What makes a plan THIS plan for a caller: its hypotheses, its
+        iteration and how it was settled. An edit that touches none of these
+        — a literature search restored on a white-paper call, a code
+        generation copying the plan — is not a new plan and must not pass an
+        earlier approval on as a later delegation's own."""
+        plan = plan or {}
+        return json.dumps({"hypotheses": cls._plan_hypotheses(plan), "iteration": plan.get("iteration"),
+                           "human_review": plan.get("human_review"),
+                           "unattended_gate": plan.get("unattended_gate")}, sort_keys=True, default=str)
+
     def run_task(self, task: str, context: Optional[Dict[str, Any]] = None,
                  autonomy: Optional[AutonomyLevel] = None,
                  max_iterations: Optional[int] = None) -> Dict[str, Any]:
@@ -1512,8 +1547,7 @@ class PlanningOrchestratorAgent:
         # Snapshot prior state so we report "what was produced *during* this
         # call" rather than "everything in the session."
         files_before = _snapshot_files()
-        _plan_before = json.dumps((self.planner.state or {}).get("current_plan") or {},
-                                  sort_keys=True, default=str)
+        _plan_before = self._plan_identity((self.planner.state or {}).get("current_plan"))
 
         # Isolate this delegation's plan artifacts in their own sub-directory
         # so a persistent planning child (reused by the meta agent) does not
@@ -1658,24 +1692,7 @@ class PlanningOrchestratorAgent:
         # verified only when a human approved it): the review stamp, an
         # unattended gate, and any blocking finding still standing.
         from .planning_rag import blocking_findings
-        from .parser_utils import plan_directions, plan_is_portfolio
-        # The plan's substance in one line each: an experiment's hypothesis,
-        # a portfolio's direction. key_findings is the campaign
-        # configuration; these are what a later task can be told.
-        hypotheses: List[str] = []
-        if plan_is_portfolio(_plan):
-            for d in plan_directions(_plan):
-                text = str(d.get("hypothesis") or d.get("title") or "").strip()
-                if text:
-                    hypotheses.append(f"Direction: {text}")
-        else:
-            for exp in _plan.get("proposed_experiments") or []:
-                if not isinstance(exp, dict):
-                    continue
-                name = str(exp.get("experiment_name") or exp.get("name") or exp.get("title") or "").strip()
-                hyp = str(exp.get("hypothesis") or "").strip()
-                if hyp or name:
-                    hypotheses.append(f"Experiment{' ' + repr(name) if name else ''}: {hyp or 'no hypothesis stated'}")
+        hypotheses = self._plan_hypotheses(_plan)
         plan_review = {
             "human_review": _plan.get("human_review") or None,
             "unattended_gate": _plan.get("unattended_gate") or None,
@@ -1684,7 +1701,7 @@ class PlanningOrchestratorAgent:
             # Whether THIS call wrote or settled the plan (the persistent
             # child keeps its plan across delegations): a later TEA-only
             # call must not pass an earlier approval on as its own.
-            "written_here": json.dumps(_plan, sort_keys=True, default=str) != _plan_before,
+            "written_here": self._plan_identity(_plan) != _plan_before,
             "blocking_findings": [{"issue": f.get("issue"), "conflict": f.get("conflict")}
                                   for f in blocking_findings(_plan.get("critic_findings"))],
             "files": [f for f in files_produced if str(f).endswith("plan.json")][:3],
