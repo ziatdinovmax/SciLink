@@ -512,9 +512,11 @@ def _analysis_records(entry: Dict[str, Any], result: Dict[str, Any]) -> List[Dic
             if rec.get("recipe_unit"):
                 payload["unit"] = rec["recipe_unit"]
                 payload["note"] = ("the locked script of the series' first anchor (unit "
-                                   f"{rec['recipe_unit']!r}); a series with several regimes locks one "
-                                   "script per regime anchor, each saved as scripts/<anchor unit>.py "
-                                   "in the same folder (every follower's replay is saved there too)")
+                                   f"{rec['recipe_unit']!r}), the one its followers replayed "
+                                   "(<unit>_locked.py when the anchor was refit afterwards); a series "
+                                   "with several regimes locks one script per regime anchor, each saved "
+                                   "as scripts/<anchor unit>.py in the same folder (every follower's "
+                                   "replay is saved there too)")
             out.append({"kind": "recipe", "payload": payload,
                         "status": "verified" if verified else "provisional",
                         "evidence": {"analysis_ids": [aid], "files": [str(script)],
@@ -539,9 +541,10 @@ def _analysis_verified(row: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
 def _recipe_script(out_dir: Any, unit: Optional[str] = None, *, series: bool = False) -> Optional[Path]:
     """The approved recipe an analysis run left behind: the curve agent's
     ``scripts/fitting_script.py`` (a single spectrum) or, for a series, the
-    ANCHOR's unit script ``scripts/<unit>.py`` (``unit`` comes from the run's
-    row, the anchor's name — an adaptive refit or another regime saves a
-    different script under its own name); the image agent's
+    ANCHOR's locked script — ``scripts/<unit>_locked.py`` when the anchor was
+    refit after its followers replayed it, else ``scripts/<unit>.py``
+    (``unit`` comes from the run's row, the anchor's name; another regime's
+    anchor saves its own script under its own name); the image agent's
     ``scripts/analysis_script.py``; the hyperspectral agent's
     ``dynamic_analysis_records.json`` (the locked script travels inside it,
     and is what a replay is pointed at; a hyperspectral SERIES keeps them per
@@ -557,8 +560,11 @@ def _recipe_script(out_dir: Any, unit: Optional[str] = None, *, series: bool = F
         return None
     if unit:
         safe = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in str(unit))
-        if (scripts / f"{safe}.py").is_file():
-            return scripts / f"{safe}.py"
+        # a refit anchor saves the script its followers replayed as
+        # <unit>_locked.py: that is the recipe, not the refit's script
+        for cand in (scripts / f"{safe}_locked.py", scripts / f"{safe}.py"):
+            if cand.is_file():
+                return cand
         return None                      # a series whose anchor script is not there: no recipe
     if series:
         return None                      # a series with no anchor unit (reused, or refit): no recipe

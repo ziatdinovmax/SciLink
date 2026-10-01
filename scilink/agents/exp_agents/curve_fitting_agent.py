@@ -1479,6 +1479,11 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     path = scripts_dir / f"{safe_name}.py"
                     path.write_text(script, encoding="utf-8")
                     saved.append(str(path))
+                    # A refit unit also keeps the script its followers
+                    # replayed: that, not the refit's, is the series' recipe.
+                    locked = r.get("locked_script")
+                    if locked and locked != script:
+                        (scripts_dir / f"{safe_name}_locked.py").write_text(locked, encoding="utf-8")
 
         if saved:
             self.logger.info(f"   Scripts: {scripts_dir} ({len(saved)} file(s))")
@@ -2137,6 +2142,10 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     **({"fitted_from": r["fitted_from"]} if r.get("fitted_from") else {}),
                     **({"role": r["role"]} if r.get("role") else {}),
                     **({"replaced_unit": r["replaced_unit"]} if r.get("replaced_unit") else {}),
+                    **({"regime": r["regime"]} if r.get("regime") else {}),
+                    # The driver's verdict on the unit, stamped when it knew
+                    # the recipe and the gate result (unit_verdict_for).
+                    **({"unit_verdict": r["unit_verdict"]} if r.get("unit_verdict") else {}),
                 }
                 for r in series_results
             ]

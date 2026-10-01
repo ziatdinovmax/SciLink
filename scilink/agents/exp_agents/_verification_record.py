@@ -22,6 +22,8 @@ builder in the HS-1 expansion via its own keymap.
 
 from __future__ import annotations
 
+import logging
+
 from typing import Any, Callable, Dict, List, Optional
 
 
@@ -287,6 +289,52 @@ def _unit_verdict(item: dict, *, where: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def unit_verdict_for(unit: Dict[str, Any], *, recipe: Optional[Dict[str, Any]] = None,
+                     regime: Optional[str] = None) -> Dict[str, Any]:
+    """The verdict on ONE series unit, stamped by the series driver at the
+    moment it knows everything — the gate result of a unit it verified, or
+    the recipe a follower replayed and that recipe's verdict. The driver
+    writes it as ``unit["unit_verdict"]``; ``analysis_verdict`` then only
+    aggregates, and no later refit of another unit can change it.
+
+    ``recipe`` is the regime anchor's record at the time the follower ran:
+    ``{"unit": name, "verdict": {verified, reason}}`` or None when the
+    follower was fitted with no base script.
+    """
+    name = unit.get("name") or unit.get("index")
+    if not unit.get("success"):
+        return {"verified": False, "reason": f"unit failed: {str(unit.get('error') or '')[:120]}",
+                "regime": regime}
+    if _has_record(unit.get("quality_history")):
+        # verified by its own gate: an anchor, a regime anchor, a refit
+        bad = _unit_verdict(unit, where="")
+        return {"verified": bad is None, "reason": (bad or {}).get("reason") or "approved by its own gate",
+                "regime": regime, "own_gate": True}
+    if (unit.get("quality_history") or {}).get("unverified"):
+        return {"verified": False, "reason": "follower unverified (budget)", "regime": regime}
+    if unit.get("fitted_from") == "fresh_code" or recipe is None:
+        return {"verified": False, "reason": "fitted without a locked recipe (its regime's anchor "
+                                             "produced none)", "regime": regime}
+    rv = recipe.get("verdict") or {}
+    if rv.get("verified"):
+        return {"verified": True, "reason": f"replayed the locked recipe of unit {recipe.get('unit')}, "
+                                            "whose gate passed", "regime": regime, "recipe_of": recipe.get("unit")}
+    return {"verified": False, "reason": f"replayed the locked recipe of unit {recipe.get('unit')}, which was "
+                                         f"not approved: {rv.get('reason')}", "regime": regime,
+            "recipe_of": recipe.get("unit")}
+
+
+def stamp_unit_verdict(unit: Dict[str, Any], *, recipe: Optional[Dict[str, Any]] = None,
+                       regime: Optional[str] = None) -> None:
+    """``unit["unit_verdict"] = unit_verdict_for(...)``, never raising: a
+    verdict that cannot be formed leaves the unit unstamped (the aggregator
+    then falls back to its reconstruction) and must not fail a fit."""
+    try:
+        unit["unit_verdict"] = unit_verdict_for(unit, recipe=recipe, regime=regime)
+    except Exception as exc:  # noqa: BLE001 - a stamp is a side note on a fit
+        logging.getLogger(__name__).warning(f"unit verdict not stamped: {exc}")
+
+
 def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
     """Did this analysis pass its own pipeline's checks?
 
@@ -332,6 +380,18 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
         ok_items = [it for it in items if isinstance(it, dict) and it.get("success")]
         if not ok_items:
             return {"verified": False, "reason": "no unit succeeded"}
+        failed = len(items) - len(ok_items)
+        if all(isinstance(it.get("unit_verdict"), dict) for it in ok_items):
+            # The driver stamped every unit when it knew the recipe and the
+            # gate result (unit_verdict_for): aggregate, nothing to reconstruct.
+            for it in ok_items:
+                uv = it["unit_verdict"]
+                if not uv.get("verified"):
+                    return {"verified": False,
+                            "reason": f"{uv.get('reason')} (unit {it.get('name') or it.get('index')})"}
+            return {"verified": True, "reason": "every unit verified by the series driver"
+                    + (f" ({failed} failed unit(s) excluded by the agent)" if failed else "")}
+        # A shape from before the stamp: reconstruct from the markers.
         # The recipe a follower replayed is its regime's anchor AS IT WAS when
         # the follower ran. A refit anchor carries a summary of the unit it
         # replaced (``replaced_unit``); a follower still on the locked script
@@ -400,7 +460,6 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
                             f"{bad['reason']} (recipe from unit {recipe.get('name')}, since refit)")}
         if anchors == 0 and not any("verified" in it for it in ok_items):
             return {"verified": False, "reason": "no unit carries a verification record"}
-        failed = len(items) - len(ok_items)
         return {"verified": True, "reason": "series anchors approved and every follower verified"
                 + (f" ({failed} failed unit(s) excluded by the agent)" if failed else "")}
 
