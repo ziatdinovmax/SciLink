@@ -1368,7 +1368,18 @@ references are to `main` at bed2f7f8.
   transition is not held to the model locked below it; an image reuse's
   verdict is one vision review, not a deterministic gate, so it replays the
   first regime's recipe and its label says so. An image strict replay needs
-  the run (its reference features), and refuses a bare file.
+  the run (its reference features), and refuses a bare file. The regime
+  recipes each run VERBATIM in a candidate folder of their own
+  (`_candidates/recipe_NN`, the best-of-N layout) and the kept one is
+  promoted, so the figure and `fit.npy` on disk are the kept result's
+  whichever ran last; the correction ladder is paid once, on the first
+  recipe, only when none executed verbatim; on the fast clock a raising
+  recipe moves on to the next regime as a poor one does. The live loop
+  locks ONE recipe, so `CurveModality.anchor_script` refuses a series
+  anchor that locked several regimes with a message saying what to point
+  it at. An image series used directly as a live anchor whose first image
+  has empty `extracted_features` is refused too (a replay gate with no
+  reference is not a verdict).
 - *Persistent-specialist delegations read nothing.* `delegate_to_*` posts but
   has no `reads_board`; the meta threads findings into `context` by hand
   (`get_board`), which is the design's turn-granularity path.

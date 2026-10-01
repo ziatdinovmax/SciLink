@@ -5091,53 +5091,99 @@ Return JSON with:
         # to full QC is a prior script that cannot execute at all.
         #
         # A prior SERIES that locked several regimes offers one recipe per
-        # regime (``_reuse_candidates``, #704): they are replayed in lock
-        # order and the first the gate calls good is kept, so a measurement
-        # above a transition is not held to the model locked below it. When
-        # none is good, the first that executed is kept (poor, flagged), as a
-        # single recipe would be.
+        # regime (``_reuse_candidates``, #704). Each runs VERBATIM in a
+        # candidate folder of its own (the best-of-N layout, so the kept
+        # result's figure and fit.npy are its own), in lock order; the first
+        # the gate calls good is kept, else the first that executed (poor,
+        # flagged), and only if none executed is the first recipe given the
+        # correction ladder, as a single recipe is — the ladder's cost is
+        # paid once, not once per regime. A single recipe runs as it always
+        # did, in the spectrum's own folder.
         candidates = [(ctx.reuse_script, ctx.reuse_source)]
         extra = ctx.state.get("_reuse_candidates") or []
         if extra and extra[0].get("script") == ctx.reuse_script:
             candidates += [(c["script"], c["source"]) for c in extra[1:]]
-        kept = None                       # the first poor-but-executed result
-        for n, (script, source) in enumerate(candidates, 1):
-            self.logger.info(
-                f"   ♻️  Reusing locked fitting script from prior run "
-                f"'{source or 'prior'}'" + (f" ({n} of {len(candidates)} regime recipes)"
-                                            if len(candidates) > 1 else "") + "...")
-            reuse_result = self._fit_single_spectrum(
-                state=ctx.state, curve_data=ctx.data, data_path=ctx.data_path,
-                spectrum_name=ctx.item_name, spectrum_idx=ctx.item_idx,
-                base_script=script,
-            )
+        if len(candidates) == 1:
+            reuse_result = self._run_reuse_candidate(ctx, ctx.reuse_script, ctx.reuse_source, None, 1, 1)
             if reuse_result.get("success"):
-                reuse_r2 = (reuse_result.get("fit_quality", {}).get("r_squared") or 0 or 0.0)
-                verdict = "good" if self._accept_gate().is_accept(reuse_r2) else "poor"
-                if verdict == "good":
-                    return self._reuse_verdict(ctx, reuse_result, source, reuse_r2, verdict, tried=n,
-                                               of=len(candidates))
-                kept = kept or (reuse_result, source, reuse_r2, n)
+                r2 = (reuse_result.get("fit_quality", {}).get("r_squared") or 0 or 0.0)
+                verdict = "good" if self._accept_gate().is_accept(r2) else "poor"
+                return self._reuse_verdict(ctx, reuse_result, ctx.reuse_source, r2, verdict, tried=1, of=1)
+            return self._reuse_failed(ctx, reuse_result, ctx.reuse_source)
+        kept = None                       # (result, source, r2, n, subdir) of the first poor-but-executed
+        failed_last = None
+        for n, (script, source) in enumerate(candidates, 1):
+            subdir = f"{CANDIDATES_DIR_NAME}/recipe_{n:02d}"
+            reuse_result = self._run_reuse_candidate(ctx, script, source, subdir, n, len(candidates),
+                                                     verbatim=True)
+            if reuse_result.get("success"):
+                r2 = (reuse_result.get("fit_quality", {}).get("r_squared") or 0 or 0.0)
+                if self._accept_gate().is_accept(r2):
+                    self._promote_candidate_artifacts(reuse_result, ctx.item_idx, 0, subdir=subdir)
+                    return self._reuse_verdict(ctx, reuse_result, source, r2, "good", tried=n, of=len(candidates))
+                kept = kept or (reuse_result, source, r2, n, subdir)
                 if n < len(candidates):
-                    self.logger.info(f"   ↪ R² = {reuse_r2:.4f} below {self.r2_threshold:.3f}; "
+                    self.logger.info(f"   ↪ R² = {r2:.4f} below {self.r2_threshold:.3f}; "
                                      "trying the next regime's recipe")
                 continue
-            if ctx.state.get("_strict_replay"):
-                # No re-derivation on the fast clock: return the failure as the
-                # item's result (a non-None return ends the engine's reuse path).
-                reuse_result.setdefault(
-                    "error", "the locked script could not execute on this data")
-                reuse_result["reuse_validity"] = {
-                    "reused": True, "source": source, "verdict": "failed",
-                    "message": "Strict replay: the locked script failed on this data; "
-                               "no in-frame repair or re-derivation."}
-                return reuse_result
+            failed_last = (reuse_result, source)
             if n < len(candidates):
-                self.logger.info("   ↪ this regime's recipe could not execute; trying the next")
+                self.logger.info("   ↪ this regime's recipe could not execute verbatim; trying the next")
         if kept is not None:
-            reuse_result, source, reuse_r2, n = kept
-            return self._reuse_verdict(ctx, reuse_result, source, reuse_r2, "poor", tried=len(candidates),
+            reuse_result, source, r2, n, subdir = kept
+            self._promote_candidate_artifacts(reuse_result, ctx.item_idx, 0, subdir=subdir)
+            return self._reuse_verdict(ctx, reuse_result, source, r2, "poor", tried=len(candidates),
                                        of=len(candidates), kept_from=n)
+        if ctx.state.get("_strict_replay"):
+            reuse_result, source = failed_last
+            return self._reuse_failed(ctx, reuse_result, source)
+        # None executed verbatim: the first recipe gets the correction ladder,
+        # as a single recipe would, in the spectrum's own folder.
+        script, source = candidates[0]
+        self.logger.info("   ↪ no regime's recipe ran verbatim; repairing the first as a single recipe would")
+        reuse_result = self._run_reuse_candidate(ctx, script, source, None, 1, len(candidates))
+        if reuse_result.get("success"):
+            r2 = (reuse_result.get("fit_quality", {}).get("r_squared") or 0 or 0.0)
+            verdict = "good" if self._accept_gate().is_accept(r2) else "poor"
+            return self._reuse_verdict(ctx, reuse_result, source, r2, verdict, tried=len(candidates),
+                                       of=len(candidates), kept_from=1)
+        return self._reuse_failed(ctx, reuse_result, source)
+
+    def _run_reuse_candidate(self, ctx: QCItemContext, script: str, source: Optional[str],
+                             subdir: Optional[str], n: int, of: int, *, verbatim: bool = False) -> dict:
+        """One replay of ``script`` on the item: in ``subdir`` under the
+        spectrum's folder when given (several recipes never share a working
+        dir), and with no correction when ``verbatim`` (a raising script is a
+        failure, not a model call)."""
+        self.logger.info(
+            f"   ♻️  Reusing locked fitting script from prior run "
+            f"'{source or 'prior'}'" + (f" ({n} of {of} regime recipes)" if of > 1 else "") + "...")
+        state = ctx.state
+        if subdir is not None or verbatim:
+            state = dict(ctx.state)
+            if subdir is not None:
+                state["_candidate_subdir"] = subdir
+            if verbatim:
+                state["_strict_replay"] = True
+        return self._fit_single_spectrum(
+            state=state, curve_data=ctx.data, data_path=ctx.data_path,
+            spectrum_name=ctx.item_name, spectrum_idx=ctx.item_idx,
+            base_script=script,
+        )
+
+    def _reuse_failed(self, ctx: QCItemContext, reuse_result: dict, source: Optional[str]) -> Optional[dict]:
+        """The replay could not execute: on the fast clock the failure is the
+        item's result; otherwise ``None`` hands the item to full re-derivation."""
+        if ctx.state.get("_strict_replay"):
+            # No re-derivation on the fast clock: return the failure as the
+            # item's result (a non-None return ends the engine's reuse path).
+            reuse_result.setdefault(
+                "error", "the locked script could not execute on this data")
+            reuse_result["reuse_validity"] = {
+                "reused": True, "source": source, "verdict": "failed",
+                "message": "Strict replay: the locked script failed on this data; "
+                           "no in-frame repair or re-derivation."}
+            return reuse_result
         self.logger.warning(
             f"   ⚠️  Prior fitting script could not execute on this data "
             f"(even after correction). Falling back to full model "
@@ -6482,17 +6528,18 @@ Return JSON with:
                     pass
 
     def _promote_candidate_artifacts(
-        self, result: dict, spectrum_idx: int, attempt: int
+        self, result: dict, spectrum_idx: int, attempt: int, *, subdir: Optional[str] = None
     ) -> None:
         """Copy the winning attempt's files up into the canonical per-spectrum dir.
 
         Everything downstream (feature tables, prior_analysis_paths, the
         orchestrator's viz search) expects artifacts directly under
         ``spectrum_NNNN/``; loser attempts stay under ``_candidates/`` for
-        audit.
+        audit. ``subdir`` names the candidate folder when it is not a
+        best-of-N attempt (a regime recipe's replay, ``_candidates/recipe_NN``).
         """
         item_dir = self.output_dir / f"spectrum_{spectrum_idx:04d}"
-        cand_dir = item_dir / CANDIDATES_DIR_NAME / f"cand_{attempt:02d}"
+        cand_dir = item_dir / (subdir if subdir else f"{CANDIDATES_DIR_NAME}/cand_{attempt:02d}")
         if not cand_dir.is_dir():
             return
         try:

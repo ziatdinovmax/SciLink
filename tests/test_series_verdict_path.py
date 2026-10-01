@@ -604,3 +604,113 @@ def test_a_multi_regime_prior_run_is_replayed_regime_by_regime(tmp_path, monkeyp
                         reuse_script="LOW", reuse_source="prior")
     res = ctrl.qc_try_reuse(ctx)
     assert "recipes_tried" not in res["reuse_validity"] and res["reuse_validity"]["source"] == "prior"
+
+
+class ScriptKeyedExecutor:
+    """R² (or a failure) by the SCRIPT that runs, and a figure whose bytes
+    name that script — so what is left on disk can be checked."""
+    timeout = 30
+
+    def __init__(self, r2_by_script):
+        self.r2_by_script, self.calls = r2_by_script, []
+
+    def execute_script(self, script, working_dir=None, timeout=None, **kw):
+        wd = Path(working_dir)
+        self.calls.append((script, wd))
+        r2 = self.r2_by_script.get(script)
+        if r2 is None:
+            return {"status": "error", "stdout": "", "stderr": "Traceback: boom", "message": f"{script} failed"}
+        (wd / "visualization.png").write_bytes(f"png {script}".encode())
+        (wd / "fit.npy").write_bytes(f"fit {script}".encode())
+        out = {"model_type": script, "parameters": {"peak_1": {"center": 144.0}}, "fit_quality": {"r_squared": r2}}
+        return {"status": "success", "stdout": "FIT_RESULTS_JSON:" + json.dumps(out), "stderr": "", "message": ""}
+
+
+def _replay(tmp_path, monkeypatch, r2_by_script, *, strict=False, repaired=None):
+    """The real qc_try_reuse → _fit_single_spectrum → stage_and_run path on a
+    two-regime prior (LOW, HIGH); ``repaired`` is what the correction ladder
+    would hand back (counted), ``None`` makes a correction an error."""
+    from scilink.agents.exp_agents._qc_engine import QCItemContext
+    out = tmp_path / "new"
+    out.mkdir(parents=True, exist_ok=True)
+    ex = ScriptKeyedExecutor(r2_by_script)
+    ctrl = _controller(out, ex)
+    corrections = []
+
+    def correct(state, script, error):
+        corrections.append(error)
+        if repaired is None:
+            raise AssertionError("the correction ladder ran")
+        return repaired, "repaired"
+    monkeypatch.setattr(ctrl, "_correct_script", correct)
+    monkeypatch.setattr(ctrl, "_correct_script_with_timeout_escalation", correct)
+    recipes = [("LOW", "prior: LOW (regime low, 1 of 2)"), ("HIGH", "prior: HIGH (regime high, 2 of 2)")]
+    state = {"num_spectra": 1, "is_single_spectrum": True, "system_info": {}, "locked_fitting_config": {},
+             "_reuse_candidates": [{"script": t, "source": s} for t, s in recipes]}
+    if strict:
+        state["_strict_replay"] = True
+    ctx = QCItemContext(state=state, data=_spectrum(1), data_path=str(tmp_path / "new.txt"), item_name="spectrum_0000",
+                        item_idx=0, reuse_script="LOW", reuse_source=recipes[0][1])
+    res = ctrl.qc_try_reuse(ctx)
+    return res, ex, corrections, out / "spectrum_0000"
+
+
+def test_regime_recipes_run_in_their_own_folders_and_the_kept_one_is_promoted(tmp_path, monkeypatch):
+    """Round 2 of #707: several recipes never share a working dir, so the kept
+    result's figure and fit.npy on disk are its own, whichever ran last; the
+    recipes run verbatim first, and the correction ladder is paid once."""
+    # LOW poor, HIGH good: HIGH kept and promoted; LOW's figure stays under _candidates
+    res, ex, corrections, item = _replay(tmp_path / "a", monkeypatch, {"LOW": 0.80, "HIGH": 0.985})
+    assert res["script"] == "HIGH" and res["reuse_validity"]["verdict"] == "good" and res["reuse_validity"]["recipes_tried"] == 2
+    assert (item / "visualization.png").read_bytes() == b"png HIGH" and (item / "fit.npy").read_bytes() == b"fit HIGH"
+    assert Path(res["visualization_path"]) == item / "visualization.png"
+    assert (item / "_candidates" / "recipe_01" / "visualization.png").read_bytes() == b"png LOW"
+    assert [wd.name for _, wd in ex.calls] == ["recipe_01", "recipe_02"] and corrections == []
+    # neither fits: the FIRST executed (LOW) is kept, poor, and its own figure is on disk although HIGH ran after it
+    res, ex, _, item = _replay(tmp_path / "b", monkeypatch, {"LOW": 0.70, "HIGH": 0.75})
+    assert res["script"] == "LOW" and res["reuse_validity"]["verdict"] == "poor" and res.get("quality_warning")
+    assert (item / "visualization.png").read_bytes() == b"png LOW" and (item / "fit.npy").read_bytes() == b"fit LOW"
+    assert "regime low, 1 of 2" in res["reuse_validity"]["source"]
+    # LOW raises verbatim, HIGH fits: HIGH kept with no correction spent on LOW
+    res, ex, corrections, item = _replay(tmp_path / "c", monkeypatch, {"HIGH": 0.99})
+    assert res["script"] == "HIGH" and corrections == [] and (item / "visualization.png").read_bytes() == b"png HIGH"
+    # LOW poor, HIGH raises: LOW kept, poor, its figure on disk (HIGH left nothing to overwrite it with)
+    res, ex, _, item = _replay(tmp_path / "d", monkeypatch, {"LOW": 0.80})
+    assert res["script"] == "LOW" and res["reuse_validity"]["verdict"] == "poor"
+    assert (item / "visualization.png").read_bytes() == b"png LOW" and Path(res["visualization_path"]).is_file()
+    # both raise verbatim: the first recipe gets the ladder once, in the spectrum's own folder
+    res, ex, corrections, item = _replay(tmp_path / "e", monkeypatch, {"REPAIRED": 0.97}, repaired="REPAIRED")
+    assert res["script"] == "REPAIRED" and res["reuse_validity"]["verdict"] == "good" and len(corrections) == 1
+    assert res["reuse_validity"]["recipes_tried"] == 2 and (item / "visualization.png").read_bytes() == b"png REPAIRED"
+    verbatim = [s for s, wd in ex.calls if wd.name.startswith("recipe_")]
+    assert verbatim == ["LOW", "HIGH"] and ex.calls[-1][1] == item         # verbatim first, the ladder in the item dir
+    # both raise and nothing repairs: None hands the item to re-derivation
+    res, ex, corrections, item = _replay(tmp_path / "f", monkeypatch, {}, repaired="STILL_BAD")
+    assert res is None and len(corrections) >= 1
+
+
+def test_a_strict_replay_tries_every_regime_before_failing(tmp_path, monkeypatch):
+    """On the fast clock a raising recipe moves on to the next regime, as a
+    poor one does; only when none executes is the frame failed."""
+    res, ex, corrections, item = _replay(tmp_path / "a", monkeypatch, {"HIGH": 0.99}, strict=True)
+    assert res["script"] == "HIGH" and res["reuse_validity"]["verdict"] == "good" and corrections == []
+    assert [s for s, _ in ex.calls] == ["LOW", "HIGH"]
+    res, ex, corrections, item = _replay(tmp_path / "b", monkeypatch, {}, strict=True)
+    assert res is not None and res["reuse_validity"]["verdict"] == "failed" and corrections == []
+    assert [s for s, _ in ex.calls] == ["LOW", "HIGH"]                     # both tried, nothing repaired
+
+
+def test_the_loop_refuses_a_multi_regime_series_anchor(tmp_path):
+    import json
+    from scilink.live.modality import CurveModality
+    run = tmp_path / "prior"
+    (run / "scripts").mkdir(parents=True)
+    (run / "series_fit_results.json").write_text("{}")
+    (run / "analysis_results.json").write_text(json.dumps({"locked_recipes": {
+        "low": {"unit": "spectrum_0000", "index": 0, "regime": "low", "script": "LOW", "verdict": {"verified": True}},
+        "high": {"unit": "spectrum_0003", "index": 3, "regime": "high", "script": "HIGH", "verdict": {"verified": True}}}}))
+    with pytest.raises(ValueError, match="locked 2 regime recipes"):
+        CurveModality().anchor_script(str(run))
+    (run / "analysis_results.json").write_text(json.dumps({"locked_recipes": {
+        "low": {"unit": "spectrum_0000", "index": 0, "regime": "low", "script": "LOW", "verdict": {"verified": True}}}}))
+    assert CurveModality().anchor_script(str(run)) == ("LOW", run)

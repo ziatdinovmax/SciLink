@@ -114,12 +114,20 @@ class CurveModality:
         a run means that run, as it always did."""
         from ..agents.exp_agents.controllers.curve_fitting_controllers import (
             _load_prior_curve_fit_state)
+        from ..agents.exp_agents._verification_record import prior_recipe_scripts
         anchor_dir, _summary, script, _label = _load_prior_curve_fit_state(anchor)
         if anchor_dir is None or not script:
             return None, None
-        if Path(anchor).is_file():
-            script = _load_prior_curve_fit_state(str(anchor_dir))[2]
-        return (script, anchor_dir) if script else (None, None)
+        recipes = prior_recipe_scripts(anchor_dir, single_name="fitting_script.py")
+        if len(recipes) > 1:
+            # The loop locks ONE recipe (its hash, its edits, its bank exclusion);
+            # a series that locked several regimes offers several, and the frames
+            # would answer with whichever fits while the loop holds the first.
+            raise ValueError(
+                f"setup(): {anchor} is a series that locked {len(recipes)} regime recipes; the loop "
+                "locks one. Point it at a single-regime run, or lay the regime's anchor out as a "
+                "single-spectrum run (as a reference analysed as a series is).")
+        return (recipes[0][0], anchor_dir) if recipes else (None, None)
 
     no_anchor_message = ("holds no reusable curve-fit run (expected series_fit_results.json "
                          "and a saved script under scripts/).")
