@@ -751,12 +751,20 @@ Settled rules, each learned from a live run or a review:
   on the triggering entry. Workers ask (`suggested_followups` become
   `task_request` records, never read by default) and the coordinator decides
   (an item only through a subscription on that kind); no worker starts a
-  worker. A withdrawn finding (`retract_finding`, the coordinator's act)
+  worker. A reaction's cause is one of its reads (its task quotes the
+  finding, as labelled data, never as an instruction), so what the cause
+  rests on, the reaction rests on. A withdrawn finding (`retract_finding`)
   taints everything that rested on it — derived in the fold from the read
   graph, so a late post that read it is caught — and the re-run is the next
-  swarm, with the items prepared; a disagreement between independent results
-  is reported, never settled by a retraction. A hazard on a subject reaches
-  every reader of that subject whatever its `kinds` filter.
+  swarm, with the items prepared (never a reaction the withdrawn finding
+  caused: that is a new decision). Who withdraws: a person at the gate,
+  shown the finding and its dependents, Enter keeping it; with nobody there
+  the model may withdraw the agents' findings but never a human-approved
+  plan's claim, and a retraction is undone by retracting it. A disagreement
+  between independent results is reported, never settled by a retraction. A
+  hazard on a subject reaches every reader of that subject whatever its
+  `kinds` filter and whatever the newest-N cut, marked as the provisional
+  record it is.
 - **One PR per stage.** A stage is verified as a whole: the full suite against
   a `main` worktree by failing-test ids, and live checks on Bedrock from a
   frozen snapshot, one heavy run at a time.

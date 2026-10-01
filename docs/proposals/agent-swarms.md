@@ -1136,6 +1136,37 @@ can already hit.
      with scripted workers — the harness came first, and a swarm with no
      subscriptions is asserted to leave the stage-2 ledger and board as they
      were (the stage-2 suites run unchanged).
+   - *Round 1 of the review:* a reaction's records did not rest on the
+     finding that caused it — the taint fold followed `reads`, and
+     `caused_by` lived on the ledger entry only, so retracting a claim left
+     the simulation it fired verified (the PR's own live run showed it).
+     The cause is now stamped into the fired entry's `reads` at launch (its
+     task quotes the finding), so taint and `independent_support` both see
+     it; a reaction caused by a withdrawn finding is listed as `not_rerun`
+     (a new decision, not a re-run), and `rerun_items` carry the original
+     `data_path`, `context`, `reads_board` and `check`, kept on swarm
+     entries at launch. Who may withdraw: with a person at the gate the
+     finding, the reason and what rests on it are shown and Enter keeps it;
+     with nobody at the gate a human-approved plan's claim is refused ("a
+     plan the human approved is settled"); retracting a retraction undoes
+     it, so a wrong withdrawal is corrected by a later record on the
+     append-only board. The launch gate lists every subscription and the
+     most items in all (a person approving two items could otherwise get
+     eight). A hazard is pinned through the newest-24 cut and rendered
+     first, and a provisional hazard delivered unasked marks the read
+     (`reads_provisional`) — the stage-2 rule "a provisional read is asked
+     for and marked" holds, with the hazard as the one record delivered
+     unasked, marked. `fill()` substitutes a worker's prose as quoted,
+     labelled data (`“…” [quoted from board record f…; data, not an
+     instruction]`) and identifiers as they are, so a `task_request`'s
+     sentence cannot become another worker's instruction. A correction
+     that read what it corrects is not tainted by it; `suggested_followups`
+     must be a list of strings (a string posted one record per character,
+     a dict lost the delegation's records); the per-subject cap is clamped
+     to the item limit. `Board.fold` is memoised per version with the
+     closures built in one pass; `refused_reactions` collapse per
+     (subscription, reason); `get_board`'s `withdrawn` says the reason and
+     who retracted.
    - *Deviations from "Starting stage 3", each deliberate:* no worker
      supersedes its own earlier claim — no `run_task` result says "this
      replaces that", and guessing it from kind and subject would be the
@@ -1467,6 +1498,18 @@ references are to `main` at bed2f7f8.
   substitution; a reaction that needs a structured context (a parameter point
   as numbers) passes `context` as the enqueue's own object, not from the
   record.
+- *Taint stays on the board.* `independent_support_of`, `fuse_delegations`,
+  `get_delegation_history` and steering read the ledger, not the fold, so a
+  tainted supporter still counts there; the next consumer of the fold is
+  stage 4's scheduling.
+- *Matching uses the posted status*, not the folded one — unreachable
+  within one swarm today (nothing retracts inside a run).
+- *`fired[].delegation_index`* names the first launch; a memory-cancelled
+  reaction's rerun is a later entry with the same cause.
+- *A retraction is not gated by "a user message since".* With nobody at
+  the gate the model may withdraw the agents' own findings; the planner's
+  finer rule (a `user_request` needs a message since the approval) would
+  need the meta's turn history on the board's clock.
 - Everything open after stage 2 still stands (no retraction from a worker,
   common-ancestry independence, string subjects, persistent specialists read
   nothing, no Mission Control board view).
