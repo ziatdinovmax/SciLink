@@ -1812,7 +1812,8 @@ def run_fanout(orch, branches: List[dict],
                 entry["informed_by"] = informed
                 entry["informed_via"] = "+".join(via)
             # Steering on its own, apart from the mesh stamp: the mesh is a
-            # shared dataset (not a coupling of findings), steering is.
+            # shared dataset (not a coupling of findings), steering is. The
+            # sibling INDICES too: labels can repeat within a group.
             if b.get("_steering"):
                 entry["steered_by"] = [p["label"] for p in b["_steering"]]
             # Carry the input path/metadata so a later fuse_delegations can
@@ -1824,6 +1825,14 @@ def run_fanout(orch, branches: List[dict],
             # without stamping it here it is lost after run_fanout returns.
             entry["join_axis"] = verdict.get("join_axis")
             entries.append(entry)
+        # Every slot exists now: the steering source's INDEX beside its label
+        # (labels can repeat within a group, and a source may sit in a
+        # higher slot than the branch it steers).
+        for b, entry in zip(run_branches, entries):
+            if b.get("_steering"):
+                entry["steered_by_index"] = [
+                    e2["index"] for c, e2 in zip(run_branches, entries)
+                    if c is not b and any(p["label"] == c["label"] for p in b["_steering"])]
 
     # On the board a steering payload is a finding OF THE COMPANION: a
     # measurement of its series (a deterministic reduction, but no gate
@@ -2524,8 +2533,9 @@ def _fusion_codegen_inputs(ok: List[dict], branch_numerics: Dict[str, Any],
                              "construction")
             if "co_registered_operands" in via:
                 notes.append("received the listed companion(s) as "
-                             "co-registered operands: overlapping results "
-                             "may be jointly computed, not independent")
+                             "co-registered operands: a number computed from "
+                             "both datasets at once is one computation; its "
+                             "own observations stand on their own")
             entry["independence_note"] = "; ".join(notes)
         per_branch.append(entry)
     return (f"\n\n--- JOIN AXIS (from the complementarity gate) ---\n"
@@ -2881,10 +2891,17 @@ def _ledger_dependents(ledger: List[dict], indices: List[int]) -> Dict[int, set]
                 out.add(int(c))
             except (TypeError, ValueError):
                 pass
-        if e.get("steered_by"):
+        if e.get("steered_by_index"):
+            out |= {int(j) for j in e["steered_by_index"] if isinstance(j, int) or str(j).isdigit()}
+        elif e.get("steered_by"):
             out |= resolve(i, e["steered_by"])
-        elif e.get("informed_by") and "co_registered_operands" not in str(e.get("informed_via") or ""):
-            out |= resolve(i, e["informed_by"])
+        elif e.get("informed_by"):
+            via = str(e.get("informed_via") or "")
+            # a stamp from before steered_by: when it says steering, every
+            # label is an edge (the mesh labels too — the count errs low, not
+            # high); a mesh-only stamp is not an edge
+            if "steering" in via or "co_registered_operands" not in via:
+                out |= resolve(i, e["informed_by"])
         out.discard(i)
         return out
 
@@ -3042,9 +3059,11 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
         if "co_registered_operands" in via:
             independence_caveats.append(
                 f"Branch '{lbl}' received {srcs} as co-registered numerical "
-                "operand(s); overlapping results may be jointly computed — "
-                "treat cross-branch agreement there as one joint "
-                "measurement, not as two independent confirmations.")
+                "operand(s). Its OBSERVATIONS are its own (a shared dataset is "
+                "not a finding), but a NUMBER it computed from both datasets "
+                "at once (a correlation, a mask, a ratio) is one computation, "
+                "not two confirmations: do not count such a number as the "
+                "companion agreeing with it.")
         if "fusion_feedback" in via:
             independence_caveats.append(
                 f"Branch '{lbl}' was re-analyzed with feedback from a prior "
@@ -3066,8 +3085,8 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
         for lbl, srcs in support["dependent"].items():
             independence_caveats.append(
                 f"Branch {lbl} had read or been given findings of {srcs} "
-                "(board reads, context_from or informed_by, transitively) before "
-                "it reported; its agreement with them is not an independent "
+                "(board reads, context_from citations or steering, transitively) "
+                "before it reported; its agreement with them is not an independent "
                 "confirmation.")
 
     # Harmonized replay — METHOD coupling, the opposite of an independence
@@ -3243,12 +3262,14 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
             "change-point hint — where its finding coincides with that "
             "companion near the hinted value, the agreement is partly by "
             "construction: discount it and say so. A branch that received "
-            "CO-REGISTERED OPERANDS may have computed results jointly with "
-            "them — treat agreement there as one joint measurement, not two "
-            "independent confirmations. A branch re-analyzed with FUSION "
+            "CO-REGISTERED OPERANDS is a separate observation of its own data "
+            "(the INDEPENDENT SUPPORT count above treats it so); only a NUMBER "
+            "it computed from both datasets at once is one computation rather "
+            "than two confirmations. A branch re-analyzed with FUSION "
             "FEEDBACK has effectively seen ALL its companions' findings — "
-            "the same discount applies. Branch pairs NOT listed here are "
-            "independent, and their agreement carries full weight.\n")
+            "the same discount as steering applies. Couplings that come from "
+            "board reads or citations are listed in the INDEPENDENT SUPPORT "
+            "block; a pair listed in neither place is independent.\n")
            if informed else "")
         + ("\n\nBRANCH RE-ANALYSIS: if some branch's OWN analysis appears "
            "flawed in a way a re-analysis could fix (wrong model order, a "

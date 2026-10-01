@@ -2135,6 +2135,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     **({"quality_warning": r["quality_warning"]} if r.get("quality_warning") else {}),
                     **({"judge_warning": r["judge_warning"]} if r.get("judge_warning") else {}),
                     **({"fitted_from": r["fitted_from"]} if r.get("fitted_from") else {}),
+                    **({"role": r["role"]} if r.get("role") else {}),
                 }
                 for r in series_results
             ]

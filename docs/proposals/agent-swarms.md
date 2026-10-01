@@ -941,9 +941,12 @@ can already hit.
      the largest set of branches none of which is coupled to another, exact
      to 12 and a stated lower bound beyond, and the prompt says exactly
      that. A follower fitted with no base script (its regime's anchor failed)
-     is fresh code with no verifier: the curve and image followers now carry
-     `fitted_from` (`locked_script` / `fresh_code`) and `replay_verbatim`, and
-     such a follower blocks the series. A series whose anchor is a
+     is fresh code with no verifier: the curve and image follower results
+     now carry `fitted_from` (`locked_script` / `fresh_code`) and
+     `replay_verbatim`; `individual_results` carries `fitted_from` (a
+     model-repaired follower is still a follower by policy, so the verdict
+     does not read `replay_verbatim`), and a `fresh_code` follower blocks the
+     series. A series whose anchor is a
      good-verdict locked reuse is verified by the replay gate; a hyperspectral
      series row is held to the single-cube rule (status `success`, something
      extracted); a hyperspectral target that failed before any code ran
@@ -953,6 +956,25 @@ can already hit.
      includes its steps and blocking issues, so an autonomous protocol
      revision is "written here". A series with no anchor unit posts no
      recipe, and a regime series' recipe record says it is the first regime's.
+   - *Round 4 of the review:* a salvaged anchor was laundered by refitting
+     it (the relaxed refit rule had skipped the anchor's bar for ANY refit).
+     The controllers now stamp `role: "anchor"` on first-in-regime units and
+     carry it through every refit replacement; `individual_results` carries
+     it; a refit with the anchor role keeps the anchor's bar, a follower
+     refit stays on the follower rule, and an anchor refit without a role
+     (a checkpoint from before the stamp) is not counted as an anchor. A
+     hyperspectral series row needs every target approved
+     (`quality_metrics.n_approved == n_targets > 0`), as a single cube does.
+     Steering is stamped by sibling index too (`steered_by_index`; labels
+     repeat within a group), and a pre-`steered_by` stamp that says
+     `+steering` counts every label as an edge (the count errs low). The
+     fusion prompt no longer calls meshed agreement "one joint measurement":
+     a meshed branch is a separate observation, and only a number computed
+     from both datasets at once is one computation; "pairs not listed here
+     are independent" now points at the INDEPENDENT SUPPORT block for
+     couplings from reads and citations. Known and left: a failed reuse
+     whose anchor was re-derived and approved is blocked by the schema-drift
+     `quality_warning` with the reason "salvaged" (pre-existing wording).
    - *Found live:* the curve agent's approved script is
      `scripts/fitting_script.py` (a series: one per spectrum), the image
      agent's `analysis_script.py` — the recipe takes the folder's

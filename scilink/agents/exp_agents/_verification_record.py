@@ -338,11 +338,18 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
             where = f" (unit {name})"
             if "verified" in it and "quality_history" not in it:
                 # a hyperspectral series row: the driver's own verdict, held
-                # to the single-cube rule (a salvaged or degraded cube is
-                # "partial"; a row with nothing extracted verified nothing)
+                # to the single-cube rule — status "success" (a salvaged or
+                # degraded cube is "partial"), something extracted, and
+                # EVERY target approved (the row's own n_approved == n_targets;
+                # the driver's `verified` asks for one)
+                qm = it.get("quality_metrics") or {}
+                n_t, n_a = qm.get("n_targets"), qm.get("n_approved")
                 if (it.get("verified") is False or it.get("status") != "success"
                         or not it.get("n_features")):
                     return {"verified": False, "reason": f"unit not verified by the series driver{where}"}
+                if not (isinstance(n_t, int) and isinstance(n_a, int) and n_t > 0 and n_a == n_t):
+                    return {"verified": False, "reason": f"not every target of the unit was approved{where}"
+                            + (f": {n_a} of {n_t}" if isinstance(n_t, int) else "")}
                 anchors += 1 if it.get("role") == "anchor" else 0
                 continue
             rv = it.get("reuse_validity") or {}
@@ -353,16 +360,18 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
                     return {"verified": False, "reason": f"reused script verdict {rv.get('verdict')!r}{where}"}
                 continue
             if _has_record(it.get("quality_history")):
-                anchors += 1
-                if it.get("adaptively_refitted"):
-                    # a refit the series driver accepted by its consistency
-                    # rule: held like a follower (finished, not unverified),
-                    # not to the anchor's salvage markers — otherwise a refit
-                    # that improved a unit could unverify a series the
-                    # unrefit unit would have passed
+                if it.get("adaptively_refitted") and it.get("role") != "anchor":
+                    # a FOLLOWER refit the series driver accepted by its
+                    # consistency rule: held like a follower (finished, not
+                    # unverified), not to the anchor's salvage markers —
+                    # otherwise a refit that improved a unit could unverify a
+                    # series the unrefit unit would have passed. An anchor
+                    # keeps its role through a refit and keeps the anchor's
+                    # bar: a salvaged anchor is not laundered by refitting it.
                     if (it.get("quality_history") or {}).get("unverified"):
                         return {"verified": False, "reason": f"refit unverified{where}"}
                     continue
+                anchors += 1
                 bad = _unit_verdict(it, where=where)
                 if bad:
                     return bad

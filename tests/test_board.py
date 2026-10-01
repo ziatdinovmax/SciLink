@@ -594,6 +594,20 @@ def test_series_verdicts_follow_the_agents_shapes():
     assert analysis_verdict(refit)["verified"]
     refit["individual_results"][1]["quality_history"]["unverified"] = True
     assert analysis_verdict(refit)["reason"] == "refit unverified (unit spectrum_0001)"
+    # round 4: a salvaged ANCHOR is not laundered by refitting it — the anchor keeps its role
+    # (the controllers stamp role="anchor" on first-in-regime units and carry it through a
+    # refit) and the anchor's bar; the series stays provisional, as it was before the refit
+    laundered = _curve_series({**ANCHOR_OK, "final_r2": 0.86, "approved": False},
+                              anchor_extra={"role": "anchor", "adaptively_refitted": True, "original_r2": 0.80,
+                                            "quality_warning": "R² = 0.8600 below threshold 0.95"})
+    assert analysis_verdict(laundered)["reason"] == "salvaged best-available result (unit spectrum_0000)"
+    # a refit anchor that WAS approved after the refit is verified
+    approved_refit = _curve_series(ANCHOR_OK, anchor_extra={"role": "anchor", "adaptively_refitted": True})
+    assert analysis_verdict(approved_refit)["verified"]
+    # an anchor refit WITHOUT a role (a checkpoint from before the stamp) is not counted as an anchor
+    old_shape = _curve_series({**ANCHOR_OK, "approved": False},
+                              anchor_extra={"adaptively_refitted": True, "quality_warning": "below"})
+    assert analysis_verdict(old_shape)["reason"] == "no unit carries a verification record"
     # a follower of a FAILED regime anchor is fresh code with no verifier (round 3)
     fresh = _curve_series(ANCHOR_OK)
     fresh["individual_results"][2]["fitted_from"] = "fresh_code"
@@ -639,7 +653,8 @@ def test_series_verdicts_follow_the_agents_shapes():
         return {"index": i, "name": f"cube{i}", "data_path": f"/d/cube{i}.npy", "success": ok, "status": "success",
                 "role": role, "confidence": "high", "output_directory": f"/o/dataset_{i:04d}", "error": None,
                 "flagged": False, "flag_reason": None, "adaptively_refitted": False, "reuse_validity": None,
-                "quality_metrics": {}, "warnings": [], "regime": "r1", "verified": verified, "n_features": 3}
+                "quality_metrics": {"n_targets": 2, "n_approved": 2}, "warnings": [], "regime": "r1",
+                "verified": verified, "n_features": 3}
     hs = {"status": "success", "individual_results": [row(0, True, True, "anchor"), row(1, True, True)]}
     assert analysis_verdict(hs)["verified"]
     hs["individual_results"][1]["verified"] = False
@@ -648,6 +663,11 @@ def test_series_verdicts_follow_the_agents_shapes():
     hs["individual_results"][1].update({"verified": True, "status": "partial"})
     assert not analysis_verdict(hs)["verified"]
     hs["individual_results"][1].update({"status": "success", "n_features": 0})
+    assert not analysis_verdict(hs)["verified"]
+    # ... and every target approved: the driver's `verified` asks for one
+    hs["individual_results"][1].update({"n_features": 3, "quality_metrics": {"n_targets": 2, "n_approved": 1}})
+    assert analysis_verdict(hs)["reason"] == "not every target of the unit was approved (unit cube1): 1 of 2"
+    hs["individual_results"][1]["quality_metrics"] = {"n_targets": 0, "n_approved": 0}
     assert not analysis_verdict(hs)["verified"]
     # on the board: the same claim text, provisional with the reason as its gate
 
@@ -856,11 +876,22 @@ def test_meshed_branches_count_once_and_labels_bind_only_earlier_entries(meta, m
     # steering from a HIGHER slot inside one fan-out: the slots are created together
     with meta._fanout_lock:
         b.pop("steered_by"); c.pop("steered_by")
+        b["informed_via"] = c["informed_via"] = "co_registered_operands"
         a["steered_by"] = ["HAADF"]                                 # #1 steered by #2
     out = json.loads(fo.fuse_delegations(meta, [1, 2]))
     assert out["independent_support"]["count"] == 1 and out["independent_support"]["by_index"] == {"1": [2]}
+    # the sibling INDEX wins over the label when both are stamped (labels can repeat in a group)
     with meta._fanout_lock:
-        a.pop("steered_by")
+        a["steered_by_index"] = [3]
+    assert json.loads(fo.fuse_delegations(meta, [1, 2, 3]))["independent_support"]["by_index"] == {"1": [3]}
+    with meta._fanout_lock:
+        a.pop("steered_by"); a.pop("steered_by_index")
+    # a stamp from before steered_by that says "+steering": every label is an edge (errs low)
+    with meta._fanout_lock:
+        b["informed_via"] = "co_registered_operands+steering"
+    assert json.loads(fo.fuse_delegations(meta, [1, 2, 3]))["independent_support"]["by_index"] == {"2": [1, 3]}
+    with meta._fanout_lock:
+        b["informed_via"] = "co_registered_operands"
     # three mutually informed (steered) branches, legacy stamp: one observation, not none
     for e in (a, b, c):
         with meta._fanout_lock:

@@ -7070,6 +7070,10 @@ Return JSON with:
                     state["original_plot_bytes"] = _saved_original_plot
                 if _saved_data_statistics is not None:
                     state["data_statistics"] = _saved_data_statistics
+                # The unit's role, for a caller that holds an anchor (full
+                # QC, the locked recipe) to a bar a follower is not held to;
+                # a refit of this unit keeps the role.
+                result["role"] = "anchor"
 
                 # #172: reuse was attempted for the anchor but the result
                 # carries no reuse_validity verdict -> the prior script could
@@ -7910,6 +7914,8 @@ Return JSON: {{"script": "<the complete modified script>"}}
                 result["locked_model_type"] = state.get(
                     "locked_fitting_config", {}
                 ).get("physical_model")
+                if (series_results[idx] or {}).get("role"):
+                    result["role"] = series_results[idx]["role"]
                 series_results[idx] = result
                 entry["new_r2"] = new_r2
                 entry["new_model"] = result.get("model_type")
@@ -7928,6 +7934,8 @@ Return JSON: {{"script": "<the complete modified script>"}}
                     result["locked_model_type"] = state.get(
                         "locked_fitting_config", {}
                     ).get("physical_model")
+                    if (series_results[idx] or {}).get("role"):
+                        result["role"] = series_results[idx]["role"]
                     series_results[idx] = result
                     entry["new_r2"] = new_r2
                     entry["new_model"] = result.get("model_type")
@@ -8083,6 +8091,8 @@ Return JSON: {{"script": "<the complete modified script>"}}
                 refit_result["original_r2"] = original_r2
                 refit_result["refit_model_type"] = refit_result.get("model_type")
                 refit_result["locked_model_type"] = locked_model
+                if (series_results[idx] or {}).get("role"):
+                    refit_result["role"] = series_results[idx]["role"]
                 series_results[idx] = refit_result
 
                 refit_summary.append({

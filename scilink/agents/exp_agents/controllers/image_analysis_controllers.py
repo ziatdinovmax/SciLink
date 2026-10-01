@@ -5975,6 +5975,9 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
                     state["original_image_bytes"] = _saved_original_bytes
                 if _saved_image_statistics is not None:
                     state["image_statistics"] = _saved_image_statistics
+                # The unit's role (the curve twin's): an anchor is held to a
+                # bar a follower is not; a refit of this unit keeps the role.
+                result["role"] = "anchor"
 
                 # #172: reuse was attempted for the anchor but the result
                 # carries no reuse_validity verdict -> the prior script could
@@ -6665,6 +6668,8 @@ class ImageAdaptiveRefitController:
                 result["locked_pipeline"] = state.get(
                     "locked_analysis_config", {}
                 ).get("processing_pipeline")
+                if (series_results[idx] or {}).get("role"):
+                    result["role"] = series_results[idx]["role"]
                 series_results[idx] = result
                 entry["new_score"] = new_score
                 entry["new_pipeline"] = result.get("analysis_type")
@@ -6682,6 +6687,8 @@ class ImageAdaptiveRefitController:
                     result["locked_pipeline"] = state.get(
                         "locked_analysis_config", {}
                     ).get("processing_pipeline")
+                    if (series_results[idx] or {}).get("role"):
+                        result["role"] = series_results[idx]["role"]
                     series_results[idx] = result
                     entry["new_score"] = new_score
                     entry["new_pipeline"] = result.get("analysis_type")
@@ -6844,6 +6851,8 @@ class ImageAdaptiveRefitController:
                     "analysis_type"
                 )
                 refit_result["locked_pipeline"] = locked_pipeline
+                if (series_results[idx] or {}).get("role"):
+                    refit_result["role"] = series_results[idx]["role"]
                 series_results[idx] = refit_result
 
                 refit_summary.append({

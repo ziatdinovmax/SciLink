@@ -152,6 +152,9 @@ def main():
           and ag.board.get(a_reads[0])["status"] == "provisional"
           and ag.board.get(a_reads[0])["author"]["mode"] == "steering")
     _sup = fused.get("independent_support") or {}
+    check("steering is stamped by sibling index as well as label",
+          by_label["techA series"].get("steered_by") == ["techB series"]
+          and by_label["techA series"].get("steered_by_index") == [by_label["techB series"]["index"]])
     check("fusion computes independent_support 1 of 2",
           (_sup.get("count"), _sup.get("raw")) == (1, 2)
           and list(_sup.get("dependent") or {}) == [f"'techA series' (#{by_label['techA series']['index']})"])

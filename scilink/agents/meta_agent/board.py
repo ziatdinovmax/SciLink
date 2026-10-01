@@ -511,9 +511,10 @@ def _analysis_records(entry: Dict[str, Any], result: Dict[str, Any]) -> List[Dic
             payload = {"path": str(script), "analysis_id": aid, "agent": rec.get("agent_name")}
             if rec.get("recipe_unit"):
                 payload["unit"] = rec["recipe_unit"]
-                payload["note"] = ("the locked script of the series' first anchor; a series with "
-                                   "several regimes locks one script per regime, the others are "
-                                   "beside it under scripts/")
+                payload["note"] = ("the locked script of the series' first anchor (unit "
+                                   f"{rec['recipe_unit']!r}); a series with several regimes locks one "
+                                   "script per regime anchor, each saved as scripts/<anchor unit>.py "
+                                   "in the same folder (every follower's replay is saved there too)")
             out.append({"kind": "recipe", "payload": payload,
                         "status": "verified" if verified else "provisional",
                         "evidence": {"analysis_ids": [aid], "files": [str(script)],
