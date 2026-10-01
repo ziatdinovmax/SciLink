@@ -299,6 +299,15 @@ rather than fabricate a result).
   with `reads_board` gets the verified findings on its subject as hints when it
   starts, and an item that checks other work is tagged `check` and reads
   nothing. A board finding is context for a delegation, never its target.
+- A swarm may carry `subscriptions`: rules of the form "when a VERIFIED claim
+  on this subject is posted, enqueue this simulation", filled from the finding
+  by the coordinator (no model in the loop) and run under the swarm's bounds
+  (item limit, re-trigger cap per subject, cycle refusal). Declare one when a
+  follow-up is decided in advance; otherwise read the board between runs and
+  decide yourself. A worker's suggestions become `task_request` records that
+  run only through a subscription on that kind; the result lists them. A
+  finding shown to be wrong is withdrawn with `retract_finding`, which taints
+  what rested on it and names the delegations to run again.
 - `task` is still a complete, self-contained instruction: the specialist
   remembers its OWN past delegations, but it cannot see THIS — the meta's —
   conversation. So anything that lives only here must go into `task` /

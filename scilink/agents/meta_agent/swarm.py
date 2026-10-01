@@ -29,6 +29,19 @@ The coordinator is deterministic, with no model call:
   while a question is on screen), and time out to the gate's default
   (``hitl.question_timeout_s``) — a timeout the gate can tell from an answer.
 
+**Reactions** (stage 3, ``reactions.py``): the meta may declare
+``subscriptions`` with the swarm — *when a record of kind K on subject S with
+status V is posted, enqueue this item* — and the coordinator applies them,
+deterministically, each time an item closes: the fired item is an ordinary
+item with its cause and causal ``chain`` stamped on its ledger entry at that
+moment; a cycle (the same ``(mode, subject, kind)`` hop twice in one chain),
+a subject re-triggered past its cap, a subscription past ``max_fires``, the
+item limit, or a record at the end of a long supersede chain is refused and
+the refusal recorded on the triggering entry and in the result. A worker's
+``suggested_followups`` are posted as ``task_request`` records (provisional,
+never read by default) and become items only through a subscription on that
+kind: workers ask, the coordinator decides, and no worker starts a worker.
+
 There is no swarm resume: after a Stop, items still queued are left
 ``running`` on the ledger until the next turn's sweep marks them interrupted.
 """
@@ -49,6 +62,7 @@ from ...hitl import (QueueChannel, QuestionServer, WorkerChannel, question_timeo
                      request_human_feedback, set_thread_channel, subject_block, make_subject)
 from ...utils.workers import resolve_workers
 from . import fanout as fo
+from . import reactions
 from .workers import MODES, build_child, release_child
 
 SWARM_MAX_ITEMS = 8
@@ -91,7 +105,12 @@ def _estimate(item: dict) -> float:
     return _MODE_MEM_FLOOR[item["mode"]]
 
 
-def normalize_items(items: Any) -> Tuple[List[dict], List[dict]]:
+#: Stamped by the coordinator when it fires a reaction; never taken from a
+#: caller's item (a chain nobody enqueued would defeat the cycle check).
+_COORDINATOR_FIELDS = ("caused_by", "chain", "subscription")
+
+
+def normalize_items(items: Any, *, coordinator: bool = False) -> Tuple[List[dict], List[dict]]:
     """Valid items (with a label and a slug) and the refused ones, each with
     the reason."""
     ok, refused = [], []
@@ -109,7 +128,8 @@ def normalize_items(items: Any) -> Tuple[List[dict], List[dict]]:
         if not task:
             refused.append({"item": i + 1, "label": label, "reason": "empty task"})
             continue
-        ok.append({**raw, "mode": mode, "task": task, "label": label,
+        ok.append({**{k: v for k, v in raw.items() if coordinator or k not in _COORDINATOR_FIELDS},
+                   "mode": mode, "task": task, "label": label,
                    "subject": (str(raw.get("subject")).strip() if raw.get("subject") else None),
                    "reads_board": _read_spec(raw.get("reads_board")),
                    "check": bool(raw.get("check")),
@@ -154,10 +174,13 @@ def _read_board(orch, item: dict, entry: dict) -> str:
     if spec is None or board is None:
         return ""
     try:
+        # A hazard on the subject reaches every reader, whatever its kinds
+        # filter (robustness item 4): the filter narrows findings, never
+        # warnings.
         view = board.snapshot(subject=spec.get("subject") or item.get("subject"),
                               kind=spec.get("kinds"),
                               include_provisional=bool(spec.get("include_provisional")),
-                              check=bool(item.get("check")))
+                              check=bool(item.get("check")), with_hazards=True)
     except board_mod.BoardReadRefused as exc:
         with orch._fanout_lock:
             entry["board_read_refused"] = str(exc)
@@ -380,9 +403,32 @@ def _guard_memory(orch, running: Dict[Any, dict], fut_item: Dict[Any, dict], fut
     return fut
 
 
-def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> str:
-    """Plan → confirm → run the items concurrently. Returns JSON."""
+def swarm_budget(raw: Any) -> dict:
+    """The swarm's bounds: ``max_items`` (initial and fired together, at most
+    ``SWARM_MAX_ITEMS``), ``max_reactions`` (fired items), and
+    ``max_triggers_per_subject``. The budget is the termination proof."""
+    raw = raw if isinstance(raw, dict) else {}
+
+    def bounded(key, default, cap=None):
+        try:
+            v = int(raw.get(key, default))
+        except (TypeError, ValueError):
+            v = default
+        v = max(0, v)
+        return min(v, cap) if cap is not None else v
+    return {"max_items": max(2, bounded("max_items", SWARM_MAX_ITEMS, SWARM_MAX_ITEMS)),
+            "max_reactions": bounded("max_reactions", SWARM_MAX_ITEMS, SWARM_MAX_ITEMS),
+            "max_triggers_per_subject": bounded("max_triggers_per_subject",
+                                                reactions.MAX_TRIGGERS_PER_SUBJECT)}
+
+
+def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
+              subscriptions: Any = None, budget: Any = None) -> str:
+    """Plan → confirm → run the items concurrently, reacting to what they
+    post under the declared ``subscriptions`` and ``budget``. Returns JSON."""
     valid, refused = normalize_items(items)
+    subs, subs_refused = reactions.normalize_subscriptions(subscriptions)
+    bounds = swarm_budget(budget)
     if not valid:
         return json.dumps({"status": "error", "message": "No runnable items.",
                            "not_started": refused})
@@ -390,6 +436,10 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
         return json.dumps({"status": "error", "not_started": refused, "message": (
             "A swarm needs at least two items; one item is an ordinary delegation "
             "(delegate_to_analysis / delegate_to_planning / delegate_to_simulation).")})
+    if len(valid) > bounds["max_items"]:
+        refused += [{"label": it["label"], "reason": f"over the swarm budget of {bounds['max_items']} items"}
+                    for it in valid[bounds["max_items"]:]]
+        valid = valid[:bounds["max_items"]]
     plan = capacity_plan(valid)
     refused += plan["refused"]
     if not plan["run"]:
@@ -422,6 +472,11 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
                 # its complementarity gate from the entries' data paths.
                 entry["data_path"] = str(item["data_path"])
             entry["_budget_s"] = budget
+            if item.get("caused_by"):
+                # A reaction: its cause and chain, stamped as it is enqueued.
+                entry["caused_by"] = list(item["caused_by"])
+                entry["chain"] = list(item.get("chain") or [])
+                entry["subscription"] = item.get("subscription")
         entries.append(entry)
         channel = (WorkerChannel(queue, item["label"], subject=item.get("subject"), kind="worker",
                                  on_wait=fo.note_human_wait(entry))
@@ -431,9 +486,83 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
                           autonomy, stop_ev)
         return fut, entry, stop_ev
 
-    print(f"  🐝 {swarm_id}: {len(plan['run'])} item(s), up to {plan['workers']} at a time")
+    print(f"  🐝 {swarm_id}: {len(plan['run'])} item(s), up to {plan['workers']} at a time"
+          + (f", {len(subs)} subscription(s)" if subs else ""))
     orch._auto_checkpoint(verbose=False)
     requeue: List[dict] = []
+    fired: List[dict] = []
+    refused_reactions: List[dict] = []
+    fired_by_sub: Dict[int, int] = {}
+    fired_pairs: set = set()
+    triggers_by_subject: Dict[Optional[str], int] = {}
+    launched = {"n": len(plan["run"])}
+    ceiling = (plan["total_bytes"] - fo._BRANCH_MEM_MARGIN) if plan.get("total_bytes") else None
+
+    def react(pool, entry: dict, item: dict) -> List[Any]:
+        """Apply every subscription to what this item just posted; launch
+        what fires. Returns the new futures."""
+        board = getattr(orch, "board", None)
+        if not subs or board is None or entry.get("status") != "success":
+            return []
+        new_futs = []
+        for fid in list(entry.get("posted") or []):
+            try:
+                rec = board.get(fid)
+            except KeyError:
+                continue
+            for sub in subs:
+                if len(fired) >= bounds["max_reactions"]:
+                    why = f"max_reactions ({bounds['max_reactions']}) reached"
+                    new_item = None
+                    if not reactions.matches(sub, rec):
+                        continue
+                else:
+                    new_item, why = reactions.decide(
+                        sub, rec, entry, board=board, fired_by_sub=fired_by_sub,
+                        fired_pairs=fired_pairs, triggers_by_subject=triggers_by_subject,
+                        items_so_far=launched["n"], max_items=bounds["max_items"],
+                        max_per_subject=bounds["max_triggers_per_subject"])
+                if new_item is None:
+                    if why is not None and "already fired" not in why:
+                        note = {"subscription": sub["index"], "finding_id": fid, "kind": rec.get("kind"),
+                                "subject": rec.get("subject"), "from_index": entry["index"], "reason": why,
+                                "chain": list(entry.get("chain") or [])}
+                        refused_reactions.append(note)
+                        with orch._fanout_lock:
+                            entry.setdefault("refused_reactions", []).append(
+                                {k: v for k, v in note.items() if k != "chain"})
+                        print(f"  ⛔ reaction refused ({sub['enqueue']['label']} on {fid}): {why}")
+                    continue
+                ok, bad = normalize_items([new_item], coordinator=True)
+                if not ok:
+                    refused_reactions.append({"subscription": sub["index"], "finding_id": fid,
+                                              "from_index": entry["index"], "reason": bad[0]["reason"]})
+                    continue
+                new_item = ok[0]
+                new_item["_mem_est"] = _estimate(new_item)
+                if ceiling is not None and new_item["_mem_est"] > ceiling:
+                    refused_reactions.append({"subscription": sub["index"], "finding_id": fid,
+                                              "from_index": entry["index"], "reason": (
+                                                  f"needs about {new_item['_mem_est'] / 1e9:.1f} GB; this "
+                                                  f"machine has {plan['total_bytes'] / 1e9:.1f} GB in all")})
+                    continue
+                fired_pairs.add((sub["index"], fid))
+                fired_by_sub[sub["index"]] = fired_by_sub.get(sub["index"], 0) + 1
+                subj = reactions._norm_subject(new_item.get("subject"))
+                triggers_by_subject[subj] = triggers_by_subject.get(subj, 0) + 1
+                launched["n"] += 1
+                fut, new_entry, stop_ev = launch(pool, new_item)
+                fut_entry[fut], fut_stop[fut], fut_label[fut] = new_entry, stop_ev, new_item["label"]
+                fut_item[fut] = new_item
+                fired.append({"delegation_index": new_entry["index"], "label": new_item["label"],
+                              "mode": new_item["mode"], "subject": new_item.get("subject"),
+                              "subscription": sub["index"], "caused_by": [fid],
+                              "from_index": entry["index"], "chain": list(new_item["chain"])})
+                print(f"  🔔 '{entry.get('label')}' posted a {rec.get('kind')} ({fid}) → "
+                      f"starting '{new_item['label']}' [{new_item['mode']}]")
+                new_futs.append(fut)
+        return new_futs
+
     seen_errors: set = set()
     channel_warnings: List[str] = []
     pool = ThreadPoolExecutor(max_workers=max(1, plan["workers"]))
@@ -473,6 +602,8 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
                 f.result()
                 print(f"  ✅ swarm item finished: {fut_label[f]} ({fut_entry[f].get('status')})")
                 since_tick = 0.0
+                for nf in react(pool, fut_entry[f], fut_item[f]):
+                    pending.add(nf)
             # One cancellation at a time: memory is read again only once the
             # cancelled worker has actually ended and let go of what it held.
             draining = {f for f in draining if not f.done()}
@@ -547,6 +678,8 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
                 "reads": list(e.get("reads") or []),
                 "board_read_refused": e.get("board_read_refused"),
                 "posted": list(e.get("posted") or []),
+                **({"caused_by": list(e["caused_by"]), "chain": list(e.get("chain") or []),
+                    "subscription": e.get("subscription")} if e.get("caused_by") else {}),
                 "error": e.get("error")} for e in entries]
     ok = [r for r in results if r["status"] == "success"]
     return json.dumps({
@@ -555,11 +688,44 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None) -> s
         "seconds": round(time.monotonic() - t0),
         "results": results,
         "not_started": refused,
+        "subscriptions": {"accepted": len(subs), "refused": subs_refused},
+        "fired": fired,
+        "refused_reactions": refused_reactions,
+        "task_requests": _task_requests(orch, entries),
         "warnings": channel_warnings,
         "board_version": len(orch.board) if getattr(orch, "board", None) is not None else None,
-        "message": (f"{len(ok)} of {len(results)} item(s) succeeded. Each is a delegation on the "
+        "message": (f"{len(ok)} of {len(results)} item(s) succeeded"
+                    + (f", {len(fired)} of them reactions" if fired else "")
+                    + (f"; {len(refused_reactions)} reaction(s) refused (see refused_reactions)"
+                       if refused_reactions else "")
+                    + ". Each is a delegation on the "
                     "ledger: read one with get_delegation_history, thread its findings into a next "
                     "delegation's context, or fuse analysis items with fuse_delegations. Their "
                     "verified findings are on the board (get_board); a next swarm's items read "
                     "them with reads_board."),
     }, default=str)
+
+
+def _task_requests(orch, entries: List[dict]) -> List[dict]:
+    """What the workers asked for (``task_request`` records they posted) and
+    whether a subscription made an item of it: asked and not done is listed,
+    never silently dropped, and never done on a worker's say-so."""
+    board = getattr(orch, "board", None)
+    if board is None:
+        return []
+    became: Dict[str, int] = {}
+    for e in entries:
+        for fid in e.get("caused_by") or []:
+            became[fid] = e["index"]
+    out = []
+    for e in entries:
+        for fid in e.get("posted") or []:
+            try:
+                rec = board.get(fid)
+            except KeyError:
+                continue
+            if rec.get("kind") == "task_request":
+                out.append({"finding_id": fid, "from": e.get("label"), "from_index": e["index"],
+                            "text": (rec.get("payload") or {}).get("text"),
+                            "item": became.get(fid)})
+    return out

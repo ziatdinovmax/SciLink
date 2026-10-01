@@ -668,8 +668,8 @@ delegations of any mode concurrently, each on an **ephemeral worker**
 too) in `<meta_session>/swarm/<NN>_<slug>/`, each an ordinary ledger
 delegation. The design, its stages and what each stage left open are in
 `docs/proposals/agent-swarms.md`; stages 0, 1 (#697) and 2 (the board, #702)
-are on `main`, stage 3 (reactions) is next. Settled rules, each learned from a live
-run or a review:
+are on `main`, stage 3 (reactions) is built, stage 4 (scheduling) is next.
+Settled rules, each learned from a live run or a review:
 
 - **A swarm item is a fresh agent.** It does not remember earlier delegations;
   its task and context carry everything. The persistent specialists stay for
@@ -738,6 +738,25 @@ run or a review:
   prompt caveat. A
   record describes its artifact as it was when posted; a later edit is a later
   delegation's record.
+- **A reaction is a rule the meta declared, applied by the coordinator.** A
+  swarm's `subscriptions` (`meta_agent/reactions.py`) say *when a record of
+  this kind, subject and status is posted, enqueue this item*; the coordinator
+  fills the item from the record (a fixed vocabulary of `{finding.*}` fields,
+  one substitution pass, no model) and launches it as an ordinary item, and
+  stamps its cause and causal `chain` on the entry at that moment. Every
+  bound is a number: a finding fires a subscription once, `max_fires` per
+  subscription, two re-triggers per subject, the swarm's item limit, and a
+  cycle — the same `(mode, subject, kind)` hop twice in one chain — or a
+  record at the end of a supersede chain of three is refused with the reason
+  on the triggering entry. Workers ask (`suggested_followups` become
+  `task_request` records, never read by default) and the coordinator decides
+  (an item only through a subscription on that kind); no worker starts a
+  worker. A withdrawn finding (`retract_finding`, the coordinator's act)
+  taints everything that rested on it — derived in the fold from the read
+  graph, so a late post that read it is caught — and the re-run is the next
+  swarm, with the items prepared; a disagreement between independent results
+  is reported, never settled by a retraction. A hazard on a subject reaches
+  every reader of that subject whatever its `kinds` filter.
 - **One PR per stage.** A stage is verified as a whole: the full suite against
   a `main` worktree by failing-test ids, and live checks on Bedrock from a
   frozen snapshot, one heavy run at a time.

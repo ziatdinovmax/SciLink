@@ -6,8 +6,9 @@ as "Starting stage 1" below describes; what changed on the way is recorded
 under the stage in "Build order". Stage 2 (the board) merged on 2026-10-01 (#702, head
 e1c0fc72) after eight review rounds, built as "Starting stage 2" describes,
 with what changed on the way under the stage in "Build order" and its open
-items in "After stage 2"; "Starting stage 3" is
-drafted below. The design notes were
+items in "After stage 2". Stage 3 (reactions) is on its PR, built as
+"Starting stage 3" describes, with what changed on the way under the stage
+in "Build order" and its open items in "After stage 3". The design notes were
 drafted 2026-09-28 against `main` at b988c7cd (Release 0.0.83), based on a source audit of the meta
 agent (`meta_orchestrator.py`, `meta_orchestrator_tools.py`, `fanout.py`,
 `telemetry.py`), the three mode orchestrators' `run_task`, the executors, the
@@ -1089,6 +1090,63 @@ can already hit.
      (`hypotheses`), and those are the plan's claims on the board.
 3. **Reactions.** Subscriptions, `task_request`, causal chains and cycle
    refusal, supersede-chain stops, retraction and taint.
+   - *Built (PR "Swarm stage 3"):* `meta_agent/reactions.py` holds the pure
+     functions — `normalize_subscriptions`, `matches` (equality on kind,
+     normalised subject and status), `fill` (one regex pass over a fixed
+     field vocabulary: `{finding.text}`, `{finding.path}`, `{finding.name}`,
+     `{finding.value}`, `{finding.unit}`, `{finding.id}`, `{finding.kind}`,
+     `{subject}`, `{analysis_id}`, `{from.label}`, `{from.index}`,
+     `{from.mode}`; anything else stays literal, a value is never
+     re-expanded), `hop`, `supersede_depth` and `decide`, which returns the
+     item to launch with `caused_by`, `chain` and `subscription` already on
+     it, or the reason it is refused. `run_swarm(work_items,
+     item_time_budget_s, subscriptions, budget)` applies them in the
+     coordinator loop each time an item closes and has posted: the fired
+     item goes through `launch` like any other (its own ledger entry, the
+     capacity ceiling, memory admission, the item budget, the question
+     queue), and `_COORDINATOR_FIELDS` are stripped from a caller's initial
+     items so a chain nobody enqueued cannot defeat the cycle check.
+     Refusals are structural first (a cycle: the same `(mode, subject,
+     kind)` hop twice in one chain; a record at supersede depth >= 2 on its
+     subject), then the counters (`max_fires`, the per-subject cap, the
+     swarm's `max_reactions` and `max_items`), and each is recorded on the
+     triggering entry (`refused_reactions`) and in the result with the
+     chain. `budget` is `{max_items <= 8, max_reactions,
+     max_triggers_per_subject (2)}`. A worker's `suggested_followups` are
+     posted by `records_for` as `task_request` records (provisional, not in
+     `READ_KINDS`, at most four, 400 characters) for every mode; they become
+     items only through a subscription on that kind, and the result's
+     `task_requests` lists each with the item it became or `null`.
+     `Board.fold` derives `tainted`: a record whose transitive reads reach a
+     retracted or superseded record (a correction's own `supersedes` link is
+     not followed — it rests on what it corrects by design), so a record
+     posted after the retraction by a worker that had read the finding
+     before is caught too; `Board.dependents` is the inverse closure.
+     `retract_finding(finding_id, reason)` posts the retraction as the
+     coordinator (`retract_and_report`) and returns the newly tainted
+     records, their source delegations (from the records' own authors) and
+     `rerun_items` ready for `run_swarm`; it re-runs nothing itself — a
+     retraction is a decision made between runs, and so is the re-run.
+     `Board.snapshot(with_hazards=True)`, used by every swarm item's read,
+     puts each standing hazard on the subject in the view whatever the
+     reader's `kinds` filter and whether or not it passed a gate; `get_board`
+     shows `withdrawn` (retracted / superseded / tainted, with `tainted_by`)
+     and the standing `task_requests`. Tests:
+     `tests/test_swarm_reactions.py`, through the real coordinator and board
+     with scripted workers — the harness came first, and a swarm with no
+     subscriptions is asserted to leave the stage-2 ledger and board as they
+     were (the stage-2 suites run unchanged).
+   - *Deviations from "Starting stage 3", each deliberate:* no worker
+     supersedes its own earlier claim — no `run_task` result says "this
+     replaces that", and guessing it from kind and subject would be the
+     reconstruction the stage-2 reviews taught against; the fold supports it
+     for a caller that knows. No automatic re-run of tainted sources inside
+     a swarm — nothing inside a swarm retracts, so the re-run is the next
+     swarm, with the items prepared. The result's list is
+     `refused_reactions` (reason, chain, finding) rather than
+     `refused_cycles`, since the cap and the chain stop are refusals of the
+     same shape; no would-be entry is opened for a refused reaction, the
+     refusal sits on the triggering entry.
 4. **Scheduling.**
    - Swarm budgets with reservation and the circuit breaker.
    - Process workers for heavy items.
@@ -1386,6 +1444,32 @@ references are to `main` at bed2f7f8.
 - *The Mission Control UI has no board view* (stage 6).
 - Everything open after stage 1 still stands (telemetry, the one-slot web
   panel, no swarm resume, memory estimated, HPC #696, #685).
+
+## After stage 3: what is on the PR, and what is open
+
+**What stage 3 adds:** `meta_agent/reactions.py`; `run_swarm`'s
+`subscriptions` and `budget` and the `react` step of its loop; `Board.fold`'s
+`tainted` status, `Board.dependents`, `Board.snapshot(with_hazards)`,
+`records_for`'s `task_request` records, `retract_and_report`; the
+`retract_finding` tool and `get_board`'s `withdrawn` / `task_requests`;
+`tests/test_swarm_reactions.py`.
+
+**Open after stage 3:**
+- *Reactions are declared per swarm.* A subscription lives for one
+  `run_swarm` call; a standing rule across turns ("whenever a verified recipe
+  appears on this sample, replay it on new data") is stage 5's instrument
+  bridge, where the subscriber is a running process, not a turn.
+- *Mid-run read points inside a mode* are still not exposed (unchanged from
+  stage 2); a reaction is new work that reads at its start.
+- *No worker supersedes a claim; no automatic re-run.* See the deviations
+  under stage 3 in "Build order".
+- *Templates are text.* A fired task carries the finding's text or path by
+  substitution; a reaction that needs a structured context (a parameter point
+  as numbers) passes `context` as the enqueue's own object, not from the
+  record.
+- Everything open after stage 2 still stands (no retraction from a worker,
+  common-ancestry independence, string subjects, persistent specialists read
+  nothing, no Mission Control board view).
 
 ## Starting stage 2 (the board)
 

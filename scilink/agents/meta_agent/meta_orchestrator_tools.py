@@ -788,10 +788,13 @@ class MetaOrchestratorTools:
         )
 
         # -- run_swarm (several delegations of any mode at once) -------------
-        def run_swarm(work_items: list, item_time_budget_s: float = None) -> str:
-            print(f"  🐝 Swarm of {len(work_items or [])} item(s)...")
+        def run_swarm(work_items: list, item_time_budget_s: float = None,
+                      subscriptions: list = None, budget: dict = None) -> str:
+            print(f"  🐝 Swarm of {len(work_items or [])} item(s)"
+                  + (f", {len(subscriptions)} subscription(s)" if subscriptions else "") + "...")
             from .swarm import run_swarm as _run_swarm
-            return _run_swarm(self.orch, work_items, item_time_budget_s=item_time_budget_s)
+            return _run_swarm(self.orch, work_items, item_time_budget_s=item_time_budget_s,
+                              subscriptions=subscriptions, budget=budget)
 
         self._register_tool(
             func=run_swarm,
@@ -815,7 +818,19 @@ class MetaOrchestratorTools:
                 "gets the board's verified findings on its subject as hints when it "
                 "starts (recorded as `reads` on its ledger entry). An item that is a "
                 "check of other work (an audit, a re-fit to confirm, a critic) gets "
-                "`check: true` and is refused a read, so it stays independent."
+                "`check: true` and is refused a read, so it stays independent. "
+                "`subscriptions` declare REACTIONS the coordinator applies without a "
+                "model as items finish: when a record of a kind (and subject, and "
+                "status — verified by default) is posted, an item is filled from it "
+                "(`{finding.text}`, `{finding.path}`, `{subject}`, `{analysis_id}`, "
+                "`{from.label}` in `task` / `label`) and started. Each finding fires a "
+                "subscription once; `max_fires` (default 1) bounds a subscription; a "
+                "subject is re-triggered at most twice; a cycle (the same mode-"
+                "subject-kind hop twice in one causal chain) is refused; the result "
+                "lists what fired (`fired`, with `caused_by` and `chain`) and what was "
+                "refused and why (`refused_reactions`). Workers' suggestions are posted "
+                "as `task_request` records and become items only through a "
+                "subscription on `kind: task_request`; `task_requests` lists them."
             ),
             parameters={
                 # Not "items": a property named like the JSON-schema keyword
@@ -873,8 +888,81 @@ class MetaOrchestratorTools:
                     "description": ("Optional per-item wall-clock budget in seconds "
                                     "(default 3600; <= 0 disables)."),
                 },
+                "subscriptions": {
+                    "type": "array",
+                    "description": ("Optional reactions: {on: {kind, subject?, status?}, "
+                                    "enqueue: {mode, label, task, subject?, reads_board?, "
+                                    "check?, context?, data_path?}, max_fires?}. `task` and "
+                                    "`label` are templates filled from the triggering finding."),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "on": {"type": "object",
+                                   "properties": {
+                                       "kind": {"type": "string",
+                                                "enum": ["claim", "measurement", "recipe", "structure",
+                                                         "parameter_point", "hazard", "task_request"]},
+                                       "subject": {"type": "string"},
+                                       "status": {"type": "string", "enum": ["verified", "provisional", "any"]}},
+                                   "required": ["kind"]},
+                            "enqueue": {"type": "object",
+                                        "properties": {
+                                            "mode": {"type": "string",
+                                                     "enum": ["analysis", "planning", "simulation"]},
+                                            "label": {"type": "string"},
+                                            "task": {"type": "string"},
+                                            "subject": {"type": "string"},
+                                            "data_path": {"type": "string"},
+                                            "context": {"type": "object"},
+                                            "reads_board": {"type": "object"},
+                                            "check": {"type": "boolean"}},
+                                        "required": ["mode", "task"]},
+                            "max_fires": {"type": "integer", "minimum": 1},
+                        },
+                        "required": ["on", "enqueue"],
+                    },
+                },
+                "budget": {
+                    "type": "object",
+                    "description": ("Optional bounds: max_items (initial + fired, <= 8), "
+                                    "max_reactions (fired items), max_triggers_per_subject "
+                                    "(default 2)."),
+                    "properties": {"max_items": {"type": "integer"},
+                                   "max_reactions": {"type": "integer"},
+                                   "max_triggers_per_subject": {"type": "integer"}},
+                },
             },
             required=["work_items"],
+        )
+
+        # -- retract_finding (withdraw a board record; taint what rests on it) --
+        def retract_finding(finding_id: str, reason: str) -> str:
+            from .board import retract_and_report
+            try:
+                return json.dumps(retract_and_report(self.orch, finding_id, reason), default=str)
+            except KeyError:
+                return json.dumps({"status": "error", "message": f"no finding {finding_id!r} on the board"})
+            except ValueError as exc:
+                return json.dumps({"status": "error", "message": str(exc)})
+
+        self._register_tool(
+            func=retract_finding,
+            name="retract_finding",
+            description=(
+                "Withdraw a board finding shown to be wrong (the user says so, or a later "
+                "independent result contradicts it beyond doubt). Posts a retraction as the "
+                "coordinator; every finding that rested on it — read it, or read something "
+                "that did — becomes `tainted` and leaves the default reads. The result lists "
+                "the tainted findings, the delegations that produced them and ready-made "
+                "`rerun_items` for run_swarm (or delegate_to_*) if they should be redone. "
+                "Not for a disagreement: two independent results that differ are a result "
+                "to report (independent_support), not a reason to withdraw one."
+            ),
+            parameters={
+                "finding_id": {"type": "string", "description": "The board record to withdraw."},
+                "reason": {"type": "string", "description": "Why, in one sentence (on the record)."},
+            },
+            required=["finding_id", "reason"],
         )
 
         # -- get_board (the session's findings, between runs) ----------------
@@ -901,12 +989,22 @@ class MetaOrchestratorTools:
                 return json.dumps({"status": "error", "message": str(exc)})
             lim = max(1, int(limit or 40))
             recs = [board.public(r) for r in view.records[-lim:]]
+            want = board_mod._norm_subject(view.subject)
+            withdrawn = [{"finding_id": r["finding_id"], "kind": r["kind"], "subject": r.get("subject"),
+                          "status": r["status"], **({"tainted_by": r["tainted_by"]} if r.get("tainted_by") else {})}
+                         for r in board.fold()
+                         if r["status"] in ("retracted", "superseded", "tainted")
+                         and (not want or board_mod._norm_subject(r.get("subject")) == want)]
+            requests = [board.public(r) for r in board.fold()
+                        if r["kind"] == "task_request" and r["status"] == "provisional"
+                        and (not want or board_mod._norm_subject(r.get("subject")) == want)]
             return json.dumps({
                 "status": "success", "board_version": view.version,
                 "subject": view.subject, "subject_note": subject_note,
                 "subjects": board.subjects(), "kinds": list(view.kinds),
                 "include_provisional": bool(include_provisional),
                 "count": len(view), "shown": len(recs), "findings": recs,
+                "withdrawn": withdrawn[-lim:], "task_requests": requests[-lim:],
                 "note": ("verified = the author's own pipeline passed it (an analysis QC, a "
                          "human-approved plan, a validated structure); provisional records "
                          "passed no gate. A finding is context for the next delegation "

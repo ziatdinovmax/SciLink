@@ -294,14 +294,60 @@ class Board:
                 r["effective"] = may_act(r, old)
                 if r["effective"] and old["status"] != "retracted":
                     old["status"] = "superseded"
+        # Taint (robustness item 4): a record that rests on a withdrawn one —
+        # it read it, or read something that did, transitively — is
+        # ``tainted``: out of every default read, on the record for a history
+        # reader. Derived from the log, so a record posted AFTER the
+        # retraction by a worker that had read the finding before is caught
+        # too. A correction (a superseding record) rests on what it corrects
+        # by design and is not tainted by it.
+        withdrawn = {r["finding_id"] for r in recs if r["status"] in ("retracted", "superseded")}
+        if withdrawn:
+            for r in recs:
+                if r["status"] in ("retracted", "superseded", "tainted") or r.get("kind") == "retraction":
+                    continue
+                rests_on = self._closure(r, by_id, follow_supersedes=False)
+                if rests_on & withdrawn:
+                    r["status"] = "tainted"
+                    r["tainted_by"] = sorted(rests_on & withdrawn)
         return recs
 
+    @staticmethod
+    def _closure(record: Dict[str, Any], by_id: Dict[str, Dict[str, Any]], *,
+                 follow_supersedes: bool) -> Set[str]:
+        seen: Set[str] = set()
+        stack = list(record.get("reads") or [])
+        while stack:
+            fid = stack.pop()
+            if fid in seen:
+                continue
+            seen.add(fid)
+            rec = by_id.get(fid)
+            if rec is None:
+                continue
+            stack.extend(rec.get("reads") or [])
+            if follow_supersedes and rec.get("supersedes"):
+                stack.append(rec["supersedes"])
+        return seen
+
+    def dependents(self, finding_id: str) -> List[str]:
+        """The records that rest on this one (read it, or read something that
+        did), in order — what a retraction of it taints."""
+        with self._lock:
+            by_id = {r["finding_id"]: r for r in self._records}
+            return [r["finding_id"] for r in self._records
+                    if finding_id in self._closure(r, by_id, follow_supersedes=False)]
+
     def snapshot(self, subject: Optional[str] = None, kind: Any = None, *,
-                 include_provisional: bool = False, check: bool = False) -> BoardView:
+                 include_provisional: bool = False, check: bool = False,
+                 with_hazards: bool = False) -> BoardView:
         """The current view for a reader: verified records (plus provisional
         ones on request), of the asked kinds, on the asked subject. A check
         is refused, structurally: ``check=True`` raises before anything is
-        read, whatever the prompt said."""
+        read, whatever the prompt said. With ``with_hazards`` every standing
+        hazard on the subject is in the view whatever ``kind`` asked and
+        whether or not it passed a gate: a warning is not narrowed away by a
+        reader's filter (robustness item 4)."""
         if check:
             raise BoardReadRefused("this work item is a check; checks run board-blind")
         kinds = tuple(READ_KINDS if kind is None else ([kind] if isinstance(kind, str) else kind))
@@ -314,7 +360,8 @@ class Board:
         with self._lock:
             version = len(self._records)
             for r in self.fold():
-                if r["kind"] not in kinds or r["status"] not in allowed:
+                hazard = with_hazards and r["kind"] == "hazard" and r["status"] in ("verified", "provisional")
+                if not hazard and (r["kind"] not in kinds or r["status"] not in allowed):
                     continue
                 if want_subject and _norm_subject(r.get("subject")) != want_subject:
                     continue
@@ -659,12 +706,35 @@ def records_for(entry: Dict[str, Any], result: Dict[str, Any]) -> List[Dict[str,
     if entry.get("status") != "success":
         return []
     if mode == "analysis":
-        return _analysis_records(entry, result)
-    if mode == "planning":
-        return _planning_records(entry, result)
-    if mode == "simulation":
-        return _simulation_records(entry, result)
-    return []
+        out = _analysis_records(entry, result)
+    elif mode == "planning":
+        out = _planning_records(entry, result)
+    elif mode == "simulation":
+        out = _simulation_records(entry, result)
+    else:
+        return []
+    return out + _task_requests(result)
+
+
+#: How many of a worker's suggestions are kept as requests, and how long.
+TASK_REQUESTS_MAX = 4
+_TASK_REQUEST_CHARS = 400
+
+
+def _task_requests(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """A worker's ``suggested_followups`` as ``task_request`` records: what
+    it asked for, provisional, never read by default (``READ_KINDS``) and
+    never an item on its own say-so — the coordinator decides, through a
+    subscription on the kind (stage 3, "workers ask, the coordinator
+    decides")."""
+    out = []
+    for text in (result.get("suggested_followups") or [])[:TASK_REQUESTS_MAX]:
+        text = " ".join(str(text).split())
+        if text:
+            out.append({"kind": "task_request", "payload": {"text": text[:_TASK_REQUEST_CHARS]},
+                        "status": "provisional",
+                        "evidence": {"gate": "a worker's suggestion (no gate; an item only through a subscription)"}})
+    return out
 
 
 RECIPE_DIRNAME_MAX = 60      # a label or an analysis id, clipped to fit any file system
@@ -740,3 +810,60 @@ def post_delegation(board: Board, entry: Dict[str, Any], result: Dict[str, Any])
             continue
         ids.append(rec["finding_id"])
     return ids
+
+
+# --------------------------------------------------------------- retraction
+COORDINATOR = {"worker": "coordinator", "mode": "coordinator"}
+
+
+def retract_and_report(orch, finding_id: str, reason: str) -> Dict[str, Any]:
+    """Withdraw a finding as the coordinator and say what it takes with it.
+
+    The retraction is posted (it takes effect from the coordinator whoever
+    the author was), the fold then reads every record that rested on the
+    finding as ``tainted`` (``Board.fold``), and the report names those
+    records, the delegations that produced them (from the records' own
+    authors, stamped when they were posted) and a ``rerun_items`` list the
+    meta can hand to ``run_swarm`` as it stands. Nothing is re-run here: a
+    retraction is a decision made between runs, and so is the re-run."""
+    board = orch.board
+    target = board.get(finding_id)                       # KeyError: unknown
+    if target.get("kind") == "retraction":
+        raise ValueError("a retraction is not retracted; retract its target's correction instead")
+    reason = " ".join(str(reason or "").split())
+    if not reason:
+        raise ValueError("a retraction states its reason")
+    before = {r["finding_id"]: r["status"] for r in board.fold()}
+    rec = board.retract(finding_id, author=COORDINATOR, reason=reason)
+    after = {r["finding_id"]: r for r in board.fold()}
+    tainted = [r for fid, r in after.items()
+               if r["status"] == "tainted" and before.get(fid) != "tainted"]
+    ledger = {e.get("index"): e for e in getattr(orch, "_delegation_ledger", [])}
+    sources: Dict[int, Dict[str, Any]] = {}
+    for r in tainted:
+        idx = (r.get("author") or {}).get("delegation_index")
+        e = ledger.get(idx)
+        if idx is None or idx in sources:
+            continue
+        sources[idx] = {"delegation_index": idx, "label": (e or {}).get("label") or r["author"].get("worker"),
+                        "mode": (e or {}).get("mode") or r["author"].get("mode"),
+                        "subject": (e or {}).get("subject") or r.get("subject"),
+                        "task": (e or {}).get("task"), "available": e is not None}
+    rerun_items = [{"mode": s["mode"], "label": f"rerun: {s['label']}", "task": s["task"],
+                    "subject": s["subject"],
+                    "context": {"reruns_delegation": s["delegation_index"],
+                                "after_retraction_of": finding_id, "retraction_reason": reason}}
+                   for s in sources.values() if s["available"] and s["mode"] in ("analysis", "planning", "simulation")]
+    return {
+        "status": "success", "retraction": rec["finding_id"], "retracted": finding_id,
+        "kind": target.get("kind"), "subject": target.get("subject"), "reason": reason,
+        "tainted": [{"finding_id": r["finding_id"], "kind": r["kind"], "subject": r.get("subject"),
+                     "author": r.get("author"), "tainted_by": r.get("tainted_by")} for r in tainted],
+        "sources": list(sources.values()),
+        "rerun_items": rerun_items,
+        "board_version": len(board),
+        "note": ("the retracted finding and everything that rested on it are out of every default "
+                 "read; a re-run is a new delegation or swarm (rerun_items is ready for run_swarm "
+                 "when there are two or more, delegate_to_<mode> for one), whose records stand on "
+                 "their own — nothing is re-run on its own"),
+    }
