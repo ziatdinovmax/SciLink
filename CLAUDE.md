@@ -653,8 +653,8 @@ delegations of any mode concurrently, each on an **ephemeral worker**
 (`workers.build_child`, the one constructor behind the persistent specialists
 too) in `<meta_session>/swarm/<NN>_<slug>/`, each an ordinary ledger
 delegation. The design, its stages and what each stage left open are in
-`docs/proposals/agent-swarms.md`; stages 0, 1 (#697) and 2 (the board) are
-built, stage 3 (reactions) is next. Settled rules, each learned from a live
+`docs/proposals/agent-swarms.md`; stages 0, 1 (#697) and 2 (the board, #702)
+are on `main`, stage 3 (reactions) is next. Settled rules, each learned from a live
 run or a review:
 
 - **A swarm item is a fresh agent.** It does not remember earlier delegations;

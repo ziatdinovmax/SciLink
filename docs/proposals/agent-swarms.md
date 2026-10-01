@@ -3,9 +3,10 @@
 Status: stage 0 merged to `main` on 2026-09-29 (head 328bd2bb); stage 1
 merged on 2026-09-30 (#697, head bed2f7f8) after three review rounds, built
 as "Starting stage 1" below describes; what changed on the way is recorded
-under the stage in "Build order". Stage 2 (the board) is on its PR, built as
-"Starting stage 2" describes, with what changed on the way under the stage in
-"Build order" and its open items in "After stage 2"; "Starting stage 3" is
+under the stage in "Build order". Stage 2 (the board) merged on 2026-10-01 (#702, head
+e1c0fc72) after eight review rounds, built as "Starting stage 2" describes,
+with what changed on the way under the stage in "Build order" and its open
+items in "After stage 2"; "Starting stage 3" is
 drafted below. The design notes were
 drafted 2026-09-28 against `main` at b988c7cd (Release 0.0.83), based on a source audit of the meta
 agent (`meta_orchestrator.py`, `meta_orchestrator_tools.py`, `fanout.py`,
