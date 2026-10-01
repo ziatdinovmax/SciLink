@@ -76,6 +76,9 @@ SWARM_MEMORY_FLOOR_BYTES = 7.5e8
 SWARM_DRAIN_TIMEOUT_S = 600.0
 _POLL_S = 5
 _HEARTBEAT_S = 60
+#: An item's context is kept on its ledger entry (so a re-run can start from
+#: it) when it is small; the ledger is checkpointed, so a large one is not.
+_CONTEXT_KEEP_CHARS = 8000
 
 # A planning or simulation item's own working set, beside the imports every
 # worker thread already shares with the process.
@@ -192,11 +195,16 @@ def _read_board(orch, item: dict, entry: dict) -> str:
         print(f"  ⚠️  '{item['label']}': board read not possible ({exc}).")
         return ""
     total = len(view)
-    view = view.newest(board_mod.READ_MAX_RECORDS)     # what is rendered is what is stamped as read
+    # What is rendered is what is stamped as read; a hazard is never cut.
+    view = view.newest(board_mod.READ_MAX_RECORDS, pin=("hazard",))
     with orch._fanout_lock:
-        entry["reads"] = list(view.ids)
+        # A reaction already "read" the finding that caused it (its task
+        # quotes it): the cause stays in reads beside what the board showed.
+        entry["reads"] = sorted(set(entry.get("reads") or []) | set(view.ids))
         entry["board_version"] = view.version
-        if view.include_provisional:
+        if view.include_provisional or any(r["status"] == "provisional" for r in view.records):
+            # A provisional record was shown — asked for, or a standing
+            # hazard delivered whatever the filter: marked either way.
             entry["reads_provisional"] = True
     print(f"  📋 '{item['label']}' read {len(view)} board finding(s)"
           + (f" (the newest of {total})" if total > len(view) else "")
@@ -232,14 +240,32 @@ def capacity_plan(items: List[dict], memory: Optional[Dict[str, Optional[float]]
             "workers": min(len(run), SWARM_MAX_WORKERS) if run else 0}
 
 
-def swarm_plan_subject(plan: dict, attended: bool) -> dict:
-    """What the swarm gate shows, as subject blocks (scilink.hitl)."""
+def _subscription_line(sub: dict) -> str:
+    on, enq = sub["on"], sub["enqueue"]
+    return (f"- on a {on['status']} **{on['kind']}**"
+            + (f" on '{on['subject']}'" if on.get("subject") else " on any subject")
+            + f" → {enq['mode']} '{enq['label']}'"
+            + (f" (up to {sub['max_fires']} times)" if sub.get("max_fires", 1) != 1 else " (once)"))
+
+
+def swarm_plan_subject(plan: dict, attended: bool, subscriptions: Optional[List[dict]] = None,
+                       budget: Optional[dict] = None) -> dict:
+    """What the swarm gate shows, as subject blocks (scilink.hitl): the
+    items, and — because a reaction starts work nobody listed — every
+    subscription and the most items the swarm may run in all."""
     rows = [f"- **{it['label']}** ({it['mode']}{', ' + it['subject'] if it.get('subject') else ''}; "
             f"~{it['_mem_est'] / 1e9:.1f} GB) — {it['task'][:160]}"
             for it in plan["run"]]
     blocks = [subject_block("text", label=f"🐝 Items ({len(plan['run'])})", markdown="\n".join(rows))]
     fields = [{"label": "Runs at once", "value": str(plan["workers"])},
               {"label": "Memory", "value": _memory_line(plan)}]
+    if subscriptions:
+        bounds = budget or {}
+        blocks.append(subject_block("text", label=f"🔔 Reactions ({len(subscriptions)})",
+                                    markdown="\n".join(_subscription_line(s) for s in subscriptions)))
+        fields.append({"label": "Items in all", "value": (
+            f"up to {bounds.get('max_items', SWARM_MAX_ITEMS)} (at most {bounds.get('max_reactions', SWARM_MAX_ITEMS)} "
+            f"fired; a subject re-triggered at most {bounds.get('max_triggers_per_subject', reactions.MAX_TRIGGERS_PER_SUBJECT)} times)")})
     blocks.append(subject_block("fields", items=fields))
     if plan["refused"]:
         blocks.append(subject_block("notice", title="⛔ Not started", tone="warn",
@@ -259,19 +285,25 @@ def _memory_line(plan: dict) -> str:
             + ("they fit together" if plan["together"] else "some will wait for others to finish"))
 
 
-def _confirm(orch, plan: dict, attended: bool) -> bool:
+def _confirm(orch, plan: dict, attended: bool, subscriptions: Optional[List[dict]] = None,
+             budget: Optional[dict] = None) -> bool:
     print("\n" + "=" * 78)
     print(f"🐝 SWARM — {len(plan['run'])} item(s), {plan['workers']} at a time")
     for it in plan["run"]:
         print(f"    • {it['label']}  [{it['mode']}]  ~{it['_mem_est'] / 1e9:.1f} GB")
     print(f"  Memory: {_memory_line(plan)}")
+    if subscriptions:
+        print(f"  🔔 Reactions ({len(subscriptions)}), up to {(budget or {}).get('max_items', SWARM_MAX_ITEMS)} items in all:")
+        for sub in subscriptions:
+            print(f"    {_subscription_line(sub)[2:]}")
     for r in plan["refused"]:
         print(f"  ⛔ not started: {r['label']} — {r['reason']}")
     print("=" * 78)
     try:
         ans = request_human_feedback(
             "\n🤔 Launch this swarm? [y/N]: ", kind="confirm", options=["y", "n"], default="n",
-            origin={"stage": "swarm_confirm"}, subject=swarm_plan_subject(plan, attended),
+            origin={"stage": "swarm_confirm"},
+            subject=swarm_plan_subject(plan, attended, subscriptions, budget),
         ).strip().lower()
     except (EOFError, KeyboardInterrupt):
         return False
@@ -419,7 +451,7 @@ def swarm_budget(raw: Any) -> dict:
     return {"max_items": max(2, bounded("max_items", SWARM_MAX_ITEMS, SWARM_MAX_ITEMS)),
             "max_reactions": bounded("max_reactions", SWARM_MAX_ITEMS, SWARM_MAX_ITEMS),
             "max_triggers_per_subject": bounded("max_triggers_per_subject",
-                                                reactions.MAX_TRIGGERS_PER_SUBJECT)}
+                                                reactions.MAX_TRIGGERS_PER_SUBJECT, SWARM_MAX_ITEMS)}
 
 
 def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
@@ -446,7 +478,7 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
         return json.dumps({"status": "error", "message": "No item fits this machine.",
                            "not_started": refused})
     attended = bool(getattr(orch, "_enable_human_feedback", False))
-    if attended and not _confirm(orch, plan, attended):
+    if attended and not _confirm(orch, plan, attended, subs, bounds):
         return json.dumps({"status": "declined", "message": "The user declined the swarm.",
                            "not_started": refused})
 
@@ -472,11 +504,27 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
                 # its complementarity gate from the entries' data paths.
                 entry["data_path"] = str(item["data_path"])
             entry["_budget_s"] = budget
+            # The item's own inputs, so a re-run (retract_finding's
+            # rerun_items) starts from what this one had.
+            if item.get("reads_board") is not None:
+                entry["reads_board"] = dict(item["reads_board"])
+            if item.get("check"):
+                entry["check"] = True
+            if isinstance(item.get("context"), dict) and item["context"]:
+                if len(json.dumps(item["context"], default=str)) <= _CONTEXT_KEEP_CHARS:
+                    entry["context"] = item["context"]
+                else:
+                    entry["context_omitted"] = "too large to keep on the ledger"
             if item.get("caused_by"):
                 # A reaction: its cause and chain, stamped as it is enqueued.
+                # The cause is a READ: the task quotes the finding, so what
+                # rests on the finding rests on this item's records too
+                # (taint, independence), whether or not it reads the board.
                 entry["caused_by"] = list(item["caused_by"])
                 entry["chain"] = list(item.get("chain") or [])
                 entry["subscription"] = item.get("subscription")
+                entry["reads"] = sorted(set(entry.get("reads") or []) | set(item["caused_by"]))
+                entry["board_version"] = len(orch.board) if getattr(orch, "board", None) is not None else None
         entries.append(entry)
         channel = (WorkerChannel(queue, item["label"], subject=item.get("subject"), kind="worker",
                                  on_wait=fo.note_human_wait(entry))
@@ -690,7 +738,7 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
         "not_started": refused,
         "subscriptions": {"accepted": len(subs), "refused": subs_refused},
         "fired": fired,
-        "refused_reactions": refused_reactions,
+        "refused_reactions": _collapse_refusals(refused_reactions),
         "task_requests": _task_requests(orch, entries),
         "warnings": channel_warnings,
         "board_version": len(orch.board) if getattr(orch, "board", None) is not None else None,
@@ -728,4 +776,21 @@ def _task_requests(orch, entries: List[dict]) -> List[dict]:
                 out.append({"finding_id": fid, "from": e.get("label"), "from_index": e["index"],
                             "text": (rec.get("payload") or {}).get("text"),
                             "item": became.get(fid)})
+    return out
+
+
+def _collapse_refusals(refusals: List[dict]) -> List[dict]:
+    """One line per (subscription, reason) with the first refusal's detail and
+    the other findings it also refused, instead of a full chain per refusal
+    (an adversarial rule set produces dozens)."""
+    out: List[dict] = []
+    seen: Dict[Tuple[Any, str], dict] = {}
+    for r in refusals:
+        key = (r.get("subscription"), str(r.get("reason")))
+        if key in seen:
+            seen[key].setdefault("also", []).append(r.get("finding_id"))
+            seen[key]["count"] = seen[key].get("count", 1) + 1
+            continue
+        seen[key] = dict(r)
+        out.append(seen[key])
     return out

@@ -950,13 +950,19 @@ class MetaOrchestratorTools:
             name="retract_finding",
             description=(
                 "Withdraw a board finding shown to be wrong (the user says so, or a later "
-                "independent result contradicts it beyond doubt). Posts a retraction as the "
-                "coordinator; every finding that rested on it — read it, or read something "
-                "that did — becomes `tainted` and leaves the default reads. The result lists "
-                "the tainted findings, the delegations that produced them and ready-made "
-                "`rerun_items` for run_swarm (or delegate_to_*) if they should be redone. "
-                "Not for a disagreement: two independent results that differ are a result "
-                "to report (independent_support), not a reason to withdraw one."
+                "independent result contradicts it beyond doubt). With a person present the "
+                "finding and what rests on it are shown and the person decides (Enter keeps "
+                "it); with nobody present a human-approved plan's claim is refused — a "
+                "human's decision is reopened only by a human. A retraction posts as the "
+                "coordinator; every finding that rested on the withdrawn one — read it, or "
+                "read something that did, or was the reaction it caused — becomes `tainted` "
+                "and leaves the default reads. The result lists the tainted findings, the "
+                "delegations that produced them, ready-made `rerun_items` for run_swarm (or "
+                "delegate_to_*) with their original inputs, and `not_rerun` (reactions the "
+                "withdrawn finding caused: a new decision, not a re-run). Passing a "
+                "retraction's own id undoes it. Not for a disagreement: two independent "
+                "results that differ are a result to report (independent_support), not a "
+                "reason to withdraw one."
             ),
             parameters={
                 "finding_id": {"type": "string", "description": "The board record to withdraw."},
@@ -990,12 +996,24 @@ class MetaOrchestratorTools:
             lim = max(1, int(limit or 40))
             recs = [board.public(r) for r in view.records[-lim:]]
             want = board_mod._norm_subject(view.subject)
+            folded = board.fold()
+            retractions = {r.get("target"): r for r in folded if r["kind"] == "retraction" and r.get("effective")}
+            superseders = {r.get("supersedes"): r for r in folded if r.get("supersedes") and r.get("effective")}
+
+            def why(r):
+                if r["status"] == "retracted" and r["finding_id"] in retractions:
+                    ret = retractions[r["finding_id"]]
+                    return {"reason": (ret.get("payload") or {}).get("reason"),
+                            "by": (ret.get("author") or {}).get("worker"), "retraction": ret["finding_id"]}
+                if r["status"] == "superseded" and r["finding_id"] in superseders:
+                    return {"superseded_by": superseders[r["finding_id"]]["finding_id"]}
+                return {"tainted_by": r.get("tainted_by")} if r.get("tainted_by") else {}
             withdrawn = [{"finding_id": r["finding_id"], "kind": r["kind"], "subject": r.get("subject"),
-                          "status": r["status"], **({"tainted_by": r["tainted_by"]} if r.get("tainted_by") else {})}
-                         for r in board.fold()
+                          "status": r["status"], **why(r)}
+                         for r in folded
                          if r["status"] in ("retracted", "superseded", "tainted")
                          and (not want or board_mod._norm_subject(r.get("subject")) == want)]
-            requests = [board.public(r) for r in board.fold()
+            requests = [board.public(r) for r in folded
                         if r["kind"] == "task_request" and r["status"] == "provisional"
                         and (not want or board_mod._norm_subject(r.get("subject")) == want)]
             return json.dumps({
