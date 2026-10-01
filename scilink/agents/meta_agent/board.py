@@ -935,17 +935,26 @@ def retract_and_report(orch, finding_id: str, reason: str) -> Dict[str, Any]:
     withdrawn = {finding_id} | {r["finding_id"] for r in tainted}
     ledger = {e.get("index"): e for e in getattr(orch, "_delegation_ledger", [])}
     sources: Dict[int, Dict[str, Any]] = {}
+
+    def source(idx, e, worker=None, mode=None, subject=None, via="posted"):
+        caused_by = set((e or {}).get("caused_by") or [])
+        sources[idx] = {"delegation_index": idx, "label": (e or {}).get("label") or worker,
+                        "mode": (e or {}).get("mode") or mode, "subject": (e or {}).get("subject") or subject,
+                        "task": (e or {}).get("task"), "available": e is not None, "via": via,
+                        "caused_by_withdrawn": sorted(caused_by & withdrawn)}
     for r in tainted:
         idx = (r.get("author") or {}).get("delegation_index")
-        e = ledger.get(idx)
         if idx is None or idx in sources:
             continue
-        caused_by = set((e or {}).get("caused_by") or [])
-        sources[idx] = {"delegation_index": idx, "label": (e or {}).get("label") or r["author"].get("worker"),
-                        "mode": (e or {}).get("mode") or r["author"].get("mode"),
-                        "subject": (e or {}).get("subject") or r.get("subject"),
-                        "task": (e or {}).get("task"), "available": e is not None,
-                        "caused_by_withdrawn": sorted(caused_by & withdrawn)}
+        source(idx, ledger.get(idx), worker=r["author"].get("worker"), mode=r["author"].get("mode"), subject=r.get("subject"))
+    # A delegation that READ what is withdrawn and posted nothing the board
+    # could taint (a memo, a plan that made no claim) still worked from it:
+    # its reads are on its entry, stamped when it read, so it is offered too.
+    for idx, e in ledger.items():
+        if idx in sources or idx is None or e.get("status") != "success":
+            continue
+        if set(e.get("reads") or []) & withdrawn:
+            source(idx, e, via="read")
     rerun_items, not_rerun = [], []
     for src in sources.values():
         if not src["available"] or src["mode"] not in ("analysis", "planning", "simulation"):
@@ -972,7 +981,7 @@ def retract_and_report(orch, finding_id: str, reason: str) -> Dict[str, Any]:
         "kind": target.get("kind"), "subject": target.get("subject"), "reason": reason,
         "tainted": [{"finding_id": r["finding_id"], "kind": r["kind"], "subject": r.get("subject"),
                      "author": r.get("author"), "tainted_by": r.get("tainted_by")} for r in tainted],
-        "sources": list(sources.values()),
+        "sources": list(sources.values()),      # via: "posted" a tainted record, or "read" the withdrawn one
         "rerun_items": rerun_items,
         "not_rerun": not_rerun,
         "board_version": len(board),

@@ -452,6 +452,20 @@ def test_retracting_a_cause_taints_the_reaction_and_offers_no_rerun_of_it(meta, 
     item = out["rerun_items"][0]
     assert item["data_path"] == "/d/y.txt" and item["reads_board"] == {} and "check" not in item   # {} is the plain opt-in
     assert item["context"]["c"] == 2 and item["context"]["after_retraction_of"] == claim and item["task"] == "read it"
+    # a delegation that READ the withdrawn finding but posted nothing (a memo): its entry's reads say so,
+    # and it is offered again too; a failed one is not
+    meta._delegation_ledger.append({"index": 100, "label": "memo", "mode": "planning", "subject": S, "task": "write it",
+                                    "reads": [sim["posted"][0]], "reads_board": {}, "status": "success"})
+    meta._delegation_ledger.append({"index": 101, "label": "failed", "mode": "planning", "subject": S, "task": "x",
+                                    "reads": [sim["posted"][0]], "status": "error"})
+    fresh = board.post(kind="claim", author={"worker": "w", "delegation_index": 1, "mode": "analysis"},
+                       subject=S, payload={"text": "fresh"}, status="verified")
+    meta._delegation_ledger[-2]["reads"] = [fresh["finding_id"]]
+    meta._delegation_ledger[-1]["reads"] = [fresh["finding_id"]]
+    out = board_mod.retract_and_report(meta, fresh["finding_id"], "withdrawn")
+    assert out["tainted"] == [] and [s["delegation_index"] for s in out["sources"]] == [100]
+    assert out["sources"][0]["via"] == "read"
+    assert [(i["label"], i["reads_board"], i["context"]["reruns_delegation"]) for i in out["rerun_items"]] == [("rerun: memo", {}, 100)]
 
 
 def test_a_person_decides_a_retraction_and_nobody_undoes_a_human_approval(meta, monkeypatch):
