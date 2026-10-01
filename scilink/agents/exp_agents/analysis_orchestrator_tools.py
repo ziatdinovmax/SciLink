@@ -287,8 +287,9 @@ def _analysis_output_dir_summary(path: Path) -> Optional[dict]:
         "This is a prior analysis OUTPUT directory, not raw data. "
         + (f"Its saved script(s): {', '.join(scripts[:6])}"
            + (" …" if len(scripts) > 6 else "")
-           + " (a series saves the same locked script once per unit; any one is the "
-             "reusable fit script — read_file it to inspect). "
+           + " (a series saves one script per unit — the locked recipe its followers "
+             "replayed, or a refit's own; a reuse of the run replays the locked recipe "
+             "recorded in analysis_results.json, not a refit's — read_file to inspect). "
            if scripts else "")
         + "To re-run the locked model on data, pass this directory as "
           "prior_analysis_paths with reuse_locked_script=true (script_edits for a "
@@ -3743,7 +3744,14 @@ class AnalysisOrchestratorTools:
                         "the result independently (re-running the script that "
                         "produced a result cannot verify it). To FORCE verbatim "
                         "reuse of the prior locked extraction script, ALSO set "
-                        "`reuse_locked_script=true` (see that parameter)."
+                        "`reuse_locked_script=true` (see that parameter). A path "
+                        "may also be a recipe FILE rather than a run: a script "
+                        "`.py` (curve, image — e.g. the swarm board's copy under "
+                        "`swarm/recipes/`) or a `dynamic_analysis_records.json` "
+                        "(hyperspectral); with `reuse_locked_script=true` that "
+                        "file is what is replayed. For a prior SERIES the replay "
+                        "is the series' locked recipe (the script its feature "
+                        "table rests on), not a later refit of its anchor."
                     )
                 },
                 "reuse_locked_script": {

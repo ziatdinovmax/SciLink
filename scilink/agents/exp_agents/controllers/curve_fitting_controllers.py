@@ -937,13 +937,22 @@ def _append_prior_knowledge_context(prompt: list, state: dict) -> None:
 def _load_prior_curve_fit_state(raw_path):
     """Locate a prior curve-fit run's artifacts for a single path.
 
-    Accepts a directory or a file inside one. Looks for
-    ``series_fit_results.json`` (the structured fit record) and a saved
-    fitting script under ``scripts/``. Returns ``(anchor_dir, summary,
-    script_text, script_label)`` or ``(None, None, None, None)`` on any
-    failure — a missing or malformed prior run silently contributes nothing.
+    Accepts a directory, a file inside one, or a script FILE on its own
+    (#705: a ``.py`` is a recipe — the board's copy under ``swarm/recipes/``
+    — and is the script replayed even when it sits inside a run folder).
+    Looks for ``series_fit_results.json`` (the structured fit record) and
+    the script to replay (``prior_recipe_script``: the run's single script,
+    else a series' LOCKED recipe, #704, else its first unit script). Returns
+    ``(anchor_dir, summary, script_text, script_label)`` or ``(None, None,
+    None, None)`` on any failure — a missing or malformed prior run silently
+    contributes nothing. ``anchor_dir`` is a RUN, always: a script file on
+    its own returns ``(None, None, text, label)``, so whatever needs the run
+    — the realtime profile's locked config and drift fingerprint, the live
+    loop's anchor — refuses a bare file as it did, while a reuse replays it.
     """
+    from .._verification_record import named_recipe_file, prior_recipe_script
     p = Path(raw_path)
+    named = named_recipe_file(p)
     dir_candidates = (
         [p.parent, p.parent.parent] if p.is_file() else [p, p.parent]
     )
@@ -956,7 +965,14 @@ def _load_prior_curve_fit_state(raw_path):
             sfr_path = candidate
             break
     if anchor_dir is None:
-        return None, None, None, None
+        if named is None:
+            return None, None, None, None
+        # a recipe file on its own: the script, and no run
+        try:
+            text, label = prior_recipe_script(named.parent, single_name="fitting_script.py", named=named)
+        except OSError:
+            return None, None, None, None
+        return None, None, text, label
     try:
         data = json.loads(sfr_path.read_text())
     except Exception:  # noqa: BLE001 - a malformed prior run is skipped
@@ -975,28 +991,16 @@ def _load_prior_curve_fit_state(raw_path):
         "locked_config": data.get("locked_config"),
     }
 
-    # Locate a representative fitting script. A single-spectrum run writes
-    # `scripts/fitting_script.py`; a series writes one `scripts/<spectrum>.py`
-    # per spectrum — all share the locked model, so the first is a
-    # representative template.
-    script_text = None
-    script_label = None
-    scripts_dir = anchor_dir / "scripts"
-    single = scripts_dir / "fitting_script.py"
-    candidate = None
-    if single.is_file():
-        candidate, script_label = single, single.name
-    elif scripts_dir.is_dir():
-        py_files = sorted(scripts_dir.glob("*.py"))
-        if py_files:
-            candidate = py_files[0]
-            script_label = f"{candidate.name} (representative of the series)"
-    if candidate is not None:
-        try:
-            script_text = candidate.read_text()
-        except Exception:  # noqa: BLE001
-            script_text = None
-            script_label = None
+    # The script to replay: a single-spectrum run's `scripts/fitting_script.py`;
+    # a series' locked recipe (what its followers replayed and its table
+    # rests on), else its first unit script; or the file the caller named.
+    try:
+        script_text, script_label = prior_recipe_script(
+            anchor_dir, single_name="fitting_script.py", named=named)
+    except Exception:  # noqa: BLE001 - an unreadable script contributes nothing
+        script_text, script_label = None, None
+    if script_text and script_label is None:
+        script_label = "fitting_script.py"
 
     return anchor_dir, summary, script_text, script_label
 
@@ -1079,9 +1083,10 @@ def _prior_curve_fit_block(state: dict) -> str:
         anchor_dir, summary, script_text, script_label = (
             _load_prior_curve_fit_state(raw_path)
         )
-        if anchor_dir is None:
+        if anchor_dir is None and not script_text:
             continue
-        lines = [f"\n### Prior run: {anchor_dir.name or anchor_dir}"]
+        lines = [f"\n### Prior run: {anchor_dir.name or anchor_dir}" if anchor_dir is not None
+                 else f"\n### Prior script file: {Path(raw_path).name}"]
         if summary:
             lines.append(f"- Fit summary: {json.dumps(summary, default=str)}")
         if script_text:
@@ -1113,14 +1118,37 @@ def _first_prior_curve_fit_script(state: dict):
     are given or none have a script. The empty-case gate keeps a normal
     (no-prior) run byte-identical.
     """
+    found = _prior_curve_fit_recipes(state)
+    return found[0] if found else (None, None)
+
+
+def _prior_curve_fit_recipes(state: dict) -> list:
+    """Every script a locked-script reuse may replay, in order, as
+    ``(script_text, source)`` pairs: the first prior path that yields any.
+    A single run or a named file yields one; a SERIES run yields its locked
+    recipes, one per regime in lock order (#704), so the anchor can replay
+    them in turn and keep the first the gate calls good (``qc_try_reuse``) —
+    a series that locked one model below a transition and another above it
+    is not replayed with the wrong one. The source names the run (or the
+    file's folder) and, for a series or a named file, which script and why
+    (``reuse_validity.source`` carries it)."""
+    from .._verification_record import named_recipe_file, prior_recipe_scripts
     paths = state.get("prior_analysis_paths") or []
     for raw_path in paths:
-        anchor_dir, _summary, script_text, _label = (
-            _load_prior_curve_fit_state(raw_path)
-        )
-        if anchor_dir is not None and script_text:
-            return script_text, (anchor_dir.name or str(anchor_dir))
-    return None, None
+        anchor_dir, _summary, script_text, _label = _load_prior_curve_fit_state(raw_path)
+        named = named_recipe_file(raw_path)
+        if anchor_dir is None and named is None:
+            continue
+        run = anchor_dir if anchor_dir is not None else named.parent
+        try:
+            found = prior_recipe_scripts(run, single_name="fitting_script.py", named=named)
+        except Exception:  # noqa: BLE001 - an unreadable script contributes nothing
+            continue
+        if not found:
+            continue
+        name = run.name or str(run)
+        return [(text, f"{name}: {label}" if label else name) for text, label in found]
+    return []
 
 
 # Shared with the image twin — the implementation lives with the QC
@@ -5061,79 +5089,98 @@ Return JSON with:
         # for the orchestrator), never a gate that re-derives the model — a
         # re-derived model could change the feature columns. The only fallback
         # to full QC is a prior script that cannot execute at all.
+        #
+        # A prior SERIES that locked several regimes offers one recipe per
+        # regime (``_reuse_candidates``, #704). Each runs VERBATIM in a
+        # candidate folder of its own (the best-of-N layout, so the kept
+        # result's figure and fit.npy are its own), in lock order; the first
+        # the gate calls good is kept, else the first that executed (poor,
+        # flagged), and only if none executed is the first recipe given the
+        # correction ladder, as a single recipe is — the ladder's cost is
+        # paid once, not once per regime. A single recipe runs as it always
+        # did, in the spectrum's own folder.
+        candidates = [(ctx.reuse_script, ctx.reuse_source)]
+        extra = ctx.state.get("_reuse_candidates") or []
+        if extra and extra[0].get("script") == ctx.reuse_script:
+            candidates += [(c["script"], c["source"]) for c in extra[1:]]
+        if len(candidates) == 1:
+            reuse_result = self._run_reuse_candidate(ctx, ctx.reuse_script, ctx.reuse_source, None, 1, 1)
+            if reuse_result.get("success"):
+                r2 = (reuse_result.get("fit_quality", {}).get("r_squared") or 0 or 0.0)
+                verdict = "good" if self._accept_gate().is_accept(r2) else "poor"
+                return self._reuse_verdict(ctx, reuse_result, ctx.reuse_source, r2, verdict, tried=1, of=1)
+            return self._reuse_failed(ctx, reuse_result, ctx.reuse_source)
+        kept = None                       # (result, source, r2, n, subdir) of the first poor-but-executed
+        failed_last = None
+        for n, (script, source) in enumerate(candidates, 1):
+            subdir = f"{CANDIDATES_DIR_NAME}/recipe_{n:02d}"
+            reuse_result = self._run_reuse_candidate(ctx, script, source, subdir, n, len(candidates),
+                                                     verbatim=True)
+            if reuse_result.get("success"):
+                r2 = (reuse_result.get("fit_quality", {}).get("r_squared") or 0 or 0.0)
+                if self._accept_gate().is_accept(r2):
+                    self._promote_candidate_artifacts(reuse_result, ctx.item_idx, 0, subdir=subdir)
+                    return self._reuse_verdict(ctx, reuse_result, source, r2, "good", tried=n, of=len(candidates))
+                kept = kept or (reuse_result, source, r2, n, subdir)
+                if n < len(candidates):
+                    self.logger.info(f"   ↪ R² = {r2:.4f} below {self.r2_threshold:.3f}; "
+                                     "trying the next regime's recipe")
+                continue
+            failed_last = (reuse_result, source)
+            if n < len(candidates):
+                self.logger.info("   ↪ this regime's recipe could not execute verbatim; trying the next")
+        if kept is not None:
+            reuse_result, source, r2, n, subdir = kept
+            self._promote_candidate_artifacts(reuse_result, ctx.item_idx, 0, subdir=subdir)
+            return self._reuse_verdict(ctx, reuse_result, source, r2, "poor", tried=len(candidates),
+                                       of=len(candidates), kept_from=n)
+        if ctx.state.get("_strict_replay"):
+            reuse_result, source = failed_last
+            return self._reuse_failed(ctx, reuse_result, source)
+        # None executed verbatim: the first recipe gets the correction ladder,
+        # as a single recipe would, in the spectrum's own folder.
+        script, source = candidates[0]
+        self.logger.info("   ↪ no regime's recipe ran verbatim; repairing the first as a single recipe would")
+        reuse_result = self._run_reuse_candidate(ctx, script, source, None, 1, len(candidates))
+        if reuse_result.get("success"):
+            r2 = (reuse_result.get("fit_quality", {}).get("r_squared") or 0 or 0.0)
+            verdict = "good" if self._accept_gate().is_accept(r2) else "poor"
+            return self._reuse_verdict(ctx, reuse_result, source, r2, verdict, tried=len(candidates),
+                                       of=len(candidates), kept_from=1)
+        return self._reuse_failed(ctx, reuse_result, source)
+
+    def _run_reuse_candidate(self, ctx: QCItemContext, script: str, source: Optional[str],
+                             subdir: Optional[str], n: int, of: int, *, verbatim: bool = False) -> dict:
+        """One replay of ``script`` on the item: in ``subdir`` under the
+        spectrum's folder when given (several recipes never share a working
+        dir), and with no correction when ``verbatim`` (a raising script is a
+        failure, not a model call)."""
         self.logger.info(
             f"   ♻️  Reusing locked fitting script from prior run "
-            f"'{ctx.reuse_source or 'prior'}'..."
-        )
-        reuse_result = self._fit_single_spectrum(
-            state=ctx.state, curve_data=ctx.data, data_path=ctx.data_path,
+            f"'{source or 'prior'}'" + (f" ({n} of {of} regime recipes)" if of > 1 else "") + "...")
+        state = ctx.state
+        if subdir is not None or verbatim:
+            state = dict(ctx.state)
+            if subdir is not None:
+                state["_candidate_subdir"] = subdir
+            if verbatim:
+                state["_strict_replay"] = True
+        return self._fit_single_spectrum(
+            state=state, curve_data=ctx.data, data_path=ctx.data_path,
             spectrum_name=ctx.item_name, spectrum_idx=ctx.item_idx,
-            base_script=ctx.reuse_script,
+            base_script=script,
         )
-        if reuse_result.get("success"):
-            reuse_r2 = (
-                reuse_result.get("fit_quality", {}).get("r_squared") or 0
-                or 0.0
-            )
-            verdict = "good" if self._accept_gate().is_accept(reuse_r2) else "poor"
-            if verdict == "good":
-                self.logger.info(
-                    f"   ✅ Reused script fits well (R² = {reuse_r2:.4f} ≥ "
-                    f"{self.r2_threshold:.3f}) — model re-derivation skipped"
-                )
-                message = (
-                    f"Reused the locked fitting script from prior run "
-                    f"'{ctx.reuse_source or 'prior'}'; R² = {reuse_r2:.4f} "
-                    f"meets the acceptance threshold "
-                    f"{self.r2_threshold:.3f}."
-                )
-            else:
-                self.logger.warning(
-                    f"   ⚠️  Reused script fits poorly (R² = "
-                    f"{reuse_r2:.4f} < {self.r2_threshold:.3f}). Keeping "
-                    f"the result to preserve feature-schema consistency; "
-                    f"flagging it as low-confidence."
-                )
-                message = (
-                    f"Reused the locked fitting script from prior run "
-                    f"'{ctx.reuse_source or 'prior'}', but R² = "
-                    f"{reuse_r2:.4f} is below the acceptance threshold "
-                    f"{self.r2_threshold:.3f}. The new measurement may "
-                    f"not belong to this series, or measurement "
-                    f"conditions shifted. Extracted parameters are "
-                    f"schema-consistent but should be treated as "
-                    f"low-confidence."
-                )
-            reuse_result["reuse_validity"] = {
-                "reused": True,
-                "source": ctx.reuse_source,
-                "r_squared": reuse_r2,
-                "threshold": self.r2_threshold,
-                "verdict": verdict,
-                "message": message,
-            }
-            # Surgical follow-up provenance (shared with the image twin).
-            from .._qc_engine import attach_script_edit_provenance
-            attach_script_edit_provenance(ctx, reuse_result)
-            if verdict == "poor":
-                reuse_result["quality_warning"] = message
-            # Realtime drift channel (#346 step 3): the gate metric measures
-            # fit quality, not data identity — an auto-adaptive locked script
-            # fits a NEW phase with a high R² (live-proven on the dehydration
-            # series). The fingerprint distance to the anchor frame sees the
-            # data change; both signals are reported, escalation stays the
-            # caller's move.
-            if (ctx.state.get("_qc_profile") == "realtime"
-                    or ctx.state.get("_cold_start_reuse")):
-                self._attach_drift_signal(ctx, reuse_result["reuse_validity"])
-            return reuse_result
+
+    def _reuse_failed(self, ctx: QCItemContext, reuse_result: dict, source: Optional[str]) -> Optional[dict]:
+        """The replay could not execute: on the fast clock the failure is the
+        item's result; otherwise ``None`` hands the item to full re-derivation."""
         if ctx.state.get("_strict_replay"):
             # No re-derivation on the fast clock: return the failure as the
             # item's result (a non-None return ends the engine's reuse path).
             reuse_result.setdefault(
                 "error", "the locked script could not execute on this data")
             reuse_result["reuse_validity"] = {
-                "reused": True, "source": ctx.reuse_source, "verdict": "failed",
+                "reused": True, "source": source, "verdict": "failed",
                 "message": "Strict replay: the locked script failed on this data; "
                            "no in-frame repair or re-derivation."}
             return reuse_result
@@ -5144,6 +5191,65 @@ Return JSON with:
             f"from the prior run."
         )
         return None
+
+    def _reuse_verdict(self, ctx: QCItemContext, reuse_result: dict, source: Optional[str],
+                       reuse_r2: float, verdict: str, *, tried: int, of: int,
+                       kept_from: Optional[int] = None) -> dict:
+        """Attach the reuse verdict (``reuse_validity``) to a replayed result."""
+        regimes = (f" ({of} regime recipes tried; this is recipe {kept_from or tried})" if of > 1 else "")
+        if verdict == "good":
+            self.logger.info(
+                f"   ✅ Reused script fits well (R² = {reuse_r2:.4f} ≥ "
+                f"{self.r2_threshold:.3f}) — model re-derivation skipped"
+            )
+            message = (
+                f"Reused the locked fitting script from prior run "
+                f"'{source or 'prior'}'; R² = {reuse_r2:.4f} "
+                f"meets the acceptance threshold "
+                f"{self.r2_threshold:.3f}.{regimes}"
+            )
+        else:
+            self.logger.warning(
+                f"   ⚠️  Reused script fits poorly (R² = "
+                f"{reuse_r2:.4f} < {self.r2_threshold:.3f}). Keeping "
+                f"the result to preserve feature-schema consistency; "
+                f"flagging it as low-confidence."
+            )
+            message = (
+                f"Reused the locked fitting script from prior run "
+                f"'{source or 'prior'}', but R² = "
+                f"{reuse_r2:.4f} is below the acceptance threshold "
+                f"{self.r2_threshold:.3f}. The new measurement may "
+                f"not belong to this series, or measurement "
+                f"conditions shifted. Extracted parameters are "
+                f"schema-consistent but should be treated as "
+                f"low-confidence.{regimes}"
+            )
+        reuse_result["reuse_validity"] = {
+            "reused": True,
+            "source": source,
+            "r_squared": reuse_r2,
+            "threshold": self.r2_threshold,
+            "verdict": verdict,
+            "message": message,
+        }
+        if of > 1:
+            reuse_result["reuse_validity"]["recipes_tried"] = tried
+        # Surgical follow-up provenance (shared with the image twin).
+        from .._qc_engine import attach_script_edit_provenance
+        attach_script_edit_provenance(ctx, reuse_result)
+        if verdict == "poor":
+            reuse_result["quality_warning"] = message
+        # Realtime drift channel (#346 step 3): the gate metric measures
+        # fit quality, not data identity — an auto-adaptive locked script
+        # fits a NEW phase with a high R² (live-proven on the dehydration
+        # series). The fingerprint distance to the anchor frame sees the
+        # data change; both signals are reported, escalation stays the
+        # caller's move.
+        if (ctx.state.get("_qc_profile") == "realtime"
+                or ctx.state.get("_cold_start_reuse")):
+            self._attach_drift_signal(ctx, reuse_result["reuse_validity"])
+        return reuse_result
 
     # Below this similarity to the anchor frame's fingerprint, a realtime
     # frame is flagged drift="suspected". Calibrated on the in-situ
@@ -6422,17 +6528,18 @@ Return JSON with:
                     pass
 
     def _promote_candidate_artifacts(
-        self, result: dict, spectrum_idx: int, attempt: int
+        self, result: dict, spectrum_idx: int, attempt: int, *, subdir: Optional[str] = None
     ) -> None:
         """Copy the winning attempt's files up into the canonical per-spectrum dir.
 
         Everything downstream (feature tables, prior_analysis_paths, the
         orchestrator's viz search) expects artifacts directly under
         ``spectrum_NNNN/``; loser attempts stay under ``_candidates/`` for
-        audit.
+        audit. ``subdir`` names the candidate folder when it is not a
+        best-of-N attempt (a regime recipe's replay, ``_candidates/recipe_NN``).
         """
         item_dir = self.output_dir / f"spectrum_{spectrum_idx:04d}"
-        cand_dir = item_dir / CANDIDATES_DIR_NAME / f"cand_{attempt:02d}"
+        cand_dir = item_dir / (subdir if subdir else f"{CANDIDATES_DIR_NAME}/cand_{attempt:02d}")
         if not cand_dir.is_dir():
             return
         try:
@@ -6942,7 +7049,13 @@ Return JSON with:
         # deepen a prior result (re-running the script that produced it only
         # reproduces it).
         if state.get("reuse_locked_script"):
-            reuse_script, reuse_source = _first_prior_curve_fit_script(state)
+            recipes = _prior_curve_fit_recipes(state)
+            reuse_script, reuse_source = recipes[0] if recipes else (None, None)
+            # Several regimes locked by the prior series: every recipe is a
+            # candidate, tried in turn by qc_try_reuse — unless script_edits
+            # were validated against the first, which is then the only one.
+            state["_reuse_candidates"] = ([{"script": t, "source": src} for t, src in recipes]
+                                          if len(recipes) > 1 and not state.get("script_edits") else [])
             reuse_script, reuse_source = _apply_reuse_script_edits(
                 state, reuse_script, reuse_source, self.logger)
         else:

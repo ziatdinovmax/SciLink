@@ -61,7 +61,7 @@ def test_examine_data_names_an_analysis_output_dir_and_its_scripts(tmp_path):
     assert out["analysis_output_dir"] is True and out["analysis_results"] == "analysis_results.json"
     assert out["saved_scripts"] == ["scripts/spectrum_0000.py", "scripts/spectrum_0001.py", "scripts/spectrum_0002.py"]
     assert "prior analysis OUTPUT directory" in out["prior_run_hint"]
-    assert "reuse_locked_script=true" in out["prior_run_hint"] and "any one is the reusable fit script" in out["prior_run_hint"]
+    assert "reuse_locked_script=true" in out["prior_run_hint"] and "replays the locked recipe" in out["prior_run_hint"]
 
 
 def test_examine_data_leaves_a_plain_data_dir_alone(tmp_path):
@@ -83,6 +83,6 @@ def test_curve_manifest_advertises_the_locked_scripts(tmp_path):
     rec = a._fitting_scripts_record(saved, state)
     assert rec["files"] == ["T_300K.py", "T_310K.py", "T_320K.py"] and rec["representative"] == "T_300K.py"
     assert rec["dir"] == str(tmp_path / "scripts")
-    assert "3 copies of the same script" in rec["note"] and "reuse_locked_script=true" in rec["note"]
+    assert "one per fitted spectrum (3)" in rec["note"] and "replays the locked recipe" in rec["note"] and "reuse_locked_script=true" in rec["note"]
     single = a._fitting_scripts_record(["/x/scripts/fitting_script.py"], {"is_single_spectrum": True})
     assert single["note"].startswith("The fitting script that produced this result.")

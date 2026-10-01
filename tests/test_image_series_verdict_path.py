@@ -240,3 +240,48 @@ def test_image_parity_of_stamped_and_legacy_verdicts(tmp_path, monkeypatch):
             differ[name] = (st, lg)
     assert set(differ) <= allowed, differ
     assert differ["failed_follower_refit_salvaged"][0]["verified"] is False      # the stricter answer wins
+
+
+def test_an_image_reuse_replays_the_locked_recipe_or_the_file_named(tmp_path, monkeypatch):
+    """#704/#705 on the image path: a reuse of a two-regime series replays the
+    FIRST regime's locked recipe from the run's own analysis_results.json (not
+    the alphabetically first unit script, which here is the same file but is
+    not in general); a `.py` named directly is the recipe, inside the run or
+    on its own (the board's copy)."""
+    import json
+    from scilink.agents.exp_agents.controllers.image_analysis_controllers import _first_prior_image_script
+    names6 = [f"image_{i:04d}" for i in range(6)]
+    state, _ = run_series(tmp_path, monkeypatch, names=names6, regimes=[[0, 1, 2], [3, 4, 5]],
+                          anchors={"image_0000": OK, "image_0003": {**OK, "script": "M3"}},
+                          follower_score={n: 0.9 for n in names6})
+    results = compile_results(tmp_path, state)
+    assert [r["unit"] for r in results["locked_recipes"].values()] == ["image_0000", "image_0003"]
+    (tmp_path / "analysis_results.json").write_text(json.dumps({"status": "success", "locked_recipes": results["locked_recipes"]}))
+    assert _first_prior_image_script({"prior_analysis_paths": [str(tmp_path)]}) == (
+        "M1", f"{tmp_path.name}: image_0000.py (the series' locked recipe, regime R1, 1 of 2)")
+    # the anchor's script changed on disk after the lock (a refit): the recipe is still what was locked
+    (tmp_path / "scripts" / "image_0000.py").write_text("M1-refit")
+    assert _first_prior_image_script({"prior_analysis_paths": [str(tmp_path)]}) == (
+        "M1", f"{tmp_path.name}: image_0000.py (the series' locked recipe, regime R1, 1 of 2, the anchor refit since)")
+    # the live loop arms on what the run replays, never on a bare file
+    from scilink.live.modality import ImageModality
+    assert ImageModality().anchor_script(str(tmp_path)) == ("M1", tmp_path)
+    assert ImageModality().anchor_script(str(tmp_path / "scripts" / "image_0003.py")) == ("M1", tmp_path)
+    # a named file wins: the regime-2 script inside the run, or a copy with no run folder at all
+    assert _first_prior_image_script({"prior_analysis_paths": [str(tmp_path / "scripts" / "image_0003.py")]}) == (
+        "M3", f"{tmp_path.name}: image_0003.py (the script file named)")
+    copy = tmp_path / "board" / "recipes" / "image_0003.py"
+    copy.parent.mkdir(parents=True)
+    copy.write_text("M3")
+    assert _first_prior_image_script({"prior_analysis_paths": [str(copy)]}) == ("M3", "recipes: image_0003.py (the script file named)")
+    assert ImageModality().anchor_script(str(copy)) == (None, None)
+    # a run from before the record: the first unit script, as before
+    (tmp_path / "analysis_results.json").write_text(json.dumps({"status": "success"}))
+    assert _first_prior_image_script({"prior_analysis_paths": [str(tmp_path)]}) == (
+        "M1-refit", f"{tmp_path.name}: image_0000.py (representative of the series)")
+    # a single-image run: its own script, the label unchanged
+    single = tmp_path / "single"
+    (single / "scripts").mkdir(parents=True)
+    (single / "analysis_results.json").write_text("{}")
+    (single / "scripts" / "analysis_script.py").write_text("S")
+    assert _first_prior_image_script({"prior_analysis_paths": [str(single)]}) == ("S", "single")

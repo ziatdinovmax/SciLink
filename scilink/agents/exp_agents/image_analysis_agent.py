@@ -420,6 +420,20 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     if _data and isinstance(_data.get("extracted_features"), dict):
                         replay_reference = _data["extracted_features"]
                         break
+            if replay_reference is None:
+                # An image replay has no R²: its gate is what the script reported
+                # on its REFERENCE. A script file with no run behind it (the swarm
+                # board's copy, say) has none, and the gate would drop to "some
+                # finite number reported" — not a verdict. Replay it as an
+                # ordinary reuse (reuse_locked_script without strict_replay).
+                return {"status": "error",
+                        "error": {"error": "strict_replay needs the prior RUN, not a script file alone",
+                                  "details": ("The deterministic replay gate compares what the script "
+                                              "reports with its reference run's extracted_features; "
+                                              "none of prior_analysis_paths carries a run with them. "
+                                              "Pass the run folder, or pass replay_reference, or use "
+                                              "reuse_locked_script=True without strict_replay.")},
+                        "output_directory": str(self.output_dir)}
 
         # Parse input
         data_path, data_paths, data_array, error = self._parse_data_input(data)

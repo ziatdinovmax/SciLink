@@ -1445,8 +1445,10 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "representative": names[0],
             "note": (
                 ("The fitting script that produced this result." if is_single else
-                 f"The locked series model, saved once per fitted spectrum ({len(names)} "
-                 "copies of the same script); any one is the reusable fit script.")
+                 f"The series' scripts, one per fitted spectrum ({len(names)}): the locked "
+                 "recipe replayed on the followers, and a refit's own script where a "
+                 "spectrum was refit. A reuse of this run replays the locked recipe "
+                 "(recorded in analysis_results.json as locked_recipes), not a refit's.")
                 + " To re-fit with this exact model, pass this output directory as "
                   "prior_analysis_paths with reuse_locked_script=true; use script_edits "
                   "for a surgical change (a bound, a window) instead of re-deriving."

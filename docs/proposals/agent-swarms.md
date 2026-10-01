@@ -1348,10 +1348,38 @@ references are to `main` at bed2f7f8.
 - *Subjects are strings matched case-insensitively.* Two spellings of one
   sample are two subjects; the meta's prompt asks for one spelling per item.
   A registry of subjects is stage 5's.
-- *A recipe record is a board-owned copy.* Nothing today replays it: a
-  worker takes a prior run folder, not a script file (stage 3 needs the
-  latter, filed), and which script a reuse of a refit series should replay
-  is undecided (filed).
+- *A recipe record is a board-owned copy.* Resolved before stage 3 (#704,
+  #705, one PR): `prior_analysis_paths` takes a script FILE (a `.py`, or a
+  `dynamic_analysis_records.json` for a cube) as the recipe — the board's
+  copy under `swarm/recipes/` replays through the same gate as a run
+  folder — and a reuse of a SERIES run replays the series' locked recipes
+  (from `locked_recipes` in its `analysis_results.json`: the scripts its
+  table rests on), not a later refit of its anchor; the agents' reuse pick
+  and the board's recipe agree, and `reuse_validity.source` says which
+  script was picked and why (`_verification_record.prior_recipe_scripts`,
+  shared by the curve and image pickers; the hyperspectral agent already
+  took the records file). A script file is a recipe and nothing more: it is
+  not a run, so the loader returns no `anchor_dir` for it, and the realtime
+  profile (locked config, drift fingerprint) and the live loop's anchor
+  refuse it as before; a file inside a run names that run for the loop,
+  which arms on the script the run replays. A curve reuse of a series that
+  locked several regimes replays the recipes in lock order and keeps the
+  first the R² gate calls good (`qc_try_reuse`), so a measurement above a
+  transition is not held to the model locked below it; an image reuse's
+  verdict is one vision review, not a deterministic gate, so it replays the
+  first regime's recipe and its label says so. An image strict replay needs
+  the run (its reference features), and refuses a bare file. The regime
+  recipes each run VERBATIM in a candidate folder of their own
+  (`_candidates/recipe_NN`, the best-of-N layout) and the kept one is
+  promoted, so the figure and `fit.npy` on disk are the kept result's
+  whichever ran last; the correction ladder is paid once, on the first
+  recipe, only when none executed verbatim; on the fast clock a raising
+  recipe moves on to the next regime as a poor one does. The live loop
+  locks ONE recipe, so `CurveModality.anchor_script` refuses a series
+  anchor that locked several regimes with a message saying what to point
+  it at. An image series used directly as a live anchor whose first image
+  has empty `extracted_features` is refused too (a replay gate with no
+  reference is not a verdict).
 - *Persistent-specialist delegations read nothing.* `delegate_to_*` posts but
   has no `reads_board`; the meta threads findings into `context` by hand
   (`get_board`), which is the design's turn-granularity path.
@@ -1439,9 +1467,10 @@ because they would have saved five rounds there:
 **Dependencies, each its own small PR or decision before the stage:**
 - #705 — an analysis worker takes a script FILE as its recipe. Without it a
   "replay the verified recipe on the new dataset" subscription cannot name
-  the board's copy under `swarm/recipes/`.
+  the board's copy under `swarm/recipes/`. *Done (see "After stage 2").*
 - #704 — which script a reuse of a refit series replays. A subscription
-  makes that choice with nobody looking.
+  makes that choice with nobody looking. *Decided: the series' locked
+  recipe, the script its table rests on (see "After stage 2").*
 - Provisional findings do not propagate by default (open question, kept).
 
 **Step 1: the subscription, declared and matched without a model.**
