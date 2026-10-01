@@ -76,10 +76,14 @@ class BoardView:
     def __len__(self) -> int:
         return len(self.records)
 
-    def newest(self, n: int) -> "BoardView":
+    def newest(self, n: int, *, pin: Tuple[str, ...] = ()) -> "BoardView":
         """The last ``n`` records of this view (what a reader is shown, so
-        the ids it stamps as read are the ids it saw)."""
-        recs = self.records[-max(0, int(n)):] if n else ()
+        the ids it stamps as read are the ids it saw). Records of a ``pin``
+        kind are kept whatever the cut and come first, so a warning is never
+        pushed out by newer findings (a hazard, for a swarm reader)."""
+        pinned = tuple(r for r in self.records if r["kind"] in pin)
+        rest = tuple(r for r in self.records if r["kind"] not in pin)
+        recs = pinned + (rest[-max(0, int(n)):] if n else ())
         return BoardView(records=tuple(recs), ids=tuple(r["finding_id"] for r in recs),
                          version=self.version, subject=self.subject, kinds=self.kinds,
                          include_provisional=self.include_provisional)
@@ -143,6 +147,7 @@ class Board:
         self._lock = threading.RLock()
         self._records: List[Dict[str, Any]] = []
         self._by_id: Dict[str, Dict[str, Any]] = {}
+        self._fold_cache: Optional[Tuple[int, List[Dict[str, Any]]]] = None
         self._load()
 
     # ------------------------------------------------------------------ load
@@ -247,10 +252,16 @@ class Board:
             self._by_id[rec["finding_id"]] = rec
             return json.loads(json.dumps(rec))
 
-    def retract(self, finding_id: str, author: Dict[str, Any], reason: str = "") -> Dict[str, Any]:
+    def retract(self, finding_id: str, author: Dict[str, Any], reason: str = "",
+                decided_by: Optional[str] = None) -> Dict[str, Any]:
+        """Post a retraction of ``finding_id``. ``decided_by`` records WHO made
+        the decision ("human" at an attended gate), so nobody but a human
+        undoes a human's withdrawal."""
+        payload: Dict[str, Any] = {"reason": reason} if reason else {}
+        if decided_by:
+            payload["decided_by"] = decided_by
         return self.post(kind="retraction", author=author, target=finding_id,
-                         payload={"reason": reason} if reason else {},
-                         subject=self.get(finding_id).get("subject"))
+                         payload=payload, subject=self.get(finding_id).get("subject"))
 
     # ------------------------------------------------------------------ read
     def get(self, finding_id: str) -> Dict[str, Any]:
@@ -264,16 +275,42 @@ class Board:
 
     def fold(self) -> List[Dict[str, Any]]:
         """The log with each record's effective status: a retraction's
-        target is ``retracted``, a superseded record ``superseded``. Records
-        that were retracted or superseded stay in the list (with their new
-        status) so a history reader sees them; ``snapshot`` filters.
+        target is ``retracted``, a superseded record ``superseded``, a record
+        that rests on either ``tainted``. Records that were withdrawn stay in
+        the list (with their new status) so a history reader sees them;
+        ``snapshot`` filters.
 
         An unchecked record cannot hide a verified one: a supersede or a
         retraction takes effect when its author is the original's author,
         when it is itself ``verified``, or when the coordinator posted it
         (``author.mode == "coordinator"``). Otherwise it is on the record
-        with ``effective: false`` and changes nothing."""
-        recs = self.records()
+        with ``effective: false`` and changes nothing. A retraction whose
+        own target is a retraction UNDOES it (under the same rule): the
+        board is append-only, so a wrong withdrawal is corrected by a later
+        record, never by an edit.
+
+        Pure over the log, so the result is memoised per board version."""
+        with self._lock:
+            version = len(self._records)
+            cached = self._fold_cache
+            if cached is not None and cached[0] == version:
+                return json.loads(json.dumps(cached[1]))
+            recs = self._fold_records(json.loads(json.dumps(self._records)))
+        with self._lock:
+            if len(self._records) == version:
+                self._fold_cache = (version, json.loads(json.dumps(recs)))
+        return recs
+
+    def preview(self, extra: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """The fold as it WOULD read with ``extra`` records appended — what an
+        act (a retraction) would do, decided before anything is written."""
+        with self._lock:
+            recs = json.loads(json.dumps(self._records + list(extra)))
+        return self._fold_records(recs)
+
+    @staticmethod
+    def _fold_records(recs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """The pure fold over a list of records (copies), in log order."""
         by_id = {r["finding_id"]: r for r in recs}
 
         def may_act(actor: Dict[str, Any], target: Dict[str, Any]) -> bool:
@@ -283,25 +320,92 @@ class Board:
                         and a.get("worker") and a.get("worker") == t.get("worker")))
             return bool(same or actor.get("status") == "verified" or a.get("mode") == "coordinator")
 
+        # Which retractions stand is decided in REVERSE log order: a
+        # retraction stands unless a later effective retraction undoes it
+        # (a retraction of a retraction), and that later one may itself have
+        # been undone later still — so the newest is settled first. Walking
+        # forward would let an undone undo take effect.
+        undone: Set[str] = set()
+        for r in reversed(recs):
+            if r.get("kind") != "retraction":
+                continue
+            target = by_id.get(r.get("target"))
+            if target is None:
+                continue
+            r["effective"] = may_act(r, target) and r["finding_id"] not in undone
+            if r["effective"] and target.get("kind") == "retraction":
+                undone.add(target["finding_id"])
         for r in recs:
             if r.get("kind") == "retraction" and r.get("target") in by_id:
-                target = by_id[r["target"]]
-                r["effective"] = may_act(r, target)
-                if r["effective"]:
-                    target["status"] = "retracted"
+                if r.get("effective"):
+                    by_id[r["target"]]["status"] = "retracted"
             elif r.get("supersedes") in by_id:
                 old = by_id[r["supersedes"]]
                 r["effective"] = may_act(r, old)
                 if r["effective"] and old["status"] != "retracted":
                     old["status"] = "superseded"
+        # Taint (robustness item 4): a record that rests on a withdrawn one —
+        # it read it, or read something that did, transitively — is
+        # ``tainted``: out of every default read, on the record for a history
+        # reader. Derived from the log, so a record posted AFTER the
+        # retraction by a worker that had read the finding before is caught
+        # too. A correction (a superseding record) rests on what it corrects
+        # by design and is not tainted by it, even when it read it. The
+        # closures are built in one pass over the log (reads name earlier
+        # records), so the fold stays linear in what the records read.
+        withdrawn = {r["finding_id"] for r in recs if r["status"] in ("retracted", "superseded")}
+        if withdrawn:
+            closure: Dict[str, Set[str]] = {}
+            for r in recs:
+                rests_on: Set[str] = set()
+                for fid in r.get("reads") or []:
+                    rests_on.add(fid)
+                    rests_on |= closure.get(fid, set())
+                closure[r["finding_id"]] = rests_on
+                if r["status"] in ("retracted", "superseded", "tainted") or r.get("kind") == "retraction":
+                    continue
+                bad = (rests_on & withdrawn) - ({r["supersedes"]} if r.get("supersedes") else set())
+                if bad:
+                    r["status"] = "tainted"
+                    r["tainted_by"] = sorted(bad)
         return recs
 
+    @staticmethod
+    def _closure(record: Dict[str, Any], by_id: Dict[str, Dict[str, Any]], *,
+                 follow_supersedes: bool) -> Set[str]:
+        seen: Set[str] = set()
+        stack = list(record.get("reads") or [])
+        while stack:
+            fid = stack.pop()
+            if fid in seen:
+                continue
+            seen.add(fid)
+            rec = by_id.get(fid)
+            if rec is None:
+                continue
+            stack.extend(rec.get("reads") or [])
+            if follow_supersedes and rec.get("supersedes"):
+                stack.append(rec["supersedes"])
+        return seen
+
+    def dependents(self, finding_id: str) -> List[str]:
+        """The records that rest on this one (read it, or read something that
+        did), in order — what a retraction of it taints."""
+        with self._lock:
+            by_id = {r["finding_id"]: r for r in self._records}
+            return [r["finding_id"] for r in self._records
+                    if finding_id in self._closure(r, by_id, follow_supersedes=False)]
+
     def snapshot(self, subject: Optional[str] = None, kind: Any = None, *,
-                 include_provisional: bool = False, check: bool = False) -> BoardView:
+                 include_provisional: bool = False, check: bool = False,
+                 with_hazards: bool = False) -> BoardView:
         """The current view for a reader: verified records (plus provisional
         ones on request), of the asked kinds, on the asked subject. A check
         is refused, structurally: ``check=True`` raises before anything is
-        read, whatever the prompt said."""
+        read, whatever the prompt said. With ``with_hazards`` every standing
+        hazard on the subject is in the view whatever ``kind`` asked and
+        whether or not it passed a gate: a warning is not narrowed away by a
+        reader's filter (robustness item 4)."""
         if check:
             raise BoardReadRefused("this work item is a check; checks run board-blind")
         kinds = tuple(READ_KINDS if kind is None else ([kind] if isinstance(kind, str) else kind))
@@ -314,7 +418,8 @@ class Board:
         with self._lock:
             version = len(self._records)
             for r in self.fold():
-                if r["kind"] not in kinds or r["status"] not in allowed:
+                hazard = with_hazards and r["kind"] == "hazard" and r["status"] in ("verified", "provisional")
+                if not hazard and (r["kind"] not in kinds or r["status"] not in allowed):
                     continue
                 if want_subject and _norm_subject(r.get("subject")) != want_subject:
                     continue
@@ -659,12 +764,38 @@ def records_for(entry: Dict[str, Any], result: Dict[str, Any]) -> List[Dict[str,
     if entry.get("status") != "success":
         return []
     if mode == "analysis":
-        return _analysis_records(entry, result)
-    if mode == "planning":
-        return _planning_records(entry, result)
-    if mode == "simulation":
-        return _simulation_records(entry, result)
-    return []
+        out = _analysis_records(entry, result)
+    elif mode == "planning":
+        out = _planning_records(entry, result)
+    elif mode == "simulation":
+        out = _simulation_records(entry, result)
+    else:
+        return []
+    return out + _task_requests(result)
+
+
+#: How many of a worker's suggestions are kept as requests, and how long.
+TASK_REQUESTS_MAX = 4
+_TASK_REQUEST_CHARS = 400
+
+
+def _task_requests(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """A worker's ``suggested_followups`` as ``task_request`` records: what
+    it asked for, provisional, never read by default (``READ_KINDS``) and
+    never an item on its own say-so — the coordinator decides, through a
+    subscription on the kind (stage 3, "workers ask, the coordinator
+    decides")."""
+    out = []
+    raw = result.get("suggested_followups")
+    if not isinstance(raw, (list, tuple)):
+        return out                   # a string would post one record per character
+    for text in [t for t in raw if isinstance(t, str)][:TASK_REQUESTS_MAX]:
+        text = " ".join(text.split())
+        if text:
+            out.append({"kind": "task_request", "payload": {"text": text[:_TASK_REQUEST_CHARS]},
+                        "status": "provisional",
+                        "evidence": {"gate": "a worker's suggestion (no gate; an item only through a subscription)"}})
+    return out
 
 
 RECIPE_DIRNAME_MAX = 60      # a label or an analysis id, clipped to fit any file system
@@ -740,3 +871,193 @@ def post_delegation(board: Board, entry: Dict[str, Any], result: Dict[str, Any])
             continue
         ids.append(rec["finding_id"])
     return ids
+
+
+# --------------------------------------------------------------- retraction
+COORDINATOR = {"worker": "coordinator", "mode": "coordinator"}
+
+
+def _human_approved(record: Dict[str, Any]) -> bool:
+    """Was this record's status a HUMAN's decision (an approved plan's claim)?"""
+    return str((record.get("evidence") or {}).get("gate") or "").startswith("a human approved")
+
+
+def _act_effects(board: "Board", finding_id: str, hypothetical: Dict[str, Any]) -> Dict[str, Any]:
+    """What retracting ``finding_id`` WOULD do, from the fold as it would read
+    with the retraction appended (``Board.preview``): the findings withdrawn,
+    the findings newly tainted, the findings that come back, and the
+    retractions whose standing flips. One answer for the gate, the refusals
+    and the report, whatever level of undo the act is."""
+    before = {r["finding_id"]: r for r in board.fold()}
+    after = {r["finding_id"]: r for r in board.preview([hypothetical]) if r["finding_id"] != hypothetical["finding_id"]}
+    findings = [fid for fid, r in after.items() if r.get("kind") != "retraction"]
+    withdrawn = [f for f in findings if before[f]["status"] != "retracted" and after[f]["status"] == "retracted"]
+    tainted = [f for f in findings if before[f]["status"] != "tainted" and after[f]["status"] == "tainted"]
+    restored = [f for f in findings if before[f]["status"] in ("retracted", "tainted")
+                and after[f]["status"] not in ("retracted", "tainted")]
+    flipped = [after[fid] for fid, r in after.items() if r.get("kind") == "retraction"
+               and bool(before[fid].get("effective")) != bool(r.get("effective"))]
+    return {"before": before, "after": after, "withdrawn": withdrawn, "tainted": tainted,
+            "restored": restored, "flipped": flipped}
+
+
+def retract_and_report(orch, finding_id: str, reason: str) -> Dict[str, Any]:
+    """Withdraw a finding as the coordinator and say what it takes with it.
+
+    The act is decided from its EFFECT, computed before anything is written
+    (``_act_effects``): which findings it withdraws, which it taints, which
+    it brings back. Retracting a retraction undoes it — and retracting an
+    undo withdraws the finding again — and the gate, the refusals and the
+    report all read the effect, not the record named.
+
+    Who may act: with a person at the gate (the meta attended), the person
+    — the effect is shown and Enter KEEPS things as they are; with nobody
+    at the gate the model may withdraw the agents' own findings but never a
+    human's decision: not a human-approved finding, not one a human-approved
+    record rests on (it would be tainted), and not a retraction a person
+    made (`decided_by`, in either direction; a retraction with no stamp is
+    treated as a person's).
+
+    The report names the newly tainted records, the delegations that
+    produced them or read what was withdrawn (from the records' own authors
+    and the entries' own reads), and ``rerun_items`` ready for ``run_swarm``
+    with the inputs the originals had; a delegation CAUSED by a withdrawn or
+    tainted finding is ``not_rerun`` — its task quotes it, so doing it again
+    is a new decision. Nothing is re-run here."""
+    from ...hitl import request_human_feedback, make_subject, subject_block
+    board = orch.board
+    target = board.get(finding_id)                       # KeyError: unknown
+    undo = target.get("kind") == "retraction"
+    reason = " ".join(str(reason or "").split())
+    if not reason:
+        raise ValueError("a retraction states its reason")
+    attended = bool(getattr(orch, "_enable_human_feedback", False))
+    hypothetical = {"finding_id": "pending", "author": dict(COORDINATOR, delegation_index=None), "subject": target.get("subject"),
+                    "kind": "retraction", "target": finding_id, "status": "provisional", "reads": [],
+                    "payload": {"reason": reason, "decided_by": "human" if attended else "coordinator"},
+                    "evidence": {}, "board_version": len(board)}
+    fx = _act_effects(board, finding_id, hypothetical)
+    if fx["before"][finding_id]["status"] == "retracted":
+        raise ValueError(f"{finding_id} is already retracted" + (" (undone)" if undo else ""))
+    if not (fx["withdrawn"] or fx["tainted"] or fx["restored"] or fx["flipped"]):
+        raise ValueError(f"retracting {finding_id} would change nothing (a retraction that does not take effect)")
+
+    def describe(fid):
+        r = board.get(fid)
+        p = r.get("payload") or {}
+        what = p.get("text") or p.get("issue") or p.get("path") or p.get("name") or json.dumps(p)[:200]
+        return f"{r['kind']} {fid} on '{r.get('subject')}' by {(r.get('author') or {}).get('worker')}: \u201c{_clip(what, 200)}\u201d"
+
+    def listing(ids, n=6):
+        return "; ".join(describe(f) for f in ids[:n]) + (f" … ({len(ids)} in all)" if len(ids) > n else "")
+    if attended:
+        lines = [f"reason given: {reason}"]
+        if undo:
+            lines.insert(0, f"retract retraction {finding_id} (\u201c{_clip((target.get('payload') or {}).get('reason'), 200)}\u201d"
+                            + (", a person's decision" if (target.get("payload") or {}).get("decided_by") != "coordinator" else "") + ")")
+        if fx["withdrawn"]:
+            lines.append(f"WITHDRAWS {len(fx['withdrawn'])}: " + listing(fx["withdrawn"]))
+        if fx["tainted"]:
+            lines.append(f"TAINTS {len(fx['tainted'])} that rest on it: " + listing(fx["tainted"]))
+        if fx["restored"]:
+            lines.append(f"BRINGS BACK {len(fx['restored'])}: " + listing(fx["restored"]))
+        title = ("Undo this retraction?" if (undo and fx["restored"] and not fx["withdrawn"])
+                 else "Withdraw this finding?")
+        subject = make_subject(title, [subject_block("text", label="🗑 Effect", markdown="\n".join(lines))])
+        try:
+            ans = request_human_feedback(
+                "\n🤔 Do it? Enter keeps things as they are. [y/N]: ", kind="confirm", options=["y", "n"],
+                default="n", origin={"stage": "retract_finding", "finding_id": finding_id}, subject=subject,
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        if ans not in ("y", "yes"):
+            return {"status": "kept", "retracted": None, "finding_id": finding_id,
+                    "message": "the user kept things as they are; nothing changed on the board"}
+    else:
+        # Nobody at the gate: the model may withdraw the agents' own findings,
+        # never a human's decision — judged by the act's EFFECT, so an undo of
+        # an undo (which withdraws again) is held to the same rule.
+        refusal = None
+        human_hit = [f for f in fx["withdrawn"] + fx["tainted"] if _human_approved(board.get(f))]
+        human_ret = [r["finding_id"] for r in fx["flipped"]
+                     if (r.get("payload") or {}).get("decided_by") != "coordinator"]
+        if human_hit:
+            refusal = (f"a human-approved finding would be withdrawn or tainted ({', '.join(human_hit[:4])})")
+        elif human_ret:
+            refusal = f"it would change the standing of a person's retraction ({', '.join(human_ret[:4])})"
+        if refusal:
+            return {"status": "refused", "retracted": None, "finding_id": finding_id,
+                    "message": (f"{refusal}; nobody is at the gate to reopen a human's decision. Tell the "
+                                "user; it is theirs to make in an attended session.")}
+    rec = board.retract(finding_id, author=COORDINATOR, reason=reason,
+                        decided_by="human" if attended else "coordinator")
+    affected = set(fx["withdrawn"]) | set(fx["tainted"])
+    ledger = {e.get("index"): e for e in getattr(orch, "_delegation_ledger", [])}
+    sources: Dict[int, Dict[str, Any]] = {}
+
+    def source(idx, e, worker=None, mode=None, subject=None, via="posted"):
+        caused_by = set((e or {}).get("caused_by") or [])
+        sources[idx] = {"delegation_index": idx, "label": (e or {}).get("label") or worker,
+                        "mode": (e or {}).get("mode") or mode, "subject": (e or {}).get("subject") or subject,
+                        "task": (e or {}).get("task"), "available": e is not None, "via": via,
+                        "caused_by_withdrawn": sorted(caused_by & affected)}
+    for f in fx["tainted"]:
+        r = board.get(f)
+        idx = (r.get("author") or {}).get("delegation_index")
+        if idx is None or idx in sources:
+            continue
+        source(idx, ledger.get(idx), worker=r["author"].get("worker"), mode=r["author"].get("mode"), subject=r.get("subject"))
+    # A delegation that READ what is withdrawn and posted nothing the board
+    # could taint (a memo, a plan that made no claim) still worked from it:
+    # its reads are on its entry, stamped when it read, so it is offered too.
+    for idx, e in ledger.items():
+        if idx in sources or idx is None or e.get("status") != "success":
+            continue
+        if set(e.get("reads") or []) & affected:
+            source(idx, e, via="read")
+    rerun_items, not_rerun = [], []
+    for src in sources.values():
+        if not src["available"] or src["mode"] not in ("analysis", "planning", "simulation"):
+            continue
+        if src["caused_by_withdrawn"]:
+            not_rerun.append({"delegation_index": src["delegation_index"], "label": src["label"],
+                              "reason": ("a reaction caused by a withdrawn finding "
+                                         f"({', '.join(src['caused_by_withdrawn'])}): its task quotes it, so "
+                                         "doing it again is a new decision, not a re-run")})
+            continue
+        e = ledger[src["delegation_index"]]
+        item = {"mode": src["mode"], "label": f"rerun: {src['label']}", "task": src["task"], "subject": src["subject"],
+                "context": {**(e.get("context") if isinstance(e.get("context"), dict) else {}),
+                            "reruns_delegation": src["delegation_index"],
+                            "after_retraction_of": finding_id, "retraction_reason": reason}}
+        if e.get("caused_by"):
+            # a reaction re-run still rests on its cause (its task quotes it)
+            item["rests_on"] = list(e["caused_by"])
+        for key in ("data_path", "reads_board", "check"):
+            # ``reads_board: {}`` is the plain opt-in and falsy — test for
+            # presence, not truth; a False check or an absent spec is the default.
+            if e.get(key) is not None and e.get(key) is not False:
+                item[key] = e[key]
+        rerun_items.append(item)
+    effect = (("withdraws " + ", ".join(fx["withdrawn"]) if fx["withdrawn"] else "")
+              + (f"; taints {len(fx['tainted'])}" if fx["tainted"] else "")
+              + (("; " if fx["withdrawn"] or fx["tainted"] else "") + "brings back " + ", ".join(fx["restored"]) if fx["restored"] else ""))
+    return {
+        "status": "success", "retraction": rec["finding_id"],
+        "retracted": fx["withdrawn"][0] if (not undo and fx["withdrawn"]) else None,
+        "undone": finding_id if undo else None,
+        "withdrawn": fx["withdrawn"], "restored": fx["restored"],
+        "kind": target.get("kind"), "subject": target.get("subject"), "reason": reason, "effect": effect,
+        "tainted": [{"finding_id": f, "kind": board.get(f)["kind"], "subject": board.get(f).get("subject"),
+                     "author": board.get(f).get("author"), "tainted_by": fx["after"][f].get("tainted_by")}
+                    for f in fx["tainted"]],
+        "sources": list(sources.values()),      # via: "posted" a tainted record, or "read" the withdrawn one
+        "rerun_items": rerun_items,
+        "not_rerun": not_rerun,
+        "board_version": len(board),
+        "note": ("what was withdrawn and everything that rested on it are out of every default read; a "
+                 "re-run is a new delegation or swarm (rerun_items is ready for run_swarm when there are two "
+                 "or more, delegate_to_<mode> for one), whose records stand on their own — nothing is re-run "
+                 "on its own"),
+    }

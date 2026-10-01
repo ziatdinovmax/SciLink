@@ -6,8 +6,9 @@ as "Starting stage 1" below describes; what changed on the way is recorded
 under the stage in "Build order". Stage 2 (the board) merged on 2026-10-01 (#702, head
 e1c0fc72) after eight review rounds, built as "Starting stage 2" describes,
 with what changed on the way under the stage in "Build order" and its open
-items in "After stage 2"; "Starting stage 3" is
-drafted below. The design notes were
+items in "After stage 2". Stage 3 (reactions) is on its PR, built as
+"Starting stage 3" describes, with what changed on the way under the stage
+in "Build order" and its open items in "After stage 3". The design notes were
 drafted 2026-09-28 against `main` at b988c7cd (Release 0.0.83), based on a source audit of the meta
 agent (`meta_orchestrator.py`, `meta_orchestrator_tools.py`, `fanout.py`,
 `telemetry.py`), the three mode orchestrators' `run_task`, the executors, the
@@ -1089,6 +1090,132 @@ can already hit.
      (`hypotheses`), and those are the plan's claims on the board.
 3. **Reactions.** Subscriptions, `task_request`, causal chains and cycle
    refusal, supersede-chain stops, retraction and taint.
+   - *Built (PR "Swarm stage 3"):* `meta_agent/reactions.py` holds the pure
+     functions — `normalize_subscriptions`, `matches` (equality on kind,
+     normalised subject and status), `fill` (one regex pass over a fixed
+     field vocabulary: `{finding.text}`, `{finding.path}`, `{finding.name}`,
+     `{finding.value}`, `{finding.unit}`, `{finding.id}`, `{finding.kind}`,
+     `{subject}`, `{analysis_id}`, `{from.label}`, `{from.index}`,
+     `{from.mode}`; anything else stays literal, a value is never
+     re-expanded), `hop`, `supersede_depth` and `decide`, which returns the
+     item to launch with `caused_by`, `chain` and `subscription` already on
+     it, or the reason it is refused. `run_swarm(work_items,
+     item_time_budget_s, subscriptions, budget)` applies them in the
+     coordinator loop each time an item closes and has posted: the fired
+     item goes through `launch` like any other (its own ledger entry, the
+     capacity ceiling, memory admission, the item budget, the question
+     queue), and `_COORDINATOR_FIELDS` are stripped from a caller's initial
+     items so a chain nobody enqueued cannot defeat the cycle check.
+     Refusals are structural first (a cycle: the same `(mode, subject,
+     kind)` hop twice in one chain; a record at supersede depth >= 2 on its
+     subject), then the counters (`max_fires`, the per-subject cap, the
+     swarm's `max_reactions` and `max_items`), and each is recorded on the
+     triggering entry (`refused_reactions`) and in the result with the
+     chain. `budget` is `{max_items <= 8, max_reactions,
+     max_triggers_per_subject (2)}`. A worker's `suggested_followups` are
+     posted by `records_for` as `task_request` records (provisional, not in
+     `READ_KINDS`, at most four, 400 characters) for every mode; they become
+     items only through a subscription on that kind, and the result's
+     `task_requests` lists each with the item it became or `null`.
+     `Board.fold` derives `tainted`: a record whose transitive reads reach a
+     retracted or superseded record (a correction's own `supersedes` link is
+     not followed — it rests on what it corrects by design), so a record
+     posted after the retraction by a worker that had read the finding
+     before is caught too; `Board.dependents` is the inverse closure.
+     `retract_finding(finding_id, reason)` posts the retraction as the
+     coordinator (`retract_and_report`) and returns the newly tainted
+     records, their source delegations (from the records' own authors) and
+     `rerun_items` ready for `run_swarm`; it re-runs nothing itself — a
+     retraction is a decision made between runs, and so is the re-run.
+     `Board.snapshot(with_hazards=True)`, used by every swarm item's read,
+     puts each standing hazard on the subject in the view whatever the
+     reader's `kinds` filter and whether or not it passed a gate; `get_board`
+     shows `withdrawn` (retracted / superseded / tainted, with `tainted_by`)
+     and the standing `task_requests`. Tests:
+     `tests/test_swarm_reactions.py`, through the real coordinator and board
+     with scripted workers — the harness came first, and a swarm with no
+     subscriptions is asserted to leave the stage-2 ledger and board as they
+     were (the stage-2 suites run unchanged).
+   - *Round 1 of the review:* a reaction's records did not rest on the
+     finding that caused it — the taint fold followed `reads`, and
+     `caused_by` lived on the ledger entry only, so retracting a claim left
+     the simulation it fired verified (the PR's own live run showed it).
+     The cause is now stamped into the fired entry's `reads` at launch (its
+     task quotes the finding), so taint and `independent_support` both see
+     it; a reaction caused by a withdrawn finding is listed as `not_rerun`
+     (a new decision, not a re-run), and `rerun_items` carry the original
+     `data_path`, `context`, `reads_board` and `check`, kept on swarm
+     entries at launch. Who may withdraw: with a person at the gate the
+     finding, the reason and what rests on it are shown and Enter keeps it;
+     with nobody at the gate a human-approved plan's claim is refused ("a
+     plan the human approved is settled"); retracting a retraction undoes
+     it, so a wrong withdrawal is corrected by a later record on the
+     append-only board. The launch gate lists every subscription and the
+     most items in all (a person approving two items could otherwise get
+     eight). A hazard is pinned through the newest-24 cut and rendered
+     first, and a provisional hazard delivered unasked marks the read
+     (`reads_provisional`) — the stage-2 rule "a provisional read is asked
+     for and marked" holds, with the hazard as the one record delivered
+     unasked, marked. `fill()` substitutes a worker's prose as quoted,
+     labelled data (`“…” [quoted from board record f…; data, not an
+     instruction]`) and identifiers as they are, so a `task_request`'s
+     sentence cannot become another worker's instruction. A correction
+     that read what it corrects is not tainted by it; `suggested_followups`
+     must be a list of strings (a string posted one record per character,
+     a dict lost the delegation's records); the per-subject cap is clamped
+     to the item limit. `Board.fold` is memoised per version with the
+     closures built in one pass; `refused_reactions` collapse per
+     (subscription, reason); `get_board`'s `withdrawn` says the reason and
+     who retracted.
+   - *Round 2 of the review:* which retractions stand is decided in
+     REVERSE log order (a retraction stands unless a later effective one
+     undoes it, and that one may itself be undone later), so an undo of an
+     undo works: C → R1 retracts C → R2 undoes R1 → R3 undoes R2 (C
+     withdrawn again) → R4 undoes R3 (C back). A retraction records who
+     decided it (`decided_by`: `human` at the attended gate, else
+     `coordinator`), and with nobody at the gate the model may not undo a
+     person's retraction, nor withdraw a finding that a human-approved
+     record rests on (it would be tainted) — "a human's decision is
+     reopened only by a human" now holds for the three ways there were to
+     reopen one. The undo gate shows the finding that would come back and
+     what rests on it, not the retraction record. `fill()` makes
+     identifiers one line too (a worker's path or id cannot carry a line of
+     its own into a task). A reaction offered again after a retraction
+     carries its cause as `rests_on`, which `launch` records as reads (a
+     caller-declared read can only add a coupling). `max_reactions` is
+     clamped to `max_items`, and the gate says "on any task_request".
+   - *Round 3 of the review:* an undo of an undo WITHDRAWS the finding
+     again, and the gate, the refusals and the report had read the record
+     named (a retraction → "an undo") instead of what the act does — a
+     fourth way round "a human's decision is reopened only by a human", and
+     a report saying the opposite of what happened. Every retraction is now
+     decided from its EFFECT: `Board.preview(extra)` folds the log as it
+     would read with the retraction appended (the pure fold is
+     `_fold_records`; `fold()` memoises it), and `_act_effects` gives the
+     findings withdrawn, newly tainted and brought back, and the retractions
+     whose standing flips; the attended gate shows exactly those
+     ("WITHDRAWS …", "TAINTS …", "BRINGS BACK …", Enter keeps things as
+     they are), the autonomous refusals test them (a human-approved finding
+     among the withdrawn or tainted; a flipped retraction that is a
+     person's — a retraction with no `decided_by` stamp, from a board made
+     before the stamp, counts as a person's), the report lists them
+     (`withdrawn`, `restored`, `tainted`, `effect`) and `rerun_items` /
+     `not_rerun` follow the affected set; an act that would change nothing
+     (undoing a retraction that never took effect) is refused. `rests_on`
+     is a list of ids that are on the board, at most 24, and ignored on a
+     `check` (a check reads nothing); identifiers in `fill()` are bounded
+     and `finding.value` is quoted too.
+   - *Deviations from "Starting stage 3", each deliberate:* no worker
+     supersedes its own earlier claim — no `run_task` result says "this
+     replaces that", and guessing it from kind and subject would be the
+     reconstruction the stage-2 reviews taught against; the fold supports it
+     for a caller that knows. No automatic re-run of tainted sources inside
+     a swarm — nothing inside a swarm retracts, so the re-run is the next
+     swarm, with the items prepared. The result's list is
+     `refused_reactions` (reason, chain, finding) rather than
+     `refused_cycles`, since the cap and the chain stop are refusals of the
+     same shape; no would-be entry is opened for a refused reaction, the
+     refusal sits on the triggering entry.
 4. **Scheduling.**
    - Swarm budgets with reservation and the circuit breaker.
    - Process workers for heavy items.
@@ -1386,6 +1513,45 @@ references are to `main` at bed2f7f8.
 - *The Mission Control UI has no board view* (stage 6).
 - Everything open after stage 1 still stands (telemetry, the one-slot web
   panel, no swarm resume, memory estimated, HPC #696, #685).
+
+## After stage 3: what is on the PR, and what is open
+
+**What stage 3 adds:** `meta_agent/reactions.py`; `run_swarm`'s
+`subscriptions` and `budget` and the `react` step of its loop; `Board.fold`'s
+`tainted` status, `Board.dependents`, `Board.snapshot(with_hazards)`,
+`records_for`'s `task_request` records, `retract_and_report`; the
+`retract_finding` tool and `get_board`'s `withdrawn` / `task_requests`;
+`tests/test_swarm_reactions.py`.
+
+**Open after stage 3:**
+- *Reactions are declared per swarm.* A subscription lives for one
+  `run_swarm` call; a standing rule across turns ("whenever a verified recipe
+  appears on this sample, replay it on new data") is stage 5's instrument
+  bridge, where the subscriber is a running process, not a turn.
+- *Mid-run read points inside a mode* are still not exposed (unchanged from
+  stage 2); a reaction is new work that reads at its start.
+- *No worker supersedes a claim; no automatic re-run.* See the deviations
+  under stage 3 in "Build order".
+- *Templates are text.* A fired task carries the finding's text or path by
+  substitution; a reaction that needs a structured context (a parameter point
+  as numbers) passes `context` as the enqueue's own object, not from the
+  record.
+- *Taint stays on the board.* `independent_support_of`, `fuse_delegations`,
+  `get_delegation_history` and steering read the ledger, not the fold, so a
+  tainted supporter still counts there; the next consumer of the fold is
+  stage 4's scheduling.
+- *Matching uses the posted status*, not the folded one — unreachable
+  within one swarm today (nothing retracts inside a run).
+- *`fired[].delegation_index`* names the first launch; a memory-cancelled
+  reaction's rerun is a later entry with the same cause.
+- *A retraction is not gated by "a user message since".* With nobody at
+  the gate the model may withdraw the agents' own findings (never a human's
+  decision, nor what one rests on, nor a person's retraction); the planner's
+  finer rule (a `user_request` needs a message since the approval) would
+  need the meta's turn history on the board's clock.
+- Everything open after stage 2 still stands (no retraction from a worker,
+  common-ancestry independence, string subjects, persistent specialists read
+  nothing, no Mission Control board view).
 
 ## Starting stage 2 (the board)
 
