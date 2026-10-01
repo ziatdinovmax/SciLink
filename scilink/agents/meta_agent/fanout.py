@@ -1745,6 +1745,7 @@ def run_fanout(orch, branches: List[dict],
             red = reduce_series(c["files"], out_dir=str(sdir),
                                 label=c["label"])
             if red.get("status") == "success":
+                red["source_slot"] = j          # the companion's slot: labels can repeat
                 payloads.append(red)
             else:
                 logger.warning(
@@ -1831,8 +1832,9 @@ def run_fanout(orch, branches: List[dict],
         for b, entry in zip(run_branches, entries):
             if b.get("_steering"):
                 entry["steered_by_index"] = [
-                    e2["index"] for c, e2 in zip(run_branches, entries)
-                    if c is not b and any(p["label"] == c["label"] for p in b["_steering"])]
+                    entries[p["source_slot"]]["index"] for p in b["_steering"]
+                    if isinstance(p.get("source_slot"), int) and p["source_slot"] < len(entries)
+                    and run_branches[p["source_slot"]] is not b]
 
     # On the board a steering payload is a finding OF THE COMPANION: a
     # measurement of its series (a deterministic reduction, but no gate
@@ -1842,14 +1844,13 @@ def run_fanout(orch, branches: List[dict],
     # informed_by stamp above stays as prose.
     board = getattr(orch, "board", None)
     if board is not None:
-        by_label = {b["label"]: (b, e) for b, e in zip(run_branches, entries)}
         for b, entry in zip(run_branches, entries):
             reads = []
             for pl in (b.get("_steering") or []):
-                src = by_label.get(pl.get("label"))
-                if src is None:
+                slot = pl.get("source_slot")
+                if not isinstance(slot, int) or slot >= len(entries) or run_branches[slot] is b:
                     continue
-                c_entry = src[1]
+                c_entry = entries[slot]
                 try:
                     rec = board.post(
                         kind="measurement", status="provisional",
@@ -3047,15 +3048,19 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
     informed_via = {(e.get("label") or f"delegation {e['index']}"):
                     (e.get("informed_via") or "steering")
                     for e in ok if e.get("informed_by")}
+    steered = {(e.get("label") or f"delegation {e['index']}"): e["steered_by"]
+               for e in ok if e.get("steered_by")}
     independence_caveats = []
     for lbl, srcs in informed.items():
         via = informed_via.get(lbl, "steering")
         if "steering" in via:
+            # the steering sources only — the mesh companions share the
+            # informed_by list but did not steer
             independence_caveats.append(
                 f"Branch '{lbl}' was steered at launch by a change-point "
-                f"hint from {srcs}; its agreement with those companion(s) "
-                "near the hinted value is partly by construction and must "
-                "not be counted as independent corroboration.")
+                f"hint from {steered.get(lbl, srcs)}; its agreement with those "
+                "companion(s) near the hinted value is partly by construction "
+                "and must not be counted as independent corroboration.")
         if "co_registered_operands" in via:
             independence_caveats.append(
                 f"Branch '{lbl}' received {srcs} as co-registered numerical "
@@ -3255,21 +3260,23 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
             "context by hand without a context_from citation. Render this number where "
             "you weigh agreement; coupled branches that agree count as one.\n")
            if support is not None else "")
-        + ((f"\n\nINDEPENDENCE PROVENANCE: these branches are NOT fully "
-            "independent of the listed companions "
-            f"(mode per branch: {json.dumps(informed_via)}): "
-            f"{json.dumps(informed)}. A STEERED branch saw its companion's "
-            "change-point hint — where its finding coincides with that "
-            "companion near the hinted value, the agreement is partly by "
-            "construction: discount it and say so. A branch that received "
-            "CO-REGISTERED OPERANDS is a separate observation of its own data "
-            "(the INDEPENDENT SUPPORT count above treats it so); only a NUMBER "
-            "it computed from both datasets at once is one computation rather "
-            "than two confirmations. A branch re-analyzed with FUSION "
-            "FEEDBACK has effectively seen ALL its companions' findings — "
-            "the same discount as steering applies. Couplings that come from "
-            "board reads or citations are listed in the INDEPENDENT SUPPORT "
-            "block; a pair listed in neither place is independent.\n")
+        + ((f"\n\nCOMPANION CONTACT (stamped at launch, per branch: "
+            f"{json.dumps(informed_via)}): {json.dumps(informed)}"
+            + (f"; steered by: {json.dumps(steered)}" if steered else "")
+            + ". A STEERED branch saw its companion's change-point hint — where its "
+            "finding coincides with that companion near the hinted value, the "
+            "agreement is partly by construction: discount it and say so. A branch "
+            "that received CO-REGISTERED OPERANDS is a separate observation of its "
+            "own data; only a NUMBER it computed from both datasets at once is one "
+            "computation rather than two confirmations. A branch re-analyzed with "
+            "FUSION FEEDBACK has effectively seen ALL its companions' findings — the "
+            "same discount as steering applies."
+            + (" Couplings that come from board reads or citations are listed in the "
+               "INDEPENDENT SUPPORT block; a pair listed in neither place is independent."
+               if support is not None else
+               " A pair not listed here, and not coupled by a citation in context_from, "
+               "is independent.")
+            + "\n")
            if informed else "")
         + ("\n\nBRANCH RE-ANALYSIS: if some branch's OWN analysis appears "
            "flawed in a way a re-analysis could fix (wrong model order, a "

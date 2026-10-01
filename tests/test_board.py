@@ -601,9 +601,39 @@ def test_series_verdicts_follow_the_agents_shapes():
                               anchor_extra={"role": "anchor", "adaptively_refitted": True, "original_r2": 0.80,
                                             "quality_warning": "R² = 0.8600 below threshold 0.95"})
     assert analysis_verdict(laundered)["reason"] == "salvaged best-available result (unit spectrum_0000)"
-    # a refit anchor that WAS approved after the refit is verified
-    approved_refit = _curve_series(ANCHOR_OK, anchor_extra={"role": "anchor", "adaptively_refitted": True})
+    # round 5: an approved anchor refit (M2) does not vouch for followers still replaying the
+    # salvaged M1 — the refit carries a summary of the unit it replaced, and followers on the
+    # locked script are judged by THAT recipe
+    m1 = {"name": "spectrum_0000", "quality_history": {"approved": False, "final_r2": 0.80, "threshold": 0.95},
+          "quality_warning": "R² = 0.8000 below threshold 0.95", "judge_warning": None, "reuse_validity": None}
+    relocked = _curve_series({**ANCHOR_OK, "final_r2": 0.97},
+                             anchor_extra={"role": "anchor", "adaptively_refitted": True, "original_r2": 0.80,
+                                           "replaced_unit": m1}, follower_qh={"produced_under_profile": "quick"})
+    for u in relocked["individual_results"][1:]:
+        u["fitted_from"] = "locked_script"
+    assert analysis_verdict(relocked)["reason"] == (
+        "follower replays a recipe that was not approved (unit spectrum_0001): salvaged best-available "
+        "result (recipe from unit spectrum_0000, since refit)")
+    # ... but a follower that was itself refit (its own record) is judged on its own
+    relocked["individual_results"][1].update({"adaptively_refitted": True, "quality_history": dict(ANCHOR_OK)})
+    relocked["individual_results"][2].update({"adaptively_refitted": True, "quality_history": dict(ANCHOR_OK)})
+    assert analysis_verdict(relocked)["verified"]
+    # a refit anchor that WAS approved after the refit, whose original was approved too: verified
+    approved_refit = _curve_series(ANCHOR_OK, anchor_extra={
+        "role": "anchor", "adaptively_refitted": True,
+        "replaced_unit": {"name": "spectrum_0000", "quality_history": {**ANCHOR_OK, "final_r2": 0.96}}})
     assert analysis_verdict(approved_refit)["verified"]
+    # the opposite direction (accepted as conservative): an approved anchor refit to a salvaged unit
+    # is a salvaged row in the table, whatever its followers replayed
+    flipped = _curve_series({**ANCHOR_OK, "final_r2": 0.93, "approved": False},
+                            anchor_extra={"role": "anchor", "adaptively_refitted": True,
+                                          "quality_warning": "R² = 0.9300 below threshold 0.95",
+                                          "replaced_unit": {"name": "spectrum_0000",
+                                                            "quality_history": {**ANCHOR_OK, "final_r2": 0.92}}})
+    assert analysis_verdict(flipped)["reason"] == "salvaged best-available result (unit spectrum_0000)"
+    # the recipe is the first ANCHOR by role, refit or not
+    from scilink.agents.exp_agents._verification_record import series_anchor_unit
+    assert series_anchor_unit(relocked) == "spectrum_0000"
     # an anchor refit WITHOUT a role (a checkpoint from before the stamp) is not counted as an anchor
     old_shape = _curve_series({**ANCHOR_OK, "approved": False},
                               anchor_extra={"adaptively_refitted": True, "quality_warning": "below"})
@@ -668,7 +698,7 @@ def test_series_verdicts_follow_the_agents_shapes():
     hs["individual_results"][1].update({"n_features": 3, "quality_metrics": {"n_targets": 2, "n_approved": 1}})
     assert analysis_verdict(hs)["reason"] == "not every target of the unit was approved (unit cube1): 1 of 2"
     hs["individual_results"][1]["quality_metrics"] = {"n_targets": 0, "n_approved": 0}
-    assert not analysis_verdict(hs)["verified"]
+    assert analysis_verdict(hs)["reason"] == "the unit has no dynamic-analysis record (unit cube1)"
     # on the board: the same claim text, provisional with the reason as its gate
 
 def test_planning_run_task_reports_how_the_plan_was_settled(tmp_path, monkeypatch):

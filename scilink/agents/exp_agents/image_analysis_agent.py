@@ -1828,6 +1828,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     **({"judge_warning": r["judge_warning"]} if r.get("judge_warning") else {}),
                     **({"fitted_from": r["fitted_from"]} if r.get("fitted_from") else {}),
                     **({"role": r["role"]} if r.get("role") else {}),
+                    **({"replaced_unit": r["replaced_unit"]} if r.get("replaced_unit") else {}),
                 }
                 for r in series_results
             ]

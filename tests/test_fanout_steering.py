@@ -132,8 +132,8 @@ def main():
     fused = json.loads(ag._fuse_delegations(
         [e["index"] for e in fan]))
     prompt = FUSION_PROMPTS[-1] if FUSION_PROMPTS else ""
-    check("fusion prompt carries INDEPENDENCE PROVENANCE",
-          "INDEPENDENCE PROVENANCE" in prompt
+    check("fusion prompt carries the companion-contact block",
+          "COMPANION CONTACT" in prompt
           and "partly by construction" in prompt
           and "techA series" in prompt)
     check("fusion result carries independence map",

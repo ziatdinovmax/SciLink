@@ -332,6 +332,14 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
         ok_items = [it for it in items if isinstance(it, dict) and it.get("success")]
         if not ok_items:
             return {"verified": False, "reason": "no unit succeeded"}
+        # The recipe a follower replayed is its regime's anchor AS IT WAS when
+        # the follower ran. A refit anchor carries a summary of the unit it
+        # replaced (``replaced_unit``); a follower still on the locked script
+        # is judged by that, never by a refit it never re-ran.
+        recipe_by_regime: Dict[Any, Dict[str, Any]] = {}
+        for it in ok_items:
+            if it.get("role") == "anchor" and it.get("adaptively_refitted") and it.get("replaced_unit"):
+                recipe_by_regime[it.get("regime")] = {**it["replaced_unit"], "role": "anchor"}
         anchors = 0
         for it in ok_items:
             name = it.get("name") or it.get("index")
@@ -348,8 +356,10 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
                         or not it.get("n_features")):
                     return {"verified": False, "reason": f"unit not verified by the series driver{where}"}
                 if not (isinstance(n_t, int) and isinstance(n_a, int) and n_t > 0 and n_a == n_t):
-                    return {"verified": False, "reason": f"not every target of the unit was approved{where}"
-                            + (f": {n_a} of {n_t}" if isinstance(n_t, int) else "")}
+                    if not n_t:
+                        return {"verified": False, "reason": f"the unit has no dynamic-analysis record{where}"}
+                    return {"verified": False, "reason": f"not every target of the unit was approved{where}: "
+                                                          f"{n_a} of {n_t}"}
                 anchors += 1 if it.get("role") == "anchor" else 0
                 continue
             rv = it.get("reuse_validity") or {}
@@ -381,6 +391,13 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
                     return {"verified": False, "reason": f"follower fitted without a locked recipe{where}"}
                 if (it.get("quality_history") or {}).get("unverified"):
                     return {"verified": False, "reason": f"follower unverified{where}"}
+                recipe = recipe_by_regime.get(it.get("regime"))
+                if recipe is not None:
+                    bad = _unit_verdict(recipe, where="")
+                    if bad:
+                        return {"verified": False, "reason": (
+                            f"follower replays a recipe that was not approved{where}: "
+                            f"{bad['reason']} (recipe from unit {recipe.get('name')}, since refit)")}
         if anchors == 0 and not any("verified" in it for it in ok_items):
             return {"verified": False, "reason": "no unit carries a verification record"}
         failed = len(items) - len(ok_items)
@@ -427,7 +444,11 @@ def series_anchor_unit(full_result: Optional[dict]) -> Optional[str]:
     items = (full_result or {}).get("individual_results")
     if not isinstance(items, list) or not items:
         return None
-    for it in items:
+    roled = [it for it in items if isinstance(it, dict) and it.get("success") and it.get("name")
+             and it.get("role") == "anchor"]
+    if roled:
+        return str(roled[0]["name"])          # the first anchor, refit or not
+    for it in items:                          # a shape from before the role stamp
         if not (isinstance(it, dict) and it.get("success") and it.get("name")) or it.get("adaptively_refitted"):
             continue
         if _has_record(it.get("quality_history")) or (it.get("reuse_validity") or {}).get("reused"):

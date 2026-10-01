@@ -6668,6 +6668,20 @@ class ImageAdaptiveRefitController:
                 result["locked_pipeline"] = state.get(
                     "locked_analysis_config", {}
                 ).get("processing_pipeline")
+                # What the replaced unit was (its approval and salvage markers):
+                # followers that replayed ITS script are judged by it, not by the
+                # refit they never re-ran.
+                _orig = series_results[idx] or {}
+                result["replaced_unit"] = _orig.get("replaced_unit") or {
+                    "name": _orig.get("name"),
+                    "quality_history": {k: (_orig.get("quality_history") or {}).get(k)
+                                        for k in ("approved", "approved_by", "unverified", "stopped_by",
+                                                  "verifier_rejected", "threshold", "final_r2", "final_score",
+                                                  "verification_iterations")},
+                    "quality_warning": _orig.get("quality_warning"),
+                    "judge_warning": _orig.get("judge_warning"),
+                    "reuse_validity": _orig.get("reuse_validity"),
+                }
                 if (series_results[idx] or {}).get("role"):
                     result["role"] = series_results[idx]["role"]
                 series_results[idx] = result
@@ -6687,6 +6701,20 @@ class ImageAdaptiveRefitController:
                     result["locked_pipeline"] = state.get(
                         "locked_analysis_config", {}
                     ).get("processing_pipeline")
+                    # What the replaced unit was (its approval and salvage markers):
+                    # followers that replayed ITS script are judged by it, not by the
+                    # refit they never re-ran.
+                    _orig = series_results[idx] or {}
+                    result["replaced_unit"] = _orig.get("replaced_unit") or {
+                        "name": _orig.get("name"),
+                        "quality_history": {k: (_orig.get("quality_history") or {}).get(k)
+                                            for k in ("approved", "approved_by", "unverified", "stopped_by",
+                                                      "verifier_rejected", "threshold", "final_r2", "final_score",
+                                                      "verification_iterations")},
+                        "quality_warning": _orig.get("quality_warning"),
+                        "judge_warning": _orig.get("judge_warning"),
+                        "reuse_validity": _orig.get("reuse_validity"),
+                    }
                     if (series_results[idx] or {}).get("role"):
                         result["role"] = series_results[idx]["role"]
                     series_results[idx] = result
@@ -6851,6 +6879,20 @@ class ImageAdaptiveRefitController:
                     "analysis_type"
                 )
                 refit_result["locked_pipeline"] = locked_pipeline
+                # What the replaced unit was (its approval and salvage markers):
+                # followers that replayed ITS script are judged by it, not by the
+                # refit they never re-ran.
+                _orig = series_results[idx] or {}
+                refit_result["replaced_unit"] = _orig.get("replaced_unit") or {
+                    "name": _orig.get("name"),
+                    "quality_history": {k: (_orig.get("quality_history") or {}).get(k)
+                                        for k in ("approved", "approved_by", "unverified", "stopped_by",
+                                                  "verifier_rejected", "threshold", "final_r2", "final_score",
+                                                  "verification_iterations")},
+                    "quality_warning": _orig.get("quality_warning"),
+                    "judge_warning": _orig.get("judge_warning"),
+                    "reuse_validity": _orig.get("reuse_validity"),
+                }
                 if (series_results[idx] or {}).get("role"):
                     refit_result["role"] = series_results[idx]["role"]
                 series_results[idx] = refit_result

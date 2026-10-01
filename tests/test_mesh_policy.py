@@ -92,7 +92,7 @@ def main():
     check("no informed_by stamped", all(not e.get("informed_by") for e in fan))
     check("no independence block in fusion",
           fused.get("independence") is None
-          and "INDEPENDENCE PROVENANCE" not in prompt)
+          and "COMPANION CONTACT" not in prompt)
 
     # 2) Co-registered -> operand mesh, recorded and discounted.
     out, fan, fused, tasks, prompt = _run("co_registered")
@@ -105,7 +105,7 @@ def main():
           all(e.get("informed_by") and e.get("informed_via")
               == "co_registered_operands" for e in fan))
     check("fusion prompt carries co-registered provenance",
-          "INDEPENDENCE PROVENANCE" in prompt
+          "COMPANION CONTACT" in prompt
           and "CO-REGISTERED OPERANDS" in prompt)
     check("joint-computation caveat in report",
           any("co-registered numerical operand" in str(c)

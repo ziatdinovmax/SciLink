@@ -975,6 +975,28 @@ can already hit.
      couplings from reads and citations. Known and left: a failed reuse
      whose anchor was re-derived and approved is blocked by the schema-drift
      `quality_warning` with the reason "salvaged" (pre-existing wording).
+   - *Round 5 of the review:* a follower is judged by the recipe it
+     REPLAYED. An anchor refit to an approved model says nothing about
+     followers still on the original script, so every refit replacement
+     site carries a summary of the unit it replaced (`replaced_unit`:
+     approval and salvage markers, chained to the earliest when a unit is
+     replaced twice), `individual_results` carries it, and a `locked_script`
+     follower whose regime anchor was refit is judged by that summary
+     ("follower replays a recipe that was not approved … since refit"). The
+     opposite direction — an approved anchor refit to a salvaged unit — is
+     accepted as conservative: the refit anchor is a salvaged row in the
+     table, whatever the followers replayed. `series_anchor_unit` reads the
+     role. The steering payload carries the source's slot (`source_slot`),
+     so the index stamp and the board post never match labels (two series
+     in one upload directory share a stem). The companion-contact block of
+     the fusion prompt no longer opens with "NOT fully independent" (a
+     mesh-only run has no independence spent), the steering caveat names
+     the steering sources only, and the reference to the INDEPENDENT
+     SUPPORT block is guarded for a caller without a board. A record-less
+     hyperspectral row reads "the unit has no dynamic-analysis record"; a
+     `not_measurable` target with `task_success: False` would count as
+     unapproved in a row and be skipped in a cube — no path produces it,
+     and the row carries no per-target records to align on.
    - *Found live:* the curve agent's approved script is
      `scripts/fitting_script.py` (a series: one per spectrum), the image
      agent's `analysis_script.py` — the recipe takes the folder's
