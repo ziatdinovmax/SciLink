@@ -1479,11 +1479,6 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     path = scripts_dir / f"{safe_name}.py"
                     path.write_text(script, encoding="utf-8")
                     saved.append(str(path))
-                    # A refit unit also keeps the script its followers
-                    # replayed: that, not the refit's, is the series' recipe.
-                    locked = r.get("locked_script")
-                    if locked and locked != script:
-                        (scripts_dir / f"{safe_name}_locked.py").write_text(locked, encoding="utf-8")
 
         if saved:
             self.logger.info(f"   Scripts: {scripts_dir} ({len(saved)} file(s))")
@@ -2154,6 +2149,13 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # top level for the orchestrator.
             if series_results and series_results[0].get("reuse_validity"):
                 results["reuse_validity"] = series_results[0]["reuse_validity"]
+
+            # The recipe of each regime — the anchor unit, its verdict and the
+            # script its followers replayed — as the series driver recorded
+            # it when the script was locked. Once per regime, not per unit;
+            # a refit of the anchor never changes it.
+            if state.get("locked_recipes"):
+                results["locked_recipes"] = state["locked_recipes"]
 
             results["flagged_spectra"] = flagged_spectra
             results["flagged_spectra_analysis"] = synthesis.get("flagged_spectra_analysis", {})

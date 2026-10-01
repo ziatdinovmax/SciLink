@@ -5982,10 +5982,6 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
                 # The unit's role (the curve twin's): an anchor is held to a
                 # bar a follower is not; a refit of this unit keeps the role.
                 result["role"] = "anchor"
-                from .._verification_record import stamp_unit_verdict
-                stamp_unit_verdict(result, regime=regime_name)
-                if result["success"] and result.get("script") and result.get("unit_verdict"):
-                    recipe_by_regime[regime_name] = {"unit": image_name, "verdict": result["unit_verdict"]}
 
                 # #172: reuse was attempted for the anchor but the result
                 # carries no reuse_validity verdict -> the prior script could
@@ -6006,8 +6002,18 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
                     }
                     result["quality_warning"] = result["reuse_validity"]["message"]
 
+                # The anchor's verdict, stamped once every caveat is on it (a
+                # reuse that failed and was re-derived is salvaged); its regime's
+                # recipe — the unit, the verdict, the script the followers will
+                # replay — is recorded here, once, and never changed by a refit.
+                from .._verification_record import stamp_unit_verdict
+                stamp_unit_verdict(result, regime=regime_name)
                 if result["success"] and result.get("script"):
                     base_scripts[regime_name] = result["script"]
+                    if result.get("unit_verdict"):
+                        recipe_by_regime[regime_name] = {
+                            "unit": image_name, "index": idx, "regime": regime_name,
+                            "verdict": result["unit_verdict"], "script": result["script"]}
                     if idx == 0:
                         state["base_analysis_script"] = result["script"]
                     self.logger.info(
@@ -6093,6 +6099,7 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
         stamp_profile(state, series_results)
         state["series_results"] = series_results
         state["flagged_images"] = flagged_images
+        state["locked_recipes"] = recipe_by_regime
 
         # Best-of-N: per-anchor candidate tables (index -> table) for the
         # final result dict.
@@ -6696,11 +6703,6 @@ class ImageAdaptiveRefitController:
                     result["role"] = series_results[idx]["role"]
                 if (series_results[idx] or {}).get("regime") and not result.get("regime"):
                     result["regime"] = series_results[idx]["regime"]
-                # the script the followers replayed stays with the unit
-                # (saved beside the refit's as <unit>_locked.py)
-                if (series_results[idx] or {}).get("script"):
-                    result["locked_script"] = (series_results[idx].get("locked_script")
-                                             or series_results[idx]["script"])
                 # a refit ran its own QC: its verdict is its own gate's
                 from .._verification_record import stamp_unit_verdict
                 stamp_unit_verdict(result, regime=result.get("regime"))
@@ -6739,11 +6741,6 @@ class ImageAdaptiveRefitController:
                         result["role"] = series_results[idx]["role"]
                     if (series_results[idx] or {}).get("regime") and not result.get("regime"):
                         result["regime"] = series_results[idx]["regime"]
-                    # the script the followers replayed stays with the unit
-                    # (saved beside the refit's as <unit>_locked.py)
-                    if (series_results[idx] or {}).get("script"):
-                        result["locked_script"] = (series_results[idx].get("locked_script")
-                                                 or series_results[idx]["script"])
                     # a refit ran its own QC: its verdict is its own gate's
                     from .._verification_record import stamp_unit_verdict
                     stamp_unit_verdict(result, regime=result.get("regime"))
@@ -6927,11 +6924,6 @@ class ImageAdaptiveRefitController:
                     refit_result["role"] = series_results[idx]["role"]
                 if (series_results[idx] or {}).get("regime") and not refit_result.get("regime"):
                     refit_result["regime"] = series_results[idx]["regime"]
-                # the script the followers replayed stays with the unit
-                # (saved beside the refit's as <unit>_locked.py)
-                if (series_results[idx] or {}).get("script"):
-                    refit_result["locked_script"] = (series_results[idx].get("locked_script")
-                                             or series_results[idx]["script"])
                 # a refit ran its own QC: its verdict is its own gate's
                 from .._verification_record import stamp_unit_verdict
                 stamp_unit_verdict(refit_result, regime=refit_result.get("regime"))

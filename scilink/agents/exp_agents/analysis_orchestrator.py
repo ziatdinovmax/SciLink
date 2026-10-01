@@ -13,7 +13,7 @@ import inspect
 import json
 from scilink.utils.text_io import atomic_write_json
 import logging
-from ._verification_record import analysis_verdict, series_anchor_unit
+from ._verification_record import analysis_verdict, series_anchor_unit, series_recipes
 import os
 import time
 from pathlib import Path
@@ -1710,6 +1710,11 @@ class AnalysisOrchestratorAgent:
                     # a series' locked recipe is the anchor's unit script
                     "recipe_unit": series_anchor_unit(rec.get("full_result")),
                     "series": bool((rec.get("full_result") or {}).get("individual_results")),
+                    # the recipes the series driver recorded at lock time
+                    # (one per regime, script text included): what a caller
+                    # that keeps its own copy of a recipe — the meta's board
+                    # — copies from. Not part of the delegation summary.
+                    "recipes": series_recipes(rec.get("full_result")),
                 } for rec in new_analyses
             ],
             "warnings": warnings,

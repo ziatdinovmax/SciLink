@@ -1045,11 +1045,6 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     path = scripts_dir / f"{safe_name}.py"
                     path.write_text(script, encoding="utf-8")
                     saved.append(str(path))
-                    # A refit unit also keeps the script its followers
-                    # replayed: that, not the refit's, is the series' recipe.
-                    locked = r.get("locked_script")
-                    if locked and locked != script:
-                        (scripts_dir / f"{safe_name}_locked.py").write_text(locked, encoding="utf-8")
 
         if saved:
             self.logger.info(f"   📝 Scripts: {scripts_dir} ({len(saved)} file(s))")
@@ -1846,6 +1841,11 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # top level for the orchestrator.
             if series_results and series_results[0].get("reuse_validity"):
                 results["reuse_validity"] = series_results[0]["reuse_validity"]
+
+            # Each regime's recipe (anchor unit, verdict, the replayed
+            # script), recorded once by the series driver at lock time.
+            if state.get("locked_recipes"):
+                results["locked_recipes"] = state["locked_recipes"]
 
             results["flagged_images"] = flagged_images
             results["flagged_images_analysis"] = synthesis.get(

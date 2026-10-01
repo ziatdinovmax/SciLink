@@ -1016,6 +1016,32 @@ can already hit.
      series and refit controllers with only the QC loop and the executor
      stubbed; fixtures written from a reading of the code are what hid the
      series cases for five rounds.
+   - *Round 7 of the review:* the structural change had added behaviour to
+     the analysis agents; that is taken back so the PR's effect on them is
+     the stamps alone. No `<unit>_locked.py` is written and the prior-run
+     reuse pick is exactly what it was. The series driver records each
+     regime's recipe ONCE, when the anchor's script is locked
+     (`state["locked_recipes"]`, on the result as `locked_recipes`: unit,
+     verdict then, script text), after every caveat is on the anchor (a
+     reuse that failed and was re-derived is salvaged); the `run_task` rows
+     carry it as `recipes` (never part of the delegation summary the model
+     sees), and the board writes its own copy under `swarm/recipes/<NN>_<label>/`
+     and points its record there (a single run's approved script is copied
+     the same way, `source` recorded). Nothing under an agent's folder is
+     added or read again for a recipe, and no later refit or reuse can
+     change what a record points at. A reused unit with no QC record is
+     verified iff the replay gate's verdict is `good`; a run with some
+     stamps but not all is not verified ("unit X has no stamp"), and the
+     legacy reconstruction is used only for runs with no stamp at all.
+     `tests/test_series_verdict_path.py` adds a good-reuse series, a failed
+     reuse re-derived (salvaged), a failed follower refit that leaves the
+     reuse pick unchanged, and a PARITY test: the stamped verdict and the
+     legacy reconstruction over every real-path shape, allowed to differ
+     only on an explicit list — and today they differ nowhere.
+     Open for stage 3, filed as issues: which script a reuse of a refit
+     series should replay (the original the followers ran, or the approved
+     refit), and a way for an analysis worker to take a script file as its
+     recipe.
    - *Found live:* the curve agent's approved script is
      `scripts/fitting_script.py` (a series: one per spectrum), the image
      agent's `analysis_script.py` — the recipe takes the folder's
@@ -1286,6 +1312,10 @@ references are to `main` at bed2f7f8.
 - *Subjects are strings matched case-insensitively.* Two spellings of one
   sample are two subjects; the meta's prompt asks for one spelling per item.
   A registry of subjects is stage 5's.
+- *A recipe record is a board-owned copy.* Nothing today replays it: a
+  worker takes a prior run folder, not a script file (stage 3 needs the
+  latter, filed), and which script a reuse of a refit series should replay
+  is undecided (filed).
 - *Persistent-specialist delegations read nothing.* `delegate_to_*` posts but
   has no `reads_board`; the meta threads findings into `context` by hand
   (`get_board`), which is the design's turn-granularity path.

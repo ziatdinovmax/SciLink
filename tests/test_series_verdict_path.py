@@ -45,8 +45,10 @@ class FakeExecutor:
         wd = Path(working_dir)
         name = next((n for n in self.r2_by_name if n in wd.as_posix()), None)
         self.calls.append((name, script))
-        (wd / "visualization.png").write_bytes(b"png")
         r2 = self.r2_by_name.get(name, 0.99)
+        if r2 is None:                                   # this unit's script fails to run
+            return {"status": "error", "stdout": "", "stderr": "Traceback: boom", "message": "script failed: boom"}
+        (wd / "visualization.png").write_bytes(b"png")
         model = f"model of {script}"
         out = {"model_type": model, "parameters": {"peak_1": {"center": 144.0, "amplitude": 1.0, "fwhm": 12.0}},
                "fit_quality": {"r_squared": r2, "rmse": 0.01}}
@@ -54,7 +56,14 @@ class FakeExecutor:
 
 
 def _canned_anchor(name, idx, *, r2, approved, script, warning=None, judge_warning=None, unverified=False,
-                   failed=False):
+                   failed=False, reused=None):
+    if reused:                                   # a locked-script reuse: no QC record, a replay-gate verdict
+        return {"index": idx, "name": name, "data_path": f"stack_index_{idx}", "success": True, "error": None,
+                "model_type": f"model of {script}", "parameters": {"peak_1": {"center": 144.0}},
+                "fit_quality": {"r_squared": r2, "rmse": 0.01}, "visualization_path": None,
+                "visualization_bytes": None, "statistics": {}, "script": script, "script_errors": [],
+                "reuse_validity": {"reused": True, "source": "prior", "r_squared": r2, "threshold": THRESHOLD,
+                                   "verdict": reused, "message": "reused"}}
     if failed:                                   # the QC loop produced nothing
         return {"index": idx, "name": name, "data_path": f"stack_index_{idx}", "success": False,
                 "error": "all attempts failed", "parameters": {}, "fit_quality": {}, "script": None,
@@ -96,7 +105,7 @@ def _refitter(tmp_path, executor):
 
 
 def run_series(tmp_path, monkeypatch, *, names, anchors, follower_r2, refits=None, regimes=None,
-               max_series_refits=None, fresh_script="FRESH: np.load('data.npy')"):
+               max_series_refits=None, fresh_script="FRESH: np.load('data.npy')", cold_start=None):
     """Drive the real series + refit path. ``anchors``: name -> canned anchor
     kwargs (the QC loop's output); ``follower_r2``: name -> the R² the
     replayed script "achieves"; ``refits``: name -> canned refit kwargs (the
@@ -124,6 +133,8 @@ def run_series(tmp_path, monkeypatch, *, names, anchors, follower_r2, refits=Non
         state["regime_configs"] = {i: {"physical_model": "M1"} for idxs in regimes for i in idxs}
     if max_series_refits is not None:
         state["max_series_refits"] = max_series_refits
+    if cold_start:                       # a script-bank cold start: the anchor is asked to reuse it
+        state["_cold_start_reuse"] = {"script": cold_start, "id": "bank-1"}
     state = ctrl.execute(state)
     # the stack names units spectrum_NNNN; map the caller's names onto them
     # (the controller names from the stack, so anchors/follower_r2 use those)
@@ -288,8 +299,11 @@ def test_refit_outcomes_through_the_real_path(tmp_path, monkeypatch):
 
 def test_the_recipe_is_the_script_the_followers_replayed(tmp_path, monkeypatch):
     """An approved M1 anchor refit to an approved M2 while the followers stay
-    on M1: the series verifies, and the recipe record must point at M1."""
-    from scilink.agents.meta_agent.board import _recipe_script
+    on M1: the series verifies; the driver's recipe record holds M1 (recorded
+    when the script was locked, untouched by the refit); the agent's folder
+    gets nothing new; the board copies M1 into its own folder."""
+    from scilink.agents.exp_agents._verification_record import series_recipes
+    from scilink.agents.meta_agent.board import Board, post_delegation
     # the anchor sits in the soft band (approved by the verifier at 0.92) so the outlier pass flags
     # it below threshold and the refit pass refits it
     state, _ = run_series(tmp_path, monkeypatch, names=NAMES, anchors={"spectrum_0000": {**OK, "r2": 0.92}},
@@ -301,10 +315,41 @@ def test_the_recipe_is_the_script_the_followers_replayed(tmp_path, monkeypatch):
     assert units[0][2] is True, units                              # the anchor was refit
     v = analysis_verdict(results)
     assert v["verified"], (v, units)
-    unit = series_anchor_unit(results)
-    recipe = _recipe_script(tmp_path, unit, series=True)
-    assert recipe is not None and recipe.name == "spectrum_0000_locked.py" and recipe.read_text() == "M1"
+    recipes = series_recipes(results)
+    assert [(r["regime"], r["unit"], r["verified"], r["script"]) for r in recipes] == [("default", "spectrum_0000", True, "M1")]
+    assert series_anchor_unit(results) == "spectrum_0000"
+    # the agent's folder: the unit scripts as always, nothing else
+    assert sorted(p.name for p in (tmp_path / "scripts").glob("*.py")) == ["spectrum_0000.py", "spectrum_0001.py", "spectrum_0002.py"]
     assert (tmp_path / "scripts" / "spectrum_0000.py").read_text() == "M2"
+    # the board copies M1 into a folder of its own
+    board = Board(tmp_path / "meta")
+    row = {"analysis_id": "series_1", "status": "success", "output_directory": str(tmp_path), "agent_name": "CurveFittingAgent",
+           **analysis_verdict(results), "recipe_unit": series_anchor_unit(results), "series": True, "recipes": recipes}
+    ids = post_delegation(board, {"index": 1, "label": "Raman series", "mode": "analysis", "status": "success"},
+                          {"key_findings": ["[series_1] anatase"], "analyses": [row]})
+    recipe = next(board.get(f) for f in ids if board.get(f)["kind"] == "recipe")
+    assert recipe["status"] == "verified" and recipe["payload"]["unit"] == "spectrum_0000"
+    assert recipe["payload"]["path"].endswith("meta/swarm/recipes/01_Raman_series/spectrum_0000.py")
+    assert Path(recipe["payload"]["path"]).read_text() == "M1"
+
+
+def test_a_failed_follower_refit_leaves_the_reuse_pick_unchanged(tmp_path, monkeypatch):
+    """A follower that failed and was refit: the agent's folder and the prior-run
+    reuse pick are exactly what they were before this PR."""
+    from scilink.agents.exp_agents.controllers.curve_fitting_controllers import _load_prior_curve_fit_state
+    names4 = [f"spectrum_{i:04d}" for i in range(4)]        # outlier detection needs three successes
+    state, ex = run_series(tmp_path, monkeypatch, names=names4, anchors={"spectrum_0000": OK},
+                           follower_r2={"spectrum_0001": 0.97, "spectrum_0002": None, "spectrum_0003": 0.96},   # one replay fails
+                           refits={"spectrum_0002": {"r2": 0.98, "approved": True, "script": "M2"}})
+    results = compile_results(tmp_path, state)
+    units = _units(results)
+    assert units[2][2] is True and units[2][4] == 0.98, units          # the failed follower was refit
+    assert analysis_verdict(results)["verified"], (analysis_verdict(results), units)
+    assert sorted(p.name for p in (tmp_path / "scripts").glob("*.py")) == [f"{n}.py" for n in names4]
+    assert (tmp_path / "scripts" / "spectrum_0002.py").read_text() == "M2"
+    (tmp_path / "analysis_results.json").write_text(json.dumps({"status": "success", "locked_config": {}}))
+    anchor_dir, summary, script_text, label = _load_prior_curve_fit_state(str(tmp_path))
+    assert script_text == "M1" and label == "spectrum_0000.py (representative of the series)"
 
 
 def test_a_failed_regime_anchor_names_its_own_regime(tmp_path, monkeypatch):
@@ -317,3 +362,110 @@ def test_a_failed_regime_anchor_names_its_own_regime(tmp_path, monkeypatch):
     assert [u[6] for u in units] == ["R1", "R1", "R1", "R2", "R2", "R2"], units   # regime on every unit
     v = analysis_verdict(results)
     assert not v["verified"] and "spectrum_0004" in v["reason"] and "without a locked recipe" in v["reason"], v
+
+
+def test_a_good_reuse_series_verifies_and_a_failed_reuse_is_salvaged(tmp_path, monkeypatch):
+    """Round 7: a series whose anchor is a locked-script reuse. A good
+    verdict is the replay gate passing (verified); a reuse whose script
+    failed, re-derived from scratch, carries the schema-drift caveat the
+    controller attaches AFTER the QC loop — the stamp must come after it."""
+    reuse_ok = {"r2": 0.97, "approved": True, "script": "PRIOR", "reused": "good"}
+    state, _ = run_series(tmp_path / "good", monkeypatch, names=NAMES, anchors={"spectrum_0000": reuse_ok},
+                          follower_r2={"spectrum_0001": 0.97, "spectrum_0002": 0.96}, cold_start="PRIOR")
+    results = compile_results(tmp_path / "good", state)
+    units = _units(results)
+    uv = results["individual_results"][0]["unit_verdict"]
+    assert "quality_history" not in results["individual_results"][0] or not results["individual_results"][0]["quality_history"]
+    assert uv == {"verified": True, "reason": "locked-script reuse passed the replay gate", "regime": "default", "own_gate": True}, uv
+    assert analysis_verdict(results)["verified"], (analysis_verdict(results), units)
+    # the reuse attempted, the script could not run, full QC re-derived the model (approved):
+    # the controller stamps reuse_validity script_failed + quality_warning → salvaged
+    state, _ = run_series(tmp_path / "failed", monkeypatch, names=NAMES, anchors={"spectrum_0000": OK},
+                          follower_r2={"spectrum_0001": 0.97, "spectrum_0002": 0.96}, cold_start="PRIOR")
+    results = compile_results(tmp_path / "failed", state)
+    a = results["individual_results"][0]
+    assert a["reuse_validity"]["verdict"] == "script_failed" and a.get("quality_warning")
+    v = analysis_verdict(results)
+    assert not v["verified"] and v["reason"].startswith("salvaged best-available result"), v
+
+
+# ---------------------------------------------------------------- parity
+#: Scenarios where the stamped verdict is MEANT to differ from the legacy
+#: reconstruction; anything else that differs fails the parity test.
+PARITY_ALLOWED = {"two_regimes_launder", "two_regimes_clean_r2_refit", "m1_m2", "laundered_anchor"}
+
+
+def _scenarios(tmp_path, monkeypatch):
+    """Every real-path shape of this module, named."""
+    S = {}
+    S["clean"] = run_series(tmp_path / "s1", monkeypatch, names=NAMES, anchors={"spectrum_0000": OK},
+                            follower_r2={"spectrum_0001": 0.97, "spectrum_0002": 0.96})[0]
+    S["m1_m2"] = run_series(tmp_path / "s2", monkeypatch, names=NAMES, anchors={"spectrum_0000": SALVAGED},
+                            follower_r2={"spectrum_0001": 0.82, "spectrum_0002": 0.84},
+                            refits={"spectrum_0000": {"r2": 0.97, "approved": True, "script": "M2"},
+                                    "spectrum_0001": {"r2": 0.81, "approved": False, "script": "M2"},
+                                    "spectrum_0002": {"r2": 0.81, "approved": False, "script": "M2"}})[0]
+    names6 = [f"spectrum_{i:04d}" for i in range(6)]
+    regimes = [[0, 1, 2], [3, 4, 5]]
+    S["two_regimes_launder"] = run_series(tmp_path / "s3", monkeypatch, names=names6, regimes=regimes,
+                                          anchors={"spectrum_0000": SALVAGED, "spectrum_0003": {"r2": 0.93, "approved": True, "script": "M3"}},
+                                          follower_r2={"spectrum_0001": 0.82, "spectrum_0002": 0.83, "spectrum_0004": 0.97, "spectrum_0005": 0.97},
+                                          refits={"spectrum_0000": {"r2": 0.97, "approved": True, "script": "M2"},
+                                                  "spectrum_0003": {"r2": 0.97, "approved": True, "script": "M4"},
+                                                  "spectrum_0001": {"r2": 0.81, "approved": False, "script": "M2"},
+                                                  "spectrum_0002": {"r2": 0.81, "approved": False, "script": "M2"}})[0]
+    S["two_regimes_clean_r2_refit"] = run_series(tmp_path / "s4", monkeypatch, names=names6, regimes=regimes,
+                                                 anchors={"spectrum_0000": OK, "spectrum_0003": {**SALVAGED, "script": "M3"}},
+                                                 follower_r2={"spectrum_0001": 0.97, "spectrum_0002": 0.97, "spectrum_0004": 0.82, "spectrum_0005": 0.83},
+                                                 refits={"spectrum_0003": {"r2": 0.97, "approved": True, "script": "M4"},
+                                                         "spectrum_0004": {"r2": 0.97, "approved": True, "script": "M4"},
+                                                         "spectrum_0005": {"r2": 0.97, "approved": True, "script": "M4"}})[0]
+    S["cut_anchor"] = run_series(tmp_path / "s5", monkeypatch, names=NAMES,
+                                 anchors={"spectrum_0000": {"r2": 0.80, "approved": False, "script": "M1", "unverified": True}},
+                                 follower_r2={"spectrum_0001": 0.97, "spectrum_0002": 0.97})[0]
+    S["failed_anchor"] = run_series(tmp_path / "s6", monkeypatch, names=NAMES,
+                                    anchors={"spectrum_0000": {"r2": 0.0, "approved": False, "script": None, "failed": True}},
+                                    follower_r2={"spectrum_0001": 0.99, "spectrum_0002": 0.99})[0]
+    S["all_refit_ok"] = run_series(tmp_path / "s7", monkeypatch, names=NAMES, anchors={"spectrum_0000": SALVAGED},
+                                   follower_r2={"spectrum_0001": 0.82, "spectrum_0002": 0.84},
+                                   refits={n: {"r2": 0.97, "approved": True, "script": "M2"} for n in NAMES})[0]
+    S["flip"] = run_series(tmp_path / "s8", monkeypatch, names=NAMES,
+                           anchors={"spectrum_0000": {"r2": 0.92, "approved": True, "script": "M1"}},
+                           follower_r2={"spectrum_0001": 0.80, "spectrum_0002": 0.80},
+                           refits={n: {"r2": 0.93, "approved": False, "script": "M2", "warning": "below"} for n in NAMES})[0]
+    S["laundered_anchor"] = run_series(tmp_path / "s9", monkeypatch, names=NAMES, anchors={"spectrum_0000": SALVAGED},
+                                       follower_r2={"spectrum_0001": 0.82, "spectrum_0002": 0.84},
+                                       refits={"spectrum_0000": {"r2": 0.86, "approved": False, "script": "M2", "warning": "below"}})[0]
+    S["good_reuse"] = run_series(tmp_path / "s10", monkeypatch, names=NAMES,
+                                 anchors={"spectrum_0000": {"r2": 0.97, "approved": True, "script": "PRIOR", "reused": "good"}},
+                                 follower_r2={"spectrum_0001": 0.97, "spectrum_0002": 0.96}, cold_start="PRIOR")[0]
+    S["failed_reuse_rederived"] = run_series(tmp_path / "s11", monkeypatch, names=NAMES, anchors={"spectrum_0000": OK},
+                                             follower_r2={"spectrum_0001": 0.97, "spectrum_0002": 0.96}, cold_start="PRIOR")[0]
+    names4 = [f"spectrum_{i:04d}" for i in range(4)]
+    S["failed_follower_refit"] = run_series(tmp_path / "s12", monkeypatch, names=names4, anchors={"spectrum_0000": OK},
+                                            follower_r2={"spectrum_0001": 0.97, "spectrum_0002": None, "spectrum_0003": 0.96},
+                                            refits={"spectrum_0002": {"r2": 0.98, "approved": True, "script": "M2"}})[0]
+    S["failed_regime_anchor"] = run_series(tmp_path / "s13", monkeypatch, names=names6, regimes=regimes,
+                                           anchors={"spectrum_0000": OK, "spectrum_0003": {"r2": 0.0, "approved": False, "script": None, "failed": True}},
+                                           follower_r2={n: 0.97 for n in names6})[0]
+    return {k: compile_results(tmp_path / f"s{i + 1}", st) for i, (k, st) in enumerate(S.items())}
+
+
+def test_parity_of_the_stamped_and_legacy_verdicts(tmp_path, monkeypatch):
+    """The stamped verdict and the legacy reconstruction agree on every
+    real-path shape, except where the change was intended (PARITY_ALLOWED):
+    a future divergence fails here instead of being found in review."""
+    from scilink.agents.exp_agents._verification_record import legacy_series_verdict
+    differ, agree = {}, []
+    for name, results in _scenarios(tmp_path, monkeypatch).items():
+        stamped = analysis_verdict(results)
+        assert all(isinstance(u.get("unit_verdict"), dict) for u in results["individual_results"] if u.get("success")), name
+        legacy = legacy_series_verdict(results)
+        if stamped["verified"] == legacy["verified"]:
+            agree.append(name)
+        else:
+            differ[name] = (stamped, legacy)
+    unexpected = {k: v for k, v in differ.items() if k not in PARITY_ALLOWED}
+    assert not unexpected, unexpected
+    assert set(agree) >= {"clean", "cut_anchor", "failed_anchor", "all_refit_ok", "flip", "good_reuse",
+                          "failed_reuse_rederived", "failed_follower_refit", "failed_regime_anchor"}, (agree, differ)

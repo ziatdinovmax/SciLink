@@ -699,7 +699,9 @@ run or a review:
   time — an anchor or refit by its own gate, a follower by the recipe it
   replayed — and a failed unit the agent already excluded does not block; a
   decision about a unit is made where the information is, never reconstructed
-  afterwards from markers; a verifier's
+  afterwards from markers; the board keeps its own copy of a recipe under
+  `swarm/recipes/`, so an agent's folder is never read again for it and the
+  agents' own layout and reuse are untouched by the swarm; a verifier's
   physics approval inside the gate's soft band counts, a bypassed verification
   below threshold does not), a human-approved plan (an unattended one stays
   provisional; only the delegation that wrote or settled the plan posts it),

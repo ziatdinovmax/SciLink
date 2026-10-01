@@ -504,25 +504,54 @@ def _analysis_records(entry: Dict[str, Any], result: Dict[str, Any]) -> List[Dic
                     "status": "verified" if verified else "provisional",
                     "evidence": {"analysis_ids": [aid] if aid else [], "gate": why}})
     for aid, rec in status_by_id.items():
-        script = _recipe_script(rec.get("output_directory"), rec.get("recipe_unit"),
-                                series=bool(rec.get("series")))
-        if script is not None:
-            verified, why = _analysis_verified(rec)
-            payload = {"path": str(script), "analysis_id": aid, "agent": rec.get("agent_name")}
-            if rec.get("recipe_unit"):
-                payload["unit"] = rec["recipe_unit"]
-                payload["note"] = ("the locked script of the series' first anchor (unit "
-                                   f"{rec['recipe_unit']!r}), the one its followers replayed "
-                                   "(<unit>_locked.py when the anchor was refit afterwards); a series "
-                                   "with several regimes locks one script per regime anchor, each saved "
-                                   "as scripts/<anchor unit>.py in the same folder (every follower's "
-                                   "replay is saved there too)")
-            out.append({"kind": "recipe", "payload": payload,
-                        "status": "verified" if verified else "provisional",
-                        "evidence": {"analysis_ids": [aid], "files": [str(script)],
-                                     "gate": ("approved analysis script: " if verified
-                                              else "script of an unapproved run: ") + why}})
+        out += _recipe_specs(aid, rec)
     return out
+
+
+def _recipe_specs(aid: str, rec: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The recipe records of one analysis row, with the script to copy into
+    the board's own folder (``_source`` / ``_text``, consumed by
+    ``post_delegation``): a series posts one per regime from the recipes the
+    driver recorded at lock time (the script its followers replayed, whatever
+    a later refit did to the anchor); a single run copies the agent's own
+    approved script. The board owns the copy: no later refit or reuse of
+    the run can change what the record points at."""
+    out: List[Dict[str, Any]] = []
+    run_verified, run_why = _analysis_verified(rec)
+    recipes = rec.get("recipes") or []
+    if recipes:
+        for r in recipes:
+            if not isinstance(r, dict) or not r.get("script") or not r.get("unit"):
+                continue
+            ok = bool(r.get("verified"))
+            out.append({"kind": "recipe",
+                        "payload": {"analysis_id": aid, "agent": rec.get("agent_name"), "unit": r["unit"],
+                                    "regime": r.get("regime"),
+                                    "note": ("the locked script of this regime's anchor, as its followers "
+                                             "replayed it; a copy the board owns")},
+                        "status": "verified" if ok else "provisional",
+                        "evidence": {"analysis_ids": [aid],
+                                     "gate": ("the anchor's gate: " + str(r.get("reason") or "")) if ok
+                                     else ("the anchor's gate did not pass: " + str(r.get("reason") or ""))},
+                        "_text": r["script"], "_name": f"{_safe(r['unit'])}.py"})
+        return out
+    if rec.get("series"):
+        return out                     # a series from before the record: no recipe
+    script = _recipe_script(rec.get("output_directory"), None)
+    if script is not None:
+        out.append({"kind": "recipe",
+                    "payload": {"analysis_id": aid, "agent": rec.get("agent_name"),
+                                "note": "the run's approved script; a copy the board owns"},
+                    "status": "verified" if run_verified else "provisional",
+                    "evidence": {"analysis_ids": [aid],
+                                 "gate": ("approved analysis script: " if run_verified
+                                          else "script of an unapproved run: ") + run_why},
+                    "_source": str(script), "_name": script.name})
+    return out
+
+
+def _safe(name: Any) -> str:
+    return "".join(c if c.isalnum() or c in ("_", "-", ".") else "_" for c in str(name)) or "recipe"
 
 
 def _analysis_verified(row: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
@@ -539,17 +568,13 @@ def _analysis_verified(row: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
 
 
 def _recipe_script(out_dir: Any, unit: Optional[str] = None, *, series: bool = False) -> Optional[Path]:
-    """The approved recipe an analysis run left behind: the curve agent's
-    ``scripts/fitting_script.py`` (a single spectrum) or, for a series, the
-    ANCHOR's locked script — ``scripts/<unit>_locked.py`` when the anchor was
-    refit after its followers replayed it, else ``scripts/<unit>.py``
-    (``unit`` comes from the run's row, the anchor's name; another regime's
-    anchor saves its own script under its own name); the image agent's
-    ``scripts/analysis_script.py``; the hyperspectral agent's
+    """The approved script a SINGLE analysis run left behind, to copy: the
+    curve agent's ``scripts/fitting_script.py``, the image agent's
+    ``scripts/analysis_script.py``, the hyperspectral agent's
     ``dynamic_analysis_records.json`` (the locked script travels inside it,
-    and is what a replay is pointed at; a hyperspectral SERIES keeps them per
-    dataset, so it has no root-level recipe and posts none)."""
-    if not out_dir:
+    and is what a replay is pointed at). A series' recipes come from the
+    driver's own record (``series_recipes``), never from this folder."""
+    if not out_dir or unit or series:
         return None
     out = Path(out_dir)
     records = out / "dynamic_analysis_records.json"
@@ -558,21 +583,10 @@ def _recipe_script(out_dir: Any, unit: Optional[str] = None, *, series: bool = F
     scripts = out / "scripts"
     if not scripts.is_dir():
         return None
-    if unit:
-        safe = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in str(unit))
-        # a refit anchor saves the script its followers replayed as
-        # <unit>_locked.py: that is the recipe, not the refit's script
-        for cand in (scripts / f"{safe}_locked.py", scripts / f"{safe}.py"):
-            if cand.is_file():
-                return cand
-        return None                      # a series whose anchor script is not there: no recipe
-    if series:
-        return None                      # a series with no anchor unit (reused, or refit): no recipe
     for name in ("analysis_script.py", "fitting_script.py"):
         if (scripts / name).is_file():
             return scripts / name
-    found = sorted(p for p in scripts.iterdir() if p.suffix == ".py" and p.is_file())
-    return found[0] if found else None
+    return None
 
 
 def _planning_records(entry: Dict[str, Any], result: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -653,6 +667,28 @@ def records_for(entry: Dict[str, Any], result: Dict[str, Any]) -> List[Dict[str,
     return []
 
 
+def _materialize_recipe(board: Board, entry: Dict[str, Any], spec: Dict[str, Any]) -> Dict[str, Any]:
+    """Write a recipe's script into the board's own folder
+    (``swarm/recipes/<NN>_<label>/<name>``) and point the record at the copy,
+    with where it came from on the evidence. The agent's folder is never
+    read again for it, and nothing under the agent's folder is added."""
+    text, source = spec.pop("_text", None), spec.pop("_source", None)
+    name = spec.pop("_name", None)
+    if spec.get("kind") != "recipe" or not name or (text is None and source is None):
+        return spec
+    folder = board.path.parent / "recipes" / f"{int(entry.get('index') or 0):02d}_{_safe(entry.get('label') or 'delegation')}"
+    folder.mkdir(parents=True, exist_ok=True)
+    dest = folder / name
+    if text is None:
+        text = Path(source).read_text(encoding="utf-8", errors="replace")
+    dest.write_text(text, encoding="utf-8")
+    spec["payload"]["path"] = str(dest)
+    if source:
+        spec["payload"]["source"] = str(source)
+    spec.setdefault("evidence", {})["files"] = [str(dest)] + ([str(source)] if source else [])
+    return spec
+
+
 def post_delegation(board: Board, entry: Dict[str, Any], result: Dict[str, Any]) -> List[str]:
     """Post a finished delegation's findings. Returns the new ids. The
     records carry the entry's recorded ``reads`` and ``board_version`` so
@@ -662,6 +698,7 @@ def post_delegation(board: Board, entry: Dict[str, Any], result: Dict[str, Any])
     ids: List[str] = []
     for spec in records_for(entry, result):
         try:
+            spec = _materialize_recipe(board, entry, spec)
             rec = board.post(author=author, subject=entry.get("subject"),
                              reads=entry.get("reads") or [],
                              board_version=entry.get("board_version"), **spec)

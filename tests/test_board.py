@@ -241,7 +241,10 @@ def test_a_finished_item_posts_what_its_mode_verified(meta):
             ("claim", "verified"), ("claim", "provisional"), ("claim", "provisional"), ("recipe", "verified")]
         assert mine[0]["evidence"]["analysis_ids"] == ["analysis_1"] and mine[0]["subject"] == "TiO2 A7"
         assert mine[0]["payload"]["text"].startswith("anatase from")      # the id prefix is evidence, not text
-        assert mine[3]["payload"]["path"].endswith("scripts/analysis_script.py")
+        # the recipe is a copy the board owns, with its source recorded
+        assert mine[3]["payload"]["path"].endswith(f"swarm/recipes/0{mine[3]['author']['delegation_index']}_{label.replace(' ', '_')}/analysis_script.py")
+        assert mine[3]["payload"]["source"].endswith("scripts/analysis_script.py")
+        assert Path(mine[3]["payload"]["path"]).read_text() == "print('fit')\n"
         assert all(r["reads"] == [] for r in mine)
     ledger = {e["label"]: e for e in meta._delegation_ledger}
     assert len(ledger["Raman A7"]["posted"]) == 4 and "reads" not in ledger["Raman A7"]
@@ -766,31 +769,37 @@ def test_planning_run_task_reports_how_the_plan_was_settled(tmp_path, monkeypatc
 
 
 def test_the_recipe_is_the_agents_approved_script(tmp_path):
-    from scilink.agents.meta_agent.board import _recipe_script
+    """A single run's recipe is the agent's own approved script (copied by
+    the board); a series' recipes come from the driver's record, never from
+    the agent's folder."""
+    from scilink.agents.meta_agent.board import _recipe_script, _recipe_specs
     assert _recipe_script(None) is None and _recipe_script(tmp_path) is None
     (tmp_path / "scripts").mkdir()
     assert _recipe_script(tmp_path) is None
-    (tmp_path / "scripts" / "spectrum_0001.py").write_text("")       # a series: one per spectrum
+    (tmp_path / "scripts" / "spectrum_0001.py").write_text("")       # a series folder: unit scripts only
     (tmp_path / "scripts" / "spectrum_0000.py").write_text("")
-    assert _recipe_script(tmp_path).name == "spectrum_0000.py"
-    (tmp_path / "scripts" / "fitting_script.py").write_text("")      # the curve agent's single fit
+    assert _recipe_script(tmp_path) is None                          # never "the first unit script"
+    (tmp_path / "scripts" / "fitting_script.py").write_text("M")     # the curve agent's single fit
     assert _recipe_script(tmp_path).name == "fitting_script.py"
     (tmp_path / "scripts" / "analysis_script.py").write_text("")     # the image agent's
     assert _recipe_script(tmp_path).name == "analysis_script.py"
-    # a series: the anchor's unit script, never another unit's or a refit's
-    assert _recipe_script(tmp_path, "spectrum_0001").name == "spectrum_0001.py"
-    assert _recipe_script(tmp_path, "spectrum 0007") is None
+    assert _recipe_script(tmp_path, series=True) is None and _recipe_script(tmp_path, "spectrum_0000") is None
     (tmp_path / "dynamic_analysis_records.json").write_text("{}")    # the hyperspectral agent's
     assert _recipe_script(tmp_path).name == "dynamic_analysis_records.json"
+    # a series row: one recipe per regime from the driver's record, script text to copy
+    row = {"analysis_id": "s1", "status": "success", "verified": True, "series": True, "output_directory": str(tmp_path),
+           "recipes": [{"regime": "R1", "unit": "spectrum_0000", "index": 0, "verified": True, "reason": "ok", "script": "M1"},
+                       {"regime": "R2", "unit": "spectrum_0003", "index": 3, "verified": False, "reason": "salvaged", "script": "M3"}]}
+    specs = _recipe_specs("s1", row)
+    assert [(sp["status"], sp["_name"], sp["_text"], sp["payload"]["regime"]) for sp in specs] == [
+        ("verified", "spectrum_0000.py", "M1", "R1"), ("provisional", "spectrum_0003.py", "M3", "R2")]
+    # a series row from before the record posts no recipe (the folder is not consulted)
+    assert _recipe_specs("s2", {**row, "recipes": []}) == []
     from scilink.agents.exp_agents._verification_record import series_anchor_unit
     series = _curve_series(ANCHOR_OK)
     series["individual_results"][0]["adaptively_refitted"] = True         # a refit is not the anchor
     series["individual_results"][1]["quality_history"] = dict(ANCHOR_OK)
     assert series_anchor_unit(series) == "spectrum_0001" and series_anchor_unit({"status": "success"}) is None
-    # a series with no anchor unit posts no recipe (never the alphabetically first script)
-    (tmp_path / "s2" / "scripts").mkdir(parents=True)
-    (tmp_path / "s2" / "scripts" / "spectrum_0000.py").write_text("")
-    assert _recipe_script(tmp_path / "s2", None, series=True) is None
     reused = _curve_series(None)
     reused["individual_results"][0]["reuse_validity"] = {"reused": True, "verdict": "good"}
     assert series_anchor_unit(reused) == "spectrum_0000"

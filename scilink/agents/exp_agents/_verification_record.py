@@ -310,6 +310,14 @@ def unit_verdict_for(unit: Dict[str, Any], *, recipe: Optional[Dict[str, Any]] =
         bad = _unit_verdict(unit, where="")
         return {"verified": bad is None, "reason": (bad or {}).get("reason") or "approved by its own gate",
                 "regime": regime, "own_gate": True}
+    rv = unit.get("reuse_validity") or {}
+    if rv.get("reused"):
+        # a locked-script reuse (a prior run's script, or a script-bank cold
+        # start) writes no QC record: the replay gate is its own gate
+        good = rv.get("verdict") == "good"
+        return {"verified": good, "regime": regime, "own_gate": True,
+                "reason": ("locked-script reuse passed the replay gate" if good
+                           else f"reused script verdict {rv.get('verdict')!r}")}
     if (unit.get("quality_history") or {}).get("unverified"):
         return {"verified": False, "reason": "follower unverified (budget)", "regime": regime}
     if unit.get("fitted_from") == "fresh_code" or recipe is None:
@@ -381,17 +389,48 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
         if not ok_items:
             return {"verified": False, "reason": "no unit succeeded"}
         failed = len(items) - len(ok_items)
-        if all(isinstance(it.get("unit_verdict"), dict) for it in ok_items):
-            # The driver stamped every unit when it knew the recipe and the
-            # gate result (unit_verdict_for): aggregate, nothing to reconstruct.
-            for it in ok_items:
-                uv = it["unit_verdict"]
-                if not uv.get("verified"):
-                    return {"verified": False,
-                            "reason": f"{uv.get('reason')} (unit {it.get('name') or it.get('index')})"}
-            return {"verified": True, "reason": "every unit verified by the series driver"
-                    + (f" ({failed} failed unit(s) excluded by the agent)" if failed else "")}
-        # A shape from before the stamp: reconstruct from the markers.
+        if any(isinstance(it.get("unit_verdict"), dict) for it in ok_items):
+            return _stamped_series_verdict(ok_items, failed)
+        # A shape from before the stamp (a pre-PR checkpoint): reconstruct
+        # from the markers.
+        return legacy_series_verdict(full)
+
+    if isinstance(hs_records, list) and hs_records:
+        return _hyperspectral_cube_verdict(hs_records)
+
+    return _single_run_verdict(full, rv)
+
+
+def _stamped_series_verdict(ok_items: List[dict], failed: int) -> Dict[str, Any]:
+    """Aggregate the drivers' stamps (``unit_verdict_for``): every successful
+    unit must be stamped and verified. A unit without a stamp is not quietly
+    judged by the legacy rule — the two rules differ, in both directions —
+    it is a verdict of its own."""
+    for it in ok_items:
+        uv = it.get("unit_verdict")
+        name = it.get("name") or it.get("index")
+        if not isinstance(uv, dict):
+            return {"verified": False, "reason": f"unit {name} has no stamp"}
+        if not uv.get("verified"):
+            return {"verified": False, "reason": f"{uv.get('reason')} (unit {name})"}
+    return {"verified": True, "reason": "every unit verified by the series driver"
+            + (f" ({failed} failed unit(s) excluded by the agent)" if failed else "")}
+
+
+def legacy_series_verdict(full: Dict[str, Any]) -> Dict[str, Any]:
+    """The series verdict reconstructed from markers (``role``,
+    ``fitted_from``, ``replaced_unit``, the salvage flags, ``regime``), as the
+    board judged a series before the drivers stamped ``unit_verdict``. Kept
+    for checkpoints written before the stamp, and as the reference the
+    parity test holds the stamped verdict to."""
+    items = full.get("individual_results")
+    if not (isinstance(items, list) and items):
+        return {"verified": False, "reason": "not a series"}
+    ok_items = [it for it in items if isinstance(it, dict) and it.get("success")]
+    if not ok_items:
+        return {"verified": False, "reason": "no unit succeeded"}
+    failed = len(items) - len(ok_items)
+    if True:
         # The recipe a follower replayed is its regime's anchor AS IT WAS when
         # the follower ran. A refit anchor carries a summary of the unit it
         # replaced (``replaced_unit``); a follower still on the locked script
@@ -463,7 +502,9 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
         return {"verified": True, "reason": "series anchors approved and every follower verified"
                 + (f" ({failed} failed unit(s) excluded by the agent)" if failed else "")}
 
-    if isinstance(hs_records, list) and hs_records:
+
+def _hyperspectral_cube_verdict(hs_records: List[Any]) -> Dict[str, Any]:
+    if True:
         scripted = 0
         for r in hs_records:
             if not isinstance(r, dict):
@@ -482,6 +523,8 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
             return {"verified": False, "reason": "no target produced an approved script"}
         return {"verified": True, "reason": "every target passed verification"}
 
+
+def _single_run_verdict(full: Dict[str, Any], rv: Dict[str, Any]) -> Dict[str, Any]:
     if full.get("quality_warning") and not _has_record(full.get("quality_history")):
         return {"verified": False, "reason": "salvaged best-available result (quality_warning)"}
     qh = full.get("quality_history")
@@ -496,10 +539,31 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
             if qh.get("verification_iterations") else "met the acceptance threshold"}
 
 
+def series_recipes(full_result: Optional[dict]) -> List[Dict[str, Any]]:
+    """The recipes a series locked, one per regime, as the driver recorded
+    them when each anchor's script was locked (``locked_recipes``): the
+    anchor unit, its verdict then, and the script text its followers
+    replayed. Empty for a single run or a result from before the record."""
+    recs = (full_result or {}).get("locked_recipes")
+    if not isinstance(recs, dict):
+        return []
+    out = []
+    for regime, r in recs.items():
+        if isinstance(r, dict) and r.get("script"):
+            out.append({"regime": r.get("regime") or regime, "unit": r.get("unit"), "index": r.get("index"),
+                        "verified": bool((r.get("verdict") or {}).get("verified")),
+                        "reason": (r.get("verdict") or {}).get("reason"), "script": r["script"]})
+    out.sort(key=lambda r: (r.get("index") if isinstance(r.get("index"), int) else 1 << 30))
+    return out
+
+
 def series_anchor_unit(full_result: Optional[dict]) -> Optional[str]:
-    """The name of a series' anchor unit — the first successful unit that
-    went through the QC engine and is not a refit — whose ``scripts/<name>.py``
-    is the locked recipe. None for a single run."""
+    """The name of a series' first anchor unit. From the driver's recipe
+    record when there is one; else, for a result from before the record,
+    the first successful unit with a QC record that is not a refit."""
+    recipes = series_recipes(full_result)
+    if recipes:
+        return str(recipes[0]["unit"]) if recipes[0].get("unit") else None
     items = (full_result or {}).get("individual_results")
     if not isinstance(items, list) or not items:
         return None
