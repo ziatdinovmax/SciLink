@@ -5,7 +5,8 @@ merged on 2026-09-30 (#697, head bed2f7f8) after three review rounds, built
 as "Starting stage 1" below describes; what changed on the way is recorded
 under the stage in "Build order". Stage 2 (the board) is on its PR, built as
 "Starting stage 2" describes, with what changed on the way under the stage in
-"Build order" and its open items in "After stage 2". The design notes were
+"Build order" and its open items in "After stage 2"; "Starting stage 3" is
+drafted below. The design notes were
 drafted 2026-09-28 against `main` at b988c7cd (Release 0.0.83), based on a source audit of the meta
 agent (`meta_orchestrator.py`, `meta_orchestrator_tools.py`, `fanout.py`,
 `telemetry.py`), the three mode orchestrators' `run_task`, the executors, the
@@ -1389,6 +1390,105 @@ the board in the meta checkpoint and restore.
 followed by a swarm that reads their claims (the second run's ledger entries
 show the reads); fusion of two independent analyses reporting
 `independent_support == 2`, and of one informed by the other reporting 1.
+
+## Starting stage 3 (reactions)
+
+Drafted while #702 was in review, from §3 ("The coordinator"), robustness
+items 2–4 and the stage-3 entry in "Build order". One PR, "Swarm stage 3",
+verified like stages 1 and 2. Two rules from the stage-2 reviews come first,
+because they would have saved five rounds there:
+
+- **A decision is made where its information is, never reconstructed.** The
+  coordinator records an item's cause and chain at the moment it enqueues
+  the item, marks taint at the moment a finding is withdrawn, and refuses a
+  cycle at the moment a subscription would fire. Nothing reads the ledger
+  afterwards to work out what caused what.
+- **The harness before the code.** A real-path test drives `run_swarm` with
+  fake workers that post findings through the real board and the real
+  coordinator loop (the shape of `tests/test_run_swarm.py`), and the
+  stage-2 swarm tests run unchanged under the new coordinator: a swarm with
+  no subscriptions must behave exactly as it does today. Shapes come from
+  the code (as in `tests/test_series_verdict_path.py`), not from a reading
+  of it.
+
+**Dependencies, each its own small PR or decision before the stage:**
+- #705 — an analysis worker takes a script FILE as its recipe. Without it a
+  "replay the verified recipe on the new dataset" subscription cannot name
+  the board's copy under `swarm/recipes/`.
+- #704 — which script a reuse of a refit series replays. A subscription
+  makes that choice with nobody looking.
+- Provisional findings do not propagate by default (open question, kept).
+
+**Step 1: the subscription, declared and matched without a model.**
+`run_swarm(work_items, subscriptions=None, budget=None)`. A subscription is
+`{on: {kind, subject?, status: "verified"}, enqueue: {mode, label, task,
+reads_board?, check?}, max_fires: 1}`; `task` is a template with a few named
+fields (`{finding.text}`, `{finding.path}`, `{subject}`, `{analysis_id}`),
+filled by the coordinator, no code and no model. Matching is equality on
+`kind`, normalised `subject` and `status`; a finding fires a subscription at
+most once, and a subscription fires at most `max_fires` times per swarm.
+Pure functions, tested on their own.
+
+**Step 2: the coordinator reacts.** After an item closes and posts, the loop
+evaluates every subscription against the records it just posted and
+enqueues the fired items under the existing rules — capacity, memory
+admission, the item budget, `SWARM_MAX_ITEMS` counting fired items, and a
+per-subject re-trigger cap (`SWARM_MAX_TRIGGERS_PER_SUBJECT`, 2). A fired
+item is an ordinary ledger entry with `caused_by` (the finding ids) and
+`chain` (the triggering item's chain plus `(mode, subject, kind,
+finding_id)`), stamped when it is enqueued. Workers still never start
+workers: every reaction is the coordinator's, so the depth stays 1 in the
+proposal's sense while a chain may be longer than one hop.
+
+**Step 3: `task_request`.** A worker's `suggested_followups` become
+`task_request` records (provisional, never readable by default, author =
+the worker). A request becomes an item only through a subscription on
+`kind: task_request` or an explicit allowance in the budget; otherwise it is
+listed in the swarm result as asked and not done. "Workers ask, the
+coordinator decides."
+
+**Step 4: cycles and oscillation.** A subscription that would fire an item
+whose `chain` already holds the same `(mode, subject, kind)` is refused and
+the refusal recorded (`refused_cycles` in the result, `refused` on the
+would-be entry). A subject re-triggered past its cap is refused the same
+way. A supersede chain longer than two on one subject stops the coordinator
+scheduling a third round and reports the disagreement (robustness item 3);
+the fold already exposes the chain.
+
+**Step 5: retraction and taint.** `Board.retract` and `supersedes` get
+their callers: a meta tool `retract_finding(finding_id, reason)` (the
+person's or the meta's act, author mode `coordinator`), and a worker
+superseding its own earlier claim on the same subject. When a finding is
+retracted or superseded, the coordinator marks every dependent in
+`read_closure` `tainted` (a fold status, as today's `superseded`), re-runs
+the tainted items' sources if the budget allows, else lists them as resting
+on a withdrawn finding. No automatic retraction: a check that disagrees is a
+result to show (`independent_support`, `audit_split`), not a withdrawal.
+
+**Step 6: hazards reach everyone.** A `hazard` on a subject is delivered to
+every reader on that subject whatever its `kinds` filter (robustness item
+4); today a filter can drop it.
+
+**Step 7: what the result and `get_board` show.** Fired items with their
+cause, refused cycles and capped subjects, tainted findings and what was
+re-run, supersede chains. Nothing new in the prompt beyond naming these.
+
+**Tests** (the harness first): a two-item cycle is refused and recorded; a
+subscription fires once per finding and stops at `max_fires` and at the
+subject cap; a retraction taints exactly its dependents and nothing else,
+and the re-run happens under budget and is listed without; a supersede
+chain of three on one subject stops the coordinator; a hazard reaches a
+reader that filtered it out; a `task_request` becomes an item only through
+a subscription; chains and causes survive a checkpoint; a swarm with no
+subscriptions produces the same ledger and board as stage 2 (the existing
+`test_run_swarm.py` and `test_board.py` unchanged).
+
+**Live checks that close stage 3:** the proposal's canonical chain on
+Bedrock — an analysis whose verified claim fires a simulation item (inputs
+only, #696), the board inspected afterwards for the cause and chain; after
+#705, a verified recipe firing a replay on a new dataset of the same subject;
+and a planted cycle (two subscriptions that would fire each other) refused
+live with the refusal in the result.
 
 ## What stays as it is
 
