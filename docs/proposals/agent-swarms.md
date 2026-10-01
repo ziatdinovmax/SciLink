@@ -1037,7 +1037,17 @@ can already hit.
      reuse re-derived (salvaged), a failed follower refit that leaves the
      reuse pick unchanged, and a PARITY test: the stamped verdict and the
      legacy reconstruction over every real-path shape, allowed to differ
-     only on an explicit list — and today they differ nowhere.
+     only on an explicit list. They differ in one case, and it is intended:
+     a FOLLOWER refit that stayed salvaged — the legacy rule held a follower
+     refit only to "finished, not unverified" (a round-3 relaxation), the
+     stamp judges every refit by its own gate, so a salvaged refit is a
+     salvaged row in the table, as a salvaged anchor refit is.
+     `tests/test_image_series_verdict_path.py` is the image twin of the
+     harness (the real `UnifiedImageProcessingController` and
+     `ImageAdaptiveRefitController`, the real `_process_single_image` for
+     every follower): clean, salvaged anchor, failed anchor with fresh-code
+     followers, two regimes, a failed follower refit (approved and salvaged),
+     and the same parity.
      Open for stage 3, filed as issues: which script a reuse of a refit
      series should replay (the original the followers ran, or the approved
      refit), and a way for an analysis worker to take a script file as its

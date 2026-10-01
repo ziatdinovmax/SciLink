@@ -390,9 +390,16 @@ def test_a_good_reuse_series_verifies_and_a_failed_reuse_is_salvaged(tmp_path, m
 
 
 # ---------------------------------------------------------------- parity
-#: Scenarios where the stamped verdict is MEANT to differ from the legacy
-#: reconstruction; anything else that differs fails the parity test.
-PARITY_ALLOWED = {"two_regimes_launder", "two_regimes_clean_r2_refit", "m1_m2", "laundered_anchor"}
+#: Scenarios where the stamped verdict is ALLOWED to differ from the legacy
+#: reconstruction; anything else that differs fails the parity test. The
+#: first four were the review's intended changes (the legacy rule, with
+#: regime carried, reaches the same answers today); the last is a real
+#: difference: the legacy rule held a FOLLOWER refit only to "finished, not
+#: unverified" (a round-3 relaxation), the stamp judges every refit by its
+#: own gate, so a refit that stayed salvaged is a salvaged row in the table
+#: — the same reasoning as for a salvaged anchor refit.
+PARITY_ALLOWED = {"two_regimes_launder", "two_regimes_clean_r2_refit", "m1_m2", "laundered_anchor",
+                  "follower_refit_salvaged"}
 
 
 def _scenarios(tmp_path, monkeypatch):
@@ -445,6 +452,10 @@ def _scenarios(tmp_path, monkeypatch):
     S["failed_follower_refit"] = run_series(tmp_path / "s12", monkeypatch, names=names4, anchors={"spectrum_0000": OK},
                                             follower_r2={"spectrum_0001": 0.97, "spectrum_0002": None, "spectrum_0003": 0.96},
                                             refits={"spectrum_0002": {"r2": 0.98, "approved": True, "script": "M2"}})[0]
+    S["follower_refit_salvaged"] = run_series(tmp_path / "s14", monkeypatch, names=names4, anchors={"spectrum_0000": OK},
+                                              follower_r2={"spectrum_0001": 0.97, "spectrum_0002": None, "spectrum_0003": 0.96},
+                                              refits={"spectrum_0002": {"r2": 0.86, "approved": False, "script": "M2",
+                                                                        "warning": "R² = 0.8600 below threshold 0.95"}})[0]
     S["failed_regime_anchor"] = run_series(tmp_path / "s13", monkeypatch, names=names6, regimes=regimes,
                                            anchors={"spectrum_0000": OK, "spectrum_0003": {"r2": 0.0, "approved": False, "script": None, "failed": True}},
                                            follower_r2={n: 0.97 for n in names6})[0]
@@ -467,5 +478,8 @@ def test_parity_of_the_stamped_and_legacy_verdicts(tmp_path, monkeypatch):
             differ[name] = (stamped, legacy)
     unexpected = {k: v for k, v in differ.items() if k not in PARITY_ALLOWED}
     assert not unexpected, unexpected
+    # the one difference that exists today, and the stricter answer is the stamped one
+    assert set(differ) == {"follower_refit_salvaged"}, differ
+    assert differ["follower_refit_salvaged"][0]["verified"] is False
     assert set(agree) >= {"clean", "cut_anchor", "failed_anchor", "all_refit_ok", "flip", "good_reuse",
                           "failed_reuse_rederived", "failed_follower_refit", "failed_regime_anchor"}, (agree, differ)
