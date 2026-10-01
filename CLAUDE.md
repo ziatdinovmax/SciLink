@@ -131,7 +131,15 @@ feature outliers are flagged (never re-analysed — the anomaly may be the
 physics), then trend codegen and a series synthesis run over the per-unit
 feature table. The per-unit rows are written to `series_analysis_results.json`
 in one shape, so `feature_table.write_feature_table` and every downstream
-consumer read all three the same way.
+consumer read all three the same way. **A later reuse of a series run replays
+its locked recipe** — the first regime's, recorded in `locked_recipes` when the
+anchor's script was locked, the script the feature table rests on — never a
+later refit of the anchor (the refit's script stays as that unit's
+`scripts/<unit>.py`; a person who wants the better model starts a new series
+from it). `prior_analysis_paths` also takes a recipe FILE (`.py`, or
+`dynamic_analysis_records.json` for a cube) through the same replay gate, so
+the swarm board's copy under `swarm/recipes/` is replayable; the pick and its
+reason are `reuse_validity.source` (`_verification_record.prior_recipe_script`).
 
 The hyperspectral instantiation differs in mechanics, not shape: the single-
 cube pipeline is bound to one output directory (decomposition, dynamic-analysis

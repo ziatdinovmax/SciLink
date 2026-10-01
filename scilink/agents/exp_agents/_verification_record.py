@@ -22,7 +22,9 @@ builder in the HS-1 expansion via its own keymap.
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 
 from typing import Any, Callable, Dict, List, Optional
 
@@ -555,6 +557,53 @@ def series_recipes(full_result: Optional[dict]) -> List[Dict[str, Any]]:
                         "reason": (r.get("verdict") or {}).get("reason"), "script": r["script"]})
     out.sort(key=lambda r: (r.get("index") if isinstance(r.get("index"), int) else 1 << 30))
     return out
+
+
+def prior_recipe_script(anchor_dir, *, single_name: str, named=None):
+    """The script a locked-script reuse of a prior run replays, as
+    ``(text, label)`` — ``label`` is ``None`` when there is nothing to say
+    beyond the run's name, else it says which script was picked and why.
+
+    In order (#704, #705):
+    - the file the caller NAMED (``named``, a ``.py`` path): a script file is
+      a recipe — the board's copy under ``swarm/recipes/``, or one unit's
+      script of a run;
+    - a single run's own script (``scripts/<single_name>``);
+    - a series' LOCKED recipe: the first regime's, from ``locked_recipes`` in
+      the run's ``analysis_results.json`` — the script its table rests on,
+      not a later refit's (the label says when the anchor was refit since);
+    - for a series from before the record, the first unit script.
+    ``(None, None)`` when the run holds no script."""
+    if named is not None:
+        named = Path(named)
+        return named.read_text(encoding="utf-8"), f"{named.name} (the script file named)"
+    anchor_dir = Path(anchor_dir)
+    scripts = anchor_dir / "scripts"
+    single = scripts / single_name
+    if single.is_file():
+        return single.read_text(encoding="utf-8"), None
+    try:
+        recorded = json.loads((anchor_dir / "analysis_results.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        recorded = None
+    recipes = series_recipes(recorded if isinstance(recorded, dict) else None)
+    if recipes:
+        r = recipes[0]
+        unit_script = scripts / f"{r.get('unit')}.py"
+        refit = unit_script.is_file() and unit_script.read_text(encoding="utf-8") != r["script"]
+        return r["script"], (f"{r.get('unit')}.py (the series' locked recipe"
+                             + (", the anchor refit since" if refit else "") + ")")
+    py_files = sorted(scripts.glob("*.py")) if scripts.is_dir() else []
+    if py_files:
+        return py_files[0].read_text(encoding="utf-8"), f"{py_files[0].name} (representative of the series)"
+    return None, None
+
+
+def named_recipe_file(raw_path) -> Optional[Path]:
+    """``raw_path`` when it names a script FILE to replay (a ``.py``), else
+    ``None`` — a run folder, or a file inside one that is not a script."""
+    p = Path(raw_path)
+    return p if p.is_file() and p.suffix == ".py" else None
 
 
 def series_anchor_unit(full_result: Optional[dict]) -> Optional[str]:

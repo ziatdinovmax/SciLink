@@ -3743,7 +3743,14 @@ class AnalysisOrchestratorTools:
                         "the result independently (re-running the script that "
                         "produced a result cannot verify it). To FORCE verbatim "
                         "reuse of the prior locked extraction script, ALSO set "
-                        "`reuse_locked_script=true` (see that parameter)."
+                        "`reuse_locked_script=true` (see that parameter). A path "
+                        "may also be a recipe FILE rather than a run: a script "
+                        "`.py` (curve, image — e.g. the swarm board's copy under "
+                        "`swarm/recipes/`) or a `dynamic_analysis_records.json` "
+                        "(hyperspectral); with `reuse_locked_script=true` that "
+                        "file is what is replayed. For a prior SERIES the replay "
+                        "is the series' locked recipe (the script its feature "
+                        "table rests on), not a later refit of its anchor."
                     )
                 },
                 "reuse_locked_script": {

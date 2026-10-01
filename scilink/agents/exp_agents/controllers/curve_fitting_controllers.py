@@ -937,13 +937,19 @@ def _append_prior_knowledge_context(prompt: list, state: dict) -> None:
 def _load_prior_curve_fit_state(raw_path):
     """Locate a prior curve-fit run's artifacts for a single path.
 
-    Accepts a directory or a file inside one. Looks for
-    ``series_fit_results.json`` (the structured fit record) and a saved
-    fitting script under ``scripts/``. Returns ``(anchor_dir, summary,
-    script_text, script_label)`` or ``(None, None, None, None)`` on any
-    failure — a missing or malformed prior run silently contributes nothing.
+    Accepts a directory, a file inside one, or a script FILE on its own
+    (#705: a ``.py`` is a recipe — the board's copy under ``swarm/recipes/``
+    — and is the script replayed even when it sits inside a run folder).
+    Looks for ``series_fit_results.json`` (the structured fit record) and
+    the script to replay (``prior_recipe_script``: the run's single script,
+    else a series' LOCKED recipe, #704, else its first unit script). Returns
+    ``(anchor_dir, summary, script_text, script_label)`` or ``(None, None,
+    None, None)`` on any failure — a missing or malformed prior run silently
+    contributes nothing.
     """
+    from .._verification_record import named_recipe_file, prior_recipe_script
     p = Path(raw_path)
+    named = named_recipe_file(p)
     dir_candidates = (
         [p.parent, p.parent.parent] if p.is_file() else [p, p.parent]
     )
@@ -956,7 +962,14 @@ def _load_prior_curve_fit_state(raw_path):
             sfr_path = candidate
             break
     if anchor_dir is None:
-        return None, None, None, None
+        if named is None:
+            return None, None, None, None
+        # a recipe file on its own: the script, with no run summary to carry
+        try:
+            text, label = prior_recipe_script(named.parent, single_name="fitting_script.py", named=named)
+        except OSError:
+            return None, None, None, None
+        return named.parent, None, text, label
     try:
         data = json.loads(sfr_path.read_text())
     except Exception:  # noqa: BLE001 - a malformed prior run is skipped
@@ -975,28 +988,16 @@ def _load_prior_curve_fit_state(raw_path):
         "locked_config": data.get("locked_config"),
     }
 
-    # Locate a representative fitting script. A single-spectrum run writes
-    # `scripts/fitting_script.py`; a series writes one `scripts/<spectrum>.py`
-    # per spectrum — all share the locked model, so the first is a
-    # representative template.
-    script_text = None
-    script_label = None
-    scripts_dir = anchor_dir / "scripts"
-    single = scripts_dir / "fitting_script.py"
-    candidate = None
-    if single.is_file():
-        candidate, script_label = single, single.name
-    elif scripts_dir.is_dir():
-        py_files = sorted(scripts_dir.glob("*.py"))
-        if py_files:
-            candidate = py_files[0]
-            script_label = f"{candidate.name} (representative of the series)"
-    if candidate is not None:
-        try:
-            script_text = candidate.read_text()
-        except Exception:  # noqa: BLE001
-            script_text = None
-            script_label = None
+    # The script to replay: a single-spectrum run's `scripts/fitting_script.py`;
+    # a series' locked recipe (what its followers replayed and its table
+    # rests on), else its first unit script; or the file the caller named.
+    try:
+        script_text, script_label = prior_recipe_script(
+            anchor_dir, single_name="fitting_script.py", named=named)
+    except Exception:  # noqa: BLE001 - an unreadable script contributes nothing
+        script_text, script_label = None, None
+    if script_text and script_label is None:
+        script_label = "fitting_script.py"
 
     return anchor_dir, summary, script_text, script_label
 
@@ -1115,11 +1116,16 @@ def _first_prior_curve_fit_script(state: dict):
     """
     paths = state.get("prior_analysis_paths") or []
     for raw_path in paths:
-        anchor_dir, _summary, script_text, _label = (
+        anchor_dir, _summary, script_text, label = (
             _load_prior_curve_fit_state(raw_path)
         )
         if anchor_dir is not None and script_text:
-            return script_text, (anchor_dir.name or str(anchor_dir))
+            # the source names the run and, for a series or a named file,
+            # which script was picked (reuse_validity.source says so)
+            source = anchor_dir.name or str(anchor_dir)
+            if label and label != "fitting_script.py":
+                source = f"{source}: {label}"
+            return script_text, source
     return None, None
 
 

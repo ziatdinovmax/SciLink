@@ -595,33 +595,33 @@ def _first_prior_image_script(state: dict):
     """Return the first reusable analysis script for locked-script reuse (#172).
 
     Mirrors the curve-fit helper: scans ``state['prior_analysis_paths']`` and
-    returns ``(script_text, source_label)`` for the first prior image-analysis
-    run that carries a saved analysis script under ``scripts/`` — a single-
-    image run writes ``scripts/analysis_script.py``; a series writes one
-    ``scripts/<image>.py`` per image (all share the locked pipeline, so the
-    first is a representative template). Returns ``(None, None)`` when no
-    prior paths are given or none carry a script, which keeps a normal
-    (no-prior) run byte-identical.
+    returns ``(script_text, source_label)`` for the first path that yields a
+    script (``prior_recipe_script``): a script FILE named directly (#705 —
+    the board's copy under ``swarm/recipes/``, or one unit's script), a
+    single-image run's ``scripts/analysis_script.py``, a series' LOCKED
+    recipe from its ``analysis_results.json`` (#704: the script its table
+    rests on, not a later refit's), else a series' first unit script. The
+    label names the run and, for a series or a named file, the pick.
+    Returns ``(None, None)`` when no prior paths are given or none carry a
+    script, which keeps a normal (no-prior) run byte-identical.
     """
+    from .._verification_record import named_recipe_file, prior_recipe_script
     paths = state.get("prior_analysis_paths") or []
     for raw_path in paths:
+        named = named_recipe_file(raw_path)
         anchor_dir, _data = _load_prior_state(raw_path)
-        if anchor_dir is None:
+        if anchor_dir is None and named is None:
             continue
-        scripts_dir = anchor_dir / "scripts"
-        single = scripts_dir / "analysis_script.py"
-        candidate = None
-        if single.is_file():
-            candidate = single
-        elif scripts_dir.is_dir():
-            py_files = sorted(scripts_dir.glob("*.py"))
-            if py_files:
-                candidate = py_files[0]
-        if candidate is not None:
-            try:
-                return candidate.read_text(), (anchor_dir.name or str(anchor_dir))
-            except Exception:  # noqa: BLE001 - a malformed prior run is skipped
-                continue
+        try:
+            text, label = prior_recipe_script(
+                anchor_dir if anchor_dir is not None else named.parent,
+                single_name="analysis_script.py", named=named)
+        except Exception:  # noqa: BLE001 - a malformed prior run is skipped
+            continue
+        if text:
+            run = anchor_dir if anchor_dir is not None else named.parent
+            source = run.name or str(run)
+            return text, (f"{source}: {label}" if label else source)
     return None, None
 
 

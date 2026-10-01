@@ -1348,10 +1348,17 @@ references are to `main` at bed2f7f8.
 - *Subjects are strings matched case-insensitively.* Two spellings of one
   sample are two subjects; the meta's prompt asks for one spelling per item.
   A registry of subjects is stage 5's.
-- *A recipe record is a board-owned copy.* Nothing today replays it: a
-  worker takes a prior run folder, not a script file (stage 3 needs the
-  latter, filed), and which script a reuse of a refit series should replay
-  is undecided (filed).
+- *A recipe record is a board-owned copy.* Resolved before stage 3 (#704,
+  #705, one PR): `prior_analysis_paths` takes a script FILE (a `.py`, or a
+  `dynamic_analysis_records.json` for a cube) as the recipe — the board's
+  copy under `swarm/recipes/` replays through the same gate as a run
+  folder — and a reuse of a SERIES run replays the series' locked recipe
+  (the first regime's, from `locked_recipes` in its `analysis_results.json`:
+  the script its table rests on), not a later refit of its anchor; the
+  agents' reuse pick and the board's recipe agree, and
+  `reuse_validity.source` says which script was picked
+  (`_verification_record.prior_recipe_script`, shared by the curve and
+  image pickers; the hyperspectral agent already took the records file).
 - *Persistent-specialist delegations read nothing.* `delegate_to_*` posts but
   has no `reads_board`; the meta threads findings into `context` by hand
   (`get_board`), which is the design's turn-granularity path.
@@ -1439,9 +1446,10 @@ because they would have saved five rounds there:
 **Dependencies, each its own small PR or decision before the stage:**
 - #705 — an analysis worker takes a script FILE as its recipe. Without it a
   "replay the verified recipe on the new dataset" subscription cannot name
-  the board's copy under `swarm/recipes/`.
+  the board's copy under `swarm/recipes/`. *Done (see "After stage 2").*
 - #704 — which script a reuse of a refit series replays. A subscription
-  makes that choice with nobody looking.
+  makes that choice with nobody looking. *Decided: the series' locked
+  recipe, the script its table rests on (see "After stage 2").*
 - Provisional findings do not propagate by default (open question, kept).
 
 **Step 1: the subscription, declared and matched without a model.**

@@ -303,6 +303,7 @@ def test_the_recipe_is_the_script_the_followers_replayed(tmp_path, monkeypatch):
     when the script was locked, untouched by the refit); the agent's folder
     gets nothing new; the board copies M1 into its own folder."""
     from scilink.agents.exp_agents._verification_record import series_recipes
+    from scilink.agents.exp_agents.controllers.curve_fitting_controllers import _load_prior_curve_fit_state
     from scilink.agents.meta_agent.board import Board, post_delegation
     # the anchor sits in the soft band (approved by the verifier at 0.92) so the outlier pass flags
     # it below threshold and the refit pass refits it
@@ -321,6 +322,14 @@ def test_the_recipe_is_the_script_the_followers_replayed(tmp_path, monkeypatch):
     # the agent's folder: the unit scripts as always, nothing else
     assert sorted(p.name for p in (tmp_path / "scripts").glob("*.py")) == ["spectrum_0000.py", "spectrum_0001.py", "spectrum_0002.py"]
     assert (tmp_path / "scripts" / "spectrum_0000.py").read_text() == "M2"
+    # a reuse of this run replays M1, the locked recipe its table rests on, and says so (#704);
+    # a reuse that NAMES the refit's script file replays that (#705)
+    from scilink.agents.exp_agents.controllers.curve_fitting_controllers import _first_prior_curve_fit_script
+    (tmp_path / "analysis_results.json").write_text(json.dumps({"status": "success", "locked_recipes": results["locked_recipes"]}))
+    assert _first_prior_curve_fit_script({"prior_analysis_paths": [str(tmp_path)]}) == (
+        "M1", f"{tmp_path.name}: spectrum_0000.py (the series' locked recipe, the anchor refit since)")
+    assert _first_prior_curve_fit_script({"prior_analysis_paths": [str(tmp_path / "scripts" / "spectrum_0000.py")]}) == (
+        "M2", f"{tmp_path.name}: spectrum_0000.py (the script file named)")
     # the board copies M1 into a folder of its own
     board = Board(tmp_path / "meta")
     row = {"analysis_id": "series_1", "status": "success", "output_directory": str(tmp_path), "agent_name": "CurveFittingAgent",
@@ -331,11 +340,20 @@ def test_the_recipe_is_the_script_the_followers_replayed(tmp_path, monkeypatch):
     assert recipe["status"] == "verified" and recipe["payload"]["unit"] == "spectrum_0000"
     assert recipe["payload"]["path"].endswith("meta/swarm/recipes/01_Raman_series/series_1/spectrum_0000.py")
     assert Path(recipe["payload"]["path"]).read_text() == "M1"
+    # and the board's copy is itself a recipe a reuse can name (#705): the same script, the same
+    # reuse path, no run folder needed
+    copy = recipe["payload"]["path"]
+    assert _first_prior_curve_fit_script({"prior_analysis_paths": [copy]}) == (
+        "M1", f"{Path(copy).parent.name}: spectrum_0000.py (the script file named)")
+    anchor_dir, summary, text, label = _load_prior_curve_fit_state(copy)
+    assert (anchor_dir, summary, text) == (Path(copy).parent, None, "M1")
+    assert _load_prior_curve_fit_state(str(Path(copy).parent))[0] is None   # the board folder is no run: nothing
 
 
 def test_a_failed_follower_refit_leaves_the_reuse_pick_unchanged(tmp_path, monkeypatch):
-    """A follower that failed and was refit: the agent's folder and the prior-run
-    reuse pick are exactly what they were before this PR."""
+    """A follower that failed and was refit: the agent's folder is exactly what
+    it was, and a reuse replays the series' locked recipe (#704), which here is
+    also the anchor's current script."""
     from scilink.agents.exp_agents.controllers.curve_fitting_controllers import _load_prior_curve_fit_state
     names4 = [f"spectrum_{i:04d}" for i in range(4)]        # outlier detection needs three successes
     state, ex = run_series(tmp_path, monkeypatch, names=names4, anchors={"spectrum_0000": OK},
@@ -347,9 +365,12 @@ def test_a_failed_follower_refit_leaves_the_reuse_pick_unchanged(tmp_path, monke
     assert analysis_verdict(results)["verified"], (analysis_verdict(results), units)
     assert sorted(p.name for p in (tmp_path / "scripts").glob("*.py")) == [f"{n}.py" for n in names4]
     assert (tmp_path / "scripts" / "spectrum_0002.py").read_text() == "M2"
-    (tmp_path / "analysis_results.json").write_text(json.dumps({"status": "success", "locked_config": {}}))
+    (tmp_path / "analysis_results.json").write_text(json.dumps({"status": "success", "locked_recipes": results["locked_recipes"]}))
     anchor_dir, summary, script_text, label = _load_prior_curve_fit_state(str(tmp_path))
-    assert script_text == "M1" and label == "spectrum_0000.py (representative of the series)"
+    assert script_text == "M1" and label == "spectrum_0000.py (the series' locked recipe)"
+    # a run from before the record: the first unit script, as before
+    (tmp_path / "analysis_results.json").write_text(json.dumps({"status": "success"}))
+    assert _load_prior_curve_fit_state(str(tmp_path))[2:] == ("M1", "spectrum_0000.py (representative of the series)")
 
 
 def test_a_failed_regime_anchor_names_its_own_regime(tmp_path, monkeypatch):
