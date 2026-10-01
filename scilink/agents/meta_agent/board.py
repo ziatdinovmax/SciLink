@@ -28,6 +28,7 @@ keeps an in-memory index (``Board``). Design: docs/proposals/agent-swarms.md
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import os
@@ -365,25 +366,56 @@ class Board:
         ``supporters`` maps an author key (a label or a delegation index) to
         the finding ids that author posted for the agreed claim; ``reads``
         optionally maps the same keys to what the author read at launch (its
-        ledger ``reads``, for an author that posted nothing). An author is
-        independent when the transitive read closure of its findings and
-        reads holds none of another supporter's findings. Returns the count,
-        the raw count, and who depends on whom — a number for a prompt to
-        render, not a judgement for it to make.
+        ledger ``reads``, for an author that posted nothing). An author
+        depends on another when the transitive read closure of its findings
+        and reads holds one of the other's findings. ``count`` is the size of
+        the largest set of supporters none of which depends on another
+        (``independent_set_size``); ``dependent`` says who depends on whom —
+        a number for a prompt to render, not a judgement for it to make.
         """
         owner: Dict[str, Any] = {}
         for key, fids in supporters.items():
             for f in fids:
                 owner[str(f)] = key
         dependent: Dict[str, List[str]] = {}
+        deps: Dict[Any, set] = {}
         for key, fids in supporters.items():
             direct = {str(r) for r in (reads or {}).get(key) or []}
             closure = self.read_closure(list(fids) + sorted(direct)) | direct
-            others = sorted({str(owner[f]) for f in closure if f in owner and owner[f] != key})
+            others = {owner[f] for f in closure if f in owner and owner[f] != key}
+            deps[key] = others
             if others:
-                dependent[str(key)] = others
-        raw = len(supporters)
-        return {"count": raw - len(dependent), "raw": raw, "dependent": dependent}
+                dependent[str(key)] = sorted(str(o) for o in others)
+        count, exact = independent_set_size(list(supporters), deps)
+        return {"count": count, "raw": len(supporters), "dependent": dependent, "exact": exact}
+
+
+def independent_set_size(keys: Sequence[Any], deps: Dict[Any, set]) -> Tuple[int, bool]:
+    """The size of the largest subset of ``keys`` with no coupling between
+    any two of them (``deps[k]`` = what k depends on; coupling is symmetric
+    here). Exact by exhaustive search up to 12 keys; beyond that a greedy
+    pass (fewest couplings first), which is a LOWER bound — the second value
+    says which. Three mutually coupled supporters count 1, never 0; two
+    independent ones plus a third that read both count 2."""
+    keys = list(keys)
+    coupled = {(a, b) for a in keys for b in deps.get(a, ()) if b in keys}
+    coupled |= {(b, a) for a, b in coupled}
+
+    def independent(subset) -> bool:
+        return not any((a, b) in coupled for a, b in itertools.combinations(subset, 2))
+
+    if not keys:
+        return 0, True
+    if len(keys) <= 12:
+        for n in range(len(keys), 0, -1):
+            if any(independent(c) for c in itertools.combinations(keys, n)):
+                return n, True
+        return 0, True
+    chosen: List[Any] = []
+    for k in sorted(keys, key=lambda x: sum(1 for y in keys if (x, y) in coupled)):
+        if independent(chosen + [k]):
+            chosen.append(k)
+    return len(chosen), False
 
 
 # --------------------------------------------------------------- rendering
@@ -472,11 +504,17 @@ def _analysis_records(entry: Dict[str, Any], result: Dict[str, Any]) -> List[Dic
                     "status": "verified" if verified else "provisional",
                     "evidence": {"analysis_ids": [aid] if aid else [], "gate": why}})
     for aid, rec in status_by_id.items():
-        script = _recipe_script(rec.get("output_directory"), rec.get("recipe_unit"))
+        script = _recipe_script(rec.get("output_directory"), rec.get("recipe_unit"),
+                                series=bool(rec.get("series")))
         if script is not None:
             verified, why = _analysis_verified(rec)
-            out.append({"kind": "recipe", "payload": {"path": str(script), "analysis_id": aid,
-                                                      "agent": rec.get("agent_name")},
+            payload = {"path": str(script), "analysis_id": aid, "agent": rec.get("agent_name")}
+            if rec.get("recipe_unit"):
+                payload["unit"] = rec["recipe_unit"]
+                payload["note"] = ("the locked script of the series' first anchor; a series with "
+                                   "several regimes locks one script per regime, the others are "
+                                   "beside it under scripts/")
+            out.append({"kind": "recipe", "payload": payload,
                         "status": "verified" if verified else "provisional",
                         "evidence": {"analysis_ids": [aid], "files": [str(script)],
                                      "gate": ("approved analysis script: " if verified
@@ -497,7 +535,7 @@ def _analysis_verified(row: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
                    f"analysis {row.get('analysis_id')} did not succeed (status {row.get('status')!r})")
 
 
-def _recipe_script(out_dir: Any, unit: Optional[str] = None) -> Optional[Path]:
+def _recipe_script(out_dir: Any, unit: Optional[str] = None, *, series: bool = False) -> Optional[Path]:
     """The approved recipe an analysis run left behind: the curve agent's
     ``scripts/fitting_script.py`` (a single spectrum) or, for a series, the
     ANCHOR's unit script ``scripts/<unit>.py`` (``unit`` comes from the run's
@@ -521,6 +559,8 @@ def _recipe_script(out_dir: Any, unit: Optional[str] = None) -> Optional[Path]:
         if (scripts / f"{safe}.py").is_file():
             return scripts / f"{safe}.py"
         return None                      # a series whose anchor script is not there: no recipe
+    if series:
+        return None                      # a series with no anchor unit (reused, or refit): no recipe
     for name in ("analysis_script.py", "fitting_script.py"):
         if (scripts / name).is_file():
             return scripts / name

@@ -156,7 +156,7 @@ def main():
           (_sup.get("count"), _sup.get("raw")) == (1, 2)
           and list(_sup.get("dependent") or {}) == [f"'techA series' (#{by_label['techA series']['index']})"])
     check("fusion prompt renders the computed count",
-          "INDEPENDENT SUPPORT" in prompt and "1 of 2 branches" in prompt)
+          "INDEPENDENT SUPPORT" in prompt and "not judged): 1 of 2 — the largest set" in prompt)
 
     # 2) No steer flag -> nothing changes (no block, no informed_by,
     #    no independence in fusion).

@@ -1478,9 +1478,17 @@ class PlanningOrchestratorAgent:
         generation copying the plan — is not a new plan and must not pass an
         earlier approval on as a later delegation's own."""
         plan = plan or {}
+        from .planning_rag import blocking_findings
+        steps = [exp.get("experimental_steps") for exp in (plan.get("proposed_experiments") or [])
+                 if isinstance(exp, dict)]
         return json.dumps({"hypotheses": cls._plan_hypotheses(plan), "iteration": plan.get("iteration"),
                            "human_review": plan.get("human_review"),
-                           "unattended_gate": plan.get("unattended_gate")}, sort_keys=True, default=str)
+                           "unattended_gate": plan.get("unattended_gate"),
+                           # an autonomous protocol revision keeps the hypotheses and the
+                           # iteration: its steps and the critic's blocking issues change
+                           "steps": steps,
+                           "blocking": [f.get("issue") for f in blocking_findings(plan.get("critic_findings"))]},
+                          sort_keys=True, default=str)
 
     def run_task(self, task: str, context: Optional[Dict[str, Any]] = None,
                  autonomy: Optional[AutonomyLevel] = None,

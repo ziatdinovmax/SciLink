@@ -257,13 +257,13 @@ def _unit_verdict(item: dict, *, where: str) -> Optional[Dict[str, Any]]:
     """Why one verified-by-record unit (a single run, a series anchor, a
     regime anchor, a refit) is NOT verified, else None."""
     qh = item.get("quality_history") or {}
+    if qh.get("unverified"):
+        return {"verified": False, "reason": f"verification did not finish{where}"
+                + (f": {qh.get('stopped_by')}" if qh.get("stopped_by") else "")}
     if item.get("quality_warning"):
         return {"verified": False, "reason": f"salvaged best-available result{where}"}
     if item.get("judge_warning"):
         return {"verified": False, "reason": f"the judge found no acceptable fit{where}"}
-    if qh.get("unverified"):
-        return {"verified": False, "reason": f"verification did not finish{where}"
-                + (f": {qh.get('stopped_by')}" if qh.get("stopped_by") else "")}
     if qh.get("verifier_rejected"):
         return {"verified": False, "reason": f"the verifier still rejected the result at the cap{where}"}
     if not qh.get("approved"):
@@ -337,17 +337,39 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
             name = it.get("name") or it.get("index")
             where = f" (unit {name})"
             if "verified" in it and "quality_history" not in it:
-                # a hyperspectral series row: the driver's own verdict
-                if it.get("verified") is False:
+                # a hyperspectral series row: the driver's own verdict, held
+                # to the single-cube rule (a salvaged or degraded cube is
+                # "partial"; a row with nothing extracted verified nothing)
+                if (it.get("verified") is False or it.get("status") != "success"
+                        or not it.get("n_features")):
                     return {"verified": False, "reason": f"unit not verified by the series driver{where}"}
                 anchors += 1 if it.get("role") == "anchor" else 0
                 continue
+            rv = it.get("reuse_validity") or {}
+            if rv.get("reused") and not _has_record(it.get("quality_history")):
+                # a reused anchor: the replay gate is its verification
+                anchors += 1
+                if rv.get("verdict") != "good":
+                    return {"verified": False, "reason": f"reused script verdict {rv.get('verdict')!r}{where}"}
+                continue
             if _has_record(it.get("quality_history")):
                 anchors += 1
+                if it.get("adaptively_refitted"):
+                    # a refit the series driver accepted by its consistency
+                    # rule: held like a follower (finished, not unverified),
+                    # not to the anchor's salvage markers — otherwise a refit
+                    # that improved a unit could unverify a series the
+                    # unrefit unit would have passed
+                    if (it.get("quality_history") or {}).get("unverified"):
+                        return {"verified": False, "reason": f"refit unverified{where}"}
+                    continue
                 bad = _unit_verdict(it, where=where)
                 if bad:
                     return bad
             else:
+                if it.get("fitted_from") == "fresh_code":
+                    # its regime's anchor failed: fitted from scratch, no verifier
+                    return {"verified": False, "reason": f"follower fitted without a locked recipe{where}"}
                 if (it.get("quality_history") or {}).get("unverified"):
                     return {"verified": False, "reason": f"follower unverified{where}"}
         if anchors == 0 and not any("verified" in it for it in ok_items):
@@ -357,11 +379,18 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
                 + (f" ({failed} failed unit(s) excluded by the agent)" if failed else "")}
 
     if isinstance(hs_records, list) and hs_records:
-        scripted = [r for r in hs_records if isinstance(r, dict) and (r.get("script") or r.get("task_success"))]
-        for r in scripted:
+        scripted = 0
+        for r in hs_records:
+            if not isinstance(r, dict):
+                continue
             where = f" (target {r.get('target')})"
+            if r.get("not_measurable") and not r.get("task_success"):
+                continue                      # answered through the honest channel
             if r.get("salvaged"):
                 return {"verified": False, "reason": f"salvaged target{where}"}
+            if not r.get("script") and not r.get("task_success"):
+                return {"verified": False, "reason": f"target failed before any code ran{where}"}
+            scripted += 1
             if not r.get("task_success") or not (r.get("quality_history") or {}).get("approved", True):
                 return {"verified": False, "reason": f"target did not pass verification{where}"}
         if not scripted:
@@ -390,8 +419,9 @@ def series_anchor_unit(full_result: Optional[dict]) -> Optional[str]:
     if not isinstance(items, list) or not items:
         return None
     for it in items:
-        if (isinstance(it, dict) and it.get("success") and not it.get("adaptively_refitted")
-                and _has_record(it.get("quality_history")) and it.get("name")):
+        if not (isinstance(it, dict) and it.get("success") and it.get("name")) or it.get("adaptively_refitted"):
+            continue
+        if _has_record(it.get("quality_history")) or (it.get("reuse_validity") or {}).get("reused"):
             return str(it["name"])
     return None
 

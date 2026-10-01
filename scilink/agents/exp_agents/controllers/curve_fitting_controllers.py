@@ -4171,6 +4171,12 @@ Your guidance: '''
             "statistics": stats,
             "script": script,
             "script_errors": script_errors,
+            # Provenance a caller can gate on: a follower replays the locked
+            # script (verbatim, or repaired on a later attempt); one fitted
+            # with no base script — its regime's anchor failed — is fresh,
+            # unverified code, whatever its R².
+            "fitted_from": ("locked_script" if base_script is not None else "fresh_code"),
+            "replay_verbatim": (base_script is not None and script == base_script),
         }
         if fit_results.get("bounds"):
             result["bounds"] = fit_results["bounds"]

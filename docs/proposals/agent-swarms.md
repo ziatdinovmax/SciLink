@@ -933,6 +933,26 @@ can already hit.
      is advisory) and posted once. The series recipe is the anchor's unit
      script (`recipe_unit` on the row); a hyperspectral series posts none.
      Fence markers inside a record are neutralised.
+   - *Round 3 of the review:* steering is recorded on its own
+     (`steered_by`), so a meshed-and-steered branch keeps its steering edge
+     while the mesh stamp is skipped; inside one fan-out any sibling may be
+     the steering source (the slots are created together), outside it only
+     an earlier entry. The count is one routine (`board.independent_set_size`):
+     the largest set of branches none of which is coupled to another, exact
+     to 12 and a stated lower bound beyond, and the prompt says exactly
+     that. A follower fitted with no base script (its regime's anchor failed)
+     is fresh code with no verifier: the curve and image followers now carry
+     `fitted_from` (`locked_script` / `fresh_code`) and `replay_verbatim`, and
+     such a follower blocks the series. A series whose anchor is a
+     good-verdict locked reuse is verified by the replay gate; a hyperspectral
+     series row is held to the single-cube rule (status `success`, something
+     extracted); a hyperspectral target that failed before any code ran
+     blocks; a refit the driver accepted by its consistency rule is held like
+     a follower (so a refit cannot unverify a series the unrefit unit would
+     have passed); a cut anchor reads as cut, not salvaged. A plan's identity
+     includes its steps and blocking issues, so an autonomous protocol
+     revision is "written here". A series with no anchor unit posts no
+     recipe, and a regime series' recipe record says it is the first regime's.
    - *Found live:* the curve agent's approved script is
      `scripts/fitting_script.py` (a series: one per spectrum), the image
      agent's `analysis_script.py` — the recipe takes the folder's

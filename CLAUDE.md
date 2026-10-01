@@ -708,10 +708,14 @@ run or a review:
   item reads once, at its start (`reads_board`, the newest 24), and a `check`
   item is refused a read by the API, not by prompt text. Every read is
   recorded (`reads`, exactly what was shown), so fusion's `independent_support`
-  is computed — the board's read graph joined with the ledger's `context_from`
-  and `informed_by` edges, keyed by delegation index — and rendered with what it
-  cannot see (a finding pasted by hand with no citation); a new way of coupling
-  two delegations becomes a read on the board, not a new prompt caveat. A
+  is computed, not judged: the largest set of fused branches none of which
+  read, was steered by, or cited another in the set (the board's read graph
+  joined with the ledger's `context_from` and `steered_by` edges, keyed by
+  delegation index, exact up to 12 branches and a stated lower bound beyond),
+  rendered with what it cannot see (a finding pasted by hand with no citation).
+  A shared dataset (co-registered operands) is not a coupling of findings. A
+  new way of coupling two delegations becomes a read on the board, not a new
+  prompt caveat. A
   record describes its artifact as it was when posted; a later edit is a later
   delegation's record.
 - **One PR per stage.** A stage is verified as a whole: the full suite against

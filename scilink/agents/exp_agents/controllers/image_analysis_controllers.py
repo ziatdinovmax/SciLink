@@ -2868,6 +2868,11 @@ Your guidance: '''
             "statistics": stats,
             "script": script,
             "script_errors": script_errors,
+            # Provenance a caller can gate on (the curve twin's): a follower
+            # replays the locked script; one with no base script is fresh,
+            # unverified code.
+            "fitted_from": ("locked_script" if base_script is not None else "fresh_code"),
+            "replay_verbatim": (base_script is not None and script == base_script),
         }
         if used_timeout_escalation:
             # Provenance: this analysis came from the last-resort pipeline

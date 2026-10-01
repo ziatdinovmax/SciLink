@@ -141,7 +141,7 @@ def test_independence_is_counted_on_the_read_graph(tmp_path):
     e = _claim(b, E, "anatase, again", reads=[])
     sup = b.independent_support({"A": [a["finding_id"]], "B": [bb["finding_id"]],
                                  "C": [c["finding_id"]], "D": [d["finding_id"]]})
-    assert sup == {"count": 2, "raw": 4, "dependent": {"C": ["A"], "D": ["A", "C"]}}
+    assert sup == {"count": 2, "raw": 4, "dependent": {"C": ["A"], "D": ["A", "C"]}, "exact": True}
     # a supporter that posted nothing but read at launch is dependent through its reads
     sup = b.independent_support({"A": [a["finding_id"]], "E": []},
                                 reads={"E": [bb["finding_id"], a["finding_id"]]})
@@ -149,7 +149,7 @@ def test_independence_is_counted_on_the_read_graph(tmp_path):
     # reading something outside the agreeing set costs nothing
     sup = b.independent_support({"B": [bb["finding_id"]], "E": [e["finding_id"]]},
                                 reads={"E": [a["finding_id"]]})
-    assert sup == {"count": 2, "raw": 2, "dependent": {}}
+    assert sup == {"count": 2, "raw": 2, "dependent": {}, "exact": True}
 
 
 # --------------------------------------------------------------- the writer
@@ -358,8 +358,8 @@ def test_fusion_reports_independent_support_and_posts_its_claims(meta, monkeypat
     b = _branch(meta, 2, "XRD A7")
     out = json.loads(fo.fuse_delegations(meta, [1, 2]))
     assert out["status"] == "success"
-    assert out["independent_support"] == {"count": 2, "raw": 2, "dependent": {}, "by_index": {}}
-    assert "INDEPENDENT SUPPORT (computed, not judged): 2 of 2" in _fusion_llm.prompts[-1]
+    assert out["independent_support"] == {"count": 2, "raw": 2, "dependent": {}, "by_index": {}, "exact": True}
+    assert "INDEPENDENT SUPPORT (computed, not judged): 2 of 2 — the largest set of branches" in _fusion_llm.prompts[-1]
     fusion = meta._delegation_ledger[-1]
     assert fusion["mode"] == "fusion" and set(fusion["reads"]) == set(a["posted"]) | set(b["posted"])
     rec = meta.board.get(fusion["posted"][0])
@@ -378,11 +378,11 @@ def test_fusion_reports_independent_support_and_posts_its_claims(meta, monkeypat
                                 "analyses": [{"analysis_id": "analysis_3", "status": "success", "verified": True}],
                                 "files_produced": [], "warnings": []})
     out = json.loads(fo.fuse_delegations(meta, [1, 2, e3["index"]]))
-    assert out["independent_support"] == {"count": 2, "raw": 3,
+    assert out["independent_support"] == {"count": 2, "raw": 3, "exact": True,
                                           "dependent": {"'Raman A7 again' (#4)": ["'Raman A7' (#1)", "'XRD A7' (#2)"]},
                                           "by_index": {"4": [1, 2]}}
     assert any("had read or been given findings of" in c for c in out["caveats"])
-    assert "2 of 3 branches" in _fusion_llm.prompts[-1]
+    assert "not judged): 2 of 3 — the largest set" in _fusion_llm.prompts[-1]
 
 
 def test_one_branch_informed_by_the_other_counts_one(meta, monkeypatch):
@@ -391,7 +391,7 @@ def test_one_branch_informed_by_the_other_counts_one(meta, monkeypatch):
     _branch(meta, 2, "XRD A7", reads=a["posted"])
     out = json.loads(fo.fuse_delegations(meta, [1, 2]))
     assert out["independent_support"] == {"count": 1, "raw": 2, "dependent": {"'XRD A7' (#2)": ["'Raman A7' (#1)"]},
-                                          "by_index": {"2": [1]}}
+                                          "by_index": {"2": [1]}, "exact": True}
     assert out["caveats"] and "not an independent confirmation" in out["caveats"][0]
 
 
@@ -412,7 +412,7 @@ def test_independence_counts_the_ledgers_own_edges(meta, monkeypatch):
                                "files_produced": [], "warnings": []})
     out = json.loads(fo.fuse_delegations(meta, [1, 2, 3]))
     assert out["independent_support"] == {"count": 2, "raw": 3, "dependent": {"'fit' (#3)": ["'fit' (#1)"]},
-                                          "by_index": {"3": [1]}}
+                                          "by_index": {"3": [1]}, "exact": True}
     # an informed_by stamp (the legacy fan-out coupling) is an edge too
     with meta._fanout_lock:
         b["informed_by"] = ["fit"]; b["informed_via"] = "steering"
@@ -584,11 +584,32 @@ def test_series_verdicts_follow_the_agents_shapes():
     failed["individual_results"][2].update({"success": False, "error": "fit diverged", "quality_history": None})
     assert analysis_verdict(failed) == {"verified": True, "reason": "series anchors approved and every follower "
                                                                     "verified (1 failed unit(s) excluded by the agent)"}
-    # a refit is a unit with a record, held to the same bar
+    # a refit the driver accepted by its consistency rule is held like a follower: finished, not
+    # unverified — not to the anchor's salvage markers (a refit that improved a unit must not
+    # unverify a series the unrefit unit would have passed)
     refit = _curve_series(ANCHOR_OK)
-    refit["individual_results"][1].update({"adaptively_refitted": True,
-                                           "quality_history": {**ANCHOR_OK, "approved": False}})
-    assert "did not approve the result (unit spectrum_0001)" in analysis_verdict(refit)["reason"]
+    refit["individual_results"][1].update({"adaptively_refitted": True, "original_r2": 0.5,
+                                           "quality_warning": "R² = 0.9000 below threshold 0.95",
+                                           "quality_history": {**ANCHOR_OK, "final_r2": 0.9, "approved": False}})
+    assert analysis_verdict(refit)["verified"]
+    refit["individual_results"][1]["quality_history"]["unverified"] = True
+    assert analysis_verdict(refit)["reason"] == "refit unverified (unit spectrum_0001)"
+    # a follower of a FAILED regime anchor is fresh code with no verifier (round 3)
+    fresh = _curve_series(ANCHOR_OK)
+    fresh["individual_results"][2]["fitted_from"] = "fresh_code"
+    assert analysis_verdict(fresh)["reason"] == "follower fitted without a locked recipe (unit spectrum_0002)"
+    fresh["individual_results"][2]["fitted_from"] = "locked_script"
+    assert analysis_verdict(fresh)["verified"]
+    # a series whose anchor is a good-verdict locked reuse (no QC-engine record) is verified by the gate
+    reused = _curve_series(None)
+    reused["individual_results"][0]["reuse_validity"] = {"reused": True, "verdict": "good", "r_squared": 0.99}
+    assert analysis_verdict(reused)["verified"]
+    reused["individual_results"][0]["reuse_validity"]["verdict"] = "poor"
+    assert "reused script verdict 'poor' (unit spectrum_0000)" in analysis_verdict(reused)["reason"]
+    # a cut anchor reads as cut, even when the deterministic gate also warned
+    both = _curve_series({**ANCHOR_OK, "approved": False, "unverified": True, "stopped_by": "time_budget"},
+                         anchor_extra={"quality_warning": "R² = 0.80 below threshold 0.95"})
+    assert analysis_verdict(both)["reason"].startswith("verification did not finish")
     # image series (image_analysis_agent.py): the unit record now travels with the same names
     img = {"status": "success", "individual_results": [
         {"index": 0, "name": "img0", "success": True, "analysis_type": "particle", "verification_score": 0.9,
@@ -608,6 +629,10 @@ def test_series_verdicts_follow_the_agents_shapes():
     cube["dynamic_analysis_records"][0] = {**rec, "task_success": False, "salvaged": True,
                                            "quality_history": {**rec["quality_history"], "approved": False}}
     assert analysis_verdict(cube)["reason"] == "salvaged target (target phase_map)"
+    # a target that failed before any code ran is not "unscripted and ignored"
+    cube["dynamic_analysis_records"][0] = {"target": "phase_map", "task_success": False, "salvaged": False,
+                                           "script": None, "required_outputs": ["phase_map"]}
+    assert analysis_verdict(cube)["reason"] == "target failed before any code ran (target phase_map)"
     assert analysis_verdict({**cube, "status": "partial"})["reason"] == "status 'partial'"
     # hyperspectral series (hyperspectral_series._row): rows carry verified, no history
     def row(i, ok, verified, role="follower"):
@@ -619,6 +644,11 @@ def test_series_verdicts_follow_the_agents_shapes():
     assert analysis_verdict(hs)["verified"]
     hs["individual_results"][1]["verified"] = False
     assert analysis_verdict(hs)["reason"] == "unit not verified by the series driver (unit cube1)"
+    # held to the single-cube rule: a partial (salvaged / degraded) row or one that extracted nothing
+    hs["individual_results"][1].update({"verified": True, "status": "partial"})
+    assert not analysis_verdict(hs)["verified"]
+    hs["individual_results"][1].update({"status": "success", "n_features": 0})
+    assert not analysis_verdict(hs)["verified"]
     # on the board: the same claim text, provisional with the reason as its gate
 
 def test_planning_run_task_reports_how_the_plan_was_settled(tmp_path, monkeypatch):
@@ -671,6 +701,18 @@ def test_planning_run_task_reports_how_the_plan_was_settled(tmp_path, monkeypatc
     assert r["plan_review"]["written_here"] is True
     assert r["plan_review"]["human_review"] is None and r["plan_review"]["unattended_gate"]["would_have_been"] == "accepted"
     assert r["plan_review"]["blocking_findings"] == [] and r["plan_review"]["hypotheses"] == ["Direction: Nb widens the gap"]
+    # an autonomous protocol revision keeps the hypotheses and iteration: its steps and blocking
+    # issues change, and that is a plan written here too
+    revised2 = {"iteration": 3, "proposed_experiments": [{"experiment_name": "Anneal", "hypothesis": "h",
+                                                          "experimental_steps": ["anneal at 650 C"]}]}
+    pending["plan"] = revised2
+    orch.run_task("plan the anneal")
+    revised2 = json.loads(json.dumps(revised2))
+    revised2["proposed_experiments"][0]["experimental_steps"] = ["anneal at 550 C", "measure"]
+    revised2["critic_findings"] = [{"severity": "blocking", "issue": "550 C still above", "conflict": "550 vs 500"}]
+    pending["plan"] = revised2
+    r = orch.run_task("fix the blocking defect")
+    assert r["plan_review"]["written_here"] is True
 
 
 def test_the_recipe_is_the_agents_approved_script(tmp_path):
@@ -695,6 +737,13 @@ def test_the_recipe_is_the_agents_approved_script(tmp_path):
     series["individual_results"][0]["adaptively_refitted"] = True         # a refit is not the anchor
     series["individual_results"][1]["quality_history"] = dict(ANCHOR_OK)
     assert series_anchor_unit(series) == "spectrum_0001" and series_anchor_unit({"status": "success"}) is None
+    # a series with no anchor unit posts no recipe (never the alphabetically first script)
+    (tmp_path / "s2" / "scripts").mkdir(parents=True)
+    (tmp_path / "s2" / "scripts" / "spectrum_0000.py").write_text("")
+    assert _recipe_script(tmp_path / "s2", None, series=True) is None
+    reused = _curve_series(None)
+    reused["individual_results"][0]["reuse_validity"] = {"reused": True, "verdict": "good"}
+    assert series_anchor_unit(reused) == "spectrum_0000"
 
 
 # ------------------------------------------------ review of #702, should-fix
@@ -795,26 +844,45 @@ def test_meshed_branches_count_once_and_labels_bind_only_earlier_entries(meta, m
             e["informed_by"] = [x["label"] for x in (a, b, c) if x is not e]
             e["informed_via"] = "co_registered_operands"
     out = json.loads(fo.fuse_delegations(meta, [1, 2, 3]))
-    assert out["independent_support"] == {"count": 3, "raw": 3, "dependent": {}, "by_index": {}}
-    # steering as well as operands: the steering read is on the board, the operands are not an edge
+    assert out["independent_support"] == {"count": 3, "raw": 3, "dependent": {}, "by_index": {}, "exact": True}
+    assert "A shared dataset (co-registered operands) is NOT a coupling" in _fusion_llm.prompts[-1]
+    # mesh PLUS steering (round 3): b and c steered by a keep the steering edge; a is the one
+    # independent root, so 2 of 3 — the mesh must not swallow the steering
     with meta._fanout_lock:
-        a["informed_via"] = "steering+co_registered_operands"
-    assert json.loads(fo.fuse_delegations(meta, [1, 2, 3]))["independent_support"]["count"] == 3
-    # three mutually informed (steered) branches: one observation, not none
+        b["steered_by"] = ["EELS"]; c["steered_by"] = ["EELS"]
+        b["informed_via"] = c["informed_via"] = "co_registered_operands+steering"
+    out = json.loads(fo.fuse_delegations(meta, [1, 2, 3]))
+    assert out["independent_support"]["count"] == 2 and out["independent_support"]["by_index"] == {"2": [1], "3": [1]}
+    # steering from a HIGHER slot inside one fan-out: the slots are created together
+    with meta._fanout_lock:
+        b.pop("steered_by"); c.pop("steered_by")
+        a["steered_by"] = ["HAADF"]                                 # #1 steered by #2
+    out = json.loads(fo.fuse_delegations(meta, [1, 2]))
+    assert out["independent_support"]["count"] == 1 and out["independent_support"]["by_index"] == {"1": [2]}
+    with meta._fanout_lock:
+        a.pop("steered_by")
+    # three mutually informed (steered) branches, legacy stamp: one observation, not none
     for e in (a, b, c):
         with meta._fanout_lock:
             e["informed_via"] = "steering"
     out = json.loads(fo.fuse_delegations(meta, [1, 2, 3]))
-    assert out["independent_support"]["count"] == 1 and out["independent_support"]["by_index"] == {"2": [1], "3": [1, 2]}
+    assert out["independent_support"]["count"] == 1 and out["independent_support"]["by_index"] == {
+        "1": [2, 3], "2": [1, 3], "3": [1, 2]}
     # a LATER independent run that reuses a label does not couple the earlier branch
     with meta._fanout_lock:
         for e in (a, b, c):
             e.pop("informed_by"); e.pop("informed_via")
     later = _branch(meta, 9, "EELS")                                  # same label, later, independent
     with meta._fanout_lock:
-        a["informed_by"] = ["EELS"]; a["informed_via"] = "steering"     # can only mean an EARLIER "EELS"
+        later["parallel_group"] = "fanout_9"                            # another fan-out
+        a["informed_by"] = ["EELS"]; a["informed_via"] = "steering"     # can only mean its OWN group's "EELS"
     out = json.loads(fo.fuse_delegations(meta, [1, later["index"]]))
     assert out["independent_support"]["count"] == 2 and out["independent_support"]["by_index"] == {}
+    # the count's exactness travels; a greedy count says "at least"
+    from scilink.agents.meta_agent.board import independent_set_size
+    assert independent_set_size([1, 2, 3], {1: {2}, 2: {3}, 3: set()}) == (2, True)
+    big = list(range(13))
+    assert independent_set_size(big, {k: set() for k in big}) == (13, False)
     # a task mentioning analysis_results.json infers no analysis id
     assert meta._analysis_ids_of({"files_produced": ["/s/results/analysis_results.json",
                                                      "/s/results/analysis_x_CurveFit_20260930_143600_001/a.json"]}) == [

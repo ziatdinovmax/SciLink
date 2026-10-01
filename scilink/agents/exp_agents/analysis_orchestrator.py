@@ -1709,6 +1709,7 @@ class AnalysisOrchestratorAgent:
                     **analysis_verdict(rec.get("full_result")),
                     # a series' locked recipe is the anchor's unit script
                     "recipe_unit": series_anchor_unit(rec.get("full_result")),
+                    "series": bool((rec.get("full_result") or {}).get("individual_results")),
                 } for rec in new_analyses
             ],
             "warnings": warnings,

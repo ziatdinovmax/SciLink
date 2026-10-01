@@ -1610,7 +1610,7 @@ class MetaOrchestratorAgent:
     #: An analysis output folder: ``analysis_<stem>_<Agent>_<YYYYMMDD>_<HHMMSS>_<NNN>``.
     #: A file name such as ``analysis_results.json`` is not one (it would
     #: infer a dependency on every analysis that wrote that file).
-    _ANALYSIS_DIR_RE = re.compile(r"^analysis_.+_\d{8}_\d{6}_\d{3}$")
+    _ANALYSIS_DIR_RE = re.compile(r"^analysis_.+_\d{8}_\d{6}_\d{3,}$")
 
     @classmethod
     def _analysis_ids_of(cls, entry: Dict[str, Any]) -> List[str]:

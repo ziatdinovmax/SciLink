@@ -36,7 +36,6 @@ sibling helper to the orchestrator.
 import glob
 from scilink.utils import path_fence as _path_fence
 import io
-import itertools
 import json
 import logging
 import os
@@ -1812,6 +1811,10 @@ def run_fanout(orch, branches: List[dict],
             if informed:
                 entry["informed_by"] = informed
                 entry["informed_via"] = "+".join(via)
+            # Steering on its own, apart from the mesh stamp: the mesh is a
+            # shared dataset (not a coupling of findings), steering is.
+            if b.get("_steering"):
+                entry["steered_by"] = [p["label"] for p in b["_steering"]]
             # Carry the input path/metadata so a later fuse_delegations can
             # recognize this set as already gated (or re-gate a mixed set).
             entry["data_path"] = b.get("data_path")
@@ -2838,21 +2841,37 @@ def _assess_fusion_novelty(orch, claims: list):
 
 def _ledger_dependents(ledger: List[dict], indices: List[int]) -> Dict[int, set]:
     """For each of ``indices``, the OTHER indices it depends on through the
-    ledger: ``context_from`` (declared or inferred) and ``informed_by``
-    (labels), closed transitively over every entry (a fusion's
-    ``context_from`` is what it fused). Keyed by index: labels repeat
-    (every fusion is "cross-dataset fusion") and a re-analysis may reuse
-    its branch's label.
+    ledger: ``context_from`` (declared or inferred), ``steered_by`` (the
+    companions whose change-point hint it received) and, for entries that
+    predate ``steered_by``, ``informed_by`` when the stamp is not the operand
+    mesh — closed transitively over every entry (a fusion's ``context_from``
+    is what it fused). Keyed by index: labels repeat (every fusion is
+    "cross-dataset fusion") and a re-analysis may reuse its branch's label.
 
-    Two stamps are NOT edges: ``informed_via`` co-registered operands (a
-    shared dataset is not a finding: three meshed branches are three
-    observations), and a label that only matches a LATER entry (an earlier
-    branch cannot have read a run that did not exist). A label resolves to
-    earlier entries of the same ``parallel_group`` when the entry has one,
-    else to earlier entries of the set being fused.
+    What is NOT an edge: a co-registered-operand stamp (a shared dataset is
+    not a finding: three meshed branches are three observations), and a
+    label that resolves only to a LATER entry outside the entry's own
+    fan-out (an earlier branch cannot have read a run that did not exist).
+    Inside one ``parallel_group`` every sibling is a candidate — the slots
+    are created together at launch, so a branch steered by a higher slot is
+    steered all the same.
     """
     by_index = {e["index"]: e for e in ledger if isinstance(e.get("index"), int)}
     wanted = set(indices)
+
+    def resolve(i: int, labels) -> set:
+        e = by_index.get(i) or {}
+        group = e.get("parallel_group")
+        out = set()
+        for lbl in labels or []:
+            for j, other in by_index.items():
+                if j == i or str(other.get("label")) != str(lbl):
+                    continue
+                if group and other.get("parallel_group") == group:
+                    out.add(j)
+                elif j < i and (not group) and j in wanted:
+                    out.add(j)
+        return out
 
     def parents(i: int) -> set:
         e = by_index.get(i) or {}
@@ -2862,17 +2881,10 @@ def _ledger_dependents(ledger: List[dict], indices: List[int]) -> Dict[int, set]
                 out.add(int(c))
             except (TypeError, ValueError):
                 pass
-        via = str(e.get("informed_via") or "")
-        if e.get("informed_by") and "co_registered_operands" not in via:
-            group = e.get("parallel_group")
-            for lbl in e["informed_by"]:
-                for j, other in by_index.items():
-                    if j >= i or str(other.get("label")) != str(lbl):
-                        continue
-                    if group and other.get("parallel_group") == group:
-                        out.add(j)
-                    elif not group and j in wanted:
-                        out.add(j)
+        if e.get("steered_by"):
+            out |= resolve(i, e["steered_by"])
+        elif e.get("informed_by") and "co_registered_operands" not in str(e.get("informed_via") or ""):
+            out |= resolve(i, e["informed_by"])
         out.discard(i)
         return out
 
@@ -2895,12 +2907,14 @@ def independent_support_of(board, ledger: List[dict], entries: List[dict]) -> Di
     ledger's own coupling edges. Keyed by delegation index; ``dependent``
     is rendered as ``'label' (#index)`` for the prompt and the report.
 
-    ``count`` is the size of the largest set of supporters with no coupling
-    between any two of them (a maximum independent set of the undirected
-    coupling graph): three meshed or mutually informed branches count once,
-    never zero; two independent branches plus a re-analysis that read both
-    count two.
+    ``count`` is the size of the largest set of branches none of which is
+    coupled to another (``board.independent_set_size``: exact up to 12
+    branches, a greedy lower bound beyond — ``exact`` says which). Three
+    meshed-and-steered or mutually informed branches count once, never
+    zero; two independent branches plus a re-analysis that read both count
+    two.
     """
+    from .board import independent_set_size
     idx = [e["index"] for e in entries]
     disp = {e["index"]: f"'{e.get('label') or 'delegation'}' (#{e['index']})" for e in entries}
     on_board = board.independent_support({e["index"]: list(e.get("posted") or []) for e in entries},
@@ -2910,25 +2924,9 @@ def independent_support_of(board, ledger: List[dict], entries: List[dict]) -> Di
         deps[int(k)].update(int(o) for o in others)
     for i, others in _ledger_dependents(ledger, idx).items():
         deps[i].update(others)
-    coupled = {(a, b) for a in idx for b in deps[a]} | {(b, a) for a in idx for b in deps[a]}
-
-    def independent(subset) -> bool:
-        return not any((a, b) in coupled for a, b in itertools.combinations(subset, 2))
-
-    count = 0
-    if len(idx) <= 12:
-        for n in range(len(idx), 0, -1):
-            if any(independent(c) for c in itertools.combinations(idx, n)):
-                count = n
-                break
-    else:                                   # greedy: fewest couplings first
-        chosen: List[int] = []
-        for i in sorted(idx, key=lambda k: sum(1 for j in idx if (k, j) in coupled)):
-            if independent(chosen + [i]):
-                chosen.append(i)
-        count = len(chosen)
+    count, exact = independent_set_size(idx, deps)
     dependent = {disp[i]: [disp[j] for j in sorted(o)] for i, o in deps.items() if o}
-    return {"count": count, "raw": len(idx), "dependent": dependent,
+    return {"count": count, "raw": len(idx), "exact": exact, "dependent": dependent,
             "by_index": {str(i): sorted(o) for i, o in deps.items() if o}}
 
 
@@ -3225,16 +3223,18 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
             "previews, and figures only; do not present any cross-dataset "
             "number as computed.\n")
            if computed and computed.get("status") != "success" else "")
-        + ((f"\n\nINDEPENDENT SUPPORT (computed, not judged): {support['count']} of "
-            f"{support['raw']} branches reached their findings without having read or "
-            "been given another branch's, counting the board's read graph and the "
-            "ledger's context_from / informed_by edges, transitively"
-            + (f"; dependent: {json.dumps(support['dependent'])}"
+        + ((f"\n\nINDEPENDENT SUPPORT (computed, not judged): "
+            f"{'' if support.get('exact', True) else 'at least '}{support['count']} of "
+            f"{support['raw']} — the largest set of branches none of which read, was steered "
+            "by, or cited another branch in the set (board reads, context_from and "
+            "steering edges, transitively)"
+            + (f"; couplings: {json.dumps(support['dependent'])}"
                if support["dependent"] else "")
-            + ". It does NOT see a finding pasted into a task or context by hand "
-            "without a context_from citation, so treat it as an upper bound. Render "
-            "this number where you weigh agreement; agreement among the dependent "
-            "branches counts once.\n")
+            + ". A shared dataset (co-registered operands) is NOT a coupling of findings: "
+            "meshed branches that agree are still separate observations, each judged on "
+            "its own data. The count does NOT see a finding pasted into a task or "
+            "context by hand without a context_from citation. Render this number where "
+            "you weigh agreement; coupled branches that agree count as one.\n")
            if support is not None else "")
         + ((f"\n\nINDEPENDENCE PROVENANCE: these branches are NOT fully "
             "independent of the listed companions "
