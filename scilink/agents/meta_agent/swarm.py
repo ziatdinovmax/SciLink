@@ -242,7 +242,8 @@ def capacity_plan(items: List[dict], memory: Optional[Dict[str, Optional[float]]
 
 def _subscription_line(sub: dict) -> str:
     on, enq = sub["on"], sub["enqueue"]
-    return (f"- on a {on['status']} **{on['kind']}**"
+    status = {"verified": "a verified", "provisional": "a provisional", "any": "any"}[on["status"]]
+    return (f"- on {status} **{on['kind']}**"
             + (f" on '{on['subject']}'" if on.get("subject") else " on any subject")
             + f" → {enq['mode']} '{enq['label']}'"
             + (f" (up to {sub['max_fires']} times)" if sub.get("max_fires", 1) != 1 else " (once)"))
@@ -448,10 +449,11 @@ def swarm_budget(raw: Any) -> dict:
             v = default
         v = max(0, v)
         return min(v, cap) if cap is not None else v
-    return {"max_items": max(2, bounded("max_items", SWARM_MAX_ITEMS, SWARM_MAX_ITEMS)),
-            "max_reactions": bounded("max_reactions", SWARM_MAX_ITEMS, SWARM_MAX_ITEMS),
+    max_items = max(2, bounded("max_items", SWARM_MAX_ITEMS, SWARM_MAX_ITEMS))
+    return {"max_items": max_items,
+            "max_reactions": bounded("max_reactions", max_items, max_items),
             "max_triggers_per_subject": bounded("max_triggers_per_subject",
-                                                reactions.MAX_TRIGGERS_PER_SUBJECT, SWARM_MAX_ITEMS)}
+                                                reactions.MAX_TRIGGERS_PER_SUBJECT, max_items)}
 
 
 def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
@@ -515,6 +517,11 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
                     entry["context"] = item["context"]
                 else:
                     entry["context_omitted"] = "too large to keep on the ledger"
+            if item.get("rests_on"):
+                # What the caller says this item's work rests on (a re-run's
+                # original cause): reads it did not make on the board, which
+                # can only add couplings, never remove one.
+                entry["reads"] = sorted(set(entry.get("reads") or []) | {str(f) for f in item["rests_on"] if f})
             if item.get("caused_by"):
                 # A reaction: its cause and chain, stamped as it is enqueued.
                 # The cause is a READ: the task quotes the finding, so what

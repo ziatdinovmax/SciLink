@@ -252,10 +252,16 @@ class Board:
             self._by_id[rec["finding_id"]] = rec
             return json.loads(json.dumps(rec))
 
-    def retract(self, finding_id: str, author: Dict[str, Any], reason: str = "") -> Dict[str, Any]:
+    def retract(self, finding_id: str, author: Dict[str, Any], reason: str = "",
+                decided_by: Optional[str] = None) -> Dict[str, Any]:
+        """Post a retraction of ``finding_id``. ``decided_by`` records WHO made
+        the decision ("human" at an attended gate), so nobody but a human
+        undoes a human's withdrawal."""
+        payload: Dict[str, Any] = {"reason": reason} if reason else {}
+        if decided_by:
+            payload["decided_by"] = decided_by
         return self.post(kind="retraction", author=author, target=finding_id,
-                         payload={"reason": reason} if reason else {},
-                         subject=self.get(finding_id).get("subject"))
+                         payload=payload, subject=self.get(finding_id).get("subject"))
 
     # ------------------------------------------------------------------ read
     def get(self, finding_id: str) -> Dict[str, Any]:
@@ -299,25 +305,25 @@ class Board:
                         and a.get("worker") and a.get("worker") == t.get("worker")))
             return bool(same or actor.get("status") == "verified" or a.get("mode") == "coordinator")
 
-        # First the undoings: a retraction of a retraction, so the main pass
-        # knows which withdrawals stand.
+        # Which retractions stand is decided in REVERSE log order: a
+        # retraction stands unless a later effective retraction undoes it
+        # (a retraction of a retraction), and that later one may itself have
+        # been undone later still — so the newest is settled first. Walking
+        # forward would let an undone undo take effect.
         undone: Set[str] = set()
-        for r in recs:
-            if r.get("kind") == "retraction":
-                target = by_id.get(r.get("target"))
-                if target is not None and target.get("kind") == "retraction":
-                    r["effective"] = may_act(r, target) and r["finding_id"] not in undone
-                    if r["effective"]:
-                        undone.add(target["finding_id"])
-                        target["status"] = "retracted"
+        for r in reversed(recs):
+            if r.get("kind") != "retraction":
+                continue
+            target = by_id.get(r.get("target"))
+            if target is None:
+                continue
+            r["effective"] = may_act(r, target) and r["finding_id"] not in undone
+            if r["effective"] and target.get("kind") == "retraction":
+                undone.add(target["finding_id"])
         for r in recs:
             if r.get("kind") == "retraction" and r.get("target") in by_id:
-                target = by_id[r["target"]]
-                if target.get("kind") == "retraction":
-                    continue                      # handled above
-                r["effective"] = may_act(r, target) and r["finding_id"] not in undone
-                if r["effective"]:
-                    target["status"] = "retracted"
+                if r.get("effective"):
+                    by_id[r["target"]]["status"] = "retracted"
             elif r.get("supersedes") in by_id:
                 old = by_id[r["supersedes"]]
                 r["effective"] = may_act(r, old)
@@ -893,40 +899,66 @@ def retract_and_report(orch, finding_id: str, reason: str) -> Dict[str, Any]:
         raise ValueError("a retraction states its reason")
     before = {r["finding_id"]: r for r in board.fold()}
     if before[finding_id]["status"] == "retracted":
-        raise ValueError(f"{finding_id} is already retracted")
-    dependents = board.dependents(finding_id) if not undo else []
+        raise ValueError(f"{finding_id} is already retracted" + (" (undone)" if undo else ""))
+    # What the act touches: for a withdrawal, the finding and what rests on
+    # it; for an undo, the finding that comes BACK and what rests on that.
+    shown = board.get(target["target"]) if undo else target
+    dependents = board.dependents(shown["finding_id"])
     attended = bool(getattr(orch, "_enable_human_feedback", False))
     if attended:
-        p = target.get("payload") or {}
+        p = shown.get("payload") or {}
         what = p.get("text") or p.get("issue") or p.get("path") or p.get("name") or json.dumps(p)[:200]
-        lines = [f"{target['kind']} {finding_id} on '{target.get('subject')}' by "
-                 f"{(target.get('author') or {}).get('worker')} ({before[finding_id]['status']})",
+        lines = [f"{shown['kind']} {shown['finding_id']} on '{shown.get('subject')}' by "
+                 f"{(shown.get('author') or {}).get('worker')} ({before[shown['finding_id']]['status']})",
                  f"\u201c{_clip(what, 300)}\u201d", f"reason given: {reason}"]
+        if undo:
+            lines.insert(0, f"undo retraction {finding_id} (\u201c{_clip((target.get('payload') or {}).get('reason'), 200)}\u201d"
+                            + (", a person's decision" if (target.get("payload") or {}).get("decided_by") == "human" else "")
+                            + "): this finding would stand again")
         if dependents:
-            lines.append(f"{len(dependents)} finding(s) rest on it and would be tainted: "
+            lines.append(f"{len(dependents)} finding(s) rest on it and would "
+                         + ("stand again" if undo else "be tainted") + ": "
                          + ", ".join(dependents[:8]) + (" …" if len(dependents) > 8 else ""))
-        subject = make_subject("Withdraw this finding?" if not undo else "Undo this retraction?",
+        subject = make_subject("Undo this retraction?" if undo else "Withdraw this finding?",
                                [subject_block("text", label="🗑 Finding", markdown="\n".join(lines))])
         try:
             ans = request_human_feedback(
-                "\n🤔 Withdraw it? Enter keeps it. [y/N]: ", kind="confirm", options=["y", "n"],
+                ("\n🤔 Undo it? Enter keeps the retraction. [y/N]: " if undo
+                 else "\n🤔 Withdraw it? Enter keeps it. [y/N]: "), kind="confirm", options=["y", "n"],
                 default="n", origin={"stage": "retract_finding", "finding_id": finding_id}, subject=subject,
             ).strip().lower()
         except (EOFError, KeyboardInterrupt):
             ans = "n"
         if ans not in ("y", "yes"):
             return {"status": "kept", "retracted": None, "finding_id": finding_id,
-                    "message": "the user kept the finding; nothing changed on the board"}
-    elif _human_approved(target):
-        return {"status": "refused", "retracted": None, "finding_id": finding_id,
-                "message": ("this finding is a human's decision (an approved plan's claim); nobody "
-                            "is at the gate to reopen it. Tell the user; a retraction of it is theirs "
-                            "to make in an attended session.")}
-    rec = board.retract(finding_id, author=COORDINATOR, reason=reason)
+                    "message": ("the user kept the retraction; nothing changed on the board" if undo
+                                else "the user kept the finding; nothing changed on the board")}
+    else:
+        # Nobody at the gate: the model may withdraw the agents' own findings,
+        # never a human's decision — not the finding itself, not a retraction a
+        # person made, and not a human-approved finding that rests on it.
+        refusal = None
+        if undo and (target.get("payload") or {}).get("decided_by") == "human":
+            refusal = "this retraction was a person's decision at an attended gate"
+        elif _human_approved(shown):
+            refusal = "this finding is a human's decision (an approved plan's claim)"
+        else:
+            human_dependents = [d for d in dependents if _human_approved(board.get(d))]
+            if human_dependents:
+                refusal = (f"a human-approved finding rests on it ({', '.join(human_dependents[:4])}) and "
+                           "would be tainted")
+        if refusal:
+            return {"status": "refused", "retracted": None, "finding_id": finding_id,
+                    "message": (f"{refusal}; nobody is at the gate to reopen a human's decision. Tell the "
+                                "user; it is theirs to make in an attended session.")}
+    rec = board.retract(finding_id, author=COORDINATOR, reason=reason,
+                        decided_by="human" if attended else "coordinator")
     after = {r["finding_id"]: r for r in board.fold()}
     if undo:
         restored = [fid for fid, r in after.items()
-                    if before.get(fid, {}).get("status") in ("retracted", "tainted") and r["status"] not in ("retracted", "tainted")]
+                    if r.get("kind") != "retraction"          # findings, not the bookkeeping that stands again
+                    and before.get(fid, {}).get("status") in ("retracted", "tainted")
+                    and r["status"] not in ("retracted", "tainted")]
         return {"status": "success", "retraction": rec["finding_id"], "undone": finding_id,
                 "retracted": None, "restored": restored, "reason": reason, "board_version": len(board),
                 "note": "the earlier retraction no longer takes effect; its target and what rested on it stand again"}
@@ -970,6 +1002,9 @@ def retract_and_report(orch, finding_id: str, reason: str) -> Dict[str, Any]:
                 "context": {**(e.get("context") if isinstance(e.get("context"), dict) else {}),
                             "reruns_delegation": src["delegation_index"],
                             "after_retraction_of": finding_id, "retraction_reason": reason}}
+        if e.get("caused_by"):
+            # a reaction re-run still rests on its cause (its task quotes it)
+            item["rests_on"] = list(e["caused_by"])
         for key in ("data_path", "reads_board", "check"):
             # ``reads_board: {}`` is the plain opt-in and falsy — test for
             # presence, not truth; a False check or an absent spec is the default.

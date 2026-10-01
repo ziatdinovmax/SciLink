@@ -878,6 +878,11 @@ class MetaOrchestratorTools:
                                       "description": "True when the item checks other "
                                                      "work (audit, confirmation, critique): "
                                                      "it is refused a board read."},
+                            "rests_on": {"type": "array", "items": {"type": "string"},
+                                         "description": "Optional: board finding ids this item's "
+                                                        "work rests on (a re-run's original cause, "
+                                                        "from retract_finding's rerun_items); "
+                                                        "recorded as reads."},
                         },
                         "required": ["mode", "task", "label"],
                     },

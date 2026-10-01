@@ -150,7 +150,9 @@ def fill(template: str, record: dict, from_entry: dict, *, quote: bool = True) -
         value = str(fields[name])
         if name in _QUOTED_FIELDS and value:
             return _quoted(value, record) if quote else " ".join(value.split())[:60]
-        return value
+        # an identifier is one line too: a path or an id a worker produced
+        # must not carry a line of its own into the task
+        return " ".join(value.split()).replace("<<<", "‹‹‹").replace(">>>", "›››")
     return _FIELD_RE.sub(sub, str(template))
 
 

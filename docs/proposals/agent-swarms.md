@@ -1167,6 +1167,23 @@ can already hit.
      closures built in one pass; `refused_reactions` collapse per
      (subscription, reason); `get_board`'s `withdrawn` says the reason and
      who retracted.
+   - *Round 2 of the review:* which retractions stand is decided in
+     REVERSE log order (a retraction stands unless a later effective one
+     undoes it, and that one may itself be undone later), so an undo of an
+     undo works: C → R1 retracts C → R2 undoes R1 → R3 undoes R2 (C
+     withdrawn again) → R4 undoes R3 (C back). A retraction records who
+     decided it (`decided_by`: `human` at the attended gate, else
+     `coordinator`), and with nobody at the gate the model may not undo a
+     person's retraction, nor withdraw a finding that a human-approved
+     record rests on (it would be tainted) — "a human's decision is
+     reopened only by a human" now holds for the three ways there were to
+     reopen one. The undo gate shows the finding that would come back and
+     what rests on it, not the retraction record. `fill()` makes
+     identifiers one line too (a worker's path or id cannot carry a line of
+     its own into a task). A reaction offered again after a retraction
+     carries its cause as `rests_on`, which `launch` records as reads (a
+     caller-declared read can only add a coupling). `max_reactions` is
+     clamped to `max_items`, and the gate says "on any task_request".
    - *Deviations from "Starting stage 3", each deliberate:* no worker
      supersedes its own earlier claim — no `run_task` result says "this
      replaces that", and guessing it from kind and subject would be the
@@ -1507,7 +1524,8 @@ references are to `main` at bed2f7f8.
 - *`fired[].delegation_index`* names the first launch; a memory-cancelled
   reaction's rerun is a later entry with the same cause.
 - *A retraction is not gated by "a user message since".* With nobody at
-  the gate the model may withdraw the agents' own findings; the planner's
+  the gate the model may withdraw the agents' own findings (never a human's
+  decision, nor what one rests on, nor a person's retraction); the planner's
   finer rule (a `user_request` needs a message since the approval) would
   need the meta's turn history on the board's clock.
 - Everything open after stage 2 still stands (no retraction from a worker,
