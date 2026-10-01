@@ -345,9 +345,16 @@ def test_the_recipe_is_the_script_the_followers_replayed(tmp_path, monkeypatch):
     copy = recipe["payload"]["path"]
     assert _first_prior_curve_fit_script({"prior_analysis_paths": [copy]}) == (
         "M1", f"{Path(copy).parent.name}: spectrum_0000.py (the script file named)")
+    # ... but it is NOT a run: anchor_dir is None, so the realtime profile and the live loop refuse it
     anchor_dir, summary, text, label = _load_prior_curve_fit_state(copy)
-    assert (anchor_dir, summary, text) == (Path(copy).parent, None, "M1")
+    assert (anchor_dir, summary, text, label) == (None, None, "M1", "spectrum_0000.py (the script file named)")
     assert _load_prior_curve_fit_state(str(Path(copy).parent))[0] is None   # the board folder is no run: nothing
+    from scilink.live.modality import CurveModality
+    assert CurveModality().anchor_script(copy) == (None, None)             # the loop arms on runs only
+    # a file INSIDE the run names the run for the loop, and the loop arms on what the run replays (M1),
+    # not on the named refit script (M2) its frames would never see
+    assert CurveModality().anchor_script(str(tmp_path / "scripts" / "spectrum_0000.py")) == ("M1", tmp_path)
+    assert CurveModality().anchor_script(str(tmp_path)) == ("M1", tmp_path)
 
 
 def test_a_failed_follower_refit_leaves_the_reuse_pick_unchanged(tmp_path, monkeypatch):
@@ -504,3 +511,96 @@ def test_parity_of_the_stamped_and_legacy_verdicts(tmp_path, monkeypatch):
     assert differ["follower_refit_salvaged"][0]["verified"] is False
     assert set(agree) >= {"clean", "cut_anchor", "failed_anchor", "all_refit_ok", "flip", "good_reuse",
                           "failed_reuse_rederived", "failed_follower_refit", "failed_regime_anchor"}, (agree, differ)
+
+
+def test_the_realtime_profile_and_the_loop_refuse_a_bare_script_and_a_reuse_names_its_regime(tmp_path, monkeypatch):
+    """Round 1 of #707: a script file on its own is a recipe for a reuse, and
+    nothing else — the realtime profile (locked config, drift fingerprint)
+    raises as it did on main; a unit whose name is not file-system safe is
+    still found for the refit check; an unverified recipe says so in its
+    label; a non-string script or a missing unit is not a recipe."""
+    import json
+    from scilink.agents.exp_agents._verification_record import prior_recipe_scripts, series_recipes, unit_script_name
+    from scilink.agents.exp_agents.controllers.curve_fitting_controllers import (
+        _load_prior_curve_fit_state, _prior_curve_fit_recipes, _prior_curve_fit_block)
+    bare = tmp_path / "copy" / "fitting_script.py"
+    bare.parent.mkdir()
+    bare.write_text("F")
+    assert _load_prior_curve_fit_state(str(bare)) == (None, None, "F", "fitting_script.py (the script file named)")
+    assert _prior_curve_fit_recipes({"prior_analysis_paths": [str(bare)]}) == [("F", "copy: fitting_script.py (the script file named)")]
+    assert "### Prior script file: fitting_script.py" in _prior_curve_fit_block({"prior_analysis_paths": [str(bare)]})
+    # the realtime entry raises on a bare file exactly as on main (anchor_dir is None)
+    anchor_dir, prior_summary, _ps, _pl = _load_prior_curve_fit_state(str(bare))
+    assert anchor_dir is None                       # what analyze(profile="realtime") tests before raising
+    # a two-regime prior run with an unsafe unit name and an unverified second regime
+    run = tmp_path / "run"
+    (run / "scripts").mkdir(parents=True)
+    (run / "series_fit_results.json").write_text("{}")
+    (run / "scripts" / "T_300K.py").write_text("M1-refit")           # the anchor was refit (saved under the safe name)
+    (run / "scripts" / "T_500K.py").write_text("M2")
+    (run / "analysis_results.json").write_text(json.dumps({"locked_recipes": {
+        "R1": {"unit": "T=300K", "index": 0, "regime": "R1", "script": "M1", "verdict": {"verified": True}},
+        "R2": {"unit": "T=500K", "index": 1, "regime": "R2", "script": "M2", "verdict": {"verified": False, "reason": "salvaged"}},
+        "bad": {"unit": "x", "index": 2, "script": 123}, "nounit": {"index": 3, "script": "S"}}}))
+    assert unit_script_name("T=300K") == "T_300K"
+    assert [r["unit"] for r in series_recipes(json.loads((run / "analysis_results.json").read_text()))] == ["T=300K", "T=500K"]
+    assert prior_recipe_scripts(run, single_name="fitting_script.py") == [
+        ("M1", "T_300K.py (the series' locked recipe, regime R1, 1 of 2, the anchor refit since)"),
+        ("M2", "T_500K.py (the series' locked recipe, regime R2, 2 of 2, its anchor's gate did not pass)")]
+    assert [src for _, src in _prior_curve_fit_recipes({"prior_analysis_paths": [str(run)]})] == [
+        "run: T_300K.py (the series' locked recipe, regime R1, 1 of 2, the anchor refit since)",
+        "run: T_500K.py (the series' locked recipe, regime R2, 2 of 2, its anchor's gate did not pass)"]
+
+
+def test_a_multi_regime_prior_run_is_replayed_regime_by_regime(tmp_path, monkeypatch):
+    """A prior series that locked one model below a transition and another
+    above it: a reuse replays the recipes in lock order and keeps the first
+    the gate calls good; when none is good, the first that executed is kept,
+    poor and flagged, as a single recipe would be."""
+    import json
+    from scilink.agents.exp_agents.controllers.curve_fitting_controllers import (
+        UnifiedSeriesProcessingController, _prior_curve_fit_recipes)
+    run = tmp_path / "prior"
+    (run / "scripts").mkdir(parents=True)
+    (run / "series_fit_results.json").write_text("{}")
+    (run / "analysis_results.json").write_text(json.dumps({"locked_recipes": {
+        "low": {"unit": "spectrum_0000", "index": 0, "regime": "low", "script": "LOW", "verdict": {"verified": True}},
+        "high": {"unit": "spectrum_0003", "index": 3, "regime": "high", "script": "HIGH", "verdict": {"verified": True}}}}))
+    assert [t for t, _ in _prior_curve_fit_recipes({"prior_analysis_paths": [str(run)]})] == ["LOW", "HIGH"]
+    # the executor scores the fit by which recipe ran: LOW fits the new spectrum poorly, HIGH well
+    out = tmp_path / "new"
+    out.mkdir()
+    ctrl = _controller(out, FakeExecutor({"spectrum_0000": 0.97}))
+    ran = []
+
+    def fit(state, curve_data, data_path, spectrum_name, spectrum_idx, base_script=None, **kw):
+        ran.append(base_script)
+        r2 = {"LOW": 0.80, "HIGH": 0.985}.get(base_script, 0.5)
+        return {"index": spectrum_idx, "name": spectrum_name, "success": True, "script": base_script,
+                "fit_quality": {"r_squared": r2}, "fitted_parameters": {}, "model_type": base_script}
+    monkeypatch.setattr(ctrl, "_fit_single_spectrum", fit)
+    monkeypatch.setattr(ctrl, "_run_verification_loop", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no QC loop")), raising=False)
+    state = {"num_spectra": 1, "is_single_spectrum": True, "spectra_data": [np.zeros((10, 2))], "spectrum_names": ["spectrum_0000"],
+             "prior_analysis_paths": [str(run)], "reuse_locked_script": True, "system_info": {}}
+    from scilink.agents.exp_agents._qc_engine import QCItemContext
+    recipes = _prior_curve_fit_recipes(state)
+    state["_reuse_candidates"] = [{"script": t, "source": s} for t, s in recipes]
+    ctx = QCItemContext(state=state, data=np.zeros((10, 2)), data_path="new.txt", item_name="spectrum_0000", item_idx=0,
+                        reuse_script=recipes[0][0], reuse_source=recipes[0][1])
+    res = ctrl.qc_try_reuse(ctx)
+    assert ran == ["LOW", "HIGH"] and res["script"] == "HIGH"
+    rv = res["reuse_validity"]
+    assert rv["verdict"] == "good" and rv["recipes_tried"] == 2 and "regime high, 2 of 2" in rv["source"] and "2 regime recipes tried" in rv["message"]
+    # none good: the first executed is kept, poor
+    ran.clear()
+    monkeypatch.setattr(ctrl, "_fit_single_spectrum", lambda *a, base_script=None, **k: {
+        "index": 0, "name": "spectrum_0000", "success": True, "script": base_script, "fit_quality": {"r_squared": 0.6}, "fitted_parameters": {}})
+    res = ctrl.qc_try_reuse(ctx)
+    assert res["script"] == "LOW" and res["reuse_validity"]["verdict"] == "poor" and res["reuse_validity"]["recipes_tried"] == 2
+    assert "regime low, 1 of 2" in res["reuse_validity"]["source"] and res.get("quality_warning")
+    # a single recipe: no candidate bookkeeping on the verdict at all
+    state["_reuse_candidates"] = []
+    ctx = QCItemContext(state=state, data=np.zeros((10, 2)), data_path="new.txt", item_name="spectrum_0000", item_idx=0,
+                        reuse_script="LOW", reuse_source="prior")
+    res = ctrl.qc_try_reuse(ctx)
+    assert "recipes_tried" not in res["reuse_validity"] and res["reuse_validity"]["source"] == "prior"

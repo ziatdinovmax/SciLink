@@ -287,8 +287,9 @@ def _analysis_output_dir_summary(path: Path) -> Optional[dict]:
         "This is a prior analysis OUTPUT directory, not raw data. "
         + (f"Its saved script(s): {', '.join(scripts[:6])}"
            + (" …" if len(scripts) > 6 else "")
-           + " (a series saves the same locked script once per unit; any one is the "
-             "reusable fit script — read_file it to inspect). "
+           + " (a series saves one script per unit — the locked recipe its followers "
+             "replayed, or a refit's own; a reuse of the run replays the locked recipe "
+             "recorded in analysis_results.json, not a refit's — read_file to inspect). "
            if scripts else "")
         + "To re-run the locked model on data, pass this directory as "
           "prior_analysis_paths with reuse_locked_script=true (script_edits for a "

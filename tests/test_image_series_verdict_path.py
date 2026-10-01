@@ -258,11 +258,15 @@ def test_an_image_reuse_replays_the_locked_recipe_or_the_file_named(tmp_path, mo
     assert [r["unit"] for r in results["locked_recipes"].values()] == ["image_0000", "image_0003"]
     (tmp_path / "analysis_results.json").write_text(json.dumps({"status": "success", "locked_recipes": results["locked_recipes"]}))
     assert _first_prior_image_script({"prior_analysis_paths": [str(tmp_path)]}) == (
-        "M1", f"{tmp_path.name}: image_0000.py (the series' locked recipe)")
+        "M1", f"{tmp_path.name}: image_0000.py (the series' locked recipe, regime R1, 1 of 2)")
     # the anchor's script changed on disk after the lock (a refit): the recipe is still what was locked
     (tmp_path / "scripts" / "image_0000.py").write_text("M1-refit")
     assert _first_prior_image_script({"prior_analysis_paths": [str(tmp_path)]}) == (
-        "M1", f"{tmp_path.name}: image_0000.py (the series' locked recipe, the anchor refit since)")
+        "M1", f"{tmp_path.name}: image_0000.py (the series' locked recipe, regime R1, 1 of 2, the anchor refit since)")
+    # the live loop arms on what the run replays, never on a bare file
+    from scilink.live.modality import ImageModality
+    assert ImageModality().anchor_script(str(tmp_path)) == ("M1", tmp_path)
+    assert ImageModality().anchor_script(str(tmp_path / "scripts" / "image_0003.py")) == ("M1", tmp_path)
     # a named file wins: the regime-2 script inside the run, or a copy with no run folder at all
     assert _first_prior_image_script({"prior_analysis_paths": [str(tmp_path / "scripts" / "image_0003.py")]}) == (
         "M3", f"{tmp_path.name}: image_0003.py (the script file named)")
@@ -270,6 +274,7 @@ def test_an_image_reuse_replays_the_locked_recipe_or_the_file_named(tmp_path, mo
     copy.parent.mkdir(parents=True)
     copy.write_text("M3")
     assert _first_prior_image_script({"prior_analysis_paths": [str(copy)]}) == ("M3", "recipes: image_0003.py (the script file named)")
+    assert ImageModality().anchor_script(str(copy)) == (None, None)
     # a run from before the record: the first unit script, as before
     (tmp_path / "analysis_results.json").write_text(json.dumps({"status": "success"}))
     assert _first_prior_image_script({"prior_analysis_paths": [str(tmp_path)]}) == (

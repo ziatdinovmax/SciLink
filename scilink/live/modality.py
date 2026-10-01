@@ -108,10 +108,18 @@ class CurveModality:
 
     # ---------------------------------------------------------------- anchor
     def anchor_script(self, anchor: str) -> Tuple[Optional[str], Optional[Path]]:
+        """The loop's anchor is a RUN: every frame replays ``anchor_dir``, so the
+        script armed here is the one that run replays. A script file on its own
+        is refused (no run: no locked config, no drift fingerprint); a file inside
+        a run means that run, as it always did."""
         from ..agents.exp_agents.controllers.curve_fitting_controllers import (
             _load_prior_curve_fit_state)
         anchor_dir, _summary, script, _label = _load_prior_curve_fit_state(anchor)
-        return (script, anchor_dir) if anchor_dir is not None and script else (None, None)
+        if anchor_dir is None or not script:
+            return None, None
+        if Path(anchor).is_file():
+            script = _load_prior_curve_fit_state(str(anchor_dir))[2]
+        return (script, anchor_dir) if script else (None, None)
 
     no_anchor_message = ("holds no reusable curve-fit run (expected series_fit_results.json "
                          "and a saved script under scripts/).")
@@ -615,11 +623,15 @@ class ImageModality(CurveModality):
         return result.get("reuse_validity") or {}
 
     def anchor_script(self, anchor: str) -> Tuple[Optional[str], Optional[Path]]:
+        """As for curves: the anchor is a run, and the script armed is the one
+        the run replays on every frame."""
         from ..agents.exp_agents.controllers.image_analysis_controllers import (
             _first_prior_image_script, _load_prior_state)
-        script, _label = _first_prior_image_script({"prior_analysis_paths": [str(anchor)]})
         anchor_dir, _data = _load_prior_state(str(anchor))
-        return (script, anchor_dir) if script and anchor_dir is not None else (None, None)
+        if anchor_dir is None:
+            return None, None
+        script, _label = _first_prior_image_script({"prior_analysis_paths": [str(anchor_dir)]})
+        return (script, anchor_dir) if script else (None, None)
 
     no_anchor_message = ("holds no reusable image-analysis run (expected analysis_results.json "
                          "and a saved script under scripts/).")

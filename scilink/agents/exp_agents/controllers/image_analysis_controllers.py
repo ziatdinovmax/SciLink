@@ -600,7 +600,10 @@ def _first_prior_image_script(state: dict):
     the board's copy under ``swarm/recipes/``, or one unit's script), a
     single-image run's ``scripts/analysis_script.py``, a series' LOCKED
     recipe from its ``analysis_results.json`` (#704: the script its table
-    rests on, not a later refit's), else a series' first unit script. The
+    rests on, not a later refit's — the FIRST regime's when the series
+    locked several, which the label says; an image reuse's verdict is one
+    vision review, not a deterministic gate, so the regimes are not tried
+    in turn as the curve twin does), else a series' first unit script. The
     label names the run and, for a series or a named file, the pick.
     Returns ``(None, None)`` when no prior paths are given or none carry a
     script, which keeps a normal (no-prior) run byte-identical.

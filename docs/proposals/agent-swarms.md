@@ -1352,13 +1352,23 @@ references are to `main` at bed2f7f8.
   #705, one PR): `prior_analysis_paths` takes a script FILE (a `.py`, or a
   `dynamic_analysis_records.json` for a cube) as the recipe — the board's
   copy under `swarm/recipes/` replays through the same gate as a run
-  folder — and a reuse of a SERIES run replays the series' locked recipe
-  (the first regime's, from `locked_recipes` in its `analysis_results.json`:
-  the script its table rests on), not a later refit of its anchor; the
-  agents' reuse pick and the board's recipe agree, and
-  `reuse_validity.source` says which script was picked
-  (`_verification_record.prior_recipe_script`, shared by the curve and
-  image pickers; the hyperspectral agent already took the records file).
+  folder — and a reuse of a SERIES run replays the series' locked recipes
+  (from `locked_recipes` in its `analysis_results.json`: the scripts its
+  table rests on), not a later refit of its anchor; the agents' reuse pick
+  and the board's recipe agree, and `reuse_validity.source` says which
+  script was picked and why (`_verification_record.prior_recipe_scripts`,
+  shared by the curve and image pickers; the hyperspectral agent already
+  took the records file). A script file is a recipe and nothing more: it is
+  not a run, so the loader returns no `anchor_dir` for it, and the realtime
+  profile (locked config, drift fingerprint) and the live loop's anchor
+  refuse it as before; a file inside a run names that run for the loop,
+  which arms on the script the run replays. A curve reuse of a series that
+  locked several regimes replays the recipes in lock order and keeps the
+  first the R² gate calls good (`qc_try_reuse`), so a measurement above a
+  transition is not held to the model locked below it; an image reuse's
+  verdict is one vision review, not a deterministic gate, so it replays the
+  first regime's recipe and its label says so. An image strict replay needs
+  the run (its reference features), and refuses a bare file.
 - *Persistent-specialist delegations read nothing.* `delegate_to_*` posts but
   has no `reads_board`; the meta threads findings into `context` by hand
   (`get_board`), which is the design's turn-granularity path.

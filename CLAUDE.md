@@ -136,10 +136,16 @@ its locked recipe** — the first regime's, recorded in `locked_recipes` when th
 anchor's script was locked, the script the feature table rests on — never a
 later refit of the anchor (the refit's script stays as that unit's
 `scripts/<unit>.py`; a person who wants the better model starts a new series
-from it). `prior_analysis_paths` also takes a recipe FILE (`.py`, or
-`dynamic_analysis_records.json` for a cube) through the same replay gate, so
-the swarm board's copy under `swarm/recipes/` is replayable; the pick and its
-reason are `reuse_validity.source` (`_verification_record.prior_recipe_script`).
+from it). A curve reuse of a series that locked several regimes replays the
+recipes in lock order and keeps the first the R² gate calls good; an image
+reuse replays the first regime's and says so (its verdict is one vision
+review, not a gate). `prior_analysis_paths` also takes a recipe FILE (`.py`,
+or `dynamic_analysis_records.json` for a cube) through the same replay gate,
+so the swarm board's copy under `swarm/recipes/` is replayable — as a recipe
+only: a file is not a run, so the realtime profile, the live loop's anchor and
+an image strict replay (which need the run's config, fingerprint or reference
+features) refuse it. The pick and its reason are `reuse_validity.source`
+(`_verification_record.prior_recipe_scripts`).
 
 The hyperspectral instantiation differs in mechanics, not shape: the single-
 cube pipeline is bound to one output directory (decomposition, dynamic-analysis
