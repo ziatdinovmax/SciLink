@@ -6,9 +6,12 @@ as "Starting stage 1" below describes; what changed on the way is recorded
 under the stage in "Build order". Stage 2 (the board) merged on 2026-10-01 (#702, head
 e1c0fc72) after eight review rounds, built as "Starting stage 2" describes,
 with what changed on the way under the stage in "Build order" and its open
-items in "After stage 2". Stage 3 (reactions) is on its PR, built as
-"Starting stage 3" describes, with what changed on the way under the stage
-in "Build order" and its open items in "After stage 3". The design notes were
+items in "After stage 2". The recipe-reuse dependency (#704, #705) merged
+on 2026-10-01 (#707, head c2c95f71) after two review rounds. Stage 3
+(reactions) merged on 2026-10-01 (#708, head a7663b2b) after three review
+rounds, built as "Starting stage 3" describes, with what changed on the way
+under the stage in "Build order" and its open items in "After stage 3";
+stage 4 (scheduling) is next. The design notes were
 drafted 2026-09-28 against `main` at b988c7cd (Release 0.0.83), based on a source audit of the meta
 agent (`meta_orchestrator.py`, `meta_orchestrator_tools.py`, `fanout.py`,
 `telemetry.py`), the three mode orchestrators' `run_task`, the executors, the
@@ -1514,9 +1517,9 @@ references are to `main` at bed2f7f8.
 - Everything open after stage 1 still stands (telemetry, the one-slot web
   panel, no swarm resume, memory estimated, HPC #696, #685).
 
-## After stage 3: what is on the PR, and what is open
+## After stage 3: what is on main, and what is open
 
-**What stage 3 adds:** `meta_agent/reactions.py`; `run_swarm`'s
+**What stage 3 adds** (#708, a7663b2b): `meta_agent/reactions.py`; `run_swarm`'s
 `subscriptions` and `budget` and the `react` step of its loop; `Board.fold`'s
 `tainted` status, `Board.dependents`, `Board.snapshot(with_hazards)`,
 `records_for`'s `task_request` records, `retract_and_report`; the
@@ -1544,6 +1547,18 @@ references are to `main` at bed2f7f8.
   within one swarm today (nothing retracts inside a run).
 - *`fired[].delegation_index`* names the first launch; a memory-cancelled
   reaction's rerun is a later entry with the same cause.
+- *Nits from the approval of #708, not fixed:* the effect is computed
+  before the retraction is posted, outside the board's lock — a post
+  landing in between would be tainted unreported; it cannot happen today
+  (tool calls are sequential, `run_swarm` blocks), so it is a note for the
+  day a retraction runs during a live swarm. A superseded finding that an
+  undo restores is reported as "brought back" although it stays superseded
+  (cosmetic). An already-tainted human-approved finding is a gap: the model
+  may retract a second basis Y without refusal because P is not *newly*
+  tainted, so if a person later undoes X, P stays tainted by Y. Fixed with
+  the status flip (#709): `rests_on_dropped` counts the ids over the cap,
+  the undo gate names the finding's own withdrawal reason, and an act that
+  only flips a retraction's standing says so instead of an empty effect.
 - *A retraction is not gated by "a user message since".* With nobody at
   the gate the model may withdraw the agents' own findings (never a human's
   decision, nor what one rests on, nor a person's retraction); the planner's

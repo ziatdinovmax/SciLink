@@ -693,6 +693,8 @@ def test_an_undo_of_an_undo_is_judged_by_what_it_withdraws(meta, monkeypatch):
     assert d["finding_id"] in tainted and len(tainted) == 2                      # D and P
     assert [i["context"]["reruns_delegation"] for i in r3["rerun_items"]] == [2] and r3["rerun_items"][0]["task"] == "do D"
     assert status(c["finding_id"]) == "retracted" and status(d["finding_id"]) == "tainted"
+    # the gate for the undo of an undo named C's own withdrawal reason (R1's), not the undo's
+    assert "first withdrawn for: \u201cr1\u201d" in shown and "2 level(s) of undo over claim" in shown
     # the model may not lift a person's withdrawal either way, and an act that changes nothing is refused
     out = board_mod.retract_and_report(meta, r3["retraction"], "r4: the model wants C back")
     assert out["status"] == "refused" and "person's retraction" in out["message"]
@@ -717,4 +719,41 @@ def test_rests_on_is_typed_bounded_and_ignored_on_a_check(meta, monkeypatch):
     assert L["Raman A7"].get("reads", []) == []                                        # a string declares nothing
     assert len(L["purity plan"]["reads"]) == swarm.RESTS_ON_MAX and set(L["purity plan"]["reads"]) <= set(real)
     assert L["audit"].get("reads", []) == [] and L["audit"]["rests_on_ignored"] == "a check reads nothing"
-    assert {**L["purity plan"]}.get("rests_on_dropped") == 3
+    assert {**L["purity plan"]}.get("rests_on_dropped") == 3 + (30 - swarm.RESTS_ON_MAX)   # bad ids AND the ones over the cap
+
+
+def test_an_act_that_only_flips_a_retraction_says_so(meta):
+    """Two retractions both stand on C; undoing one changes no finding's
+    standing — the effect says which retraction loses effect rather than
+    reading as empty."""
+    board = meta.board
+
+    def status(fid):
+        return {r["finding_id"]: r["status"] for r in board.fold()}[fid]
+    c = board.post(kind="claim", author={"worker": "w1", "delegation_index": 1, "mode": "analysis"},
+                   subject=S, payload={"text": "C"}, status="verified")
+    r1 = board_mod.retract_and_report(meta, c["finding_id"], "first reason")
+    # a second, independent retraction of C by its author stands beside R1
+    r2 = board.post(kind="retraction", author={"worker": "w1", "delegation_index": 1, "mode": "analysis"},
+                    target=c["finding_id"], payload={"reason": "also wrong", "decided_by": "coordinator"})
+    out = board_mod.retract_and_report(meta, r1["retraction"], "lift the first")
+    assert out["status"] == "success" and out["withdrawn"] == [] and out["restored"] == []
+    assert out["effect"] == f"changes no finding's standing: retraction {r1['retraction']} loses effect"
+    assert status(c["finding_id"]) == "retracted"                                  # R2 still stands
+    # the gate's subject says the same for a person
+    from scilink import hitl
+    meta._enable_human_feedback = True
+    asked = []
+
+    class Keep:
+        def ask(self, req):
+            asked.append(req)
+            return ""
+    hitl.set_thread_channel(Keep())
+    try:
+        kept = board_mod.retract_and_report(meta, r2["finding_id"], "and the second")
+    finally:
+        hitl.set_thread_channel(None)
+        meta._enable_human_feedback = False
+    shown = json.dumps(asked[-1].subject, ensure_ascii=False)
+    assert kept["status"] == "kept" and "BRINGS BACK 1" in shown              # lifting R2 would bring C back

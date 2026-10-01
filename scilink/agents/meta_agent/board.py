@@ -268,6 +268,10 @@ class Board:
         with self._lock:
             return json.loads(json.dumps(self._by_id[finding_id]))
 
+    def has(self, finding_id: Any) -> bool:
+        with self._lock:
+            return finding_id in self._by_id
+
     def records(self) -> List[Dict[str, Any]]:
         """Every record as written (copies), in order."""
         with self._lock:
@@ -953,8 +957,20 @@ def retract_and_report(orch, finding_id: str, reason: str) -> Dict[str, Any]:
     if attended:
         lines = [f"reason given: {reason}"]
         if undo:
-            lines.insert(0, f"retract retraction {finding_id} (\u201c{_clip((target.get('payload') or {}).get('reason'), 200)}\u201d"
+            # The record named is a retraction; what matters is the finding it
+            # concerns, however many undo levels down: say that finding's own
+            # withdrawal reason (R1's), not an undo's "undo R1".
+            root, hops = target, 0
+            while root.get("kind") == "retraction" and root.get("target") and hops < 64:
+                root, hops = board.get(root["target"]), hops + 1
+            first = next((r for r in board.records() if r.get("kind") == "retraction"
+                          and r.get("target") == root["finding_id"]), None)
+            lines.insert(0, f"retract retraction {finding_id} ({hops} level(s) of undo over {root['kind']} {root['finding_id']}; "
+                            f"first withdrawn for: \u201c{_clip(((first or {}).get('payload') or {}).get('reason'), 200)}\u201d"
                             + (", a person's decision" if (target.get("payload") or {}).get("decided_by") != "coordinator" else "") + ")")
+        if not (fx["withdrawn"] or fx["tainted"] or fx["restored"]):
+            lines.append("changes no finding's standing: " + "; ".join(
+                f"retraction {r['finding_id']} would {'take' if r.get('effective') else 'lose'} effect" for r in fx["flipped"]))
         if fx["withdrawn"]:
             lines.append(f"WITHDRAWS {len(fx['withdrawn'])}: " + listing(fx["withdrawn"]))
         if fx["tainted"]:
@@ -1040,9 +1056,13 @@ def retract_and_report(orch, finding_id: str, reason: str) -> Dict[str, Any]:
             if e.get(key) is not None and e.get(key) is not False:
                 item[key] = e[key]
         rerun_items.append(item)
-    effect = (("withdraws " + ", ".join(fx["withdrawn"]) if fx["withdrawn"] else "")
-              + (f"; taints {len(fx['tainted'])}" if fx["tainted"] else "")
-              + (("; " if fx["withdrawn"] or fx["tainted"] else "") + "brings back " + ", ".join(fx["restored"]) if fx["restored"] else ""))
+    parts = ([f"withdraws {', '.join(fx['withdrawn'])}"] if fx["withdrawn"] else []) \
+        + ([f"taints {len(fx['tainted'])}"] if fx["tainted"] else []) \
+        + ([f"brings back {', '.join(fx['restored'])}"] if fx["restored"] else [])
+    if not parts:          # only a retraction's standing changed (one of two withdrawals of a finding undone)
+        parts = ["changes no finding's standing: " + ", ".join(
+            f"retraction {r['finding_id']} {'takes' if r.get('effective') else 'loses'} effect" for r in fx["flipped"])]
+    effect = "; ".join(parts)
     return {
         "status": "success", "retraction": rec["finding_id"],
         "retracted": fx["withdrawn"][0] if (not undo and fx["withdrawn"]) else None,
