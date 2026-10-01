@@ -716,6 +716,13 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         if staged:
             response["staged_solutions"] = staged
 
+        # The cube's verdict, stamped now that the status is decided (#712).
+        from ._verification_record import final_verdict_record
+        try:
+            response["verdict"] = final_verdict_record(response)
+        except Exception as exc:  # noqa: BLE001 - a stamp never fails a run
+            self.logger.warning(f"verdict not stamped: {exc}")
+
         # Persist the numeric results to <output_dir>/analysis_results.json
         # so the shared feature-table writer (feature_table.py, generic
         # extracted_features adapter) can emit features.csv — the file the
@@ -831,6 +838,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             }
             if response.get("stage_timings"):
                 payload["stage_timings"] = response["stage_timings"]
+            if isinstance(response.get("verdict"), dict):
+                payload["verdict"] = response["verdict"]          # the run's stamped verdict (#712)
             path = self.output_dir / "analysis_results.json"
             with open(path, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, indent=2, default=str)
@@ -1549,6 +1558,12 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             response["warnings"] = warnings
         if literature_file:
             response["literature_files"] = {"provided_file": str(literature_file)}
+        # The series' verdict, the aggregate of its rows' stamps (#712).
+        from ._verification_record import final_verdict_record
+        try:
+            response["verdict"] = final_verdict_record(response)
+        except Exception as exc:  # noqa: BLE001 - a stamp never fails a run
+            self.logger.warning(f"verdict not stamped: {exc}")
         return response
 
     def _maybe_stage_t2_solutions(self, records: list, skill_state: dict) -> list:

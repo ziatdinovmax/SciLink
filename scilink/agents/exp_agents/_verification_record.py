@@ -301,37 +301,38 @@ def unit_verdict_for(unit: Dict[str, Any], *, recipe: Optional[Dict[str, Any]] =
 
     ``recipe`` is the regime anchor's record at the time the follower ran:
     ``{"unit": name, "verdict": {verified, reason}}`` or None when the
-    follower was fitted with no base script.
+    follower was fitted with no base script. The record is the shared
+    ``verdict_record`` shape (``_replay.py``): who decided is ``decided_by``.
     """
-    name = unit.get("name") or unit.get("index")
+    from ._replay import verdict_record
     if not unit.get("success"):
-        return {"verified": False, "reason": f"unit failed: {str(unit.get('error') or '')[:120]}",
-                "regime": regime}
+        return verdict_record(verified=False, reason=f"unit failed: {str(unit.get('error') or '')[:120]}",
+                              decided_by="excluded", regime=regime)
     if _has_record(unit.get("quality_history")):
         # verified by its own gate: an anchor, a regime anchor, a refit
         bad = _unit_verdict(unit, where="")
-        return {"verified": bad is None, "reason": (bad or {}).get("reason") or "approved by its own gate",
-                "regime": regime, "own_gate": True}
+        return verdict_record(verified=bad is None, reason=(bad or {}).get("reason") or "approved by its own gate",
+                              decided_by="qc_gate", regime=regime)
     rv = unit.get("reuse_validity") or {}
     if rv.get("reused"):
         # a locked-script reuse (a prior run's script, or a script-bank cold
         # start) writes no QC record: the replay gate is its own gate
         good = rv.get("verdict") == "good"
-        return {"verified": good, "regime": regime, "own_gate": True,
-                "reason": ("locked-script reuse passed the replay gate" if good
-                           else f"reused script verdict {rv.get('verdict')!r}")}
+        return verdict_record(verified=good, decided_by="replay_gate", regime=regime,
+                              reason=("locked-script reuse passed the replay gate" if good
+                                      else f"reused script verdict {rv.get('verdict')!r}"))
     if (unit.get("quality_history") or {}).get("unverified"):
-        return {"verified": False, "reason": "follower unverified (budget)", "regime": regime}
+        return verdict_record(verified=False, reason="follower unverified (budget)", decided_by="none", regime=regime)
     if unit.get("fitted_from") == "fresh_code" or recipe is None:
-        return {"verified": False, "reason": "fitted without a locked recipe (its regime's anchor "
-                                             "produced none)", "regime": regime}
+        return verdict_record(verified=False, decided_by="none", regime=regime,
+                              reason="fitted without a locked recipe (its regime's anchor produced none)")
     rv = recipe.get("verdict") or {}
     if rv.get("verified"):
-        return {"verified": True, "reason": f"replayed the locked recipe of unit {recipe.get('unit')}, "
-                                            "whose gate passed", "regime": regime, "recipe_of": recipe.get("unit")}
-    return {"verified": False, "reason": f"replayed the locked recipe of unit {recipe.get('unit')}, which was "
-                                         f"not approved: {rv.get('reason')}", "regime": regime,
-            "recipe_of": recipe.get("unit")}
+        return verdict_record(verified=True, decided_by="recipe", regime=regime, recipe_of=recipe.get("unit"),
+                              reason=f"replayed the locked recipe of unit {recipe.get('unit')}, whose gate passed")
+    return verdict_record(verified=False, decided_by="recipe", regime=regime, recipe_of=recipe.get("unit"),
+                          reason=f"replayed the locked recipe of unit {recipe.get('unit')}, which was "
+                                 f"not approved: {rv.get('reason')}")
 
 
 def stamp_unit_verdict(unit: Dict[str, Any], *, recipe: Optional[Dict[str, Any]] = None,
@@ -376,6 +377,20 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
     - a hyperspectral series: every successful row's own ``verified``.
     """
     full = full_result or {}
+    from ._replay import is_verdict_record
+    stamped = full.get("verdict")
+    if is_verdict_record(stamped):
+        # The agent stamped its verdict when the result was final
+        # (``final_verdict_record``): read it. The reconstruction serves
+        # results from before the stamp.
+        return {"verified": stamped["verified"], "reason": stamped["reason"]}
+    return reconstructed_verdict(full)
+
+
+def reconstructed_verdict(full: Dict[str, Any]) -> Dict[str, Any]:
+    """The verdict read from the shapes an agent writes, for a result that
+    carries no stamped ``verdict`` (a run from before the record), and the
+    reference the stamps are held to (the parity test)."""
     status = full.get("status")
     if status != "success":
         return {"verified": False, "reason": f"status {status!r}"}
@@ -459,8 +474,9 @@ def legacy_series_verdict(full: Dict[str, Any]) -> Dict[str, Any]:
                 if not (isinstance(n_t, int) and isinstance(n_a, int) and n_t > 0 and n_a == n_t):
                     if not n_t:
                         return {"verified": False, "reason": f"the unit has no dynamic-analysis record{where}"}
-                    return {"verified": False, "reason": f"not every target of the unit was approved{where}: "
-                                                          f"{n_a} of {n_t}"}
+                    # (the count before the unit, as the row's stamp says it)
+                    return {"verified": False, "reason": f"not every target of the unit was approved: "
+                                                          f"{n_a} of {n_t}{where}"}
                 anchors += 1 if it.get("role") == "anchor" else 0
                 continue
             rv = it.get("reuse_validity") or {}
@@ -501,7 +517,8 @@ def legacy_series_verdict(full: Dict[str, Any]) -> Dict[str, Any]:
                             f"{bad['reason']} (recipe from unit {recipe.get('name')}, since refit)")}
         if anchors == 0 and not any("verified" in it for it in ok_items):
             return {"verified": False, "reason": "no unit carries a verification record"}
-        return {"verified": True, "reason": "series anchors approved and every follower verified"
+        # (the same words as the stamped aggregation, so a reader of either path reads one text)
+        return {"verified": True, "reason": "every unit verified by the series driver"
                 + (f" ({failed} failed unit(s) excluded by the agent)" if failed else "")}
 
 
@@ -524,6 +541,42 @@ def _hyperspectral_cube_verdict(hs_records: List[Any]) -> Dict[str, Any]:
         if not scripted:
             return {"verified": False, "reason": "no target produced an approved script"}
         return {"verified": True, "reason": "every target passed verification"}
+
+
+def final_verdict_record(final: Dict[str, Any]) -> Dict[str, Any]:
+    """The verdict an agent stamps on its result when it is final
+    (``final["verdict"]``): a single curve or image run, a series (the
+    aggregate of the units' stamps), a hyperspectral cube or series. Built
+    from the same signals the reconstruction read — the status, the QC
+    record, the reuse verdict, the salvage and judge markers, the units'
+    stamps, the cube's records — so a reader of the stamp and a reader of
+    the shapes agree (the parity test holds them to it). Who decided: the
+    QC gate, the replay gate, the units' stamps (``qc_gate``), or nobody."""
+    from ._replay import verdict_record
+    v = reconstructed_verdict(final)
+    rv = final.get("reuse_validity") or {}
+    records = final.get("dynamic_analysis_records") or []
+    if final.get("status") != "success":
+        decided = "none"
+    elif isinstance(final.get("individual_results"), list) and final["individual_results"]:
+        decided = "qc_gate"
+    elif isinstance(records, list) and records:
+        replayed = any(isinstance(r, dict) and r.get("replay") for r in records) or bool(
+            (final.get("script_reuse") or {}).get("verbatim"))
+        decided = "replay_gate" if replayed else "qc_gate"
+    elif rv.get("reused") and not _has_record(final.get("quality_history")):
+        decided = "replay_gate"
+    elif _has_record(final.get("quality_history")):
+        decided = "qc_gate"
+    else:
+        decided = "none"
+    return verdict_record(verified=v["verified"], reason=v["reason"], decided_by=decided,
+                          score=next((v for v in (rv.get("r_squared"), rv.get("quality_score"),
+                                                  (final.get("quality_history") or {}).get("final_r2"),
+                                                  (final.get("quality_history") or {}).get("final_score"))
+                                      if isinstance(v, (int, float))), None),
+                          threshold=next((v for v in (rv.get("threshold"), (final.get("quality_history") or {}).get("threshold"))
+                                          if isinstance(v, (int, float))), None))
 
 
 def _single_run_verdict(full: Dict[str, Any], rv: Dict[str, Any]) -> Dict[str, Any]:

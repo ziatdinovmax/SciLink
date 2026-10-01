@@ -1036,82 +1036,9 @@ def _map_valid_coverage(result_map) -> tuple[float, int]:
     return 100.0 * n_valid / max(result_map.size, 1), n_valid
 
 
-def _replay_map_gate(result_map, fit_mask, reference: dict | None,
-                     required: bool) -> tuple[bool, str]:
-    """Deterministic acceptance of a map produced by a LOCKED-SCRIPT replay.
-
-    A verbatim replay re-runs a method the reviewer already approved on the
-    anchor; re-judging every map with the LLM only adds cost and judge
-    variance (observed live: the map approved on the anchor rejected on
-    replays, punching holes in the series schema). So replays are gated on
-    evidence alone: valid coverage (within the fit mask when scoped), a
-    non-collapsed value distribution, and — for a required output with the
-    anchor's stats as ``reference`` — a median inside the locked method's
-    plausible range (the anchor's [min, max] widened by one span on each
-    side, at least 0.5 % of the magnitude so a near-constant anchor map does
-    not reject trivial drift). Coverage is judged against the anchor's own
-    coverage (``reference["coverage"]``) when known. A map outside that range is the
-    method breaking down on this dataset (e.g. the peak left the fit
-    window), which the series driver answers with a fresh-code refit.
-    """
-    m = np.asarray(result_map, dtype=float)
-    if fit_mask is not None:
-        try:
-            m = m[np.asarray(fit_mask, dtype=bool)]
-        except Exception:  # noqa: BLE001 - shape mismatch: judge the full frame
-            pass
-    m = m.ravel()
-    finite = np.isfinite(m)
-    cov = float(finite.mean()) if m.size else 0.0
-    # Coverage floor: half of what the SAME method achieved on the anchor when
-    # that is known (a dilated fit mask over-covers its emitter, so the
-    # converged fraction is legitimately well below 1 — observed live at 43 %
-    # on a mask-scoped follower, which a fixed 50 % floor wrongly rejected);
-    # otherwise a lenient absolute floor.
-    # Without a reference there is NO coverage floor: a small emitter fitted
-    # full-frame legitimately covers ~1 % of the frame (observed live on a
-    # legacy replay), and only the anchor's own coverage can say what this
-    # method should reach. All-NaN maps are excluded before the gate.
-    ref_cov = (reference or {}).get("coverage") if isinstance(reference, dict) else None
-    if isinstance(ref_cov, (int, float)) and 0 < ref_cov <= 1:
-        min_cov = 0.25 * float(ref_cov)
-        if cov < min_cov:
-            return False, (f"valid coverage {cov:.0%} < {min_cov:.0%} (a quarter of the "
-                           f"anchor's {float(ref_cov):.0%}) — the locked method did not "
-                           "converge here")
-    vals = m[finite]
-    # A constant map is a collapse only if the SAME method varied on the
-    # anchor: a synthetic emitter with one exact centre, or a channel-
-    # quantized position, is legitimately constant (observed live on a
-    # mask-scoped follower the LLM review used to accept).
-    if vals.size > 8 and float(np.ptp(vals)) == 0.0 and isinstance(reference, dict):
-        try:
-            ref_spread = float(reference.get("max")) - float(reference.get("min"))
-        except (TypeError, ValueError):
-            ref_spread = None
-        if ref_spread is not None and ref_spread > 0:
-            return False, ("map is constant across the frame while the anchor's varied "
-                           f"over [{float(reference['min']):.4g}, {float(reference['max']):.4g}] "
-                           "(fit collapsed to a bound)")
-    # The range rule is for SIBLING datasets, where a required output far from
-    # the anchor's means the method broke. In a stream the tracked quantity is
-    # expected to move (a resonance shifting through a ramp, another part of a
-    # sample), so a live loop sets ``values_may_move``: method health is judged
-    # here (coverage, collapse), plausibility by the loop's own range gate, which
-    # flags a jump and then adopts a value that keeps saying the same thing.
-    # Observed live on tiles of one real EELS field: four of eleven tiles were
-    # withheld for a plasmon 35 to 60 meV below the first tile's range.
-    if (required and isinstance(reference, dict) and not reference.get("values_may_move")
-            and all(isinstance(reference.get(k), (int, float)) for k in ("min", "max"))):
-        lo, hi = float(reference["min"]), float(reference["max"])
-        mean = float(reference.get("mean", (lo + hi) / 2.0))
-        span = max(hi - lo, 0.005 * abs(mean), 1e-9)
-        med = float(np.median(vals))
-        if not (lo - span <= med <= hi + span):
-            return False, (f"median {med:.4g} outside the locked method's plausible "
-                           f"range [{lo - span:.4g}, {hi + span:.4g}] (anchor "
-                           f"[{lo:.4g}, {hi:.4g}]) — method breakdown on this dataset")
-    return True, ""
+# The per-map replay gate lives with the shared replay policies (#712); the
+# name stays here for its callers and tests.
+from .._replay import MapReplayGate, map_health as _replay_map_gate  # noqa: E402
 
 
 def _wrap_console_text(text: str, width: int = 70) -> list:
@@ -4226,9 +4153,9 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         # Locked-script replay: deterministic gate, no LLM
                         # review (see _replay_map_gate).
                         _ref = (state.get("replay_reference") or {}).get(feature_name)
-                        is_valid, critique = _replay_map_gate(
-                            result_map, fit_mask, _ref,
-                            feature_name in required_outputs)
+                        _rv = MapReplayGate().judge(result_map, fit_mask, _ref,
+                                                    feature_name in required_outputs)
+                        is_valid, critique = _rv["verdict"] == "good", (_rv["reasons"] or [""])[0]
                         self.logger.info(
                             f"    🔒 Deterministic replay gate on {feature_name}: "
                             f"{'pass' if is_valid else 'REJECT — ' + critique}")

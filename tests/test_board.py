@@ -562,7 +562,7 @@ def test_series_verdicts_follow_the_agents_shapes():
     from scilink.agents.exp_agents._verification_record import analysis_verdict
     # a clean curve series: anchor approved, followers replayed
     v = analysis_verdict(_curve_series(ANCHOR_OK))
-    assert v == {"verified": True, "reason": "series anchors approved and every follower verified"}
+    assert v == {"verified": True, "reason": "every unit verified by the series driver"}
     # quick profile: followers carry only the profile stamp — still verified
     v = analysis_verdict(_curve_series({**ANCHOR_OK, "produced_under_profile": "quick"},
                                        follower_qh={"produced_under_profile": "quick"}))
@@ -585,8 +585,8 @@ def test_series_verdicts_follow_the_agents_shapes():
     # a failed unit is flagged and excluded by the agent: it does not block
     failed = _curve_series(ANCHOR_OK)
     failed["individual_results"][2].update({"success": False, "error": "fit diverged", "quality_history": None})
-    assert analysis_verdict(failed) == {"verified": True, "reason": "series anchors approved and every follower "
-                                                                    "verified (1 failed unit(s) excluded by the agent)"}
+    assert analysis_verdict(failed) == {"verified": True, "reason": "every unit verified by the series driver "
+                                                                    "(1 failed unit(s) excluded by the agent)"}
     # a refit the driver accepted by its consistency rule is held like a follower: finished, not
     # unverified — not to the anchor's salvage markers (a refit that improved a unit must not
     # unverify a series the unrefit unit would have passed)
@@ -699,7 +699,7 @@ def test_series_verdicts_follow_the_agents_shapes():
     assert not analysis_verdict(hs)["verified"]
     # ... and every target approved: the driver's `verified` asks for one
     hs["individual_results"][1].update({"n_features": 3, "quality_metrics": {"n_targets": 2, "n_approved": 1}})
-    assert analysis_verdict(hs)["reason"] == "not every target of the unit was approved (unit cube1): 1 of 2"
+    assert analysis_verdict(hs)["reason"] == "not every target of the unit was approved: 1 of 2 (unit cube1)"
     hs["individual_results"][1]["quality_metrics"] = {"n_targets": 0, "n_approved": 0}
     assert analysis_verdict(hs)["reason"] == "the unit has no dynamic-analysis record (unit cube1)"
     # on the board: the same claim text, provisional with the reason as its gate

@@ -575,9 +575,11 @@ class TestStrictReplay:
             logger=SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None),
             _fit_single_spectrum=lambda **kw: {"success": False, "error": "needs 3 peaks",
                                                "parameters": {}, "fit_quality": {}})
-        # the reuse path's own helpers (a single recipe runs as it always did)
+        # the reuse path's own helpers (a single recipe runs as it always did) and its gate
         host._run_reuse_candidate = lambda *a, **kw: C._run_reuse_candidate(host, *a, **kw)
         host._reuse_failed = lambda *a, **kw: C._reuse_failed(host, *a, **kw)
+        host._accept_gate = lambda: SimpleNamespace(is_accept=lambda r2: r2 >= 0.95)
+        host.r2_threshold = 0.95
         ctx = QCItemContext(state={"_strict_replay": strict}, data=None, data_path="f.csv",
                             item_name="f", item_idx=0, reuse_script="s",
                             reuse_source="anchor")

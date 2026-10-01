@@ -548,47 +548,9 @@ def _load_prior_state(raw_path):
     return anchor_dir, data
 
 
-def _replay_feature_gate(features, reference) -> tuple:
-    """Evidence-only acceptance of an image analysed by a LOCKED-SCRIPT replay.
-
-    A strict replay (a live frame) has no model to look at the overlay, and an
-    image analysis has no R²: what it has is the numbers the approved script
-    reports, and what that script reported on its reference. The gate judges
-    METHOD HEALTH from them and nothing else:
-
-    - every numeric quantity the reference run reported is reported again, and
-      is finite (a script that silently stops measuring something is broken);
-    - the analysis still finds SOMETHING: if every quantity that was non-zero on
-      the reference is zero now (no particles, no mask, no lattice), the method
-      collapsed on this image or there is nothing in it, and either way the
-      frame is not one to track quietly.
-
-    It does not ask whether the values are plausible: in a stream they are
-    expected to move, and that is the live loop's range gate (which flags a
-    jump and adopts a value that persists) and its audits. What no gate here
-    can see is a segmentation that runs, reports finite numbers and is wrong;
-    the independent audit is the check for that. Returns ``(ok, reason)``."""
-    import math
-    ref = {k: v for k, v in (reference or {}).items()
-           if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)}
-    got = features if isinstance(features, dict) else {}
-    if not ref:
-        numeric = [v for v in got.values() if isinstance(v, (int, float)) and not isinstance(v, bool)]
-        if not numeric or not all(math.isfinite(v) for v in numeric):
-            return False, "the replay reported no finite quantity"
-        return True, ""
-    missing = [k for k in ref if not isinstance(got.get(k), (int, float)) or isinstance(got.get(k), bool)]
-    if missing:
-        return False, ("the locked script no longer reports "
-                       + ", ".join(sorted(missing)[:4]) + " (it did on the reference)")
-    broken = [k for k in ref if not math.isfinite(float(got[k]))]
-    if broken:
-        return False, "not finite: " + ", ".join(sorted(broken)[:4])
-    alive = [k for k, v in ref.items() if v != 0]
-    if alive and all(float(got[k]) == 0.0 for k in alive):
-        return False, ("every quantity that was non-zero on the reference is zero here "
-                       "(nothing was found: the method collapsed on this image, or it is empty)")
-    return True, ""
+# The strict-replay gate lives with the shared replay policies (#712); the
+# name stays here for its callers and tests.
+from .._replay import FeatureHealthGate, ScoreReplayGate, feature_health as _replay_feature_gate  # noqa: E402
 
 
 def _first_prior_image_script(state: dict):
@@ -3706,9 +3668,9 @@ Return JSON with:
             # A live frame: no vision review. The verdict is evidence only —
             # what the approved script reports, against what it reported on its
             # reference (see _replay_feature_gate for what that can and cannot see).
-            ok, reason = _replay_feature_gate(
-                reuse_result.get("extracted_features"),
-                ctx.state.get("replay_reference"))
+            _rv = FeatureHealthGate().judge(reuse_result.get("extracted_features"),
+                                            ctx.state.get("replay_reference"))
+            ok, reason = _rv["verdict"] == "good", (_rv["reasons"] or [""])[0]
             (self.logger.info if ok else self.logger.warning)(
                 "   🔒 Deterministic replay gate: " + ("pass" if ok else f"REJECT — {reason}"))
             reuse_result["reuse_validity"] = {
@@ -3743,7 +3705,8 @@ Return JSON with:
                 verification.get("quality_score"), (int, float)
             ):
                 v_score = verification["quality_score"]
-            verdict = "good" if ctx.accept_gate.is_accept(v_score) else "poor"
+            verdict = ScoreReplayGate(ctx.accept_gate.is_accept, ctx.quality_threshold,
+                                      "vision score").judge(v_score)["verdict"]
             reuse_result["_quality_score"] = v_score
             if verdict == "good":
                 self.logger.info(

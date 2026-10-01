@@ -404,7 +404,9 @@ def test_a_good_reuse_series_verifies_and_a_failed_reuse_is_salvaged(tmp_path, m
     units = _units(results)
     uv = results["individual_results"][0]["unit_verdict"]
     assert "quality_history" not in results["individual_results"][0] or not results["individual_results"][0]["quality_history"]
-    assert uv == {"verified": True, "reason": "locked-script reuse passed the replay gate", "regime": "default", "own_gate": True}, uv
+    assert {k: uv[k] for k in ("verified", "reason", "regime", "own_gate", "decided_by")} == {
+        "verified": True, "reason": "locked-script reuse passed the replay gate", "regime": "default",
+        "own_gate": True, "decided_by": "replay_gate"}, uv
     assert analysis_verdict(results)["verified"], (analysis_verdict(results), units)
     # the reuse attempted, the script could not run, full QC re-derived the model (approved):
     # the controller stamps reuse_validity script_failed + quality_warning → salvaged

@@ -5099,6 +5099,12 @@ Return JSON with:
         # correction ladder, as a single recipe is — the ladder's cost is
         # paid once, not once per regime. A single recipe runs as it always
         # did, in the spectrum's own folder.
+        from .._replay import ScoreReplayGate, select_recipe
+        gate = ScoreReplayGate(self._accept_gate().is_accept, self.r2_threshold, "R²")
+
+        def r2_of(result: dict) -> float:
+            return float(result.get("fit_quality", {}).get("r_squared") or 0 or 0.0)
+
         candidates = [(ctx.reuse_script, ctx.reuse_source)]
         extra = ctx.state.get("_reuse_candidates") or []
         if extra and extra[0].get("script") == ctx.reuse_script:
@@ -5106,46 +5112,45 @@ Return JSON with:
         if len(candidates) == 1:
             reuse_result = self._run_reuse_candidate(ctx, ctx.reuse_script, ctx.reuse_source, None, 1, 1)
             if reuse_result.get("success"):
-                r2 = (reuse_result.get("fit_quality", {}).get("r_squared") or 0 or 0.0)
-                verdict = "good" if self._accept_gate().is_accept(r2) else "poor"
-                return self._reuse_verdict(ctx, reuse_result, ctx.reuse_source, r2, verdict, tried=1, of=1)
+                rv = gate.judge(r2_of(reuse_result))
+                return self._reuse_verdict(ctx, reuse_result, ctx.reuse_source, rv["score"], rv["verdict"], tried=1, of=1)
             return self._reuse_failed(ctx, reuse_result, ctx.reuse_source)
-        kept = None                       # (result, source, r2, n, subdir) of the first poor-but-executed
-        failed_last = None
-        for n, (script, source) in enumerate(candidates, 1):
-            subdir = f"{CANDIDATES_DIR_NAME}/recipe_{n:02d}"
-            reuse_result = self._run_reuse_candidate(ctx, script, source, subdir, n, len(candidates),
-                                                     verbatim=True)
-            if reuse_result.get("success"):
-                r2 = (reuse_result.get("fit_quality", {}).get("r_squared") or 0 or 0.0)
-                if self._accept_gate().is_accept(r2):
-                    self._promote_candidate_artifacts(reuse_result, ctx.item_idx, 0, subdir=subdir)
-                    return self._reuse_verdict(ctx, reuse_result, source, r2, "good", tried=n, of=len(candidates))
-                kept = kept or (reuse_result, source, r2, n, subdir)
-                if n < len(candidates):
-                    self.logger.info(f"   ↪ R² = {r2:.4f} below {self.r2_threshold:.3f}; "
-                                     "trying the next regime's recipe")
-                continue
-            failed_last = (reuse_result, source)
-            if n < len(candidates):
+        # Several regimes: each recipe VERBATIM in its own folder, the shared
+        # choice rule (select_recipe: the first the gate calls good, else the
+        # first that executed), the chosen one promoted.
+        subdirs: Dict[int, str] = {}
+
+        def run(n: int, script: str, source: Optional[str]) -> dict:
+            subdirs[n] = f"{CANDIDATES_DIR_NAME}/recipe_{n:02d}"
+            out = self._run_reuse_candidate(ctx, script, source, subdirs[n], n, len(candidates), verbatim=True)
+            if not out.get("success") and n < len(candidates):
                 self.logger.info("   ↪ this regime's recipe could not execute verbatim; trying the next")
-        if kept is not None:
-            reuse_result, source, r2, n, subdir = kept
-            self._promote_candidate_artifacts(reuse_result, ctx.item_idx, 0, subdir=subdir)
-            return self._reuse_verdict(ctx, reuse_result, source, r2, "poor", tried=len(candidates),
-                                       of=len(candidates), kept_from=n)
+            return out
+
+        def judge(result: dict) -> dict:
+            rv = gate.judge(r2_of(result))
+            if rv["verdict"] != "good":
+                self.logger.info(f"   ↪ R² = {rv['score']:.4f} below {self.r2_threshold:.3f}; "
+                                 "trying the next regime's recipe")
+            return rv
+        chosen = select_recipe(candidates, run, judge)
+        if chosen["chosen"] is not None:
+            n, reuse_result, rv = chosen["chosen"], chosen["result"], chosen["verdict"]
+            self._promote_candidate_artifacts(reuse_result, ctx.item_idx, 0, subdir=subdirs[n])
+            return self._reuse_verdict(ctx, reuse_result, chosen["source"], rv["score"], rv["verdict"],
+                                       tried=len(chosen["tried"]), of=len(candidates),
+                                       kept_from=n if rv["verdict"] != "good" else None)
         if ctx.state.get("_strict_replay"):
-            reuse_result, source = failed_last
-            return self._reuse_failed(ctx, reuse_result, source)
+            failed = chosen["last_failed"]
+            return self._reuse_failed(ctx, failed["result"], failed["source"])
         # None executed verbatim: the first recipe gets the correction ladder,
         # as a single recipe would, in the spectrum's own folder.
         script, source = candidates[0]
         self.logger.info("   ↪ no regime's recipe ran verbatim; repairing the first as a single recipe would")
         reuse_result = self._run_reuse_candidate(ctx, script, source, None, 1, len(candidates))
         if reuse_result.get("success"):
-            r2 = (reuse_result.get("fit_quality", {}).get("r_squared") or 0 or 0.0)
-            verdict = "good" if self._accept_gate().is_accept(r2) else "poor"
-            return self._reuse_verdict(ctx, reuse_result, source, r2, verdict, tried=len(candidates),
+            rv = gate.judge(r2_of(reuse_result))
+            return self._reuse_verdict(ctx, reuse_result, source, rv["score"], rv["verdict"], tried=len(candidates),
                                        of=len(candidates), kept_from=1)
         return self._reuse_failed(ctx, reuse_result, source)
 

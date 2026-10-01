@@ -236,6 +236,24 @@ matplotlib and the sandbox executor out of each other's way
 spec. Anchors and refits stay serial: they are the LLM-heavy, human-gated
 part.
 
+**The replay gate, the verdict and the regime choice are shared policies.**
+The three analysis agents each judged a replay of a locked recipe, said what
+"verified" means and chose among a series' regime recipes in their own way,
+and the copies drifted (#712). `exp_agents/_replay.py` now holds those
+policies by composition — no base class: a `verdict_record` (one dict shape,
+`verified` / `reason` / `decided_by` ∈ qc_gate · replay_gate · recipe ·
+excluded · none) that every agent STAMPS where it decides (a series unit at
+fit time, a cube or a run when its result is final, `results["verdict"]`) and
+that `analysis_verdict` and the swarm board only read; three replay gates with
+one verdict shape (`ScoreReplayGate` for the curve's R² and the image's vision
+score, `FeatureHealthGate` for an image strict replay, `MapReplayGate` for a
+hyperspectral map); and `select_recipe`, the one rule for choosing among a
+series' regime recipes on a reuse (today: in lock order, the first the gate
+calls good). The reconstruction from result shapes (`reconstructed_verdict`)
+serves results from before the stamp and is the reference the stamps are held
+to (`tests/test_verdict_parity.py`, no allow-list). A new agent-side decision
+about a replay or a verdict goes into `_replay.py`, not into one agent.
+
 ## Data preparation is a stage, not an agent
 
 Some instruments hand over a container that sits *upstream* of what the
