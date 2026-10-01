@@ -653,9 +653,9 @@ delegations of any mode concurrently, each on an **ephemeral worker**
 (`workers.build_child`, the one constructor behind the persistent specialists
 too) in `<meta_session>/swarm/<NN>_<slug>/`, each an ordinary ledger
 delegation. The design, its stages and what each stage left open are in
-`docs/proposals/agent-swarms.md`; stages 0 and 1 are on `main` (#697), stage 2
-(the shared board) is next. Settled rules, each learned from a live run or a
-review:
+`docs/proposals/agent-swarms.md`; stages 0, 1 (#697) and 2 (the board) are
+built, stage 3 (reactions) is next. Settled rules, each learned from a live
+run or a review:
 
 - **A swarm item is a fresh agent.** It does not remember earlier delegations;
   its task and context carry everything. The persistent specialists stay for
@@ -686,6 +686,44 @@ review:
   never across a backoff); usage is charged per worker; the distill staging,
   graduated skills and instrument homes take a lock for every change, and a
   reviewed skill upgrade refuses a skill that changed during the review.
+- **The board is the record, and independence is a number.** Every finished
+  delegation posts typed, small records to `swarm/board.jsonl`
+  (`meta_agent/board.py`): a claim, a measurement, a recipe or structure by
+  path, a parameter point, a hazard. One writer, never edited in place (a
+  correction `supersedes`, a withdrawal is a `retraction`, and neither takes
+  effect from an unchecked record of another author), and `verified` means a
+  GATE the author's own pipeline runs passed it — the analysis verifier's
+  approval (`analysis_verdict`, read from the shapes the agents write: a
+  salvaged, unverified or unapproved result is "success" too and stays
+  provisional; a series unit carries the verdict its driver stamped at fit
+  time — an anchor or refit by its own gate, a follower by the recipe it
+  replayed — and a failed unit the agent already excluded does not block; a
+  decision about a unit is made where the information is, never reconstructed
+  afterwards from markers; the board keeps its own copy of a recipe under
+  `swarm/recipes/<NN>_<label>/<analysis_id>/`, written once and never
+  rewritten, so an agent's folder is never read again for it and the
+  agents' own layout and reuse are untouched by the swarm; a verifier's
+  physics approval inside the gate's soft band counts, a bypassed verification
+  below threshold does not), a human-approved plan (an unattended one stays
+  provisional; only the delegation that wrote or settled the plan posts it),
+  the structure validator. Engine output and advice that passed no gate — a BO
+  point, a steering reduction, a TEA summary, a critic's blocking finding — is
+  provisional. The board adds
+  no judge. A reader gets verified records only, as quoted data between markers,
+  clipped and budgeted, under the same additive-only rule as steering; a swarm
+  item reads once, at its start (`reads_board`, the newest 24), and a `check`
+  item is refused a read by the API, not by prompt text. Every read is
+  recorded (`reads`, exactly what was shown), so fusion's `independent_support`
+  is computed, not judged: the largest set of fused branches none of which
+  read, was steered by, or cited another in the set (the board's read graph
+  joined with the ledger's `context_from` and `steered_by` edges, keyed by
+  delegation index, exact up to 12 branches and a stated lower bound beyond),
+  rendered with what it cannot see (a finding pasted by hand with no citation).
+  A shared dataset (co-registered operands) is not a coupling of findings. A
+  new way of coupling two delegations becomes a read on the board, not a new
+  prompt caveat. A
+  record describes its artifact as it was when posted; a later edit is a later
+  delegation's record.
 - **One PR per stage.** A stage is verified as a whole: the full suite against
   a `main` worktree by failing-test ids, and live checks on Bedrock from a
   frozen snapshot, one heavy run at a time.

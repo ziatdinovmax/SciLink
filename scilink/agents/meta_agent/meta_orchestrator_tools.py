@@ -809,7 +809,13 @@ class MetaOrchestratorTools:
                 "once, and an item too large for it is not started (the result says "
                 "why). In AUTOPILOT the user confirms the swarm first and items pause "
                 "for their approvals, one question at a time. Each item's `task` must "
-                "be complete and self-contained, with absolute paths."
+                "be complete and self-contained, with absolute paths. When items "
+                "finish, their verified findings are posted on the session's BOARD "
+                "(see get_board); an item of a LATER swarm that sets `reads_board` "
+                "gets the board's verified findings on its subject as hints when it "
+                "starts (recorded as `reads` on its ledger entry). An item that is a "
+                "check of other work (an audit, a re-fit to confirm, a critic) gets "
+                "`check: true` and is refused a read, so it stays independent."
             ),
             parameters={
                 # Not "items": a property named like the JSON-schema keyword
@@ -836,6 +842,27 @@ class MetaOrchestratorTools:
                             "context": {"type": "object",
                                         "description": "Optional context, as for a "
                                                        "delegate_to_* call."},
+                            "reads_board": {
+                                "type": "object",
+                                "description": ("Optional: read the board when the item "
+                                                "starts. An empty object reads the verified "
+                                                "findings on the item's subject (every subject "
+                                                "when the item has none); keys narrow it: "
+                                                "subject (string), kinds (list of claim | "
+                                                "measurement | recipe | structure | "
+                                                "parameter_point | hazard), include_provisional "
+                                                "(bool, marked as such). The newest 24 are "
+                                                "shown and recorded as read."),
+                                "properties": {
+                                    "subject": {"type": "string"},
+                                    "kinds": {"type": "array", "items": {"type": "string"}},
+                                    "include_provisional": {"type": "boolean"},
+                                },
+                            },
+                            "check": {"type": "boolean",
+                                      "description": "True when the item checks other "
+                                                     "work (audit, confirmation, critique): "
+                                                     "it is refused a board read."},
                         },
                         "required": ["mode", "task", "label"],
                     },
@@ -848,6 +875,72 @@ class MetaOrchestratorTools:
                 },
             },
             required=["work_items"],
+        )
+
+        # -- get_board (the session's findings, between runs) ----------------
+        def get_board(subject: str = None, kind: str = None,
+                      include_provisional: bool = False, limit: int = 40) -> str:
+            from . import board as board_mod
+            board = self.orch.board
+            subject_note = None
+            try:
+                view = board.snapshot(subject=subject, kind=kind or None,
+                                      include_provisional=bool(include_provisional))
+                known = {board_mod._norm_subject(x["subject"]) for x in board.subjects()}
+                if subject and board_mod._norm_subject(subject) not in known and known:
+                    # Subjects are the items' own strings; a guessed spelling
+                    # matches nothing. Show every subject rather than an empty
+                    # board (found live: "anatase sample" vs "TiO2 nanopowder A7").
+                    # Only for a subject the board has never seen: a known
+                    # subject with nothing verified is an honest empty answer.
+                    view = board.snapshot(kind=kind or None,
+                                          include_provisional=bool(include_provisional))
+                    subject_note = (f"no records are filed under {subject!r}; showing every "
+                                    "subject — the ones on the board are listed in `subjects`")
+            except ValueError as exc:
+                return json.dumps({"status": "error", "message": str(exc)})
+            lim = max(1, int(limit or 40))
+            recs = [board.public(r) for r in view.records[-lim:]]
+            return json.dumps({
+                "status": "success", "board_version": view.version,
+                "subject": view.subject, "subject_note": subject_note,
+                "subjects": board.subjects(), "kinds": list(view.kinds),
+                "include_provisional": bool(include_provisional),
+                "count": len(view), "shown": len(recs), "findings": recs,
+                "note": ("verified = the author's own pipeline passed it (an analysis QC, a "
+                         "human-approved plan, a validated structure); provisional records "
+                         "passed no gate. A finding is context for the next delegation "
+                         "(reads_board on a swarm item, or threaded into `context`), never "
+                         "a gate parameter."),
+            }, default=str)
+
+        self._register_tool(
+            func=get_board,
+            name="get_board",
+            description=(
+                "Read the session's BOARD: the typed findings (claim, measurement, "
+                "recipe, structure, parameter_point, hazard) that finished "
+                "delegations posted, with who posted each, its status and what its "
+                "author had read. Use it between runs to decide the next delegation "
+                "or swarm from what the last one found. Verified findings only "
+                "unless include_provisional; filter by subject and kind. Read-only."
+            ),
+            parameters={
+                "subject": {"type": "string",
+                            "description": "Optional: only findings on this subject, spelled "
+                                           "as the items gave it (the result lists the "
+                                           "subjects on the board; an unknown one shows all)."},
+                "kind": {"type": "string",
+                         "enum": ["claim", "measurement", "recipe", "structure",
+                                  "parameter_point", "hazard"],
+                         "description": "Optional: one kind."},
+                "include_provisional": {"type": "boolean",
+                                        "description": "Also return records that passed "
+                                                       "no gate (marked provisional)."},
+                "limit": {"type": "integer",
+                          "description": "Newest records to return (default 40)."},
+            },
+            required=[],
         )
 
         # -- delegate_to_analyses (parallel fan-out, full-mesh aux) ----------

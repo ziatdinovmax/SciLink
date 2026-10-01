@@ -2128,6 +2128,19 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "locked_model_type": r.get("locked_model_type"),
                     "quality_history": r.get("quality_history"),
                     "reuse_validity": r.get("reuse_validity"),
+                    # The unit's own salvage markers (a series anchor that fell
+                    # back to the judge or best-available), so a caller can
+                    # tell an approved anchor from a salvaged one: the
+                    # top-level quality_warning is the single-spectrum field.
+                    **({"quality_warning": r["quality_warning"]} if r.get("quality_warning") else {}),
+                    **({"judge_warning": r["judge_warning"]} if r.get("judge_warning") else {}),
+                    **({"fitted_from": r["fitted_from"]} if r.get("fitted_from") else {}),
+                    **({"role": r["role"]} if r.get("role") else {}),
+                    **({"replaced_unit": r["replaced_unit"]} if r.get("replaced_unit") else {}),
+                    **({"regime": r["regime"]} if r.get("regime") else {}),
+                    # The driver's verdict on the unit, stamped when it knew
+                    # the recipe and the gate result (unit_verdict_for).
+                    **({"unit_verdict": r["unit_verdict"]} if r.get("unit_verdict") else {}),
                 }
                 for r in series_results
             ]
@@ -2136,6 +2149,13 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # top level for the orchestrator.
             if series_results and series_results[0].get("reuse_validity"):
                 results["reuse_validity"] = series_results[0]["reuse_validity"]
+
+            # The recipe of each regime — the anchor unit, its verdict and the
+            # script its followers replayed — as the series driver recorded
+            # it when the script was locked. Once per regime, not per unit;
+            # a refit of the anchor never changes it.
+            if state.get("locked_recipes"):
+                results["locked_recipes"] = state["locked_recipes"]
 
             results["flagged_spectra"] = flagged_spectra
             results["flagged_spectra_analysis"] = synthesis.get("flagged_spectra_analysis", {})

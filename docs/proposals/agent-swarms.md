@@ -3,7 +3,10 @@
 Status: stage 0 merged to `main` on 2026-09-29 (head 328bd2bb); stage 1
 merged on 2026-09-30 (#697, head bed2f7f8) after three review rounds, built
 as "Starting stage 1" below describes; what changed on the way is recorded
-under the stage in "Build order". Stage 2 (the board) is next. The design notes were
+under the stage in "Build order". Stage 2 (the board) is on its PR, built as
+"Starting stage 2" describes, with what changed on the way under the stage in
+"Build order" and its open items in "After stage 2"; "Starting stage 3" is
+drafted below. The design notes were
 drafted 2026-09-28 against `main` at b988c7cd (Release 0.0.83), based on a source audit of the meta
 agent (`meta_orchestrator.py`, `meta_orchestrator_tools.py`, `fanout.py`,
 `telemetry.py`), the three mode orchestrators' `run_task`, the executors, the
@@ -841,6 +844,248 @@ can already hit.
    - Verified-only propagation and board-blind checks.
    - `independent_support` in fusion.
    - Steering, `fusion_feedback` and `informed_by` rebased onto board reads.
+
+   **Built (PR "Swarm stage 2").** `scilink/agents/meta_agent/board.py`.
+   What changed from the design above:
+   - *A correction is the replacement itself.* The schema listed `supersedes`
+     as a kind; on the board it is a field: the corrected claim is a `claim`
+     that `supersedes` the old id. A bare "supersedes" kind with the content
+     in its payload would make every reader unwrap it. A `retraction` is a
+     record of its own (`target`). The fold marks the old record
+     `superseded` / `retracted` and hides it from reads; nothing revives a
+     record (retracting a correction does not bring the corrected one back).
+   - *Every delegation posts, not only swarm items.* Posting lives in
+     `_close_delegation`, so a direct delegation, a fan-out branch, a swarm
+     item and a fusion all leave records, and the board is the session's
+     record rather than a swarm's. Posting never fails the delegation.
+   - *Workers post through the writer's lock, not a queue.* In one process
+     a lock-serialised `Board.post` that flushes (and fsyncs) before
+     returning is the "one writer, acknowledged after the flush" of the
+     design; the queue-and-drain shape is for process workers (stage 4).
+   - *What each mode verifies:* an analysis claim is verified when its
+     analysis record's status is success (its `[analysis_id]` prefix is
+     evidence, not text), and the approved `scripts/analysis_script.py` is
+     posted as a `recipe`; a plan's findings are verified only under a
+     `human_review` stamp — an unattended gate leaves them provisional — with
+     BO-engine points as verified `parameter_point`s (computed, not
+     authored) and a standing blocking finding as a `hazard` (a hint by
+     type, so it may propagate on the critic's word); a structure is
+     verified when the validator's status is `success`. The planning result
+     now carries `plan_review` and each simulation structure its
+     `validation_status`; nothing else in the modes changed.
+   - *A steering payload is a finding of the companion.* It is filed under
+     the companion's ledger index (author "fan-out steering (reduction of
+     …)", mode `steering`), provisional — a deterministic reduction, but no
+     gate passed it — and the steered branch's entry reads it, which is what
+     makes fusion count 1 of 2. Co-registered operands stay a ledger stamp:
+     a shared dataset is not a finding, and the count skips that stamp.
+   - *Fusion's claims are provisional* (a synthesis passes no gate of its
+     own) and read every fused finding, so a re-analysis citing the fusion
+     inherits them as reads and the next fusion counts it dependent.
+   - *A read is once, at the item's start, after admission* — so an item
+     admitted later in a swarm sees what earlier items of the same swarm
+     already posted. The read block is rendered like fan-out steering, with
+     the additive-only rule; the ledger keeps the task as sent.
+   - *Found by the tests:* a post after a torn last line was appended onto
+     the torn text. The writer now starts on a fresh line when the file does
+     not end with one.
+   - *From the review (PR #702):* an analysis claim is verified on the
+     agent's own verdict, not on `status` — the curve and image agents
+     return `success` for a salvaged best-available fit (`quality_warning`),
+     an unverified run (`quality_history.unverified`) and a result the
+     verifier never approved (`approved` false); `analysis_verdict`
+     (`_verification_record.py`) reads those, per item for a series, and the
+     `analyses` rows of `run_task` carry `verified` and `reason`. Fusion's
+     `independent_support` is keyed by delegation index (labels repeat) and
+     joins the board's read graph with the ledger's `context_from` (declared
+     or inferred) and `informed_by` edges, transitively
+     (`fanout.independent_support_of`); the prompt says what it cannot see.
+     Only the delegation that wrote or settled a plan posts its hypotheses
+     (`plan_review.written_here`); configuration and TEA findings, BO points
+     and steering reductions are provisional (no gate); a blocking finding a
+     human approved the plan over is settled and not posted. A reader is
+     shown the newest 24 records, clipped and under a budget, between data
+     markers, and is stamped with exactly those ids. Records are written
+     JSON-clean (a `Path` or numpy scalar in `evidence` no longer breaks
+     every later read). A supersede or retraction takes effect only from the
+     original's author, a verified record, or the coordinator. `get_board`
+     falls back to every subject only for a subject the board has never
+     seen; subjects are NFKC-normalised. A re-analysis citing a fusion
+     inherits the fusion's reads as well as its claims. The hyperspectral
+     recipe is `dynamic_analysis_records.json`.
+   - *Round 2 of the review:* `analysis_verdict` reads the shapes the
+     agents write, not one field: a series' anchors, regime anchors and
+     refits (the units with a QC-engine record) must be approved with no
+     salvage marker (`quality_warning` / `judge_warning`, now carried on the
+     curve and image `individual_results`), its followers must have
+     succeeded and not be `unverified`, and a FAILED unit does not block
+     (the agent excludes it from the table and flags it; an unverified
+     success is in the table, so it does); a hyperspectral cube needs
+     `success` and every scripted target `task_success` and not `salvaged`;
+     a hyperspectral series reads each row's `verified`; a good-verdict
+     locked reuse is verified by the replay gate. Fusion's count is the
+     largest set of supporters with no coupling between any two (three
+     meshed or mutually informed branches count once, never zero; two
+     branches plus a re-analysis of both count two); a co-registered-operand
+     stamp is not an edge; a label binds only to an earlier entry of the same
+     group; `_analysis_ids_of` accepts only an analysis folder name. A plan
+     is "written here" when its hypotheses, iteration or review stamp
+     changed, not on any edit; a blocking finding is provisional (the critic
+     is advisory) and posted once. The series recipe is the anchor's unit
+     script (`recipe_unit` on the row); a hyperspectral series posts none.
+     Fence markers inside a record are neutralised.
+   - *Round 3 of the review:* steering is recorded on its own
+     (`steered_by`), so a meshed-and-steered branch keeps its steering edge
+     while the mesh stamp is skipped; inside one fan-out any sibling may be
+     the steering source (the slots are created together), outside it only
+     an earlier entry. The count is one routine (`board.independent_set_size`):
+     the largest set of branches none of which is coupled to another, exact
+     to 12 and a stated lower bound beyond, and the prompt says exactly
+     that. A follower fitted with no base script (its regime's anchor failed)
+     is fresh code with no verifier: the curve and image follower results
+     now carry `fitted_from` (`locked_script` / `fresh_code`) and
+     `replay_verbatim`; `individual_results` carries `fitted_from` (a
+     model-repaired follower is still a follower by policy, so the verdict
+     does not read `replay_verbatim`), and a `fresh_code` follower blocks the
+     series. A series whose anchor is a
+     good-verdict locked reuse is verified by the replay gate; a hyperspectral
+     series row is held to the single-cube rule (status `success`, something
+     extracted); a hyperspectral target that failed before any code ran
+     blocks; a refit the driver accepted by its consistency rule is held like
+     a follower (so a refit cannot unverify a series the unrefit unit would
+     have passed); a cut anchor reads as cut, not salvaged. A plan's identity
+     includes its steps and blocking issues, so an autonomous protocol
+     revision is "written here". A series with no anchor unit posts no
+     recipe, and a regime series' recipe record says it is the first regime's.
+   - *Round 4 of the review:* a salvaged anchor was laundered by refitting
+     it (the relaxed refit rule had skipped the anchor's bar for ANY refit).
+     The controllers now stamp `role: "anchor"` on first-in-regime units and
+     carry it through every refit replacement; `individual_results` carries
+     it; a refit with the anchor role keeps the anchor's bar, a follower
+     refit stays on the follower rule, and an anchor refit without a role
+     (a checkpoint from before the stamp) is not counted as an anchor. A
+     hyperspectral series row needs every target approved
+     (`quality_metrics.n_approved == n_targets > 0`), as a single cube does.
+     Steering is stamped by sibling index too (`steered_by_index`; labels
+     repeat within a group), and a pre-`steered_by` stamp that says
+     `+steering` counts every label as an edge (the count errs low). The
+     fusion prompt no longer calls meshed agreement "one joint measurement":
+     a meshed branch is a separate observation, and only a number computed
+     from both datasets at once is one computation; "pairs not listed here
+     are independent" now points at the INDEPENDENT SUPPORT block for
+     couplings from reads and citations. Known and left: a failed reuse
+     whose anchor was re-derived and approved is blocked by the schema-drift
+     `quality_warning` with the reason "salvaged" (pre-existing wording).
+   - *Round 5 of the review:* a follower is judged by the recipe it
+     REPLAYED. An anchor refit to an approved model says nothing about
+     followers still on the original script, so every refit replacement
+     site carries a summary of the unit it replaced (`replaced_unit`:
+     approval and salvage markers, chained to the earliest when a unit is
+     replaced twice), `individual_results` carries it, and a `locked_script`
+     follower whose regime anchor was refit is judged by that summary
+     ("follower replays a recipe that was not approved … since refit"). The
+     opposite direction — an approved anchor refit to a salvaged unit — is
+     accepted as conservative: the refit anchor is a salvaged row in the
+     table, whatever the followers replayed. `series_anchor_unit` reads the
+     role. The steering payload carries the source's slot (`source_slot`),
+     so the index stamp and the board post never match labels (two series
+     in one upload directory share a stem). The companion-contact block of
+     the fusion prompt no longer opens with "NOT fully independent" (a
+     mesh-only run has no independence spent), the steering caveat names
+     the steering sources only, and the reference to the INDEPENDENT
+     SUPPORT block is guarded for a caller without a board. A record-less
+     hyperspectral row reads "the unit has no dynamic-analysis record"; a
+     `not_measurable` target with `task_success: False` would count as
+     unapproved in a row and be skipped in a cube — no path produces it,
+     and the row carries no per-target records to align on.
+   - *Round 6 of the review, and the end of a cycle:* five rounds each
+     closed one hole in `analysis_verdict` and opened another, because the
+     verdict RECONSTRUCTED after the fact which recipe each unit replayed
+     and whether its gate passed, from markers scattered across units. The
+     root cause was where the decision lived. Now the curve and image
+     series drivers stamp `unit_verdict` on each unit at fit time
+     (`_verification_record.unit_verdict_for`): an anchor or refit by its
+     own gate, a follower by the recipe it replayed and that recipe's
+     verdict as it was then, fresh code as unverified — at the anchor fit,
+     each follower fit (serial and the parallel drain) and every refit
+     replacement, never failing a fit (`stamp_unit_verdict`). The
+     aggregator only aggregates; the marker reconstruction remains for
+     checkpoints from before the stamp (with `regime` now carried). A refit
+     anchor keeps the script its followers replayed as
+     `scripts/<unit>_locked.py`, which the board's recipe and the series
+     reuse path prefer. `tests/test_series_verdict_path.py` drives the real
+     series and refit controllers with only the QC loop and the executor
+     stubbed; fixtures written from a reading of the code are what hid the
+     series cases for five rounds.
+   - *Round 7 of the review:* the structural change had added behaviour to
+     the analysis agents; that is taken back so the PR's effect on them is
+     the stamps alone. No `<unit>_locked.py` is written and the prior-run
+     reuse pick is exactly what it was. The series driver records each
+     regime's recipe ONCE, when the anchor's script is locked
+     (`state["locked_recipes"]`, on the result as `locked_recipes`: unit,
+     verdict then, script text), after every caveat is on the anchor (a
+     reuse that failed and was re-derived is salvaged); the `run_task` rows
+     carry it as `recipes` (left off the delegation summary the model
+     sees, see round 8), and the board writes its own copy under
+     `swarm/recipes/<NN>_<label>/<analysis_id>/` and points its record there (a single run's approved script is copied
+     the same way, `source` recorded). Nothing under an agent's folder is
+     added or read again for a recipe, and no later refit or reuse can
+     change what a record points at. A reused unit with no QC record is
+     verified iff the replay gate's verdict is `good`; a run with some
+     stamps but not all is not verified ("unit X has no stamp"), and the
+     legacy reconstruction is used only for runs with no stamp at all.
+     `tests/test_series_verdict_path.py` adds a good-reuse series, a failed
+     reuse re-derived (salvaged), a failed follower refit that leaves the
+     reuse pick unchanged, and a PARITY test: the stamped verdict and the
+     legacy reconstruction over every real-path shape, allowed to differ
+     only on an explicit list. They differ in one case, and it is intended:
+     a FOLLOWER refit that stayed salvaged — the legacy rule held a follower
+     refit only to "finished, not unverified" (a round-3 relaxation), the
+     stamp judges every refit by its own gate, so a salvaged refit is a
+     salvaged row in the table, as a salvaged anchor refit is.
+     `tests/test_image_series_verdict_path.py` is the image twin of the
+     harness (the real `UnifiedImageProcessingController` and
+     `ImageAdaptiveRefitController`, the real `_process_single_image` for
+     every follower): clean, salvaged anchor, failed anchor with fresh-code
+     followers, two regimes, a failed follower refit (approved and salvaged),
+     and the same parity.
+     Open for stage 3, filed as issues: which script a reuse of a refit
+     series should replay (the original the followers ran, or the approved
+     refit), and a way for an analysis worker to take a script file as its
+     recipe.
+   - *Round 8 of the review (board and meta side only; the agents are
+     done):* the board's recipe copy was keyed by `<NN>_<label>/<name>`
+     alone, so two analyses of one delegation anchored on the same unit
+     name (or two single runs, both `fitting_script.py`), or an entry
+     posted twice, overwrote one copy and a verified record could point at
+     an unverified script. The path now carries the analysis id and a copy
+     is written ONCE (`_write_once`: identical content reuses the file,
+     different content takes the next free name) — a record's file never
+     changes under it. The model's view: `_summarize_delegation_result`
+     copied the `analyses` rows verbatim, so a series row's `recipes` put
+     the full script text (3 regimes: ~21 K characters) in the tool
+     result; the model now gets the rows without `recipes` (on a copy —
+     `post_delegation` reads the same rows after), and the fan-out event
+     log was never at risk (`append_event` keeps a 300-character gist and
+     the files, pinned by a test). A 300-character label raised "File name
+     too long" and `post_delegation`'s `break` then dropped every remaining
+     recipe: directory names are clipped (`RECIPE_DIRNAME_MAX`) and a
+     record that cannot be written is skipped alone. Noted, not changed:
+     a single run posts a recipe only for the agents' own script names
+     (`fitting_script.py`, `analysis_script.py`,
+     `dynamic_analysis_records.json`), never "the first `.py`" — a
+     preparation run (`prepare_script.py`) posts none; `locked_recipes`
+     is one extra copy of each regime's script in `analysis_results.json`
+     and the checkpoint.
+   - *Found live:* the curve agent's approved script is
+     `scripts/fitting_script.py` (a series: one per spectrum), the image
+     agent's `analysis_script.py` — the recipe takes the folder's
+     representative script (`_recipe_script`). `reads_board: {}`, the tool
+     schema's plain opt-in, is falsy in Python and was read as "nothing".
+     A planning `run_task`'s `key_findings` are the campaign configuration
+     (targets, TEA), so a short plan posted nothing: `plan_review` now
+     carries one line per proposed experiment or portfolio direction
+     (`hypotheses`), and those are the plan's claims on the board.
 3. **Reactions.** Subscriptions, `task_request`, causal chains and cycle
    refusal, supersede-chain stops, retraction and taint.
 4. **Scheduling.**
@@ -1062,6 +1307,57 @@ references are to `main` at bed2f7f8.
   long jobs in a swarm). A swarm of simulation items prepares inputs only.
 - *Generated code outside the executor* — #685 (predates the swarm).
 
+## After stage 2: what is on main, and what is open
+
+**What stage 2 adds** (line references to the stage-2 PR head):
+- `scilink/agents/meta_agent/board.py`: `Board` (`post`, `retract`, `fold`,
+  `snapshot`, `read_closure`, `independent_support`, `public`),
+  `BoardReadRefused`, `render`, `records_for` / `post_delegation` (the
+  per-mode translation of a result into records). `KINDS`, `READ_KINDS`.
+- `meta_orchestrator.py`: `self.board`; `_close_delegation` posts;
+  `_open_delegation_locked` turns `fusion_feedback` into `reads`; the
+  checkpoint carries `board_version` and the restore reports it (the file is
+  the record; a shorter file than the checkpoint's version is warned about).
+- `swarm.py`: items take `reads_board` (`{}` or `{subject, kinds,
+  include_provisional}`) and `check`; `_read_board` at the item's start;
+  results carry `reads`, `posted`, `board_read_refused`, `board_version`.
+- `fanout.py`: steering measurements under the companion's index, read by
+  the steered branch; `fuse_delegations` computes `independent_support`,
+  renders it (`INDEPENDENT SUPPORT … n of m`), stores it on the report and
+  the fusion entry, and posts the fused claims with `reads`.
+- `meta_orchestrator_tools.py`: `get_board(subject, kind,
+  include_provisional, limit)`; `run_swarm`'s item schema.
+- `planning_orchestrator.run_task` → `plan_review` (`human_review`,
+  `unattended_gate`, `blocking_findings`, `hypotheses`, `iteration`);
+  `simulation_orchestrator.run_task` → `structures[].validation_status`.
+- Tests: `tests/test_board.py`; board checks in `tests/test_fanout_steering.py`.
+
+**Open after stage 2:**
+- *No retraction or supersede from the meta's tools.* `Board.retract` and
+  `supersedes` exist and fold correctly, but nothing calls them yet: they
+  are stage 3's (retraction and taint, supersede-chain stops).
+- *Taint is not propagated.* A retracted finding's dependents keep their
+  status; `read_closure` gives stage 3 the graph to taint over.
+- *Reads are once per item, the newest 24 records.* Stage boundaries inside
+  a mode (the design's optional mid-run read points) are not exposed.
+- *Independence counts reads and citations, not common ancestry.* Two
+  fusions over the same inputs count as two supporters; a finding pasted into
+  a task by hand with no `context_from` is invisible to the count (the prompt
+  says so).
+- *Subjects are strings matched case-insensitively.* Two spellings of one
+  sample are two subjects; the meta's prompt asks for one spelling per item.
+  A registry of subjects is stage 5's.
+- *A recipe record is a board-owned copy.* Nothing today replays it: a
+  worker takes a prior run folder, not a script file (stage 3 needs the
+  latter, filed), and which script a reuse of a refit series should replay
+  is undecided (filed).
+- *Persistent-specialist delegations read nothing.* `delegate_to_*` posts but
+  has no `reads_board`; the meta threads findings into `context` by hand
+  (`get_board`), which is the design's turn-granularity path.
+- *The Mission Control UI has no board view* (stage 6).
+- Everything open after stage 1 still stands (telemetry, the one-slot web
+  panel, no swarm resume, memory estimated, HPC #696, #685).
+
 ## Starting stage 2 (the board)
 
 The design is §2 above; the tests to write are listed under "Build order".
@@ -1118,6 +1414,105 @@ the board in the meta checkpoint and restore.
 followed by a swarm that reads their claims (the second run's ledger entries
 show the reads); fusion of two independent analyses reporting
 `independent_support == 2`, and of one informed by the other reporting 1.
+
+## Starting stage 3 (reactions)
+
+Drafted while #702 was in review, from §3 ("The coordinator"), robustness
+items 2–4 and the stage-3 entry in "Build order". One PR, "Swarm stage 3",
+verified like stages 1 and 2. Two rules from the stage-2 reviews come first,
+because they would have saved five rounds there:
+
+- **A decision is made where its information is, never reconstructed.** The
+  coordinator records an item's cause and chain at the moment it enqueues
+  the item, marks taint at the moment a finding is withdrawn, and refuses a
+  cycle at the moment a subscription would fire. Nothing reads the ledger
+  afterwards to work out what caused what.
+- **The harness before the code.** A real-path test drives `run_swarm` with
+  fake workers that post findings through the real board and the real
+  coordinator loop (the shape of `tests/test_run_swarm.py`), and the
+  stage-2 swarm tests run unchanged under the new coordinator: a swarm with
+  no subscriptions must behave exactly as it does today. Shapes come from
+  the code (as in `tests/test_series_verdict_path.py`), not from a reading
+  of it.
+
+**Dependencies, each its own small PR or decision before the stage:**
+- #705 — an analysis worker takes a script FILE as its recipe. Without it a
+  "replay the verified recipe on the new dataset" subscription cannot name
+  the board's copy under `swarm/recipes/`.
+- #704 — which script a reuse of a refit series replays. A subscription
+  makes that choice with nobody looking.
+- Provisional findings do not propagate by default (open question, kept).
+
+**Step 1: the subscription, declared and matched without a model.**
+`run_swarm(work_items, subscriptions=None, budget=None)`. A subscription is
+`{on: {kind, subject?, status: "verified"}, enqueue: {mode, label, task,
+reads_board?, check?}, max_fires: 1}`; `task` is a template with a few named
+fields (`{finding.text}`, `{finding.path}`, `{subject}`, `{analysis_id}`),
+filled by the coordinator, no code and no model. Matching is equality on
+`kind`, normalised `subject` and `status`; a finding fires a subscription at
+most once, and a subscription fires at most `max_fires` times per swarm.
+Pure functions, tested on their own.
+
+**Step 2: the coordinator reacts.** After an item closes and posts, the loop
+evaluates every subscription against the records it just posted and
+enqueues the fired items under the existing rules — capacity, memory
+admission, the item budget, `SWARM_MAX_ITEMS` counting fired items, and a
+per-subject re-trigger cap (`SWARM_MAX_TRIGGERS_PER_SUBJECT`, 2). A fired
+item is an ordinary ledger entry with `caused_by` (the finding ids) and
+`chain` (the triggering item's chain plus `(mode, subject, kind,
+finding_id)`), stamped when it is enqueued. Workers still never start
+workers: every reaction is the coordinator's, so the depth stays 1 in the
+proposal's sense while a chain may be longer than one hop.
+
+**Step 3: `task_request`.** A worker's `suggested_followups` become
+`task_request` records (provisional, never readable by default, author =
+the worker). A request becomes an item only through a subscription on
+`kind: task_request` or an explicit allowance in the budget; otherwise it is
+listed in the swarm result as asked and not done. "Workers ask, the
+coordinator decides."
+
+**Step 4: cycles and oscillation.** A subscription that would fire an item
+whose `chain` already holds the same `(mode, subject, kind)` is refused and
+the refusal recorded (`refused_cycles` in the result, `refused` on the
+would-be entry). A subject re-triggered past its cap is refused the same
+way. A supersede chain longer than two on one subject stops the coordinator
+scheduling a third round and reports the disagreement (robustness item 3);
+the fold already exposes the chain.
+
+**Step 5: retraction and taint.** `Board.retract` and `supersedes` get
+their callers: a meta tool `retract_finding(finding_id, reason)` (the
+person's or the meta's act, author mode `coordinator`), and a worker
+superseding its own earlier claim on the same subject. When a finding is
+retracted or superseded, the coordinator marks every dependent in
+`read_closure` `tainted` (a fold status, as today's `superseded`), re-runs
+the tainted items' sources if the budget allows, else lists them as resting
+on a withdrawn finding. No automatic retraction: a check that disagrees is a
+result to show (`independent_support`, `audit_split`), not a withdrawal.
+
+**Step 6: hazards reach everyone.** A `hazard` on a subject is delivered to
+every reader on that subject whatever its `kinds` filter (robustness item
+4); today a filter can drop it.
+
+**Step 7: what the result and `get_board` show.** Fired items with their
+cause, refused cycles and capped subjects, tainted findings and what was
+re-run, supersede chains. Nothing new in the prompt beyond naming these.
+
+**Tests** (the harness first): a two-item cycle is refused and recorded; a
+subscription fires once per finding and stops at `max_fires` and at the
+subject cap; a retraction taints exactly its dependents and nothing else,
+and the re-run happens under budget and is listed without; a supersede
+chain of three on one subject stops the coordinator; a hazard reaches a
+reader that filtered it out; a `task_request` becomes an item only through
+a subscription; chains and causes survive a checkpoint; a swarm with no
+subscriptions produces the same ledger and board as stage 2 (the existing
+`test_run_swarm.py` and `test_board.py` unchanged).
+
+**Live checks that close stage 3:** the proposal's canonical chain on
+Bedrock — an analysis whose verified claim fires a simulation item (inputs
+only, #696), the board inspected afterwards for the cause and chain; after
+#705, a verified recipe firing a replay on a new dataset of the same subject;
+and a planted cycle (two subscriptions that would fire each other) refused
+live with the refusal in the result.
 
 ## What stays as it is
 

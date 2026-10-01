@@ -16,6 +16,11 @@ import tempfile
 
 os.environ.setdefault("ANTHROPIC_API_KEY", "sk-dummy")
 
+import sys
+
+# Run as a script, test the checkout, not an installed scilink.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import numpy as np
 import scilink.agents.meta_agent.fanout as fo
 from scilink.agents.meta_agent.meta_orchestrator import MetaOrchestratorAgent, MetaMode
@@ -127,8 +132,8 @@ def main():
     fused = json.loads(ag._fuse_delegations(
         [e["index"] for e in fan]))
     prompt = FUSION_PROMPTS[-1] if FUSION_PROMPTS else ""
-    check("fusion prompt carries INDEPENDENCE PROVENANCE",
-          "INDEPENDENCE PROVENANCE" in prompt
+    check("fusion prompt carries the companion-contact block",
+          "COMPANION CONTACT" in prompt
           and "partly by construction" in prompt
           and "techA series" in prompt)
     check("fusion result carries independence map",
@@ -137,6 +142,24 @@ def main():
           any("steered at launch" in str(c) for c in fused.get("caveats") or []))
     report = json.load(open(fused["report_path"]))
     check("report persists independence", report.get("independence") is not None)
+    # Board (swarm stage 2): the hint is a measurement of techB's series filed
+    # under techB's entry, read by techA; fusion counts 1 independent of 2.
+    a_reads = by_label["techA series"].get("reads") or []
+    b_posted = by_label["techB series"].get("posted") or []
+    check("steering hint is a board measurement techA read, owned by techB (provisional, mode steering)",
+          len(a_reads) == 1 and a_reads[0] in b_posted
+          and ag.board.get(a_reads[0])["kind"] == "measurement"
+          and ag.board.get(a_reads[0])["status"] == "provisional"
+          and ag.board.get(a_reads[0])["author"]["mode"] == "steering")
+    _sup = fused.get("independent_support") or {}
+    check("steering is stamped by sibling index as well as label",
+          by_label["techA series"].get("steered_by") == ["techB series"]
+          and by_label["techA series"].get("steered_by_index") == [by_label["techB series"]["index"]])
+    check("fusion computes independent_support 1 of 2",
+          (_sup.get("count"), _sup.get("raw")) == (1, 2)
+          and list(_sup.get("dependent") or {}) == [f"'techA series' (#{by_label['techA series']['index']})"])
+    check("fusion prompt renders the computed count",
+          "INDEPENDENT SUPPORT" in prompt and "not judged): 1 of 2 — the largest set" in prompt)
 
     # 2) No steer flag -> nothing changes (no block, no informed_by,
     #    no independence in fusion).
@@ -188,6 +211,14 @@ def main():
         if not v:
             print("  FAILED:", k)
     raise SystemExit(0 if npass == len(results) else 1)
+
+
+def test_fanout_steering():
+    """pytest entry: the script's checks, as one test."""
+    try:
+        main()
+    except SystemExit as exc:
+        assert exc.code == 0, "see the FAILED lines above"
 
 
 if __name__ == "__main__":

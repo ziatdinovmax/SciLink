@@ -2868,6 +2868,11 @@ Your guidance: '''
             "statistics": stats,
             "script": script,
             "script_errors": script_errors,
+            # Provenance a caller can gate on (the curve twin's): a follower
+            # replays the locked script; one with no base script is fresh,
+            # unverified code.
+            "fitted_from": ("locked_script" if base_script is not None else "fresh_code"),
+            "replay_verbatim": (base_script is not None and script == base_script),
         }
         if used_timeout_escalation:
             # Provenance: this analysis came from the last-resort pipeline
@@ -5900,6 +5905,10 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
             )
 
         series_results = []
+        # The verdict of each regime's locked recipe, as it was when its
+        # followers replayed it (unit_verdict_for); a later anchor refit
+        # changes nothing here.
+        recipe_by_regime: Dict[str, dict] = {}
         base_scripts: Dict[str, str] = {}
         original_locked_config = state.get("locked_analysis_config", {})
         if original_locked_config:
@@ -5970,6 +5979,9 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
                     state["original_image_bytes"] = _saved_original_bytes
                 if _saved_image_statistics is not None:
                     state["image_statistics"] = _saved_image_statistics
+                # The unit's role (the curve twin's): an anchor is held to a
+                # bar a follower is not; a refit of this unit keeps the role.
+                result["role"] = "anchor"
 
                 # #172: reuse was attempted for the anchor but the result
                 # carries no reuse_validity verdict -> the prior script could
@@ -5990,8 +6002,18 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
                     }
                     result["quality_warning"] = result["reuse_validity"]["message"]
 
+                # The anchor's verdict, stamped once every caveat is on it (a
+                # reuse that failed and was re-derived is salvaged); its regime's
+                # recipe — the unit, the verdict, the script the followers will
+                # replay — is recorded here, once, and never changed by a refit.
+                from .._verification_record import stamp_unit_verdict
+                stamp_unit_verdict(result, regime=regime_name)
                 if result["success"] and result.get("script"):
                     base_scripts[regime_name] = result["script"]
+                    if result.get("unit_verdict"):
+                        recipe_by_regime[regime_name] = {
+                            "unit": image_name, "index": idx, "regime": regime_name,
+                            "verdict": result["unit_verdict"], "script": result["script"]}
                     if idx == 0:
                         state["base_analysis_script"] = result["script"]
                     self.logger.info(
@@ -6017,6 +6039,8 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
                     image_name=image_name, image_idx=idx,
                     base_script=base_script,
                 )
+                from .._verification_record import stamp_unit_verdict
+                stamp_unit_verdict(result, recipe=recipe_by_regime.get(regime_name), regime=regime_name)
 
             # Tag result with regime info
             if regime_configs:
@@ -6075,6 +6099,7 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
         stamp_profile(state, series_results)
         state["series_results"] = series_results
         state["flagged_images"] = flagged_images
+        state["locked_recipes"] = recipe_by_regime
 
         # Best-of-N: per-anchor candidate tables (index -> table) for the
         # final result dict.
@@ -6660,6 +6685,27 @@ class ImageAdaptiveRefitController:
                 result["locked_pipeline"] = state.get(
                     "locked_analysis_config", {}
                 ).get("processing_pipeline")
+                # What the replaced unit was (its approval and salvage markers):
+                # followers that replayed ITS script are judged by it, not by the
+                # refit they never re-ran.
+                _orig = series_results[idx] or {}
+                result["replaced_unit"] = _orig.get("replaced_unit") or {
+                    "name": _orig.get("name"),
+                    "quality_history": {k: (_orig.get("quality_history") or {}).get(k)
+                                        for k in ("approved", "approved_by", "unverified", "stopped_by",
+                                                  "verifier_rejected", "threshold", "final_r2", "final_score",
+                                                  "verification_iterations")},
+                    "quality_warning": _orig.get("quality_warning"),
+                    "judge_warning": _orig.get("judge_warning"),
+                    "reuse_validity": _orig.get("reuse_validity"),
+                }
+                if (series_results[idx] or {}).get("role"):
+                    result["role"] = series_results[idx]["role"]
+                if (series_results[idx] or {}).get("regime") and not result.get("regime"):
+                    result["regime"] = series_results[idx]["regime"]
+                # a refit ran its own QC: its verdict is its own gate's
+                from .._verification_record import stamp_unit_verdict
+                stamp_unit_verdict(result, regime=result.get("regime"))
                 series_results[idx] = result
                 entry["new_score"] = new_score
                 entry["new_pipeline"] = result.get("analysis_type")
@@ -6677,6 +6723,27 @@ class ImageAdaptiveRefitController:
                     result["locked_pipeline"] = state.get(
                         "locked_analysis_config", {}
                     ).get("processing_pipeline")
+                    # What the replaced unit was (its approval and salvage markers):
+                    # followers that replayed ITS script are judged by it, not by the
+                    # refit they never re-ran.
+                    _orig = series_results[idx] or {}
+                    result["replaced_unit"] = _orig.get("replaced_unit") or {
+                        "name": _orig.get("name"),
+                        "quality_history": {k: (_orig.get("quality_history") or {}).get(k)
+                                            for k in ("approved", "approved_by", "unverified", "stopped_by",
+                                                      "verifier_rejected", "threshold", "final_r2", "final_score",
+                                                      "verification_iterations")},
+                        "quality_warning": _orig.get("quality_warning"),
+                        "judge_warning": _orig.get("judge_warning"),
+                        "reuse_validity": _orig.get("reuse_validity"),
+                    }
+                    if (series_results[idx] or {}).get("role"):
+                        result["role"] = series_results[idx]["role"]
+                    if (series_results[idx] or {}).get("regime") and not result.get("regime"):
+                        result["regime"] = series_results[idx]["regime"]
+                    # a refit ran its own QC: its verdict is its own gate's
+                    from .._verification_record import stamp_unit_verdict
+                    stamp_unit_verdict(result, regime=result.get("regime"))
                     series_results[idx] = result
                     entry["new_score"] = new_score
                     entry["new_pipeline"] = result.get("analysis_type")
@@ -6839,6 +6906,27 @@ class ImageAdaptiveRefitController:
                     "analysis_type"
                 )
                 refit_result["locked_pipeline"] = locked_pipeline
+                # What the replaced unit was (its approval and salvage markers):
+                # followers that replayed ITS script are judged by it, not by the
+                # refit they never re-ran.
+                _orig = series_results[idx] or {}
+                refit_result["replaced_unit"] = _orig.get("replaced_unit") or {
+                    "name": _orig.get("name"),
+                    "quality_history": {k: (_orig.get("quality_history") or {}).get(k)
+                                        for k in ("approved", "approved_by", "unverified", "stopped_by",
+                                                  "verifier_rejected", "threshold", "final_r2", "final_score",
+                                                  "verification_iterations")},
+                    "quality_warning": _orig.get("quality_warning"),
+                    "judge_warning": _orig.get("judge_warning"),
+                    "reuse_validity": _orig.get("reuse_validity"),
+                }
+                if (series_results[idx] or {}).get("role"):
+                    refit_result["role"] = series_results[idx]["role"]
+                if (series_results[idx] or {}).get("regime") and not refit_result.get("regime"):
+                    refit_result["regime"] = series_results[idx]["regime"]
+                # a refit ran its own QC: its verdict is its own gate's
+                from .._verification_record import stamp_unit_verdict
+                stamp_unit_verdict(refit_result, regime=refit_result.get("regime"))
                 series_results[idx] = refit_result
 
                 refit_summary.append({

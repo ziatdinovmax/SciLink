@@ -4171,6 +4171,12 @@ Your guidance: '''
             "statistics": stats,
             "script": script,
             "script_errors": script_errors,
+            # Provenance a caller can gate on: a follower replays the locked
+            # script (verbatim, or repaired on a later attempt); one fitted
+            # with no base script — its regime's anchor failed — is fresh,
+            # unverified code, whatever its R².
+            "fitted_from": ("locked_script" if base_script is not None else "fresh_code"),
+            "replay_verbatim": (base_script is not None and script == base_script),
         }
         if fit_results.get("bounds"):
             result["bounds"] = fit_results["bounds"]
@@ -6980,6 +6986,10 @@ Return JSON with:
 
         results_by_idx: Dict[int, dict] = {}
         deferred_non_anchors: List[dict] = []
+        # The verdict of each regime's locked recipe, as it was when its
+        # followers replayed it (unit_verdict_for): a later refit of the
+        # anchor changes nothing here.
+        recipe_by_regime: Dict[str, dict] = {}
         base_scripts: Dict[str, str] = {}  # keyed by regime name
         locked_preprocessing_strategy = None
         original_locked_config = state.get("locked_fitting_config", {})
@@ -7064,6 +7074,10 @@ Return JSON with:
                     state["original_plot_bytes"] = _saved_original_plot
                 if _saved_data_statistics is not None:
                     state["data_statistics"] = _saved_data_statistics
+                # The unit's role, for a caller that holds an anchor (full
+                # QC, the locked recipe) to a bar a follower is not held to;
+                # a refit of this unit keeps the role.
+                result["role"] = "anchor"
 
                 # #172: reuse was attempted for the anchor but the result
                 # carries no reuse_validity verdict -> the prior script could
@@ -7084,8 +7098,18 @@ Return JSON with:
                     }
                     result["quality_warning"] = result["reuse_validity"]["message"]
 
+                # The anchor's verdict, stamped once every caveat is on it (a
+                # reuse that failed and was re-derived is salvaged); its regime's
+                # recipe — the unit, the verdict, the script the followers will
+                # replay — is recorded here, once, and never changed by a refit.
+                from .._verification_record import stamp_unit_verdict
+                stamp_unit_verdict(result, regime=regime_name)
                 if result["success"] and result.get("script"):
                     base_scripts[regime_name] = result["script"]
+                    if result.get("unit_verdict"):
+                        recipe_by_regime[regime_name] = {
+                            "unit": spectrum_name, "index": idx, "regime": regime_name,
+                            "verdict": result["unit_verdict"], "script": result["script"]}
                     if idx == 0:
                         state["base_fitting_script"] = result["script"]
                     self.logger.info(
@@ -7125,6 +7149,8 @@ Return JSON with:
                     spectrum_name=spectrum_name, spectrum_idx=idx,
                     base_script=base_script,
                 )
+                from .._verification_record import stamp_unit_verdict
+                stamp_unit_verdict(result, recipe=recipe_by_regime.get(regime_name), regime=regime_name)
 
             # Tag result with regime info
             if regime_configs:
@@ -7188,6 +7214,8 @@ Return JSON with:
                             "script": job["base_script"],
                             "script_errors": [],
                         }
+                    from .._verification_record import stamp_unit_verdict
+                    stamp_unit_verdict(result, recipe=recipe_by_regime.get(job["regime_name"]), regime=job["regime_name"])
                     if regime_configs:
                         result["regime"] = job["regime_name"]
                     results_by_idx[idx] = result
@@ -7243,6 +7271,7 @@ Return JSON with:
         stamp_profile(state, series_results)
         state["series_results"] = series_results
         state["flagged_spectra"] = flagged_spectra
+        state["locked_recipes"] = recipe_by_regime
 
         # Best-of-N: per-anchor candidate tables (index -> table) for the
         # final result dict.
@@ -7904,6 +7933,27 @@ Return JSON: {{"script": "<the complete modified script>"}}
                 result["locked_model_type"] = state.get(
                     "locked_fitting_config", {}
                 ).get("physical_model")
+                # What the replaced unit was (its approval and salvage markers):
+                # followers that replayed ITS script are judged by it, not by the
+                # refit they never re-ran.
+                _orig = series_results[idx] or {}
+                result["replaced_unit"] = _orig.get("replaced_unit") or {
+                    "name": _orig.get("name"),
+                    "quality_history": {k: (_orig.get("quality_history") or {}).get(k)
+                                        for k in ("approved", "approved_by", "unverified", "stopped_by",
+                                                  "verifier_rejected", "threshold", "final_r2", "final_score",
+                                                  "verification_iterations")},
+                    "quality_warning": _orig.get("quality_warning"),
+                    "judge_warning": _orig.get("judge_warning"),
+                    "reuse_validity": _orig.get("reuse_validity"),
+                }
+                if (series_results[idx] or {}).get("role"):
+                    result["role"] = series_results[idx]["role"]
+                if (series_results[idx] or {}).get("regime") and not result.get("regime"):
+                    result["regime"] = series_results[idx]["regime"]
+                # a refit ran its own QC: its verdict is its own gate's
+                from .._verification_record import stamp_unit_verdict
+                stamp_unit_verdict(result, regime=result.get("regime"))
                 series_results[idx] = result
                 entry["new_r2"] = new_r2
                 entry["new_model"] = result.get("model_type")
@@ -7922,6 +7972,27 @@ Return JSON: {{"script": "<the complete modified script>"}}
                     result["locked_model_type"] = state.get(
                         "locked_fitting_config", {}
                     ).get("physical_model")
+                    # What the replaced unit was (its approval and salvage markers):
+                    # followers that replayed ITS script are judged by it, not by the
+                    # refit they never re-ran.
+                    _orig = series_results[idx] or {}
+                    result["replaced_unit"] = _orig.get("replaced_unit") or {
+                        "name": _orig.get("name"),
+                        "quality_history": {k: (_orig.get("quality_history") or {}).get(k)
+                                            for k in ("approved", "approved_by", "unverified", "stopped_by",
+                                                      "verifier_rejected", "threshold", "final_r2", "final_score",
+                                                      "verification_iterations")},
+                        "quality_warning": _orig.get("quality_warning"),
+                        "judge_warning": _orig.get("judge_warning"),
+                        "reuse_validity": _orig.get("reuse_validity"),
+                    }
+                    if (series_results[idx] or {}).get("role"):
+                        result["role"] = series_results[idx]["role"]
+                    if (series_results[idx] or {}).get("regime") and not result.get("regime"):
+                        result["regime"] = series_results[idx]["regime"]
+                    # a refit ran its own QC: its verdict is its own gate's
+                    from .._verification_record import stamp_unit_verdict
+                    stamp_unit_verdict(result, regime=result.get("regime"))
                     series_results[idx] = result
                     entry["new_r2"] = new_r2
                     entry["new_model"] = result.get("model_type")
@@ -8077,6 +8148,27 @@ Return JSON: {{"script": "<the complete modified script>"}}
                 refit_result["original_r2"] = original_r2
                 refit_result["refit_model_type"] = refit_result.get("model_type")
                 refit_result["locked_model_type"] = locked_model
+                # What the replaced unit was (its approval and salvage markers):
+                # followers that replayed ITS script are judged by it, not by the
+                # refit they never re-ran.
+                _orig = series_results[idx] or {}
+                refit_result["replaced_unit"] = _orig.get("replaced_unit") or {
+                    "name": _orig.get("name"),
+                    "quality_history": {k: (_orig.get("quality_history") or {}).get(k)
+                                        for k in ("approved", "approved_by", "unverified", "stopped_by",
+                                                  "verifier_rejected", "threshold", "final_r2", "final_score",
+                                                  "verification_iterations")},
+                    "quality_warning": _orig.get("quality_warning"),
+                    "judge_warning": _orig.get("judge_warning"),
+                    "reuse_validity": _orig.get("reuse_validity"),
+                }
+                if (series_results[idx] or {}).get("role"):
+                    refit_result["role"] = series_results[idx]["role"]
+                if (series_results[idx] or {}).get("regime") and not refit_result.get("regime"):
+                    refit_result["regime"] = series_results[idx]["regime"]
+                # a refit ran its own QC: its verdict is its own gate's
+                from .._verification_record import stamp_unit_verdict
+                stamp_unit_verdict(refit_result, regime=refit_result.get("regime"))
                 series_results[idx] = refit_result
 
                 refit_summary.append({

@@ -1819,6 +1819,20 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                         if r.get("quality_history") else None
                     ),
                     "reuse_validity": r.get("reuse_validity"),
+                    # The unit's verification record and salvage markers, as
+                    # the curve agent reports them: what tells an approved
+                    # anchor from a salvaged one and a replayed follower from
+                    # an unverified one.
+                    "quality_history": r.get("quality_history"),
+                    **({"quality_warning": r["quality_warning"]} if r.get("quality_warning") else {}),
+                    **({"judge_warning": r["judge_warning"]} if r.get("judge_warning") else {}),
+                    **({"fitted_from": r["fitted_from"]} if r.get("fitted_from") else {}),
+                    **({"role": r["role"]} if r.get("role") else {}),
+                    **({"replaced_unit": r["replaced_unit"]} if r.get("replaced_unit") else {}),
+                    **({"regime": r["regime"]} if r.get("regime") else {}),
+                    # The driver's verdict on the unit, stamped when it knew
+                    # the recipe and the gate result (unit_verdict_for).
+                    **({"unit_verdict": r["unit_verdict"]} if r.get("unit_verdict") else {}),
                 }
                 for r in series_results
             ]
@@ -1827,6 +1841,11 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # top level for the orchestrator.
             if series_results and series_results[0].get("reuse_validity"):
                 results["reuse_validity"] = series_results[0]["reuse_validity"]
+
+            # Each regime's recipe (anchor unit, verdict, the replayed
+            # script), recorded once by the series driver at lock time.
+            if state.get("locked_recipes"):
+                results["locked_recipes"] = state["locked_recipes"]
 
             results["flagged_images"] = flagged_images
             results["flagged_images_analysis"] = synthesis.get(
