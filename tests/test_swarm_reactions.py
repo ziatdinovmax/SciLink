@@ -440,7 +440,7 @@ def test_retracting_a_cause_taints_the_reaction_and_offers_no_rerun_of_it(meta, 
     board.post(kind="claim", author={"worker": "reader", "delegation_index": 99, "mode": "analysis"},
                subject=S, payload={"text": "rests on it"}, status="verified", reads=[sim["posted"][0]])
     meta._delegation_ledger.append({"index": 99, "label": "reader", "mode": "analysis", "subject": S, "task": "read it",
-                                    "data_path": "/d/y.txt", "reads_board": {"kinds": ["claim"]}, "check": False,
+                                    "data_path": "/d/y.txt", "reads_board": {}, "check": False,
                                     "context": {"c": 2}, "status": "success"})
     out = board_mod.retract_and_report(meta, claim, "wrong phase")
     tainted = {t["finding_id"] for t in out["tainted"]}
@@ -450,7 +450,7 @@ def test_retracting_a_cause_taints_the_reaction_and_offers_no_rerun_of_it(meta, 
     assert all("new decision" in n["reason"] for n in out["not_rerun"])
     assert [i["context"]["reruns_delegation"] for i in out["rerun_items"]] == [99]
     item = out["rerun_items"][0]
-    assert item["data_path"] == "/d/y.txt" and item["reads_board"] == {"kinds": ["claim"]} and "check" not in item
+    assert item["data_path"] == "/d/y.txt" and item["reads_board"] == {} and "check" not in item   # {} is the plain opt-in
     assert item["context"]["c"] == 2 and item["context"]["after_retraction_of"] == claim and item["task"] == "read it"
 
 

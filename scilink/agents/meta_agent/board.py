@@ -962,7 +962,9 @@ def retract_and_report(orch, finding_id: str, reason: str) -> Dict[str, Any]:
                             "reruns_delegation": src["delegation_index"],
                             "after_retraction_of": finding_id, "retraction_reason": reason}}
         for key in ("data_path", "reads_board", "check"):
-            if e.get(key):                # a False check or an absent spec is the default
+            # ``reads_board: {}`` is the plain opt-in and falsy — test for
+            # presence, not truth; a False check or an absent spec is the default.
+            if e.get(key) is not None and e.get(key) is not False:
                 item[key] = e[key]
         rerun_items.append(item)
     return {
