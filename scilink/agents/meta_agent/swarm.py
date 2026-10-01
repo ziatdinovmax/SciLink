@@ -527,13 +527,14 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
                 # are on the board, at most RESTS_ON_MAX; a check reads nothing.
                 raw = item["rests_on"] if isinstance(item["rests_on"], (list, tuple)) else []
                 board = getattr(orch, "board", None)
-                known = [f for f in raw if isinstance(f, str) and board is not None and f in board._by_id]
+                known = [f for f in raw if isinstance(f, str) and board is not None and board.has(f)]
+                kept_ids = known[-RESTS_ON_MAX:]
                 if item.get("check"):
                     entry["rests_on_ignored"] = "a check reads nothing"
                 else:
-                    if len(raw) - len(known):
-                        entry["rests_on_dropped"] = len(raw) - len(known)
-                    entry["reads"] = sorted(set(entry.get("reads") or []) | set(known[-RESTS_ON_MAX:]))
+                    if len(raw) - len(kept_ids):          # unknown, non-string, and over the cap
+                        entry["rests_on_dropped"] = len(raw) - len(kept_ids)
+                    entry["reads"] = sorted(set(entry.get("reads") or []) | set(kept_ids))
             if item.get("caused_by"):
                 # A reaction: its cause and chain, stamped as it is enqueued.
                 # The cause is a READ: the task quotes the finding, so what
