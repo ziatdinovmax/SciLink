@@ -295,7 +295,22 @@ class Board:
             cached = self._fold_cache
             if cached is not None and cached[0] == version:
                 return json.loads(json.dumps(cached[1]))
-            recs = json.loads(json.dumps(self._records))
+            recs = self._fold_records(json.loads(json.dumps(self._records)))
+        with self._lock:
+            if len(self._records) == version:
+                self._fold_cache = (version, json.loads(json.dumps(recs)))
+        return recs
+
+    def preview(self, extra: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """The fold as it WOULD read with ``extra`` records appended — what an
+        act (a retraction) would do, decided before anything is written."""
+        with self._lock:
+            recs = json.loads(json.dumps(self._records + list(extra)))
+        return self._fold_records(recs)
+
+    @staticmethod
+    def _fold_records(recs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """The pure fold over a list of records (copies), in log order."""
         by_id = {r["finding_id"]: r for r in recs}
 
         def may_act(actor: Dict[str, Any], target: Dict[str, Any]) -> bool:
@@ -353,9 +368,6 @@ class Board:
                 if bad:
                     r["status"] = "tainted"
                     r["tainted_by"] = sorted(bad)
-        with self._lock:
-            if len(self._records) == version:
-                self._fold_cache = (version, json.loads(json.dumps(recs)))
         return recs
 
     @staticmethod
@@ -870,26 +882,48 @@ def _human_approved(record: Dict[str, Any]) -> bool:
     return str((record.get("evidence") or {}).get("gate") or "").startswith("a human approved")
 
 
+def _act_effects(board: "Board", finding_id: str, hypothetical: Dict[str, Any]) -> Dict[str, Any]:
+    """What retracting ``finding_id`` WOULD do, from the fold as it would read
+    with the retraction appended (``Board.preview``): the findings withdrawn,
+    the findings newly tainted, the findings that come back, and the
+    retractions whose standing flips. One answer for the gate, the refusals
+    and the report, whatever level of undo the act is."""
+    before = {r["finding_id"]: r for r in board.fold()}
+    after = {r["finding_id"]: r for r in board.preview([hypothetical]) if r["finding_id"] != hypothetical["finding_id"]}
+    findings = [fid for fid, r in after.items() if r.get("kind") != "retraction"]
+    withdrawn = [f for f in findings if before[f]["status"] != "retracted" and after[f]["status"] == "retracted"]
+    tainted = [f for f in findings if before[f]["status"] != "tainted" and after[f]["status"] == "tainted"]
+    restored = [f for f in findings if before[f]["status"] in ("retracted", "tainted")
+                and after[f]["status"] not in ("retracted", "tainted")]
+    flipped = [after[fid] for fid, r in after.items() if r.get("kind") == "retraction"
+               and bool(before[fid].get("effective")) != bool(r.get("effective"))]
+    return {"before": before, "after": after, "withdrawn": withdrawn, "tainted": tainted,
+            "restored": restored, "flipped": flipped}
+
+
 def retract_and_report(orch, finding_id: str, reason: str) -> Dict[str, Any]:
     """Withdraw a finding as the coordinator and say what it takes with it.
 
-    Who may withdraw: with a person at the gate (the meta attended), the
-    person — the finding and what rests on it are shown and Enter KEEPS it;
-    with nobody at the gate, the model may withdraw the agents' own
-    findings but never one a human settled (an approved plan's claims):
-    a human's decision is reopened only by a human, as in plan mode.
+    The act is decided from its EFFECT, computed before anything is written
+    (``_act_effects``): which findings it withdraws, which it taints, which
+    it brings back. Retracting a retraction undoes it — and retracting an
+    undo withdraws the finding again — and the gate, the refusals and the
+    report all read the effect, not the record named.
 
-    The retraction is posted (it takes effect from the coordinator whoever
-    the author was), the fold then reads every record that rested on the
-    finding as ``tainted`` (``Board.fold``), and the report names those
-    records, the delegations that produced them (from the records' own
-    authors, stamped when they were posted) and a ``rerun_items`` list the
-    meta can hand to ``run_swarm`` as it stands, each with the inputs the
-    original had; a delegation that was CAUSED by a withdrawn or tainted
-    finding is not offered — its task quotes what was withdrawn, so it is a
-    new decision, not a re-run. Retracting a retraction undoes it (same
-    gate). Nothing is re-run here: a retraction is a decision made between
-    runs, and so is the re-run."""
+    Who may act: with a person at the gate (the meta attended), the person
+    — the effect is shown and Enter KEEPS things as they are; with nobody
+    at the gate the model may withdraw the agents' own findings but never a
+    human's decision: not a human-approved finding, not one a human-approved
+    record rests on (it would be tainted), and not a retraction a person
+    made (`decided_by`, in either direction; a retraction with no stamp is
+    treated as a person's).
+
+    The report names the newly tainted records, the delegations that
+    produced them or read what was withdrawn (from the records' own authors
+    and the entries' own reads), and ``rerun_items`` ready for ``run_swarm``
+    with the inputs the originals had; a delegation CAUSED by a withdrawn or
+    tainted finding is ``not_rerun`` — its task quotes it, so doing it again
+    is a new decision. Nothing is re-run here."""
     from ...hitl import request_human_feedback, make_subject, subject_block
     board = orch.board
     target = board.get(finding_id)                       # KeyError: unknown
@@ -897,74 +931,68 @@ def retract_and_report(orch, finding_id: str, reason: str) -> Dict[str, Any]:
     reason = " ".join(str(reason or "").split())
     if not reason:
         raise ValueError("a retraction states its reason")
-    before = {r["finding_id"]: r for r in board.fold()}
-    if before[finding_id]["status"] == "retracted":
-        raise ValueError(f"{finding_id} is already retracted" + (" (undone)" if undo else ""))
-    # What the act touches: for a withdrawal, the finding and what rests on
-    # it; for an undo, the finding that comes BACK and what rests on that.
-    shown = board.get(target["target"]) if undo else target
-    dependents = board.dependents(shown["finding_id"])
     attended = bool(getattr(orch, "_enable_human_feedback", False))
-    if attended:
-        p = shown.get("payload") or {}
+    hypothetical = {"finding_id": "pending", "author": dict(COORDINATOR, delegation_index=None), "subject": target.get("subject"),
+                    "kind": "retraction", "target": finding_id, "status": "provisional", "reads": [],
+                    "payload": {"reason": reason, "decided_by": "human" if attended else "coordinator"},
+                    "evidence": {}, "board_version": len(board)}
+    fx = _act_effects(board, finding_id, hypothetical)
+    if fx["before"][finding_id]["status"] == "retracted":
+        raise ValueError(f"{finding_id} is already retracted" + (" (undone)" if undo else ""))
+    if not (fx["withdrawn"] or fx["tainted"] or fx["restored"] or fx["flipped"]):
+        raise ValueError(f"retracting {finding_id} would change nothing (a retraction that does not take effect)")
+
+    def describe(fid):
+        r = board.get(fid)
+        p = r.get("payload") or {}
         what = p.get("text") or p.get("issue") or p.get("path") or p.get("name") or json.dumps(p)[:200]
-        lines = [f"{shown['kind']} {shown['finding_id']} on '{shown.get('subject')}' by "
-                 f"{(shown.get('author') or {}).get('worker')} ({before[shown['finding_id']]['status']})",
-                 f"\u201c{_clip(what, 300)}\u201d", f"reason given: {reason}"]
+        return f"{r['kind']} {fid} on '{r.get('subject')}' by {(r.get('author') or {}).get('worker')}: \u201c{_clip(what, 200)}\u201d"
+
+    def listing(ids, n=6):
+        return "; ".join(describe(f) for f in ids[:n]) + (f" … ({len(ids)} in all)" if len(ids) > n else "")
+    if attended:
+        lines = [f"reason given: {reason}"]
         if undo:
-            lines.insert(0, f"undo retraction {finding_id} (\u201c{_clip((target.get('payload') or {}).get('reason'), 200)}\u201d"
-                            + (", a person's decision" if (target.get("payload") or {}).get("decided_by") == "human" else "")
-                            + "): this finding would stand again")
-        if dependents:
-            lines.append(f"{len(dependents)} finding(s) rest on it and would "
-                         + ("stand again" if undo else "be tainted") + ": "
-                         + ", ".join(dependents[:8]) + (" …" if len(dependents) > 8 else ""))
-        subject = make_subject("Undo this retraction?" if undo else "Withdraw this finding?",
-                               [subject_block("text", label="🗑 Finding", markdown="\n".join(lines))])
+            lines.insert(0, f"retract retraction {finding_id} (\u201c{_clip((target.get('payload') or {}).get('reason'), 200)}\u201d"
+                            + (", a person's decision" if (target.get("payload") or {}).get("decided_by") != "coordinator" else "") + ")")
+        if fx["withdrawn"]:
+            lines.append(f"WITHDRAWS {len(fx['withdrawn'])}: " + listing(fx["withdrawn"]))
+        if fx["tainted"]:
+            lines.append(f"TAINTS {len(fx['tainted'])} that rest on it: " + listing(fx["tainted"]))
+        if fx["restored"]:
+            lines.append(f"BRINGS BACK {len(fx['restored'])}: " + listing(fx["restored"]))
+        title = ("Undo this retraction?" if (undo and fx["restored"] and not fx["withdrawn"])
+                 else "Withdraw this finding?")
+        subject = make_subject(title, [subject_block("text", label="🗑 Effect", markdown="\n".join(lines))])
         try:
             ans = request_human_feedback(
-                ("\n🤔 Undo it? Enter keeps the retraction. [y/N]: " if undo
-                 else "\n🤔 Withdraw it? Enter keeps it. [y/N]: "), kind="confirm", options=["y", "n"],
+                "\n🤔 Do it? Enter keeps things as they are. [y/N]: ", kind="confirm", options=["y", "n"],
                 default="n", origin={"stage": "retract_finding", "finding_id": finding_id}, subject=subject,
             ).strip().lower()
         except (EOFError, KeyboardInterrupt):
             ans = "n"
         if ans not in ("y", "yes"):
             return {"status": "kept", "retracted": None, "finding_id": finding_id,
-                    "message": ("the user kept the retraction; nothing changed on the board" if undo
-                                else "the user kept the finding; nothing changed on the board")}
+                    "message": "the user kept things as they are; nothing changed on the board"}
     else:
         # Nobody at the gate: the model may withdraw the agents' own findings,
-        # never a human's decision — not the finding itself, not a retraction a
-        # person made, and not a human-approved finding that rests on it.
+        # never a human's decision — judged by the act's EFFECT, so an undo of
+        # an undo (which withdraws again) is held to the same rule.
         refusal = None
-        if undo and (target.get("payload") or {}).get("decided_by") == "human":
-            refusal = "this retraction was a person's decision at an attended gate"
-        elif _human_approved(shown):
-            refusal = "this finding is a human's decision (an approved plan's claim)"
-        else:
-            human_dependents = [d for d in dependents if _human_approved(board.get(d))]
-            if human_dependents:
-                refusal = (f"a human-approved finding rests on it ({', '.join(human_dependents[:4])}) and "
-                           "would be tainted")
+        human_hit = [f for f in fx["withdrawn"] + fx["tainted"] if _human_approved(board.get(f))]
+        human_ret = [r["finding_id"] for r in fx["flipped"]
+                     if (r.get("payload") or {}).get("decided_by") != "coordinator"]
+        if human_hit:
+            refusal = (f"a human-approved finding would be withdrawn or tainted ({', '.join(human_hit[:4])})")
+        elif human_ret:
+            refusal = f"it would change the standing of a person's retraction ({', '.join(human_ret[:4])})"
         if refusal:
             return {"status": "refused", "retracted": None, "finding_id": finding_id,
                     "message": (f"{refusal}; nobody is at the gate to reopen a human's decision. Tell the "
                                 "user; it is theirs to make in an attended session.")}
     rec = board.retract(finding_id, author=COORDINATOR, reason=reason,
                         decided_by="human" if attended else "coordinator")
-    after = {r["finding_id"]: r for r in board.fold()}
-    if undo:
-        restored = [fid for fid, r in after.items()
-                    if r.get("kind") != "retraction"          # findings, not the bookkeeping that stands again
-                    and before.get(fid, {}).get("status") in ("retracted", "tainted")
-                    and r["status"] not in ("retracted", "tainted")]
-        return {"status": "success", "retraction": rec["finding_id"], "undone": finding_id,
-                "retracted": None, "restored": restored, "reason": reason, "board_version": len(board),
-                "note": "the earlier retraction no longer takes effect; its target and what rested on it stand again"}
-    tainted = [r for fid, r in after.items()
-               if r["status"] == "tainted" and before.get(fid, {}).get("status") != "tainted"]
-    withdrawn = {finding_id} | {r["finding_id"] for r in tainted}
+    affected = set(fx["withdrawn"]) | set(fx["tainted"])
     ledger = {e.get("index"): e for e in getattr(orch, "_delegation_ledger", [])}
     sources: Dict[int, Dict[str, Any]] = {}
 
@@ -973,8 +1001,9 @@ def retract_and_report(orch, finding_id: str, reason: str) -> Dict[str, Any]:
         sources[idx] = {"delegation_index": idx, "label": (e or {}).get("label") or worker,
                         "mode": (e or {}).get("mode") or mode, "subject": (e or {}).get("subject") or subject,
                         "task": (e or {}).get("task"), "available": e is not None, "via": via,
-                        "caused_by_withdrawn": sorted(caused_by & withdrawn)}
-    for r in tainted:
+                        "caused_by_withdrawn": sorted(caused_by & affected)}
+    for f in fx["tainted"]:
+        r = board.get(f)
         idx = (r.get("author") or {}).get("delegation_index")
         if idx is None or idx in sources:
             continue
@@ -985,7 +1014,7 @@ def retract_and_report(orch, finding_id: str, reason: str) -> Dict[str, Any]:
     for idx, e in ledger.items():
         if idx in sources or idx is None or e.get("status") != "success":
             continue
-        if set(e.get("reads") or []) & withdrawn:
+        if set(e.get("reads") or []) & affected:
             source(idx, e, via="read")
     rerun_items, not_rerun = [], []
     for src in sources.values():
@@ -1011,17 +1040,24 @@ def retract_and_report(orch, finding_id: str, reason: str) -> Dict[str, Any]:
             if e.get(key) is not None and e.get(key) is not False:
                 item[key] = e[key]
         rerun_items.append(item)
+    effect = (("withdraws " + ", ".join(fx["withdrawn"]) if fx["withdrawn"] else "")
+              + (f"; taints {len(fx['tainted'])}" if fx["tainted"] else "")
+              + (("; " if fx["withdrawn"] or fx["tainted"] else "") + "brings back " + ", ".join(fx["restored"]) if fx["restored"] else ""))
     return {
-        "status": "success", "retraction": rec["finding_id"], "retracted": finding_id,
-        "kind": target.get("kind"), "subject": target.get("subject"), "reason": reason,
-        "tainted": [{"finding_id": r["finding_id"], "kind": r["kind"], "subject": r.get("subject"),
-                     "author": r.get("author"), "tainted_by": r.get("tainted_by")} for r in tainted],
+        "status": "success", "retraction": rec["finding_id"],
+        "retracted": fx["withdrawn"][0] if (not undo and fx["withdrawn"]) else None,
+        "undone": finding_id if undo else None,
+        "withdrawn": fx["withdrawn"], "restored": fx["restored"],
+        "kind": target.get("kind"), "subject": target.get("subject"), "reason": reason, "effect": effect,
+        "tainted": [{"finding_id": f, "kind": board.get(f)["kind"], "subject": board.get(f).get("subject"),
+                     "author": board.get(f).get("author"), "tainted_by": fx["after"][f].get("tainted_by")}
+                    for f in fx["tainted"]],
         "sources": list(sources.values()),      # via: "posted" a tainted record, or "read" the withdrawn one
         "rerun_items": rerun_items,
         "not_rerun": not_rerun,
         "board_version": len(board),
-        "note": ("the retracted finding and everything that rested on it are out of every default "
-                 "read; a re-run is a new delegation or swarm (rerun_items is ready for run_swarm "
-                 "when there are two or more, delegate_to_<mode> for one), whose records stand on "
-                 "their own — nothing is re-run on its own"),
+        "note": ("what was withdrawn and everything that rested on it are out of every default read; a "
+                 "re-run is a new delegation or swarm (rerun_items is ready for run_swarm when there are two "
+                 "or more, delegate_to_<mode> for one), whose records stand on their own — nothing is re-run "
+                 "on its own"),
     }

@@ -125,8 +125,9 @@ def template_fields(record: dict, from_entry: dict) -> Dict[str, str]:
 #: Fields whose value is a worker's prose: substituted as QUOTED data with
 #: the record it came from, never as bare text — one worker's sentence must
 #: not become another worker's instruction (the board's additive-only rule).
-_QUOTED_FIELDS = ("finding.text", "finding.name", "finding.unit")
+_QUOTED_FIELDS = ("finding.text", "finding.name", "finding.unit", "finding.value")
 _QUOTE_MAX = 1500
+_IDENTIFIER_MAX = 600
 
 
 def _quoted(value: str, record: dict) -> str:
@@ -150,9 +151,9 @@ def fill(template: str, record: dict, from_entry: dict, *, quote: bool = True) -
         value = str(fields[name])
         if name in _QUOTED_FIELDS and value:
             return _quoted(value, record) if quote else " ".join(value.split())[:60]
-        # an identifier is one line too: a path or an id a worker produced
-        # must not carry a line of its own into the task
-        return " ".join(value.split()).replace("<<<", "‹‹‹").replace(">>>", "›››")
+        # an identifier is one line too, and bounded: a path or an id a
+        # worker produced must not carry a line of its own into the task
+        return " ".join(value.split()).replace("<<<", "‹‹‹").replace(">>>", "›››")[:_IDENTIFIER_MAX]
     return _FIELD_RE.sub(sub, str(template))
 
 

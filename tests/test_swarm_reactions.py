@@ -560,6 +560,10 @@ def test_two_levels_of_undo_and_a_humans_decision_stays_a_humans(meta, monkeypat
     assert status(c["finding_id"]) == "retracted" and status(d["finding_id"]) == "tainted"      # R1 stands again
     r4 = board_mod.retract_and_report(meta, r3["retraction"], "r4: and back")
     assert r4["undone"] == r3["retraction"] and set(r4["restored"]) == {c["finding_id"], d["finding_id"]}
+    # R3, an undo of an undo, WITHDREW C again, and its report said so (round 3)
+    assert r3["withdrawn"] == [c["finding_id"]] and [t["finding_id"] for t in r3["tainted"]] == [d["finding_id"]]
+    assert r3["retracted"] is None and r3["undone"] == r2["retraction"] and r3["effect"].startswith("withdraws")
+    assert r2["withdrawn"] == [] and set(r2["restored"]) == {c["finding_id"], d["finding_id"]}
     assert status(c["finding_id"]) == "verified" and status(d["finding_id"]) == "verified"
     eff = {r["finding_id"]: r.get("effective") for r in board.fold() if r["kind"] == "retraction"}
     assert [eff[x["retraction"]] for x in (r1, r2, r3, r4)] == [False, True, False, True]   # R2 stands again once R3 is undone
@@ -584,7 +588,7 @@ def test_two_levels_of_undo_and_a_humans_decision_stays_a_humans(meta, monkeypat
         meta._enable_human_feedback = False
     assert board.get(h["retraction"])["payload"]["decided_by"] == "human"
     out = board_mod.retract_and_report(meta, h["retraction"], "the model would like C back")
-    assert out["status"] == "refused" and "person's decision" in out["message"] and status(c["finding_id"]) == "retracted"
+    assert out["status"] == "refused" and "person's retraction" in out["message"] and status(c["finding_id"]) == "retracted"
     # the undo gate shows the finding that would come back and what rests on it, not the retraction record
     meta._enable_human_feedback = True
     person = Yes()
@@ -596,7 +600,7 @@ def test_two_levels_of_undo_and_a_humans_decision_stays_a_humans(meta, monkeypat
         meta._enable_human_feedback = False
     shown = json.dumps(person.asked[-1].subject, ensure_ascii=False)
     assert und["undone"] == h["retraction"] and "Undo this retraction?" in shown and "“C”" in shown
-    assert d["finding_id"] in shown and "stand again" in shown and "a person's decision" in shown
+    assert d["finding_id"] in shown and "BRINGS BACK 2" in shown and "a person's decision" in shown
     # a human-approved finding that rests on an agent's claim: the claim cannot be withdrawn autonomously
     a = board.post(kind="claim", author={"worker": "w1", "delegation_index": 1, "mode": "analysis"},
                    subject=S, payload={"text": "A"}, status="verified")
@@ -604,7 +608,7 @@ def test_two_levels_of_undo_and_a_humans_decision_stays_a_humans(meta, monkeypat
                subject=S, payload={"text": "H1 built on A"}, status="verified", reads=[a["finding_id"]],
                evidence={"gate": "a human approved the plan"})
     out = board_mod.retract_and_report(meta, a["finding_id"], "the model doubts A")
-    assert out["status"] == "refused" and "human-approved finding rests on it" in out["message"]
+    assert out["status"] == "refused" and "human-approved finding would be withdrawn or tainted" in out["message"]
     assert status(a["finding_id"]) == "verified"
     # a retraction the coordinator made is stamped as such
     assert board.get(r1["retraction"])["payload"]["decided_by"] == "coordinator"
@@ -633,3 +637,84 @@ def test_a_rerun_of_a_reaction_rests_on_its_cause(meta, monkeypatch):
     rerun = _by_label(meta)["rerun: cell for Raman A7"]
     assert set(sim["caused_by"]) <= set(rerun["reads"]) and "caused_by" not in rerun
     assert set(sim["caused_by"]) <= set(board.get(rerun["posted"][0])["reads"])
+
+
+def test_an_undo_of_an_undo_is_judged_by_what_it_withdraws(meta, monkeypatch):
+    """Round 3 of #708: the gate, the refusals and the report read the act's
+    EFFECT (the fold as it would be), not the record named — so retracting an
+    undo, which withdraws the finding again, is refused autonomously when a
+    human-approved record rests on the finding, is reported as a withdrawal
+    with re-run items, and is shown to a person as one."""
+    from scilink import hitl
+    board = meta.board
+
+    def status(fid):
+        return {r["finding_id"]: r["status"] for r in board.fold()}[fid]
+    c = board.post(kind="claim", author={"worker": "w1", "delegation_index": 1, "mode": "analysis"},
+                   subject=S, payload={"text": "C"}, status="verified")
+    d = board.post(kind="claim", author={"worker": "w2", "delegation_index": 2, "mode": "analysis"},
+                   subject=S, payload={"text": "D rests on C"}, status="verified", reads=[c["finding_id"]])
+    meta._delegation_ledger.append({"index": 2, "label": "D item", "mode": "analysis", "subject": S, "task": "do D",
+                                    "status": "success", "reads": [c["finding_id"]]})
+    r1 = board_mod.retract_and_report(meta, c["finding_id"], "r1")
+    r2 = board_mod.retract_and_report(meta, r1["retraction"], "r2: undo")
+    assert status(c["finding_id"]) == "verified"
+    # a human-approved P now rests on C: retracting the undo (withdrawing C again) is refused autonomously
+    board.post(kind="claim", author={"worker": "planner", "delegation_index": 3, "mode": "planning"},
+               subject=S, payload={"text": "P built on C"}, status="verified", reads=[c["finding_id"]],
+               evidence={"gate": "a human approved the plan"})
+    out = board_mod.retract_and_report(meta, r2["retraction"], "r3: the model undoes the undo")
+    assert out["status"] == "refused" and "human-approved finding would be withdrawn or tainted" in out["message"]
+    assert status(c["finding_id"]) == "verified"
+    # a person may: shown as a WITHDRAWAL of C that taints D and P, Enter keeps, "y" does it
+    meta._enable_human_feedback = True
+    asked = []
+
+    class Person:
+        def __init__(self, answers):
+            self.answers = list(answers)
+
+        def ask(self, req):
+            asked.append(req)
+            return self.answers.pop(0)
+    hitl.set_thread_channel(Person(["", "y"]))
+    try:
+        kept = board_mod.retract_and_report(meta, r2["retraction"], "r3: the person undoes the undo")
+        assert kept["status"] == "kept" and status(c["finding_id"]) == "verified"
+        shown = json.dumps(asked[-1].subject, ensure_ascii=False)
+        assert "Withdraw this finding?" in shown and "WITHDRAWS 1" in shown and "“C”" in shown
+        assert "TAINTS 2" in shown and d["finding_id"] in shown and "BRINGS BACK" not in shown
+        r3 = board_mod.retract_and_report(meta, r2["retraction"], "r3: the person undoes the undo")
+    finally:
+        hitl.set_thread_channel(None)
+        meta._enable_human_feedback = False
+    assert r3["status"] == "success" and r3["withdrawn"] == [c["finding_id"]] and r3["restored"] == []
+    tainted = {t["finding_id"] for t in r3["tainted"]}
+    assert d["finding_id"] in tainted and len(tainted) == 2                      # D and P
+    assert [i["context"]["reruns_delegation"] for i in r3["rerun_items"]] == [2] and r3["rerun_items"][0]["task"] == "do D"
+    assert status(c["finding_id"]) == "retracted" and status(d["finding_id"]) == "tainted"
+    # the model may not lift a person's withdrawal either way, and an act that changes nothing is refused
+    out = board_mod.retract_and_report(meta, r3["retraction"], "r4: the model wants C back")
+    assert out["status"] == "refused" and "person's retraction" in out["message"]
+    with pytest.raises(ValueError, match="change nothing"):
+        unchecked = board.post(kind="claim", author={"worker": "w9", "delegation_index": 9, "mode": "analysis"},
+                               subject=S, payload={"text": "x"}, status="provisional")
+        board.post(kind="retraction", author={"worker": "stranger", "delegation_index": 8, "mode": "analysis"},
+                   target=unchecked["finding_id"], payload={"reason": "not mine"})
+        board_mod.retract_and_report(meta, board.records()[-1]["finding_id"], "undo a retraction that never took effect")
+
+
+def test_rests_on_is_typed_bounded_and_ignored_on_a_check(meta, monkeypatch):
+    _script(monkeypatch, lambda mode, task, context: {"claims": ["anatase"]} if mode == "analysis" else {})
+    board = meta.board
+    real = [board.post(kind="claim", author={"worker": "w", "delegation_index": 0, "mode": "analysis"},
+                       subject=S, payload={"text": f"c{i}"}, status="verified")["finding_id"] for i in range(30)]
+    items = [{**ITEMS[0], "rests_on": "f0001-abcdef"},                                   # a string: ignored
+             {**ITEMS[1], "rests_on": real + ["f9999-nope", 7, None]},                   # unknown ids dropped, capped
+             {"mode": "analysis", "task": "audit", "label": "audit", "subject": S, "check": True, "rests_on": real[:3]}]
+    res = json.loads(swarm.run_swarm(meta, items))
+    L = _by_label(meta)
+    assert L["Raman A7"].get("reads", []) == []                                        # a string declares nothing
+    assert len(L["purity plan"]["reads"]) == swarm.RESTS_ON_MAX and set(L["purity plan"]["reads"]) <= set(real)
+    assert L["audit"].get("reads", []) == [] and L["audit"]["rests_on_ignored"] == "a check reads nothing"
+    assert {**L["purity plan"]}.get("rests_on_dropped") == 3

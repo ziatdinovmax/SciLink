@@ -1184,6 +1184,27 @@ can already hit.
      carries its cause as `rests_on`, which `launch` records as reads (a
      caller-declared read can only add a coupling). `max_reactions` is
      clamped to `max_items`, and the gate says "on any task_request".
+   - *Round 3 of the review:* an undo of an undo WITHDRAWS the finding
+     again, and the gate, the refusals and the report had read the record
+     named (a retraction → "an undo") instead of what the act does — a
+     fourth way round "a human's decision is reopened only by a human", and
+     a report saying the opposite of what happened. Every retraction is now
+     decided from its EFFECT: `Board.preview(extra)` folds the log as it
+     would read with the retraction appended (the pure fold is
+     `_fold_records`; `fold()` memoises it), and `_act_effects` gives the
+     findings withdrawn, newly tainted and brought back, and the retractions
+     whose standing flips; the attended gate shows exactly those
+     ("WITHDRAWS …", "TAINTS …", "BRINGS BACK …", Enter keeps things as
+     they are), the autonomous refusals test them (a human-approved finding
+     among the withdrawn or tainted; a flipped retraction that is a
+     person's — a retraction with no `decided_by` stamp, from a board made
+     before the stamp, counts as a person's), the report lists them
+     (`withdrawn`, `restored`, `tainted`, `effect`) and `rerun_items` /
+     `not_rerun` follow the affected set; an act that would change nothing
+     (undoing a retraction that never took effect) is refused. `rests_on`
+     is a list of ids that are on the board, at most 24, and ignored on a
+     `check` (a check reads nothing); identifiers in `fill()` are bounded
+     and `finding.value` is quoted too.
    - *Deviations from "Starting stage 3", each deliberate:* no worker
      supersedes its own earlier claim — no `run_task` result says "this
      replaces that", and guessing it from kind and subject would be the

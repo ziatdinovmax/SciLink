@@ -762,7 +762,9 @@ Settled rules, each learned from a live run or a review:
   the model may withdraw the agents' findings but never a human's decision —
   not a human-approved plan's claim, not a finding such a claim rests on, not
   a retraction a person made (`decided_by`); a retraction is undone by
-  retracting it, and which retractions stand is decided newest first. A disagreement
+  retracting it, which retractions stand is decided newest first, and every
+  act is judged by its previewed EFFECT (what it withdraws, taints or brings
+  back), never by the record it names. A disagreement
   between independent results is reported, never settled by a retraction. A
   hazard on a subject reaches every reader of that subject whatever its
   `kinds` filter and whatever the newest-N cut, marked as the provisional
