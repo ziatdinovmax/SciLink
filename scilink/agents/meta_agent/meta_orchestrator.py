@@ -1883,9 +1883,15 @@ class MetaOrchestratorAgent:
                     "changed). Note it in your summary; the user can review it later via "
                     "`scilink memory staged` or review_distilled_skills."
                 )
-        # Domain-specific field, passed through lightly.
+        # Domain-specific field, passed through lightly. A row's ``recipes``
+        # (the series' locked scripts, text included) is for the board's own
+        # copy, not for the model: left off the model's rows — on a copy,
+        # since the board posts from the same rows after this.
         if "analyses" in result:
-            summary["analyses"] = result["analyses"]
+            rows = result["analyses"]
+            summary["analyses"] = ([{k: v for k, v in row.items() if k != "recipes"}
+                                    if isinstance(row, dict) else row for row in rows]
+                                   if isinstance(rows, list) else rows)
         if "campaign_state" in result:
             summary["campaign_state"] = result["campaign_state"]
         return json.dumps(summary, indent=2, default=str)

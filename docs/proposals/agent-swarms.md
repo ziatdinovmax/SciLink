@@ -1025,9 +1025,9 @@ can already hit.
      (`state["locked_recipes"]`, on the result as `locked_recipes`: unit,
      verdict then, script text), after every caveat is on the anchor (a
      reuse that failed and was re-derived is salvaged); the `run_task` rows
-     carry it as `recipes` (never part of the delegation summary the model
-     sees), and the board writes its own copy under `swarm/recipes/<NN>_<label>/`
-     and points its record there (a single run's approved script is copied
+     carry it as `recipes` (left off the delegation summary the model
+     sees, see round 8), and the board writes its own copy under
+     `swarm/recipes/<NN>_<label>/<analysis_id>/` and points its record there (a single run's approved script is copied
      the same way, `source` recorded). Nothing under an agent's folder is
      added or read again for a recipe, and no later refit or reuse can
      change what a record points at. A reused unit with no QC record is
@@ -1053,6 +1053,30 @@ can already hit.
      series should replay (the original the followers ran, or the approved
      refit), and a way for an analysis worker to take a script file as its
      recipe.
+   - *Round 8 of the review (board and meta side only; the agents are
+     done):* the board's recipe copy was keyed by `<NN>_<label>/<name>`
+     alone, so two analyses of one delegation anchored on the same unit
+     name (or two single runs, both `fitting_script.py`), or an entry
+     posted twice, overwrote one copy and a verified record could point at
+     an unverified script. The path now carries the analysis id and a copy
+     is written ONCE (`_write_once`: identical content reuses the file,
+     different content takes the next free name) — a record's file never
+     changes under it. The model's view: `_summarize_delegation_result`
+     copied the `analyses` rows verbatim, so a series row's `recipes` put
+     the full script text (3 regimes: ~21 K characters) in the tool
+     result; the model now gets the rows without `recipes` (on a copy —
+     `post_delegation` reads the same rows after), and the fan-out event
+     log was never at risk (`append_event` keeps a 300-character gist and
+     the files, pinned by a test). A 300-character label raised "File name
+     too long" and `post_delegation`'s `break` then dropped every remaining
+     recipe: directory names are clipped (`RECIPE_DIRNAME_MAX`) and a
+     record that cannot be written is skipped alone. Noted, not changed:
+     a single run posts a recipe only for the agents' own script names
+     (`fitting_script.py`, `analysis_script.py`,
+     `dynamic_analysis_records.json`), never "the first `.py`" — a
+     preparation run (`prepare_script.py`) posts none; `locked_recipes`
+     is one extra copy of each regime's script in `analysis_results.json`
+     and the checkpoint.
    - *Found live:* the curve agent's approved script is
      `scripts/fitting_script.py` (a series: one per spectrum), the image
      agent's `analysis_script.py` — the recipe takes the folder's

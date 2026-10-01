@@ -335,8 +335,8 @@ def unit_verdict_for(unit: Dict[str, Any], *, recipe: Optional[Dict[str, Any]] =
 def stamp_unit_verdict(unit: Dict[str, Any], *, recipe: Optional[Dict[str, Any]] = None,
                        regime: Optional[str] = None) -> None:
     """``unit["unit_verdict"] = unit_verdict_for(...)``, never raising: a
-    verdict that cannot be formed leaves the unit unstamped (the aggregator
-    then falls back to its reconstruction) and must not fail a fit."""
+    verdict that cannot be formed leaves the unit unstamped (the series then
+    reads "unit X has no stamp", not verified) and must not fail a fit."""
     try:
         unit["unit_verdict"] = unit_verdict_for(unit, recipe=recipe, regime=regime)
     except Exception as exc:  # noqa: BLE001 - a stamp is a side note on a fit

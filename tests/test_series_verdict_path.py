@@ -329,7 +329,7 @@ def test_the_recipe_is_the_script_the_followers_replayed(tmp_path, monkeypatch):
                           {"key_findings": ["[series_1] anatase"], "analyses": [row]})
     recipe = next(board.get(f) for f in ids if board.get(f)["kind"] == "recipe")
     assert recipe["status"] == "verified" and recipe["payload"]["unit"] == "spectrum_0000"
-    assert recipe["payload"]["path"].endswith("meta/swarm/recipes/01_Raman_series/spectrum_0000.py")
+    assert recipe["payload"]["path"].endswith("meta/swarm/recipes/01_Raman_series/series_1/spectrum_0000.py")
     assert Path(recipe["payload"]["path"]).read_text() == "M1"
 
 

@@ -667,21 +667,47 @@ def records_for(entry: Dict[str, Any], result: Dict[str, Any]) -> List[Dict[str,
     return []
 
 
+RECIPE_DIRNAME_MAX = 60      # a label or an analysis id, clipped to fit any file system
+
+
+def _write_once(folder: Path, name: str, text: str) -> Path:
+    """Write ``text`` under ``folder`` as ``name`` and never rewrite a file:
+    the same content reuses the file, different content takes the next free
+    name (``name-2.py``, ...). A record's copy therefore never changes under
+    it, whoever posts next (another analysis with the same unit name, the
+    same entry posted again)."""
+    stem, suffix = os.path.splitext(name)
+    for n in range(1, 10_000):
+        dest = folder / (name if n == 1 else f"{stem}-{n}{suffix}")
+        try:
+            with open(dest, "x", encoding="utf-8") as f:
+                f.write(text)
+            return dest
+        except FileExistsError:
+            if dest.read_text(encoding="utf-8", errors="replace") == text:
+                return dest
+    raise OSError(f"no free name for {name} under {folder}")
+
+
 def _materialize_recipe(board: Board, entry: Dict[str, Any], spec: Dict[str, Any]) -> Dict[str, Any]:
     """Write a recipe's script into the board's own folder
-    (``swarm/recipes/<NN>_<label>/<name>``) and point the record at the copy,
-    with where it came from on the evidence. The agent's folder is never
-    read again for it, and nothing under the agent's folder is added."""
+    (``swarm/recipes/<NN>_<label>/<analysis_id>/<name>``) and point the
+    record at the copy, with where it came from on the evidence. The agent's
+    folder is never read again for it, and nothing under the agent's folder
+    is added. Each copy is written once (``_write_once``): two analyses of
+    one delegation anchored on the same unit name, or two single runs, each
+    keep their own script."""
     text, source = spec.pop("_text", None), spec.pop("_source", None)
     name = spec.pop("_name", None)
     if spec.get("kind") != "recipe" or not name or (text is None and source is None):
         return spec
-    folder = board.path.parent / "recipes" / f"{int(entry.get('index') or 0):02d}_{_safe(entry.get('label') or 'delegation')}"
+    folder = (board.path.parent / "recipes"
+              / f"{int(entry.get('index') or 0):02d}_{_safe(entry.get('label') or 'delegation')[:RECIPE_DIRNAME_MAX]}"
+              / _safe(spec["payload"].get("analysis_id") or "analysis")[:RECIPE_DIRNAME_MAX])
     folder.mkdir(parents=True, exist_ok=True)
-    dest = folder / name
     if text is None:
         text = Path(source).read_text(encoding="utf-8", errors="replace")
-    dest.write_text(text, encoding="utf-8")
+    dest = _write_once(folder, name, text)
     spec["payload"]["path"] = str(dest)
     if source:
         spec["payload"]["source"] = str(source)
@@ -706,9 +732,11 @@ def post_delegation(board: Board, entry: Dict[str, Any], result: Dict[str, Any])
             logger.warning(f"board: record from delegation {entry.get('index')} refused: {exc}")
             continue
         except OSError as exc:
-            # The disk failed part-way: what was written is on the board and
-            # is reported, so nothing on the file is missing from ``posted``.
-            logger.warning(f"board: could not write delegation {entry.get('index')}'s records: {exc}")
-            break
+            # This record's copy or line could not be written (a source file
+            # gone, a disk failure): the record is skipped, the delegation's
+            # other records still post. What was written is on the board and
+            # in ``posted``.
+            logger.warning(f"board: a record of delegation {entry.get('index')} was not written: {exc}")
+            continue
         ids.append(rec["finding_id"])
     return ids

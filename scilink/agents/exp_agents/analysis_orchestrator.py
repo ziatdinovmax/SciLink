@@ -1713,7 +1713,8 @@ class AnalysisOrchestratorAgent:
                     # the recipes the series driver recorded at lock time
                     # (one per regime, script text included): what a caller
                     # that keeps its own copy of a recipe — the meta's board
-                    # — copies from. Not part of the delegation summary.
+                    # — copies from; the meta leaves it off the rows its
+                    # model reads (_summarize_delegation_result).
                     "recipes": series_recipes(rec.get("full_result")),
                 } for rec in new_analyses
             ],

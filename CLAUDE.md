@@ -700,7 +700,8 @@ run or a review:
   replayed — and a failed unit the agent already excluded does not block; a
   decision about a unit is made where the information is, never reconstructed
   afterwards from markers; the board keeps its own copy of a recipe under
-  `swarm/recipes/`, so an agent's folder is never read again for it and the
+  `swarm/recipes/<NN>_<label>/<analysis_id>/`, written once and never
+  rewritten, so an agent's folder is never read again for it and the
   agents' own layout and reuse are untouched by the swarm; a verifier's
   physics approval inside the gate's soft band counts, a bypassed verification
   below threshold does not), a human-approved plan (an unattended one stays

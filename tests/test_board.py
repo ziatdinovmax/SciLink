@@ -242,7 +242,7 @@ def test_a_finished_item_posts_what_its_mode_verified(meta):
         assert mine[0]["evidence"]["analysis_ids"] == ["analysis_1"] and mine[0]["subject"] == "TiO2 A7"
         assert mine[0]["payload"]["text"].startswith("anatase from")      # the id prefix is evidence, not text
         # the recipe is a copy the board owns, with its source recorded
-        assert mine[3]["payload"]["path"].endswith(f"swarm/recipes/0{mine[3]['author']['delegation_index']}_{label.replace(' ', '_')}/analysis_script.py")
+        assert mine[3]["payload"]["path"].endswith(f"swarm/recipes/0{mine[3]['author']['delegation_index']}_{label.replace(' ', '_')}/analysis_1/analysis_script.py")
         assert mine[3]["payload"]["source"].endswith("scripts/analysis_script.py")
         assert Path(mine[3]["payload"]["path"]).read_text() == "print('fit')\n"
         assert all(r["reads"] == [] for r in mine)
@@ -957,3 +957,111 @@ def test_meshed_branches_count_once_and_labels_bind_only_earlier_entries(meta, m
     assert meta._analysis_ids_of({"files_produced": ["/s/results/analysis_results.json",
                                                      "/s/results/analysis_x_CurveFit_20260930_143600_001/a.json"]}) == [
         "analysis_x_CurveFit_20260930_143600_001"]
+
+
+# ------------------------------------------------ review of #702, round 8
+def _series_row(aid, unit, script, **kw):
+    return {"analysis_id": aid, "status": "success", "verified": True, "reason": "ok", "series": True,
+            "agent_name": "CurveFittingAgent",
+            "recipes": [{"regime": "R1", "unit": unit, "index": 0, "verified": True, "reason": "ok", "script": script}],
+            **kw}
+
+
+def test_each_recipe_copy_is_written_once_and_kept(tmp_path):
+    """Two series of one delegation anchored on the same unit name, two single
+    runs with the agent's fixed script name, and an entry posted twice: every
+    record keeps its own script; no copy is ever rewritten."""
+    board = Board(tmp_path)
+    entry = {"index": 3, "label": "T series", "mode": "analysis", "status": "success"}
+    result = {"analyses": [_series_row("s1", "spectrum_0000", "M1"), _series_row("s2", "spectrum_0000", "M2")]}
+    ids = board_mod.post_delegation(board, entry, result)
+    recs = {r["payload"]["analysis_id"]: r for r in board.records() if r["kind"] == "recipe"}
+    assert len(ids) == 2 and {Path(recs["s1"]["payload"]["path"]).read_text(),
+                              Path(recs["s2"]["payload"]["path"]).read_text()} == {"M1", "M2"}
+    assert recs["s1"]["payload"]["path"].endswith("swarm/recipes/03_T_series/s1/spectrum_0000.py")
+    assert recs["s2"]["payload"]["path"].endswith("swarm/recipes/03_T_series/s2/spectrum_0000.py")
+    # two single runs, both `fitting_script.py`
+    runs = []
+    for aid, text in (("a1", "F1"), ("a2", "F2")):
+        out = tmp_path / aid
+        (out / "scripts").mkdir(parents=True)
+        (out / "scripts" / "fitting_script.py").write_text(text)
+        runs.append({"analysis_id": aid, "status": "success", "verified": True, "reason": "ok",
+                     "output_directory": str(out), "agent_name": "CurveFittingAgent"})
+    board_mod.post_delegation(board, {**entry, "index": 4}, {"analyses": runs})
+    recs = {r["payload"]["analysis_id"]: r for r in board.records() if r["kind"] == "recipe"}
+    assert [Path(recs[a]["payload"]["path"]).read_text() for a in ("a1", "a2")] == ["F1", "F2"]
+    assert recs["a1"]["payload"]["source"].endswith("a1/scripts/fitting_script.py")
+    # the same entry posted again, with the script changed meanwhile: the first
+    # record's file is untouched, the new record gets its own copy
+    first = Path(recs["s1"]["payload"]["path"])
+    again = {"analyses": [_series_row("s1", "spectrum_0000", "M1-refit")]}
+    board_mod.post_delegation(board, entry, again)
+    newest = [r for r in board.records() if r["kind"] == "recipe"][-1]
+    assert first.read_text() == "M1" and Path(newest["payload"]["path"]).read_text() == "M1-refit"
+    assert Path(newest["payload"]["path"]).name == "spectrum_0000-2.py"
+    # identical content reuses the copy
+    board_mod.post_delegation(board, entry, {"analyses": [_series_row("s1", "spectrum_0000", "M1")]})
+    assert [r for r in board.records() if r["kind"] == "recipe"][-1]["payload"]["path"] == str(first)
+    assert sorted(p.name for p in first.parent.iterdir()) == ["spectrum_0000-2.py", "spectrum_0000.py"]
+
+
+def test_a_long_label_or_a_missing_source_drops_only_what_it_cannot_write(tmp_path):
+    board = Board(tmp_path)
+    entry = {"index": 1, "label": "x" * 300 + "/../ü", "mode": "analysis", "status": "success"}
+    result = {"analyses": [_series_row("s1", "spectrum_0000", "M1"), _series_row("s2", "spectrum_0004", "M4")],
+              "key_findings": ["[s1] a claim"]}
+    ids = board_mod.post_delegation(board, entry, result)
+    recs = board.records()
+    assert len(ids) == 3 and [r["kind"] for r in recs] == ["claim", "recipe", "recipe"]
+    for r in recs[1:]:
+        p = Path(r["payload"]["path"])
+        assert p.is_file() and p.parent.parent.parent == board.path.parent / "recipes"   # inside the board's folder
+        assert len(p.parent.parent.name) <= 3 + board_mod.RECIPE_DIRNAME_MAX
+    # a single run whose script vanished skips that record alone
+    gone = {"analysis_id": "a9", "status": "success", "verified": True, "reason": "ok",
+            "output_directory": str(tmp_path / "nowhere"), "agent_name": "CurveFittingAgent"}
+    (tmp_path / "nowhere" / "scripts").mkdir(parents=True)
+    (tmp_path / "nowhere" / "scripts" / "fitting_script.py").write_text("F")
+    specs_before = board_mod.records_for({**entry, "index": 2}, {"analyses": [gone, _series_row("s3", "u", "M")]})
+    assert [s["kind"] for s in specs_before] == ["recipe", "recipe"]
+    (tmp_path / "nowhere" / "scripts" / "fitting_script.py").unlink()
+    # the file is gone between the spec and the copy (a missing source at copy time)
+    monkey = board_mod._recipe_script
+    board_mod._recipe_script = lambda out_dir, unit=None, *, series=False: (
+        Path(out_dir) / "scripts" / "fitting_script.py" if out_dir and "nowhere" in str(out_dir) else monkey(out_dir, unit, series=series))
+    try:
+        ids = board_mod.post_delegation(board, {**entry, "index": 2}, {"analyses": [gone, _series_row("s3", "u", "M")]})
+    finally:
+        board_mod._recipe_script = monkey
+    assert len(ids) == 1 and board.records()[-1]["payload"]["analysis_id"] == "s3"
+
+
+def test_the_model_sees_the_verdicts_and_the_board_gets_the_scripts(meta, monkeypatch):
+    """A series row's `recipes` (script text) is left off the delegation
+    summary the meta model reads — on a copy, so the board still posts the
+    recipe from the same rows — and the fan-out event log keeps a gist, not
+    the result."""
+    big = "x = 1\n" * 1000                                            # ~6 KB, like a real script
+    result = {"status": "success", "summary": "series done", "key_findings": ["[s1] a trend"],
+              "analyses": [_series_row("s1", "spectrum_0000", big, output_directory="/r/s1")],
+              "files_produced": [], "warnings": []}
+    text = meta._summarize_delegation_result("analysis", result, 7)
+    assert "x = 1" not in text and len(text) < 2000
+    row = json.loads(text)["analyses"][0]
+    assert row["verified"] is True and row["series"] is True and "recipes" not in row
+    assert result["analyses"][0]["recipes"][0]["script"] == big      # the rows were not touched
+    entry = {"index": 7, "label": "T series", "mode": "analysis", "status": "success"}
+    ids = board_mod.post_delegation(meta.board, entry, result)
+    recs = meta.board.records()
+    assert len(ids) == 2 and recs[-1]["kind"] == "recipe" and Path(recs[-1]["payload"]["path"]).read_text() == big
+    # the event log line of a fan-out branch is a gist (status, 300 chars, files), never the result
+    from scilink import session_events
+    log = meta.session_dir / "events.jsonl" if hasattr(meta, "session_dir") else Path(meta.base_dir) / "events.jsonl"
+    session_events.set_thread_event_log(str(log))
+    try:
+        session_events.append_event("fanout_branch", {"label": "T series"}, json.dumps(result, default=str), branch="T series")
+    finally:
+        session_events.set_thread_event_log(None)
+    line = log.read_text().splitlines()[-1]
+    assert "x = 1" not in line and len(line) < 1000 and json.loads(line)["status"] == "success"
