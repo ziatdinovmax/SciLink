@@ -695,8 +695,11 @@ run or a review:
   GATE the author's own pipeline runs passed it — the analysis verifier's
   approval (`analysis_verdict`, read from the shapes the agents write: a
   salvaged, unverified or unapproved result is "success" too and stays
-  provisional; a series needs its anchors approved and its followers verified,
-  a failed unit the agent already excluded does not block; a verifier's
+  provisional; a series unit carries the verdict its driver stamped at fit
+  time — an anchor or refit by its own gate, a follower by the recipe it
+  replayed — and a failed unit the agent already excluded does not block; a
+  decision about a unit is made where the information is, never reconstructed
+  afterwards from markers; a verifier's
   physics approval inside the gate's soft band counts, a bypassed verification
   below threshold does not), a human-approved plan (an unattended one stays
   provisional; only the delegation that wrote or settled the plan posts it),

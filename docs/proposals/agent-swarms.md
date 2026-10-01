@@ -997,6 +997,25 @@ can already hit.
      `not_measurable` target with `task_success: False` would count as
      unapproved in a row and be skipped in a cube — no path produces it,
      and the row carries no per-target records to align on.
+   - *Round 6 of the review, and the end of a cycle:* five rounds each
+     closed one hole in `analysis_verdict` and opened another, because the
+     verdict RECONSTRUCTED after the fact which recipe each unit replayed
+     and whether its gate passed, from markers scattered across units. The
+     root cause was where the decision lived. Now the curve and image
+     series drivers stamp `unit_verdict` on each unit at fit time
+     (`_verification_record.unit_verdict_for`): an anchor or refit by its
+     own gate, a follower by the recipe it replayed and that recipe's
+     verdict as it was then, fresh code as unverified — at the anchor fit,
+     each follower fit (serial and the parallel drain) and every refit
+     replacement, never failing a fit (`stamp_unit_verdict`). The
+     aggregator only aggregates; the marker reconstruction remains for
+     checkpoints from before the stamp (with `regime` now carried). A refit
+     anchor keeps the script its followers replayed as
+     `scripts/<unit>_locked.py`, which the board's recipe and the series
+     reuse path prefer. `tests/test_series_verdict_path.py` drives the real
+     series and refit controllers with only the QC loop and the executor
+     stubbed; fixtures written from a reading of the code are what hid the
+     series cases for five rounds.
    - *Found live:* the curve agent's approved script is
      `scripts/fitting_script.py` (a series: one per spectrum), the image
      agent's `analysis_script.py` — the recipe takes the folder's
