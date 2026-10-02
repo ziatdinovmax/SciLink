@@ -676,7 +676,8 @@ def series_recipes(full_result: Optional[dict]) -> List[Dict[str, Any]]:
                         "reason": (r.get("verdict") or {}).get("reason"), "script": r["script"],
                         "drift_state": r.get("drift_state") if isinstance(r.get("drift_state"), dict) else None,
                         "x_range": r.get("x_range") if isinstance(r.get("x_range"), (int, float)) else None,
-                        "model": r.get("model") if isinstance(r.get("model"), str) else None})
+                        "model": r.get("model") if isinstance(r.get("model"), str) else None,
+                        "gate": r.get("gate") if isinstance(r.get("gate"), dict) else None})
     out.sort(key=lambda r: (r.get("index") if isinstance(r.get("index"), int) else 1 << 30))
     return out
 
@@ -743,19 +744,23 @@ def prior_recipe_candidates(anchor_dir, *, single_name: str, named=None) -> List
     ``drift_state`` (its curve on the drift monitor's grid, recorded at lock
     time; ``None`` on an older run)."""
     pairs = prior_recipe_scripts(anchor_dir, single_name=single_name, named=named)
-    if named is not None or not pairs or pairs[0][1] is None or "locked recipe" not in (pairs[0][1] or ""):
-        return [{"script": t, "label": lbl, "regime": None, "unit": None, "verified": None, "drift_state": None,
-                 "x_range": None, "model": None} for t, lbl in pairs]
     try:
         recorded = json.loads((Path(anchor_dir) / "analysis_results.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, TypeError):
         recorded = None
-    recipes = series_recipes(recorded if isinstance(recorded, dict) else None)
+    recorded = recorded if isinstance(recorded, dict) else {}
+    # the gate the prior RUN was held to: what a recipe with no gate of its
+    # own (a single run's script, a named unit script) is replayed under
+    run_gate = recorded.get("quality_gate") if isinstance(recorded.get("quality_gate"), dict) else None
+    if named is not None or not pairs or pairs[0][1] is None or "locked recipe" not in (pairs[0][1] or ""):
+        return [{"script": t, "label": lbl, "regime": None, "unit": None, "verified": None, "drift_state": None,
+                 "x_range": None, "model": None, "gate": run_gate} for t, lbl in pairs]
+    recipes = series_recipes(recorded)
     out = []
     for (t, lbl), r in zip(pairs, recipes):
         out.append({"script": t, "label": lbl, "regime": r.get("regime"), "unit": r.get("unit"),
                     "verified": r.get("verified"), "drift_state": r.get("drift_state"), "x_range": r.get("x_range"),
-                    "model": r.get("model")})
+                    "model": r.get("model"), "gate": r.get("gate") or run_gate})
     return out
 
 

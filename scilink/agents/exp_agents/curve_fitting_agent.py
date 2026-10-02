@@ -2184,6 +2184,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # units' stamps. What "verified" means to a reader — the board,
         # run_task's rows — is decided here, never reconstructed later.
         from ._verification_record import final_verdict_record
+        from .quality_gate import gate_record
+        # the gate this run was held to, so a later replay of its recipe is
+        # held to the same one (a reuse run resolves its own gate from
+        # whatever skill it was or was not given, which is not the recipe's)
+        if gate_record(state.get("quality_gate")) is not None:
+            results["quality_gate"] = gate_record(state.get("quality_gate"))
         try:
             results["verdict"] = final_verdict_record(results)
         except Exception as exc:  # noqa: BLE001 - a stamp never fails a run

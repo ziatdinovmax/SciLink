@@ -23,6 +23,15 @@
     "model_type": "Gaussian + linear background",
     "output_directory": "<OUTDIR>",
     "profile": "realtime",
+    "quality_gate": {
+      "accept_threshold": 0.95,
+      "best_value": 1.0,
+      "direction": "higher_is_better",
+      "hard_reject_threshold": 0.9,
+      "metric": "r_squared",
+      "physical_review": true,
+      "value_source": "result"
+    },
     "quality_history": {
       "produced_under_profile": "realtime"
     },
