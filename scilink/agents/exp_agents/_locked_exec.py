@@ -28,6 +28,7 @@ import os
 from pathlib import Path
 
 import numpy as np
+from typing import Optional
 
 _LOG = logging.getLogger(__name__)
 
@@ -165,7 +166,8 @@ TIMEOUT_GROWTH = 2.0
 TIMEOUT_HARD_CAP_S = 1800
 
 
-def escalate_timeouts(attempt, *, base_timeout: int, timed_out, logger=None):
+def escalate_timeouts(attempt, *, base_timeout: int, timed_out, logger=None,
+                      remaining_s=None, escalations: Optional[int] = None):
     """The timeout policy every analysis agent runs generated code under
     (#699): a script that is merely SLOW gets more time before anyone calls
     it broken. ``attempt(timeout_s)`` runs the same script once under that
@@ -175,27 +177,43 @@ def escalate_timeouts(attempt, *, base_timeout: int, timed_out, logger=None):
     ``TIMEOUT_ESCALATIONS`` retries bounded by ``TIMEOUT_HARD_CAP_S``; any
     other outcome is returned at once (a genuine error is the correction
     loop's job). The final, still-timed-out outcome is returned unchanged so
-    the correction loop sees the standard message. Returns ``(out, timeout_s)``
-    — the outcome and the limit it was produced under, which a locked replay
-    of the script may start from."""
+    the correction loop sees the standard message. ``remaining_s`` (a
+    callable giving the seconds left on the run's deadline, or a number)
+    clamps every limit to what is left — a retry never runs past the
+    deadline — and ``escalations`` (default ``TIMEOUT_ESCALATIONS``; 0 for a
+    strict replay, which must fail fast) bounds the retries. Returns
+    ``(out, timeout_s)`` — the outcome and the limit it was produced under,
+    which a locked replay of the script may start from."""
     log = logger or _LOG
+    budget = TIMEOUT_ESCALATIONS if escalations is None else max(0, int(escalations))
+
+    def left():
+        r = remaining_s() if callable(remaining_s) else remaining_s
+        return None if r is None else max(1, int(r))
     current = int(base_timeout)
+    r0 = left()
+    if r0 is not None:
+        current = min(current, r0)
     out = None
-    for esc in range(TIMEOUT_ESCALATIONS + 1):
+    for esc in range(budget + 1):
         out = attempt(current)
         if not timed_out(out):
             return out, current
         next_timeout = min(int(current * TIMEOUT_GROWTH), TIMEOUT_HARD_CAP_S)
-        if next_timeout <= current or esc >= TIMEOUT_ESCALATIONS:
+        r = left()
+        if r is not None:
+            next_timeout = min(next_timeout, r)
+        if next_timeout <= current or esc >= budget:
             log.warning(
                 f"    ⏱  Timed out at {current}s; escalation budget exhausted "
-                f"({TIMEOUT_ESCALATIONS} retries, {TIMEOUT_HARD_CAP_S}s cap) "
-                f"— handing the timeout to the correction loop."
+                f"({budget} retries, {TIMEOUT_HARD_CAP_S}s cap"
+                + (", the run's deadline" if r is not None and next_timeout >= r else "")
+                + ") — handing the timeout to the correction loop."
             )
             return out, current
         log.warning(
             f"    ⏱  Script timed out at {current}s — retrying same script "
-            f"with {next_timeout}s (escalation {esc + 1}/{TIMEOUT_ESCALATIONS})"
+            f"with {next_timeout}s (escalation {esc + 1}/{budget})"
         )
         current = next_timeout
     return out, current
