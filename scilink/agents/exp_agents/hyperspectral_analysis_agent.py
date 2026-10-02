@@ -1509,7 +1509,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "confidence", "output_directory", "error", "flagged",
                     "flag_reason", "flag_details", "adaptively_refitted",
                     "reuse_validity", "quality_metrics", "warnings", "regime",
-                    "locked_schema_gap", "schema_aliases", "verified")
+                    "locked_schema_gap", "schema_aliases", "verified", "unit_verdict")
                 if k in r})
             individual[-1]["n_features"] = len(r.get("extracted_features") or {})
 

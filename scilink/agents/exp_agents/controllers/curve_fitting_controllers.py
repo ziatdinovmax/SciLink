@@ -5129,7 +5129,7 @@ Return JSON with:
 
         def judge(result: dict) -> dict:
             rv = gate.judge(r2_of(result))
-            if rv["verdict"] != "good":
+            if rv["verdict"] != "good" and len(subdirs) < len(candidates):     # a next candidate exists
                 self.logger.info(f"   ↪ R² = {rv['score']:.4f} below {self.r2_threshold:.3f}; "
                                  "trying the next regime's recipe")
             return rv

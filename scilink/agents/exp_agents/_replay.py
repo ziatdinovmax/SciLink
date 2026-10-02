@@ -47,9 +47,7 @@ def verdict_record(*, verified: bool, reason: str, decided_by: str, regime: Opti
     if decided_by not in DECIDERS:
         raise ValueError(f"decided_by must be one of {DECIDERS}, not {decided_by!r}")
     rec: Dict[str, Any] = {"verified": bool(verified), "reason": str(reason), "decided_by": decided_by,
-                           "interpretation_checked": bool(interpretation_checked)}
-    if regime is not None:
-        rec["regime"] = regime
+                           "interpretation_checked": bool(interpretation_checked), "regime": regime}
     if recipe_of is not None:
         rec["recipe_of"] = recipe_of
     if score is not None:

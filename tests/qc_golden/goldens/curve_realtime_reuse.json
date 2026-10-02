@@ -44,6 +44,7 @@
       "interpretation_checked": false,
       "own_gate": true,
       "reason": "locked-script reuse passed the replay gate",
+      "regime": null,
       "score": 0.995,
       "threshold": 0.95,
       "verified": true

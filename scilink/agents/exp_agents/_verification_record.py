@@ -561,7 +561,9 @@ def final_verdict_record(final: Dict[str, Any]) -> Dict[str, Any]:
     elif isinstance(final.get("individual_results"), list) and final["individual_results"]:
         decided = "qc_gate"
     elif isinstance(records, list) and records:
-        replayed = any(isinstance(r, dict) and r.get("replay") for r in records) or bool(
+        # a cube's records say ``locked_replay`` (the controller's key); the
+        # response's ``script_reuse`` says it too, verbatim or repaired
+        replayed = any(isinstance(r, dict) and r.get("locked_replay") for r in records) or bool(
             (final.get("script_reuse") or {}).get("verbatim"))
         decided = "replay_gate" if replayed else "qc_gate"
     elif rv.get("reused") and not _has_record(final.get("quality_history")):

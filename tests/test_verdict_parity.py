@@ -216,14 +216,22 @@ def test_hyperspectral_series_rows_stamp_equals_the_legacy_row_rule():
             for i, (k, v) in enumerate(cubes.items())}
     for k, row in rows.items():
         assert is_verdict_record(row["unit_verdict"]), k
-        # as analyze_series projects a row into the response (n_features beside the row's keys)
-        row["n_features"] = len(row.get("extracted_features") or {})
     assert rows["verbatim_replay"]["unit_verdict"]["decided_by"] == "replay_gate"
-    # every combination the series driver can hand to a reader
+    # every combination the series driver can hand to a reader, assembled by the
+    # agent's own _compile_series_results (the response's rows and its stamp)
+    from scilink.agents.exp_agents.hyperspectral_analysis_agent import HyperspectralAnalysisAgent
     import itertools
+    agent = object.__new__(HyperspectralAnalysisAgent)
+    agent.output_dir = Path("/o")
+    agent._validate_scientific_claims = lambda claims: claims
+    agent._scout_summary = lambda scout: None
     names = list(rows)
     for k in range(1, 4):
         for combo in itertools.combinations(names, k):
-            final = {"status": "success", "individual_results": [copy.deepcopy(rows[n]) for n in combo]}
-            final["verdict"] = final_verdict_record(final)
+            state = {"series_results": [copy.deepcopy(rows[n]) for n in combo],
+                     "synthesis_result": {"detailed_analysis": "d", "scientific_claims": []}}
+            final = agent._compile_series_results(state, None)
+            assert all(is_verdict_record(r.get("unit_verdict")) for r in final["individual_results"]), combo
             _check(final, f"hs series rows {combo}", hs_rows=True)
+            # the response's own stamp says who decided; a series that is not "success" has none to decide
+            assert final["verdict"]["decided_by"] == ("qc_gate" if final["status"] == "success" else "none"), combo
