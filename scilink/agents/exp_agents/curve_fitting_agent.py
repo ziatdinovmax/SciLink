@@ -2143,6 +2143,10 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     # The driver's verdict on the unit, stamped when it knew
                     # the recipe and the gate result (unit_verdict_for).
                     **({"unit_verdict": r["unit_verdict"]} if r.get("unit_verdict") else {}),
+                    # a follower's cheap checks against its regime's anchor
+                    # (the state distance, the identity block): what its
+                    # unit verdict's interpretation_checked rests on
+                    **({"regime_checks": r["regime_checks"]} if r.get("regime_checks") else {}),
                 }
                 for r in series_results
             ]

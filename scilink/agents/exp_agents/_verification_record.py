@@ -319,6 +319,7 @@ def unit_verdict_for(unit: Dict[str, Any], *, recipe: Optional[Dict[str, Any]] =
         # start) writes no QC record: the replay gate is its own gate
         good = rv.get("verdict") == "good"
         return verdict_record(verified=good, decided_by="replay_gate", regime=regime,
+                              interpretation_checked=interpretation_checked_by(rv),
                               reason=("locked-script reuse passed the replay gate" if good
                                       else f"reused script verdict {rv.get('verdict')!r}"))
     if (unit.get("quality_history") or {}).get("unverified"):
@@ -328,7 +329,10 @@ def unit_verdict_for(unit: Dict[str, Any], *, recipe: Optional[Dict[str, Any]] =
                               reason="fitted without a locked recipe (its regime's anchor produced none)")
     rv = recipe.get("verdict") or {}
     if rv.get("verified"):
+        # a follower is certified by the cheap checks against its regime's
+        # anchor (``regime_checks``, the series driver's), when they agree
         return verdict_record(verified=True, decided_by="recipe", regime=regime, recipe_of=recipe.get("unit"),
+                              interpretation_checked=interpretation_checked_by(unit.get("regime_checks")),
                               reason=f"replayed the locked recipe of unit {recipe.get('unit')}, whose gate passed")
     return verdict_record(verified=False, decided_by="recipe", regime=regime, recipe_of=recipe.get("unit"),
                           reason=f"replayed the locked recipe of unit {recipe.get('unit')}, which was "
@@ -383,7 +387,9 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
         # The agent stamped its verdict when the result was final
         # (``final_verdict_record``): read it. The reconstruction serves
         # results from before the stamp.
-        return {"verified": stamped["verified"], "reason": stamped["reason"]}
+        return {"verified": stamped["verified"], "reason": stamped["reason"],
+                "decided_by": stamped.get("decided_by"),
+                "interpretation_checked": bool(stamped.get("interpretation_checked"))}
     return reconstructed_verdict(full)
 
 
@@ -543,6 +549,24 @@ def _hyperspectral_cube_verdict(hs_records: List[Any]) -> Dict[str, Any]:
         return {"verified": True, "reason": "every target passed verification"}
 
 
+def interpretation_checked_by(rv: Optional[Dict[str, Any]]) -> bool:
+    """A replay's numbers passing the gate says nothing about WHAT was
+    measured (#711); the interpretation counts as checked only on clean
+    evidence: the identity check ran and was within (against one reference
+    unit too — a miss only withholds), and the data is the regime's state
+    under the CERTIFICATION bar (``CERTIFY_STATE_BAR``, tighter than the flag
+    bar: a fixed-position recipe cannot report an impurity or a low mixture,
+    so the state distance is the only check that sees them). Reads the
+    ``identity`` / ``state_distance`` keys of a reuse record or of a series
+    follower's ``regime_checks``."""
+    from ._replay import CERTIFY_STATE_BAR
+    rv = rv or {}
+    idc = rv.get("identity") or {}
+    dist = rv.get("state_distance")
+    return bool(idc.get("checked") and idc.get("within")
+                and isinstance(dist, (int, float)) and dist <= CERTIFY_STATE_BAR)
+
+
 def final_verdict_record(final: Dict[str, Any]) -> Dict[str, Any]:
     """The verdict an agent stamps on its result when it is final
     (``final["verdict"]``): a single curve or image run, a series (the
@@ -556,23 +580,47 @@ def final_verdict_record(final: Dict[str, Any]) -> Dict[str, Any]:
     v = reconstructed_verdict(final)
     rv = final.get("reuse_validity") or {}
     records = final.get("dynamic_analysis_records") or []
+    units = final.get("individual_results") if isinstance(final.get("individual_results"), list) else None
+    checked = False
     if final.get("status") != "success":
         decided = "none"
-    elif isinstance(final.get("individual_results"), list) and final["individual_results"]:
-        decided = "qc_gate"
+    elif units:
+        # a series whose ANCHOR replayed a prior recipe (a reuse on a series
+        # run) rests on that replay's gate, as the same replay as a single
+        # run does — its followers replayed the same recipe. Followers that
+        # are themselves replays (a hyperspectral series replays its own
+        # anchor's script) are the series' mechanics, not a prior replay.
+        ok_units = [u for u in units if isinstance(u, dict) and u.get("success")]
+        stamps = [u.get("unit_verdict") or {} for u in ok_units]
+        anchors = [u for u in ok_units if u.get("role") == "anchor"] or ok_units[:1]
+        decided = ("replay_gate" if any((u.get("unit_verdict") or {}).get("decided_by") == "replay_gate" for u in anchors)
+                   else "qc_gate")
+        # a series' interpretation is checked only when every unit's was —
+        # an anchor's verifier reviews the fit, not the claims; a follower
+        # is checked against its regime's anchor (regime_checks)
+        checked = bool(stamps) and all(st.get("interpretation_checked") for st in stamps)
     elif isinstance(records, list) and records:
         # a cube's records say ``locked_replay`` (the controller's key); the
         # response's ``script_reuse`` says it too, verbatim or repaired
         replayed = any(isinstance(r, dict) and r.get("locked_replay") for r in records) or bool(
             (final.get("script_reuse") or {}).get("verbatim"))
         decided = "replay_gate" if replayed else "qc_gate"
+        # a cube replay's required maps were held to the anchor's statistics
+        # when a reference was there (the map gate's range rule): its identity
+        # check. A fresh cube's reviewer judged its maps, not its claims — the
+        # curve rule — so it is not checked.
+        checked = replayed and all(r.get("identity_checked") for r in records
+                                   if isinstance(r, dict) and r.get("locked_replay"))
     elif rv.get("reused") and not _has_record(final.get("quality_history")):
         decided = "replay_gate"
+        checked = interpretation_checked_by(rv)
     elif _has_record(final.get("quality_history")):
         decided = "qc_gate"
+        checked = False                     # the verifier reviews the fit, not the claims
     else:
         decided = "none"
     return verdict_record(verified=v["verified"], reason=v["reason"], decided_by=decided,
+                          interpretation_checked=bool(checked and v["verified"]),
                           score=next((v for v in (rv.get("r_squared"), rv.get("quality_score"),
                                                   (final.get("quality_history") or {}).get("final_r2"),
                                                   (final.get("quality_history") or {}).get("final_score"))
@@ -609,7 +657,9 @@ def series_recipes(full_result: Optional[dict]) -> List[Dict[str, Any]]:
         if isinstance(r, dict) and isinstance(r.get("script"), str) and r["script"] and r.get("unit"):
             out.append({"regime": r.get("regime") or regime, "unit": str(r["unit"]), "index": r.get("index"),
                         "verified": bool((r.get("verdict") or {}).get("verified")),
-                        "reason": (r.get("verdict") or {}).get("reason"), "script": r["script"]})
+                        "reason": (r.get("verdict") or {}).get("reason"), "script": r["script"],
+                        "drift_state": r.get("drift_state") if isinstance(r.get("drift_state"), dict) else None,
+                        "x_range": r.get("x_range") if isinstance(r.get("x_range"), (int, float)) else None})
     out.sort(key=lambda r: (r.get("index") if isinstance(r.get("index"), int) else 1 << 30))
     return out
 
@@ -667,6 +717,28 @@ def prior_recipe_scripts(anchor_dir, *, single_name: str, named=None) -> List[Tu
     if py_files:
         return [(py_files[0].read_text(encoding="utf-8"), f"{py_files[0].name} (representative of the series)")]
     return []
+
+
+def prior_recipe_candidates(anchor_dir, *, single_name: str, named=None) -> List[Dict[str, Any]]:
+    """``prior_recipe_scripts`` with what a choice among regimes needs: one
+    dict per candidate — ``script``, ``label``, and for a series' locked
+    recipe its ``regime``, ``unit``, ``verified`` and the anchor's
+    ``drift_state`` (its curve on the drift monitor's grid, recorded at lock
+    time; ``None`` on an older run)."""
+    pairs = prior_recipe_scripts(anchor_dir, single_name=single_name, named=named)
+    if named is not None or not pairs or pairs[0][1] is None or "locked recipe" not in (pairs[0][1] or ""):
+        return [{"script": t, "label": lbl, "regime": None, "unit": None, "verified": None, "drift_state": None,
+                 "x_range": None} for t, lbl in pairs]
+    try:
+        recorded = json.loads((Path(anchor_dir) / "analysis_results.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        recorded = None
+    recipes = series_recipes(recorded if isinstance(recorded, dict) else None)
+    out = []
+    for (t, lbl), r in zip(pairs, recipes):
+        out.append({"script": t, "label": lbl, "regime": r.get("regime"), "unit": r.get("unit"),
+                    "verified": r.get("verified"), "drift_state": r.get("drift_state"), "x_range": r.get("x_range")})
+    return out
 
 
 def prior_recipe_script(anchor_dir, *, single_name: str, named=None):

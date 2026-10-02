@@ -29,10 +29,18 @@
     "reuse_validity": {
       "drift": "none",
       "fingerprint_similarity": 1.0,
+      "identity": {
+        "checked": true,
+        "compared": 1,
+        "drifted": [],
+        "spread_known": false,
+        "within": true
+      },
       "message": "Reused the locked fitting script from prior run 'prior'; R² = 0.9950 meets the acceptance threshold 0.950.",
       "r_squared": 0.995,
       "reused": true,
       "source": "prior",
+      "state_distance": 0.0,
       "threshold": 0.95,
       "verdict": "good"
     },
@@ -41,7 +49,7 @@
     "task_mode": "fitting",
     "verdict": {
       "decided_by": "replay_gate",
-      "interpretation_checked": false,
+      "interpretation_checked": true,
       "own_gate": true,
       "reason": "locked-script reuse passed the replay gate",
       "regime": null,
@@ -53,10 +61,18 @@
   "reuse_validity": {
     "drift": "none",
     "fingerprint_similarity": 1.0,
+    "identity": {
+      "checked": true,
+      "compared": 1,
+      "drifted": [],
+      "spread_known": false,
+      "within": true
+    },
     "message": "Reused the locked fitting script from prior run 'prior'; R² = 0.9950 meets the acceptance threshold 0.950.",
     "r_squared": 0.995,
     "reused": true,
     "source": "prior",
+    "state_distance": 0.0,
     "threshold": 0.95,
     "verdict": "good"
   }
