@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 import json
 import os
+import time as _time_mod
 import re
 import inspect
 from datetime import datetime
@@ -1034,6 +1035,13 @@ def _map_valid_coverage(result_map) -> tuple[float, int]:
     _real = _finite & (np.abs(result_map) > 0)
     n_valid = int(_real.sum())
     return 100.0 * n_valid / max(result_map.size, 1), n_valid
+
+
+def _sandbox_timeout(exc: BaseException) -> bool:
+    """The sandbox's own limit (``ExecutionTimeout``), not a ``TimeoutError``
+    a script raised itself (a socket, a future): only the former means
+    "merely slow"."""
+    return isinstance(exc, TimeoutError) and "Code execution timed out after" in str(exc)
 
 
 # The per-map replay gate lives with the shared replay policies (#712); the
@@ -3904,10 +3912,11 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             # Curve/image parity: execution-level failures (unparsable
             # response, syntax/runtime error, non-dict return) are repaired
             # in place with the traceback — no ladder budget spent, no
-            # annealing movement. Timeouts are EXCLUDED: rerunning
-            # near-identical too-slow code burns the full cap again, so they
-            # go to the ladder, whose critique feedback can restructure the
-            # method. QC rejections remain ladder currency as before.
+            # annealing movement. A timeout is first given more time (the
+            # shared escalation below: the same script under a doubled
+            # limit, within the run's deadline); a script still too slow
+            # then goes to the ladder, whose critique feedback can
+            # restructure the method. QC rejections remain ladder currency.
             code_str, result_dict, _mech_tb = "", None, ""
             # A strict replay (a live frame) never calls a model: a locked
             # script that raises FAILS the frame, which is what tells a live
@@ -3976,6 +3985,12 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     from .._locked_exec import escalate_timeouts
                     _base_timeout = max(int(self.executor_timeout),
                                         int(getattr(ctx, "locked_timeout_s", 0) or 0))
+                    ctx.timeout_used_s = None            # per attempt: a swallowed or failed run leaves none
+                    _run_deadline = state.get("_run_deadline")
+
+                    def _remaining_s():
+                        # what is left on the run's deadline, if it has one
+                        return None if _run_deadline is None else _run_deadline - _time_mod.monotonic()
 
                     def _attempt(_timeout_s: int):
                         _scope_g, _scope_l = dict(global_scope), {}
@@ -3989,12 +4004,20 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                                     _scope_l["analyze_feature"], optimal_data, state["energy_axis"], reconstruction,
                                     auxiliary=auxiliary_operands, fit_mask=fit_mask,
                                 )
-                        except Exception as _exc:    # noqa: BLE001 - a TimeoutError is the policy's outcome,
-                            return _exc              # anything else is re-raised below with the script's traceback
+                        except Exception as _exc:    # noqa: BLE001 - the sandbox's TimeoutError is the policy's
+                            if _sandbox_timeout(_exc):   # outcome; anything else is re-raised below
+                                # the timed-out attempt's frames hold the script's arrays:
+                                # let them go before the same script runs again
+                                _exc.__traceback__ = None
+                                _scope_g.clear(); _scope_l.clear()
+                            return _exc
                     result_dict, _timeout_used = escalate_timeouts(
                         _attempt, base_timeout=_base_timeout,
-                        timed_out=lambda out: isinstance(out, TimeoutError), logger=self.logger)
-                    if isinstance(result_dict, TimeoutError):
+                        timed_out=lambda out: isinstance(out, TimeoutError) and _sandbox_timeout(out),
+                        logger=self.logger, remaining_s=_remaining_s,
+                        # a live frame must fail fast: no escalation on the fast clock
+                        escalations=0 if state.get("_strict_replay") else None)
+                    if isinstance(result_dict, TimeoutError) and _sandbox_timeout(result_dict):
                         raise result_dict          # ladder currency, as before, once the budget is spent
                     if isinstance(result_dict, Exception):
                         # Raised here, without this wrapper's frame, so the
