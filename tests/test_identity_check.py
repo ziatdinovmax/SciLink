@@ -56,11 +56,19 @@ def test_identity_features_and_reference_read_what_a_recipe_found():
     # names match as one string without spaces (a group under its settings and spellings) or as token sets
     # (a qualifier in parentheses does not erase the phase: "TiO2 (anatase)" against "TiO2 (rutile)" differs)
     m = _replay.names_match
-    assert m(_replay._norm_label("I41/amd"), _replay._norm_label("I 41/a m d :2")) and m(_replay._norm_label("R -3 m :H"), "r-3m")
+    assert m(_replay._norm_label("I41/amd"), _replay._norm_label("I 41/a m d :2")) and m(_replay._norm_label("R -3 m :H", "space_group"), "r-3m")
     # a bar is part of its digit's token (P-1 is not P1, R-3c is not R3c); a Greek letter is spelled out (alpha is not gamma)
-    assert not m(_replay._norm_label("R -3 m :H"), "r 3 m") and not m(_replay._norm_label("P-1"), "p1") and not m(_replay._norm_label("R-3c"), "r3c")
+    assert not m(_replay._norm_label("R -3 m :H", "space_group"), "r 3 m") and not m(_replay._norm_label("P-1", "space_group"), "p1")
+    assert not m(_replay._norm_label("R-3c", "sg"), "r3c")
     assert _replay._norm_label("α-Fe2O3") == "alpha fe2o3" and not m(_replay._norm_label("α-Fe2O3"), _replay._norm_label("γ-Fe2O3"))
-    assert m(_replay._norm_label("Pm−3m"), _replay._norm_label("P m -3 m"))                    # a minus sign is a bar
+    sg = "space_group"
+    assert m(_replay._norm_label("Pm−3m", sg), _replay._norm_label("P m -3 m", sg))            # a minus sign is a bar
+    # round 5: subscripts are digits (NFKC), a screw axis joins, and the bar rule is for space-group keys only
+    assert not m(_replay._norm_label("Fe₃O₄"), _replay._norm_label("Fe₂O₃")) and not m(_replay._norm_label("TiO₂"), _replay._norm_label("TiO"))
+    assert m(_replay._norm_label("P4_2/mnm", sg), _replay._norm_label("P42/mnm", sg)) and not m(_replay._norm_label("P4_2/mnm", sg), _replay._norm_label("P4/mnm", sg))
+    assert not m(_replay._norm_label("P2_1/c", sg), _replay._norm_label("P2/c", sg))
+    assert m(_replay._norm_label("ZIF-8"), _replay._norm_label("ZIF8")) and m(_replay._norm_label("UiO-66", "phase"), "uio66")
+    assert not m(_replay._norm_label("Fm-3m", sg), _replay._norm_label("Fm3m", sg))
     assert m(_replay._norm_label("anatase (TiO2)"), "anatase") and m("tio2 anatase", "anatase")
     assert not m(_replay._norm_label("TiO2 (anatase)"), _replay._norm_label("TiO2 (rutile)")) and not m("hematite fe2o3", "maghemite fe2o3")
     assert not m("141", "i41amd")                                               # a number vs a symbol: still a table's job

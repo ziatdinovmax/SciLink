@@ -355,23 +355,33 @@ _GREEK = {"α": "alpha", "β": "beta", "γ": "gamma", "δ": "delta", "ε": "epsi
           "σ": "sigma", "τ": "tau", "φ": "phi", "χ": "chi", "ψ": "psi", "ω": "omega"}
 
 
-def _norm_label(value: Any) -> str:
-    """A name as identity: lower case, a Greek letter spelled out (α-Fe2O3 is
-    not γ-Fe2O3), a trailing space-group SETTING dropped (``I 41/a m d :2``
-    and ``I41/amd`` are one group), a bar kept on the digit it negates
-    (``P-1`` is not ``P1``, ``R-3c`` is not ``R3c``), every other run of
-    non-alphanumerics one space — so the TOKENS survive (``TiO2 (anatase)``
+_SPACE_GROUP_WORDS = ("space", "group", "symmetry", "sg")
+
+
+def _norm_label(value: Any, key: Any = None) -> str:
+    """A name as identity: NFKC-folded (``TiO₂`` is ``TiO2``, not ``TiO``),
+    lower case, a Greek letter spelled out (α-Fe2O3 is not γ-Fe2O3), a
+    screw-axis underscore joined (``P4_2/mnm`` is ``P42/mnm``), a trailing
+    space-group SETTING dropped (``I 41/a m d :2`` and ``I41/amd`` are one
+    group), and — for a SPACE-GROUP key only — a bar kept on the digit it
+    negates (``P-1`` is not ``P1``, ``R-3c`` is not ``R3c``); in any other
+    name a hyphen separates (``ZIF-8`` is ``ZIF8``). Every other run of
+    non-alphanumerics is one space, so the TOKENS survive (``TiO2 (anatase)``
     is {tio2, anatase}, not "tio2": a stripped qualifier erased the phase).
     ``names_match`` compares two of these. A number against a symbol (141
     vs I41/amd) still differs: that needs a table, not a rule."""
     import re as _re
-    text = str(value).strip().lower()
+    import unicodedata as _ud
+    text = _ud.normalize("NFKC", str(value)).strip().lower()
     for g, latin in _GREEK.items():
         text = text.replace(g, latin + " ")
-    text = _re.sub(r"\s*:\s*[a-z0-9]{1,2}\s*$", "", text)       # a trailing ":2" / ":h" setting
-    text = _re.sub(r"[\u2212\u2013\u2014]", "-", text)             # a minus or a dash is a bar
-    text = _re.sub(r"-(?!\d)", " ", text)                           # a hyphen not before a digit separates
-    return " ".join(_re.split(r"[^0-9a-z\-]+", text)).strip()
+    text = text.replace("_", "")                                      # a screw axis: 4_2 is 42
+    text = _re.sub(r"\s*:\s*[a-z0-9]{1,2}\s*$", "", text)          # a trailing ":2" / ":h" setting
+    text = _re.sub(r"[\u2212\u2013\u2014]", "-", text)                # a minus or a dash is a bar
+    if key is not None and any(w in str(key).lower() for w in _SPACE_GROUP_WORDS):
+        text = _re.sub(r"-(?!\d)", " ", text)                          # a hyphen not before a digit separates
+        return " ".join(_re.split(r"[^0-9a-z\-]+", text)).strip()
+    return " ".join(_re.split(r"[^0-9a-z]+", text)).strip()
 
 
 def names_match(a: str, b: str) -> bool:
@@ -404,7 +414,7 @@ def identity_features(parameters: Any) -> Dict[str, Any]:
         if isinstance(v, dict):
             groups.setdefault(key, {}).update({str(kk): vv for kk, vv in v.items()})
         elif isinstance(v, str) and v.strip() and any(w in key.lower() for w in _IDENTITY_WORDS):
-            out["names"][key] = _norm_label(v)
+            out["names"][key] = _norm_label(v, key)
         elif isinstance(v, (int, float)) and not isinstance(v, bool):
             # a flat layout: peak1_center / peak1_amplitude → component "peak1";
             # bare center / amplitude / sigma → the one component of a single fit

@@ -1057,9 +1057,9 @@ def _restamp_regimes(output_dir, recipe_by_regime: dict, series_results: list) -
     """When the series is done, each regime's recipe records the regime's
     UNITS' curves (``_replay.drift_state_of_curves``, from the units' data
     files), not its anchor's alone: a later reuse is then held to the
-    regime's spread. An anchor-only stamp failed half of a regime's own
-    units in review. A regime whose units' files cannot be read keeps the
-    anchor's stamp."""
+    regime's spread (an anchor-only stamp fails units of its own regime
+    that drifted along it). A regime whose units' files cannot be read
+    keeps the anchor's stamp."""
     from .._replay import drift_state_of_curves
     by_regime: Dict[Any, list] = {}
     for r in series_results or []:

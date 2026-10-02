@@ -283,7 +283,9 @@ spread is not required: a miss only withholds), and a series' followers are
 checked the same cheap way against their regime's anchor (`_check_follower`
 → `regime_checks`), so a series whose anchor replayed a prior recipe can
 post a verified claim when every unit certified; without that, a single-run
-reuse and every series reuse were provisional forever. A hyperspectral
+reuse and every series reuse were provisional forever. This is the curve
+agent's: an image reuse has no identity check on its `reuse_validity` and
+is never certified, so its claims stay provisional (verified on `main`). A hyperspectral
 replay's `identity_checked` is the map gate's range rule — every required
 map inside the anchor's plausible range — a weaker certificate than the
 curve's two checks. The verdict stays the gate's, on the fast clock and

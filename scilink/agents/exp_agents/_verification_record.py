@@ -596,8 +596,8 @@ def final_verdict_record(final: Dict[str, Any]) -> Dict[str, Any]:
         decided = ("replay_gate" if any((u.get("unit_verdict") or {}).get("decided_by") == "replay_gate" for u in anchors)
                    else "qc_gate")
         # a series' interpretation is checked only when every unit's was —
-        # an anchor's verifier reviews the fit, not the claims, and a
-        # follower verified by its recipe inherits no check
+        # an anchor's verifier reviews the fit, not the claims; a follower
+        # is checked against its regime's anchor (regime_checks)
         checked = bool(stamps) and all(st.get("interpretation_checked") for st in stamps)
     elif isinstance(records, list) and records:
         # a cube's records say ``locked_replay`` (the controller's key); the
