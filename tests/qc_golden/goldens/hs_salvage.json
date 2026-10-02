@@ -198,7 +198,8 @@
       "salvaged": true,
       "script": "def analyze_feature(data, energy_axis):\n    import numpy as np\n    arr = np.asarray(data)\n    return {\n        \"maps\": {\n            \"edge_jump\": arr[:, :, -1] - arr[:, :, 0],\n            \"mean_map\": arr.mean(axis=2),\n        },\n        \"units\": {\"edge_jump\": \"a.u.\", \"mean_map\": \"a.u.\"},\n        \"description\": \"edge jump and mean intensity\",\n    }\n",
       "target": "quantify the edge jump per pixel",
-      "task_success": false
+      "task_success": false,
+      "timeout_used_s": 60
     }
   ]
 }

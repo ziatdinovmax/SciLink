@@ -3987,13 +3987,18 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                                     _scope_l["analyze_feature"], optimal_data, state["energy_axis"], reconstruction,
                                     auxiliary=auxiliary_operands, fit_mask=fit_mask,
                                 )
-                        except TimeoutError as _te:
-                            return _te
+                        except Exception as _exc:    # noqa: BLE001 - a TimeoutError is the policy's outcome,
+                            return _exc              # anything else is re-raised below with the script's traceback
                     result_dict, _timeout_used = escalate_timeouts(
                         _attempt, base_timeout=_base_timeout,
                         timed_out=lambda out: isinstance(out, TimeoutError), logger=self.logger)
                     if isinstance(result_dict, TimeoutError):
                         raise result_dict          # ladder currency, as before, once the budget is spent
+                    if isinstance(result_dict, Exception):
+                        # Raised here, without this wrapper's frame, so the
+                        # traceback the correction prompt shows is the script's.
+                        _tb = result_dict.__traceback__
+                        raise result_dict.with_traceback(_tb.tb_next if _tb is not None and _tb.tb_next else _tb)
                     ctx.timeout_used_s = _timeout_used
                     if not isinstance(result_dict, dict):
                         raise ValueError("Function return must be a dict.")

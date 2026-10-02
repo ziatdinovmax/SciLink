@@ -52,7 +52,8 @@
       "salvaged": false,
       "script": "def analyze_feature(data, energy_axis):\n    import numpy as np\n    return {\n        \"maps\": {\"mean_map\": np.asarray(data).mean(axis=2)},\n        \"units\": \"a.u.\",\n        \"description\": \"per-pixel mean intensity\",\n    }\n",
       "target": "map the mean intensity per pixel",
-      "task_success": true
+      "task_success": true,
+      "timeout_used_s": 60
     }
   ]
 }
