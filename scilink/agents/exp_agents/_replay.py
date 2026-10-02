@@ -79,8 +79,11 @@ class ScoreReplayGate:
     vision-review score. ``accept`` is the agent's ``is_accept`` (the soft
     band included, as it always was)."""
 
-    def __init__(self, accept: Callable[[float], bool], threshold: float, metric: str):
+    def __init__(self, accept: Callable[[float], bool], threshold: float, metric: str, key: Optional[str] = None):
+        # ``metric`` is the label the messages use ("R²"); ``key`` the
+        # metric's name as a gate record spells it ("r_squared")
         self.accept, self.threshold, self.metric = accept, threshold, metric
+        self.key = key or metric
 
     def judge(self, score: Any) -> Dict[str, Any]:
         if score is None:

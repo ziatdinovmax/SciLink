@@ -5490,20 +5490,20 @@ Return JSON with:
         if g is not None and g.value_source == "result" and g.metric != "r_squared":
             def score_of(result: dict) -> Optional[float]:
                 return g.extract(result.get("fit_quality"))
-            return ScoreReplayGate(g.is_accept, float(g.accept_threshold), g.label), score_of
+            return ScoreReplayGate(g.is_accept, float(g.accept_threshold), g.label, key=g.metric), score_of
         if g is not None and g.metric == "r_squared":
             def score_of(result: dict) -> float:
                 return float((result.get("fit_quality") or {}).get("r_squared") or 0.0)
-            return ScoreReplayGate(g.is_accept, float(g.accept_threshold), "R²"), score_of
+            return ScoreReplayGate(g.is_accept, float(g.accept_threshold), "R²", key="r_squared"), score_of
         g = _gate(state)
         if g.metric == "r_squared" or g.value_source != "result":
             def score_of(result: dict) -> float:
                 return float((result.get("fit_quality") or {}).get("r_squared") or 0.0)
-            return ScoreReplayGate(self._accept_gate().is_accept, float(self.r2_threshold), "R²"), score_of
+            return ScoreReplayGate(self._accept_gate().is_accept, float(self.r2_threshold), "R²", key="r_squared"), score_of
 
         def score_of(result: dict) -> Optional[float]:
             return g.extract(result.get("fit_quality"))
-        return ScoreReplayGate(g.is_accept, float(g.accept_threshold), g.label), score_of
+        return ScoreReplayGate(g.is_accept, float(g.accept_threshold), g.label, key=g.metric), score_of
 
     def _identity_of(self, result: dict, ref: Optional[dict], xy, distance: Optional[float]) -> dict:
         """The two checks a replayed result is held to beyond its gate (#711),
@@ -5797,7 +5797,7 @@ Return JSON with:
             "reused": True,
             "source": source,
             "r_squared": (float(fit_r2) if isinstance(fit_r2, (int, float)) else reuse_r2),
-            "metric": label,
+            "metric": gate.key,
             "score": reuse_r2,
             "threshold": thr,
             "verdict": verdict,
