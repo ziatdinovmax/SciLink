@@ -8994,7 +8994,11 @@ Return JSON: {{"script": "<the complete modified script>"}}
         state["refit_summary"] = refit_summary
 
         # Re-run outlier detection with updated results
-        updated_flagged = self._fitting_helper._detect_outliers(series_results, gate=self._fitting_helper._series_gate(state))
+        # the same gate the series pass used: a reuse's units stay held to
+        # the recipe's gate through the refit's re-scan
+        series_gate = getattr(self._fitting_helper, "_series_gate", None)
+        updated_flagged = (self._fitting_helper._detect_outliers(series_results, gate=series_gate(state))
+                           if callable(series_gate) else self._fitting_helper._detect_outliers(series_results))
         state["flagged_spectra"] = updated_flagged
 
         improved_count = sum(1 for r in refit_summary if r["improved"])
