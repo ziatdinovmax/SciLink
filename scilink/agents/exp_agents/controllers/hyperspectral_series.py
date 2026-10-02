@@ -149,6 +149,26 @@ def build_series_row(index: int, data_path: str, result: Dict[str, Any],
         "scientific_claims": result.get("scientific_claims") or [],
         "detailed_analysis": result.get("detailed_analysis") or "",
     }
+    # The unit's verdict, stamped here where everything about it is known
+    # (the shared record shape, _replay.verdict_record): the single-cube rule
+    # — a clean status, something extracted, EVERY target approved. The
+    # series' own `verified` (one approved target is enough to keep the row
+    # in the table) stays as it is; this is what "verified" means to a
+    # reader of the result (the board).
+    from .._replay import verdict_record
+    n_t = len(records)
+    if row["verified"] is False or status != "success" or not features:
+        uv = verdict_record(verified=False, reason="unit not verified by the series driver",
+                            decided_by="none" if status != "success" else "qc_gate")
+    elif not n_t:
+        uv = verdict_record(verified=False, reason="the unit has no dynamic-analysis record", decided_by="none")
+    elif n_ok != n_t:
+        uv = verdict_record(verified=False, reason=f"not every target of the unit was approved: {n_ok} of {n_t}",
+                            decided_by="qc_gate")
+    else:
+        uv = verdict_record(verified=True, reason="every target approved", decided_by=(
+            "replay_gate" if (result.get("script_reuse") or {}).get("verbatim") else "qc_gate"))
+    row["unit_verdict"] = uv
     reuse = result.get("script_reuse")
     if reuse:
         row["reuse_validity"] = {

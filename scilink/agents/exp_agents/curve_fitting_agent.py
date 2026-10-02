@@ -2175,6 +2175,15 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             if state.get("anchor_candidates"):
                 results["anchor_candidates"] = state["anchor_candidates"]
 
+        # The run's verdict, stamped here where the result's signals are all
+        # in hand (#712): the status, the QC record, the reuse verdict, the
+        # units' stamps. What "verified" means to a reader — the board,
+        # run_task's rows — is decided here, never reconstructed later.
+        from ._verification_record import final_verdict_record
+        try:
+            results["verdict"] = final_verdict_record(results)
+        except Exception as exc:  # noqa: BLE001 - a stamp never fails a run
+            self.logger.warning(f"verdict not stamped: {exc}")
         return results
 
     def _make_serializable(self, obj: Any) -> Any:

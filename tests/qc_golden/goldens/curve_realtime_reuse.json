@@ -38,7 +38,17 @@
     },
     "scientific_claims": [],
     "status": "success",
-    "task_mode": "fitting"
+    "task_mode": "fitting",
+    "verdict": {
+      "decided_by": "replay_gate",
+      "interpretation_checked": false,
+      "own_gate": true,
+      "reason": "locked-script reuse passed the replay gate",
+      "regime": null,
+      "score": 0.995,
+      "threshold": 0.95,
+      "verified": true
+    }
   },
   "reuse_validity": {
     "drift": "none",
