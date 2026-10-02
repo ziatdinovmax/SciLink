@@ -658,12 +658,13 @@ def _replay(tmp_path, monkeypatch, r2_by_script, *, strict=False, repaired=None,
         cands = _prior_curve_fit_candidates({"prior_analysis_paths": [str(prior)]})
         candidates = [{k: c.get(k) for k in ("script", "source", "regime", "unit", "drift_state")} for c in cands]
         reuse_candidates = candidates if len(candidates) > 1 else []      # as the series controller sets it
+        reuse_gate = cands[0].get("gate") if cands else None
     else:
         recipes = [("LOW", "prior: LOW (regime low, 1 of 2)"), ("HIGH", "prior: HIGH (regime high, 2 of 2)")]
         candidates = [{"script": t, "source": s} for t, s in recipes]
-        reuse_candidates = candidates
+        reuse_candidates, reuse_gate = candidates, None
     state = {"num_spectra": 1, "is_single_spectrum": True, "system_info": {}, "locked_fitting_config": {},
-             "_reuse_candidates": reuse_candidates,
+             "_reuse_candidates": reuse_candidates, "_reuse_gate": reuse_gate,
              **({"prior_analysis_paths": [str(prior)], "reuse_locked_script": True} if prior is not None else {})}
     if strict:
         state["_strict_replay"] = True

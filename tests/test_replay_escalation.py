@@ -149,6 +149,11 @@ def test_a_replay_that_fails_its_checks_is_explained_and_the_verdict_does_not_mo
     text = _text_of(judge.prompts[0])
     assert _replay.ESCALATION_MARK_OPEN in text and "because the new measurement is NOT the chosen regime's state" in text
     assert "'low'" in text and "anchor unit: spectrum_0000" in text and "3 units" in text
+    # the judge sees the distance to EVERY regime of the prior run, nearest first, although one recipe was replayed
+    body = text[text.index(_replay.ESCALATION_MARK_OPEN) + len(_replay.ESCALATION_MARK_OPEN):text.index(_replay.ESCALATION_MARK_CLOSE)]
+    shown = json.loads(body)["regimes"]
+    assert [x["regime"] for x in shown["ranking"]] == ["high", "low"] and shown["ranking"][0]["distance"] < 0.05
+    assert shown["ranking"][1]["distance"] > _replay.SAME_STATE_BAR and shown["chosen"] is None
     assert len(_images_of(judge.prompts[0])) >= 1                                              # the overlay at least
     # the row and the board: an opinion beside the verdict, a PROVISIONAL claim with the judge gate
     full = {"status": "success", "reuse_validity": rv}
