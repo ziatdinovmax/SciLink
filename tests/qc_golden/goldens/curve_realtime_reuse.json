@@ -46,7 +46,7 @@
         "within": true
       },
       "message": "Reused the locked fitting script from prior run 'prior'; R² = 0.9950 meets the acceptance threshold 0.950.",
-      "metric": "R²",
+      "metric": "r_squared",
       "r_squared": 0.995,
       "reused": true,
       "score": 0.995,
@@ -80,7 +80,7 @@
       "within": true
     },
     "message": "Reused the locked fitting script from prior run 'prior'; R² = 0.9950 meets the acceptance threshold 0.950.",
-    "metric": "R²",
+    "metric": "r_squared",
     "r_squared": 0.995,
     "reused": true,
     "score": 0.995,

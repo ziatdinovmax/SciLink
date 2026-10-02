@@ -78,10 +78,10 @@ def test_an_r2_gate_keeps_the_drivers_live_threshold(tmp_path, monkeypatch):
     epr = QualityGate(metric="r_squared", accept_threshold=0.90, hard_reject_threshold=0.75)
     res, ex, _, _ = curve._replay(tmp_path / "a", monkeypatch, {"LOW": 0.92, "HIGH": 0.80}, quality_gate=epr)
     rv = res["reuse_validity"]
-    assert rv["verdict"] == "poor" and rv["metric"] == "R²" and rv["threshold"] == curve.THRESHOLD and rv["score"] == 0.92
+    assert rv["verdict"] == "poor" and rv["metric"] == "r_squared" and rv["threshold"] == curve.THRESHOLD and rv["score"] == 0.92
     # no gate in state (a legacy caller): R² at the driver's threshold, as always
     res, ex, _, _ = curve._replay(tmp_path / "b", monkeypatch, {"LOW": 0.99, "HIGH": 0.80})
-    assert res["reuse_validity"]["verdict"] == "good" and res["reuse_validity"]["metric"] == "R²"
+    assert res["reuse_validity"]["verdict"] == "good" and res["reuse_validity"]["metric"] == "r_squared"
 
 
 def _recorded(prior, gate, *, recipes_too=True):
@@ -140,7 +140,7 @@ def test_a_replay_is_held_to_the_gate_the_recipe_was_approved_under(tmp_path, mo
     res, ex, _, _ = curve._replay(tmp_path / "d", monkeypatch, {"LOW": 0.80, "HIGH": 0.92}, prior=prior2,
                                   data=rc.spectrum(rc.RUTILE, shift=0.5, seed=11),
                                   extra_params={"HIGH": rc.auto_detect_parameters(rc.RUTILE, shift=0.5, seed=50, n_noise=7)})
-    assert res["reuse_validity"]["verdict"] == "good" and res["reuse_validity"]["threshold"] == 0.90 and res["reuse_validity"]["metric"] == "R²"
+    assert res["reuse_validity"]["verdict"] == "good" and res["reuse_validity"]["threshold"] == 0.90 and res["reuse_validity"]["metric"] == "r_squared"
     # an older run that recorded no gate: the reuse run's own, as before
     prior3 = rc.prior_two_regime_run(tmp_path / "p3")
     res, ex, _, _ = curve._replay(tmp_path / "e", monkeypatch, {"LOW": 0.80, "HIGH": 0.92}, prior=prior3,
