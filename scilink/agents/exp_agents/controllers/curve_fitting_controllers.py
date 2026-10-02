@@ -1033,13 +1033,45 @@ def _degenerate_data_check(curve_data):
 def _drift_state(curve_data):
     """What a regime's recipe records about its anchor's data (#710): the
     curve on the drift monitor's grid (``_replay.drift_state_of``), or
-    ``None``; never raises."""
+    ``None``; never raises. The anchor's alone at lock time; the regime's
+    units replace it when the series is done (``_restamp_regimes``)."""
     try:
         from .._replay import drift_state_of
         xy = _extract_xy(curve_data)
         return None if xy is None else drift_state_of(xy[0], xy[1])
     except Exception:  # noqa: BLE001 - a stamp is a side note on a lock
         return None
+
+
+def _restamp_regimes(output_dir, recipe_by_regime: dict, series_results: list) -> None:
+    """When the series is done, each regime's recipe records the regime's
+    UNITS' curves (``_replay.drift_state_of_curves``, from the units' data
+    files), not its anchor's alone: a later reuse is then held to the
+    regime's spread. An anchor-only stamp failed half of a regime's own
+    units in review. A regime whose units' files cannot be read keeps the
+    anchor's stamp."""
+    from .._replay import drift_state_of_curves
+    by_regime: Dict[Any, list] = {}
+    for r in series_results or []:
+        if isinstance(r, dict) and r.get("success") and isinstance(r.get("index"), int):
+            by_regime.setdefault(r.get("regime"), []).append(r["index"])
+    for regime, rec in (recipe_by_regime or {}).items():
+        curves = []
+        for idx in sorted(by_regime.get(regime, [])):
+            f = Path(output_dir) / f"spectrum_{idx:04d}" / "data.npy"
+            if not f.is_file():
+                continue
+            try:
+                xy = _extract_xy(np.load(f))
+            except Exception:  # noqa: BLE001
+                xy = None
+            if xy is not None:
+                curves.append(xy)
+        if len(curves) >= 2:
+            st = drift_state_of_curves(curves)
+            if st is not None:
+                rec["drift_state"] = st
+                rec["drift_state_units"] = len(curves)
 
 
 def _regime_of_named(state: dict) -> Optional[str]:
@@ -1103,9 +1135,13 @@ def _regime_references(state: dict, candidates: list) -> list:
                     curves.append(xy)
                     x_range = float(np.nanmax(xy[0]) - np.nanmin(xy[0]))
         monitor = None
+        dropped = 0
         try:
             if curves:
                 monitor = state_monitor(curves)
+                # a unit covering too little of the first unit's axis is not
+                # seeded (the monitor's rule); the reference says how many
+                dropped = len(curves) - len(getattr(monitor, "_seed", curves))
             elif isinstance(c.get("drift_state"), dict):
                 monitor = state_monitor(state=c["drift_state"])
                 xs = c["drift_state"].get("x") or []
@@ -1114,7 +1150,8 @@ def _regime_references(state: dict, candidates: list) -> list:
             monitor = None
         samples = [identity_features(r.get("parameters")) for r in units if isinstance(r.get("parameters"), dict)]
         identity = identity_reference(samples, x_range=x_range) if samples else None
-        out.append({"monitor": monitor, "identity": identity, "n_curves": len(curves), "regime": regime})
+        out.append({"monitor": monitor, "identity": identity, "n_curves": len(curves), "regime": regime,
+                    **({"curves_not_seeded": dropped} if dropped else {})})
     return out
 
 
@@ -5190,9 +5227,9 @@ Return JSON with:
         # regime (``_reuse_candidates``, #704). Each runs VERBATIM in a
         # candidate folder of its own (the best-of-N layout), in order of how
         # near the new data is to each regime's own data (#710, the drift
-        # monitor's measure); a candidate is kept when its gate passes AND the
-        # new data is its regime's state AND what it found is what the regime
-        # found (#711) — else the next is tried; when none is kept, the first
+        # monitor's measure); a candidate is kept when its gate passes AND
+        # what it found is what the regime's units found (#711; the state
+        # distance is a flag) — else the next is tried; when none is kept, the first
         # that executed (poor, flagged); only if none executed is the nearest
         # recipe given the correction ladder, once. A single recipe runs as it
         # always did, in the spectrum's own folder, held to the same checks.
@@ -5224,6 +5261,8 @@ Return JSON with:
             from .._replay import state_distance
             distances = [state_distance(r["monitor"], xy[0], xy[1]) if r.get("monitor") is not None else None
                          for r in refs]
+            if all(d is None for d in distances):
+                distances = None            # no regime could grid the new curve: lock order, and said
         if len(candidates) == 1:
             reuse_result = self._run_reuse_candidate(ctx, ctx.reuse_script, ctx.reuse_source, None, 1, 1)
             if reuse_result.get("success"):
@@ -5242,12 +5281,12 @@ Return JSON with:
             return out
 
         def judge(n: int, result: dict) -> dict:
-            # the gate, then the regime's own checks: is this its state, and
-            # did the recipe find what the regime finds
+            # the gate, then the regime's own checks: did the recipe find what
+            # the regime finds (decides), and is this its state (a flag)
             rv = gate.judge(r2_of(result))
             ref = refs[n - 1] if n - 1 < len(refs) else None
             dist = distances[n - 1] if distances else None
-            checks[n] = self._identity_of(result, ref, xy, dist)
+            checks[n] = self._identity_of(result, ref, xy, dist, decide=not ctx.state.get("_strict_replay"))
             if rv["verdict"] == "good" and not checks[n]["same"]:
                 rv = {**rv, "verdict": "poor", "reasons": rv["reasons"] + [checks[n]["why"]]}
             if rv["verdict"] != "good" and len(subdirs) < len(candidates):
@@ -5273,11 +5312,7 @@ Return JSON with:
             rv = out["reuse_validity"]
             rv["regime_choice"] = {**regime_choice, "chosen_regime": extra[n - 1].get("regime") if n - 1 < len(extra) else None}
             if n in checks:
-                rv["identity"] = checks[n]["identity"]
-                rv["state_distance"] = checks[n]["distance"]
-                if not checks[n]["same"]:
-                    rv["message"] += " " + checks[n]["why"]
-                    out["quality_warning"] = rv["message"]
+                self._record_checks(out, rv, checks[n])
             if regime_choice["ambiguous"]:
                 # an ambiguous attribution is said where the attribution is read
                 rv["source"] = f"{rv.get('source')} [regime choice ambiguous: {regime_choice['note']}]"
@@ -5304,7 +5339,8 @@ Return JSON with:
         if reuse_result.get("success"):
             rv = gate.judge(r2_of(reuse_result))
             checks[n] = self._identity_of(reuse_result, refs[n - 1] if n - 1 < len(refs) else None, xy,
-                                          distances[n - 1] if distances else None)
+                                          distances[n - 1] if distances else None,
+                                          decide=not ctx.state.get("_strict_replay"))
             if rv["verdict"] == "good" and not checks[n]["same"]:
                 rv = {**rv, "verdict": "poor"}
             out = self._reuse_verdict(ctx, reuse_result, source, rv["score"], rv["verdict"], tried=len(candidates),
@@ -5315,15 +5351,28 @@ Return JSON with:
             out["reuse_validity"]["regime_choice"] = {**regime_choice, "chosen_regime": None}
         return out
 
-    def _identity_of(self, result: dict, ref: Optional[dict], xy, distance: Optional[float]) -> dict:
+    def _identity_of(self, result: dict, ref: Optional[dict], xy, distance: Optional[float],
+                     *, decide: bool = True) -> dict:
         """The two checks a replayed result is held to beyond its gate (#711):
         is the new data the regime's STATE (the drift monitor's distance to
         the regime's own curves), and is what the recipe found what the
         regime's units found (``identity_check``: names, strong positions).
-        Returns ``{"same", "why", "identity", "distance"}``; a check that
-        cannot run (no reference) is not a failure, and says so."""
+
+        Only identity drift against a known SPREAD decides (``same`` False →
+        the verdict is ``poor``); that alone catches the original case, a
+        recipe fitting another phase. A state distance beyond the bar is a
+        FLAG (``state_flag``, a caveat in the message, ``interpretation_
+        checked`` False): the monitor seeded from one or a few curves calls
+        a same-phase thermal shift of a few cm⁻¹ "not the same state", and
+        a flag is what a difference against a thin reference is. With
+        ``decide`` False (a strict replay: the live loop has its own monitor
+        and audits, and a downgrade here would turn a change into a fit
+        breach) nothing decides; everything is a caveat.
+        Returns ``{"same", "why", "caveat", "identity", "distance", "state_flag"}``;
+        a check that cannot run (no reference) is not a failure, and says so."""
         from .._replay import SAME_STATE_BAR, identity_check, identity_features
-        out = {"same": True, "why": "", "identity": {"checked": False}, "distance": distance}
+        out = {"same": True, "why": "", "caveat": "", "identity": {"checked": False}, "distance": distance,
+               "state_flag": False}
         if ref is None:
             return out
         try:
@@ -5331,10 +5380,15 @@ Return JSON with:
                 from .._replay import state_distance
                 distance = state_distance(ref["monitor"], xy[0], xy[1])
                 out["distance"] = distance
+                if distance is None:
+                    # the monitor could not grid the new curve (it covers too
+                    # little of the regime's axis): said, never silent
+                    out["state_check"] = "skipped: the new curve covers too little of the regime's axis"
+                    out["caveat"] = "STATE: not checked — " + out["state_check"][9:]
             if isinstance(distance, (int, float)) and distance > SAME_STATE_BAR:
-                out["same"] = False
-                out["why"] = (f"STATE: {distance:.0%} of this measurement is structure the regime's own data does "
-                              f"not describe (bar {SAME_STATE_BAR:.0%}) — it is not the regime's state")
+                out["state_flag"] = True
+                out["caveat"] = (f"STATE: {distance:.0%} of this measurement is structure the regime's own data does "
+                                 f"not describe (bar {SAME_STATE_BAR:.0%}) — flagged: it may not be the regime's state")
             if ref.get("identity"):
                 chk = identity_check(identity_features(result.get("parameters")), ref["identity"])
                 out["identity"] = chk
@@ -5347,11 +5401,12 @@ Return JSON with:
                         else:
                             bits.append(f"{d['name']} = {d['value']!r} (the regime's units: {d['reference']})")
                     why = "IDENTITY: " + "; ".join(bits) + " — the recipe found a different thing than the regime's units"
-                    out["why"] = (out["why"] + " " + why).strip() if out["why"] else why
-                    if chk["spread_known"]:
+                    if chk["spread_known"] and decide:
                         out["same"] = False
+                        out["why"] = why
                     else:
-                        out["identity"]["flagged"] = True       # one reference unit: a flag, not a verdict
+                        out["identity"]["flagged"] = True       # one reference unit, or a strict replay: a flag
+                        out["caveat"] = (out["caveat"] + " " + why + " (flagged)").strip()
         except Exception as exc:  # noqa: BLE001 - the checks are side notes on the gate
             out["identity"] = {"checked": False, "error": str(exc)[:200]}
         return out
@@ -5363,16 +5418,30 @@ Return JSON with:
         rv = reuse_result.get("reuse_validity")
         if not isinstance(rv, dict):
             return reuse_result
-        chk = self._identity_of(reuse_result, ref, xy, None)
+        chk = self._identity_of(reuse_result, ref, xy, None, decide=not ctx.state.get("_strict_replay"))
+        self._record_checks(reuse_result, rv, chk)
+        return reuse_result
+
+    def _record_checks(self, reuse_result: dict, rv: dict, chk: dict) -> None:
+        """The checks' outcome on the record: the identity block and the
+        state distance always; a decision (``why``) turns the verdict
+        ``poor`` and is the result's quality warning; a flag (``caveat``) is
+        said in the message and as ``state_flag`` and leaves the verdict."""
         rv["identity"] = chk["identity"]
         if chk["distance"] is not None:
             rv["state_distance"] = chk["distance"]
+        if chk.get("state_flag"):
+            rv["state_flag"] = True
+        if chk.get("state_check"):
+            rv["state_check"] = chk["state_check"]
         if not chk["same"]:
             rv["verdict"] = "poor"
-            rv["message"] = rv.get("message", "") + " " + chk["why"]
+            rv["message"] = (rv.get("message") or "") + " " + chk["why"]
             reuse_result["quality_warning"] = rv["message"]
             self.logger.warning(f"   🧬 {chk['why']}")
-        return reuse_result
+        if chk.get("caveat"):
+            rv["message"] = (rv.get("message") or "") + " " + chk["caveat"]
+            self.logger.info(f"   🧬 {chk['caveat']}")
 
     def _run_reuse_candidate(self, ctx: QCItemContext, script: str, source: Optional[str],
                              subdir: Optional[str], n: int, of: int, *, verbatim: bool = False) -> dict:
@@ -7616,6 +7685,10 @@ Return JSON with:
         stamp_profile(state, series_results)
         state["series_results"] = series_results
         state["flagged_spectra"] = flagged_spectra
+        try:
+            _restamp_regimes(self.output_dir, recipe_by_regime, series_results)
+        except Exception as exc:  # noqa: BLE001 - a stamp is a side note on a lock
+            self.logger.debug(f"regime stamps not updated: {exc}")
         state["locked_recipes"] = recipe_by_regime
 
         # Best-of-N: per-anchor candidate tables (index -> table) for the

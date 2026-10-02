@@ -219,3 +219,83 @@ def test_the_repair_fallback_repairs_the_nearest_and_a_strict_failure_records_th
     res, ex, _, _ = curve._replay(tmp_path / "f", monkeypatch, {}, prior=prior, data=data, strict=True)
     assert res["reuse_validity"]["verdict"] == "failed" and res["reuse_validity"]["regime_choice"]["by"] == "state_distance"
     assert res["reuse_validity"]["regime_choice"]["chosen_regime"] is None
+
+
+def test_the_stamp_is_the_regimes_units_on_the_monitors_own_grid(tmp_path, monkeypatch):
+    """Review of 59a56cee: a stamp holding the anchor's curve alone failed
+    half of a regime's own units (median distance 0.25–0.31), and
+    ``drift_state_of`` resampled by point interpolation, which inflated a
+    curve's distance to its own stamp 2–4× (an XRD anchor at 0.24–0.44).
+    The stamp now carries the regime's units (at most STAMP_MAX_CURVES) on
+    the grid the monitor builds itself, and the series driver re-stamps each
+    regime when the series is done."""
+    # a curve against its own stamp: ~0, at the monitor's own binning (no interpolation)
+    xy = spectrum(ANATASE, seed=1)
+    st = _replay.drift_state_of(xy[:, 0], xy[:, 1])
+    assert len(st["x"]) == xy.shape[0] and len(st["seed"]) == 1
+    assert _replay.state_distance(_replay.state_monitor(state=st), xy[:, 0], xy[:, 1]) < 0.02
+    # a long curve is reduced by block means (the whole axis kept), never by point sampling
+    long_x = np.linspace(100, 800, 20000)
+    long_y = np.interp(long_x, xy[:, 0], xy[:, 1]) + 0.01 * np.random.default_rng(3).standard_normal(long_x.size)
+    st_long = _replay.drift_state_of(long_x, long_y)
+    assert len(st_long["x"]) <= _replay.STAMP_MAX_POINTS and st_long["x"][-1] > 799.5
+    assert _replay.state_distance(_replay.state_monitor(state=st_long), long_x, long_y) < 0.05
+    # a regime spread along the series (a 0.6 cm-1 thermal shift per unit): the anchor-only stamp fails the far
+    # units; the regime's stamp accepts them all
+    units = [spectrum(ANATASE, shift=0.6 * i, seed=10 + i) for i in range(8)]
+    anchor_only = _replay.state_monitor(state=_replay.drift_state_of(units[0][:, 0], units[0][:, 1]))
+    regime = _replay.state_monitor(state=_replay.drift_state_of_curves([(u[:, 0], u[:, 1]) for u in units]))
+    far = [_replay.state_distance(anchor_only, u[:, 0], u[:, 1]) for u in units]
+    near = [_replay.state_distance(regime, u[:, 0], u[:, 1]) for u in units]
+    assert max(far) > max(near) and all(d < _replay.SAME_STATE_BAR for d in near)
+    # the record is bounded: at most STAMP_MAX_CURVES curves, evenly spaced
+    many = _replay.drift_state_of_curves([(u[:, 0], u[:, 1]) for u in units * 3])
+    assert len(many["seed"]) == _replay.STAMP_MAX_CURVES
+    # the real series path re-stamps each regime with its units when the series is done
+    names6 = [f"spectrum_{i:04d}" for i in range(6)]
+    state, _ = curve.run_series(tmp_path / "lock", monkeypatch, names=names6, regimes=[[0, 1, 2], [3, 4, 5]],
+                                anchors={"spectrum_0000": curve.OK, "spectrum_0003": {**curve.OK, "script": "M3"}},
+                                follower_r2={n: 0.97 for n in names6})
+    results = curve.compile_results(tmp_path / "lock", state)
+    for r in results["locked_recipes"].values():
+        assert r.get("drift_state_units") == 3 and len(r["drift_state"]["seed"]) == 3
+    # and stamps alone (data files pruned) hold a reuse to the regime's spread: the prior built here from
+    # three shifted units per regime accepts a unit inside the spread
+    prior = prior_two_regime_run(tmp_path / "st", data=True, stamps=True)
+    from scilink.agents.exp_agents.controllers.curve_fitting_controllers import _restamp_regimes
+    rows = json.loads((prior / "series_fit_results.json").read_text())["results"]
+    recipes = json.loads((prior / "analysis_results.json").read_text())["locked_recipes"]
+    _restamp_regimes(prior, recipes, rows)
+    assert all(r.get("drift_state_units") == 3 for r in recipes.values())
+    (prior / "analysis_results.json").write_text(json.dumps({"locked_recipes": recipes}))
+    for i in range(6):
+        (prior / f"spectrum_{i:04d}" / "data.npy").unlink()
+    res, ex, _, _ = curve._replay(tmp_path / "f", monkeypatch, {"LOW": 0.999, "HIGH": 0.999}, prior=prior,
+                                  data=spectrum(RUTILE, shift=0.6, seed=15),
+                                  extra_params={"HIGH": auto_detect_parameters(RUTILE, shift=0.6, seed=57)})
+    rv = res["reuse_validity"]
+    assert rv["regime_choice"]["by"] == "state_distance" and res["script"] == "HIGH"
+    assert rv["state_distance"] < _replay.SAME_STATE_BAR and not rv.get("state_flag")
+
+
+def test_a_curve_the_monitor_cannot_grid_is_said_not_silent(tmp_path, monkeypatch):
+    """Review nits: a new curve covering too little of the regime's axis
+    skipped the state check silently, and a unit covering too little of the
+    first unit's axis was dropped from seeding silently."""
+    prior = prior_two_regime_run(tmp_path)
+    narrow = spectrum(RUTILE, shift=0.5, seed=11)
+    narrow = narrow[(narrow[:, 0] > 400) & (narrow[:, 0] < 500)]          # 14 % of the axis
+    res, ex, _, _ = curve._replay(tmp_path / "a", monkeypatch, {"LOW": 0.999, "HIGH": 0.999}, prior=prior, data=narrow,
+                                  extra_params={"LOW": auto_detect_parameters(ANATASE, seed=50)})
+    rv = res["reuse_validity"]
+    assert rv["regime_choice"]["by"] == "lock_order"                      # no distance could be measured
+    assert rv.get("state_check", "").startswith("skipped") and "STATE: not checked" in rv["message"]
+    assert rv["verdict"] == "good" and rv["identity"]["within"]          # the identity check still ran
+    # a reference whose units include one covering half the axis: seeded without it, and said
+    rows = json.loads((prior / "series_fit_results.json").read_text())["results"]
+    half = spectrum(ANATASE, seed=1)
+    np.save(prior / "spectrum_0001" / "data.npy", half[half[:, 0] < 450])
+    from scilink.agents.exp_agents.controllers.curve_fitting_controllers import _prior_curve_fit_candidates, _regime_references
+    cands = _prior_curve_fit_candidates({"prior_analysis_paths": [str(prior)]})
+    refs = _regime_references({"prior_analysis_paths": [str(prior)]}, cands)
+    assert refs[0]["curves_not_seeded"] == 1 and "curves_not_seeded" not in refs[1]

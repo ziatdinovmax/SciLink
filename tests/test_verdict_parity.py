@@ -257,5 +257,9 @@ def test_hyperspectral_series_rows_stamp_equals_the_legacy_row_rule():
             final = agent._compile_series_results(state, None)
             assert all(is_verdict_record(r.get("unit_verdict")) for r in final["individual_results"]), combo
             _check(final, f"hs series rows {combo}", hs_rows=True)
-            # the response's own stamp says who decided; a series that is not "success" has none to decide
-            assert final["verdict"]["decided_by"] == ("qc_gate" if final["status"] == "success" else "none"), combo
+            # the response's own stamp says who decided; a series that is not "success" has none to decide;
+            # one whose ANCHOR (the first unit here) is a replay of a prior recipe rests on the replay gate
+            first = final["individual_results"][0] if final.get("individual_results") else {}
+            anchor_replay = (first.get("unit_verdict") or {}).get("decided_by") == "replay_gate" and first.get("success")
+            expect = "none" if final["status"] != "success" else ("replay_gate" if anchor_replay else "qc_gate")
+            assert final["verdict"]["decided_by"] == expect, combo

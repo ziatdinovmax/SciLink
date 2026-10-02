@@ -578,11 +578,19 @@ def final_verdict_record(final: Dict[str, Any]) -> Dict[str, Any]:
     if final.get("status") != "success":
         decided = "none"
     elif units:
-        decided = "qc_gate"
+        # a series whose ANCHOR replayed a prior recipe (a reuse on a series
+        # run) rests on that replay's gate, as the same replay as a single
+        # run does — its followers replayed the same recipe. Followers that
+        # are themselves replays (a hyperspectral series replays its own
+        # anchor's script) are the series' mechanics, not a prior replay.
+        ok_units = [u for u in units if isinstance(u, dict) and u.get("success")]
+        stamps = [u.get("unit_verdict") or {} for u in ok_units]
+        anchors = [u for u in ok_units if u.get("role") == "anchor"] or ok_units[:1]
+        decided = ("replay_gate" if any((u.get("unit_verdict") or {}).get("decided_by") == "replay_gate" for u in anchors)
+                   else "qc_gate")
         # a series' interpretation is checked only when every unit's was —
         # an anchor's verifier reviews the fit, not the claims, and a
         # follower verified by its recipe inherits no check
-        stamps = [u.get("unit_verdict") or {} for u in units if isinstance(u, dict) and u.get("success")]
         checked = bool(stamps) and all(st.get("interpretation_checked") for st in stamps)
     elif isinstance(records, list) and records:
         # a cube's records say ``locked_replay`` (the controller's key); the
@@ -591,9 +599,11 @@ def final_verdict_record(final: Dict[str, Any]) -> Dict[str, Any]:
             (final.get("script_reuse") or {}).get("verbatim"))
         decided = "replay_gate" if replayed else "qc_gate"
         # a cube replay's required maps were held to the anchor's statistics
-        # when a reference was there (the map gate's range rule): its identity check
-        checked = (not replayed) or all(r.get("identity_checked") for r in records
-                                        if isinstance(r, dict) and r.get("locked_replay"))
+        # when a reference was there (the map gate's range rule): its identity
+        # check. A fresh cube's reviewer judged its maps, not its claims — the
+        # curve rule — so it is not checked.
+        checked = replayed and all(r.get("identity_checked") for r in records
+                                   if isinstance(r, dict) and r.get("locked_replay"))
     elif rv.get("reused") and not _has_record(final.get("quality_history")):
         decided = "replay_gate"
         checked = interpretation_checked_by(rv)

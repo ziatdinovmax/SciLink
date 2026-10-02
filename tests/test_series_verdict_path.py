@@ -116,6 +116,13 @@ def run_series(tmp_path, monkeypatch, *, names, anchors, follower_r2, refits=Non
 
     def fake_best_of_n(state, curve_data, data_path, spectrum_name, spectrum_idx, **kw):
         spec = anchors[spectrum_name]
+        # the real QC loop stages the unit's data as spectrum_NNNN/data.npy; the canned one does too
+        d = Path(tmp_path) / f"spectrum_{spectrum_idx:04d}"
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            np.save(d / "data.npy", np.asarray(curve_data, dtype=float))
+        except Exception:  # noqa: BLE001 - a canned anchor whose data is not an array
+            pass
         return _canned_anchor(spectrum_name, spectrum_idx, **spec)
     monkeypatch.setattr(ctrl, "_fit_with_quality_control_best_of_n", fake_best_of_n)
     # a follower with no base script (its anchor failed) generates fresh code:

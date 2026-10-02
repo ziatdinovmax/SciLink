@@ -252,19 +252,56 @@ def state_monitor(curves: Sequence[Tuple[Any, Any]] = (), *, state: Optional[Dic
     return m
 
 
+STAMP_MAX_POINTS = 32 * 256         # the longest x a stamp keeps as is (a same-instrument curve then
+                                    # lands on the stamp's own grid, with no interpolation at all)
+STAMP_MAX_CURVES = 12               # the most curves a regime's stamp carries
+
+
+def _block_mean(x: np.ndarray, y: np.ndarray, block: int):
+    """``x`` and ``y`` reduced by the means of consecutive blocks of ``block``
+    points — the monitor's own reduction (``DriftMonitor._to_grid``), never a
+    point interpolation, which samples the noise instead of averaging it and
+    was measured to inflate a curve's distance to its own stamp 2–4×."""
+    n = x.size // block
+    m = block * n
+    return x[:m].reshape(n, block).mean(axis=1), y[:m].reshape(n, block).mean(axis=1)
+
+
 def drift_state_of(x: Any, y: Any) -> Optional[Dict[str, Any]]:
-    """What a regime's recipe records about its anchor's data: the curve on
-    the monitor's grid (``DriftMonitor.to_state``), a few hundred numbers."""
+    """What a regime's recipe records about ONE curve: the monitor's state
+    seeded with it (``DriftMonitor.to_state``). See ``drift_state_of_curves``
+    for the regime's record."""
+    return drift_state_of_curves([(x, y)])
+
+
+def drift_state_of_curves(curves: Sequence[Tuple[Any, Any]]) -> Optional[Dict[str, Any]]:
+    """What a regime's recipe records about its DATA: the monitor's state
+    seeded with the regime's units' curves (at most ``STAMP_MAX_CURVES``,
+    evenly spaced along the regime), so a later measurement is held to the
+    regime's spread, not to its anchor alone — an anchor-only stamp failed
+    half of a regime's own units (median distance 0.25–0.31). The curves
+    go in at their own x (one longer than ``STAMP_MAX_POINTS`` reduced by
+    block means), on the grid the monitor builds itself."""
     try:
         from ...live.drift import N_GRID
-        xa, ya = np.asarray(x, dtype=float).ravel(), np.asarray(y, dtype=float).ravel()
-        n = min(xa.size, ya.size)
-        xa, ya = xa[:n], ya[:n]
-        if n > N_GRID:                       # the record stays a few hundred numbers
-            xg = np.linspace(float(np.nanmin(xa)), float(np.nanmax(xa)), N_GRID)
-            order = np.argsort(xa)
-            xa, ya = xg, np.interp(xg, xa[order], ya[order])
-        m = state_monitor([(xa, ya)])
+        prepared = []
+        for cx, cy in curves:
+            xa, ya = np.asarray(cx, dtype=float).ravel(), np.asarray(cy, dtype=float).ravel()
+            n = min(xa.size, ya.size)
+            xa, ya = xa[:n], ya[:n]
+            if n < 16:
+                continue
+            order = np.argsort(xa, kind="stable")
+            xa, ya = xa[order], ya[order]
+            if n > STAMP_MAX_POINTS:
+                xa, ya = _block_mean(xa, ya, -(-n // STAMP_MAX_POINTS))
+            prepared.append((xa, ya))
+        if not prepared:
+            return None
+        if len(prepared) > STAMP_MAX_CURVES:
+            keep = np.unique(np.round(np.linspace(0, len(prepared) - 1, STAMP_MAX_CURVES)).astype(int))
+            prepared = [prepared[int(i)] for i in keep]
+        m = state_monitor(prepared)
         st = m.to_state()
         return st if st.get("x") is not None and st.get("seed") else None
     except Exception:  # noqa: BLE001 - a stamp is a side note on a lock
@@ -311,7 +348,16 @@ def _is_position(key: str) -> bool:
 
 
 def _norm_label(value: Any) -> str:
-    return "".join(ch for ch in str(value).lower() if ch.isalnum())
+    """A name as identity: lower-case alphanumerics, without a trailing
+    space-group SETTING (``I 41/a m d :2`` and ``I41/amd`` are one group)
+    or a parenthetical qualifier (``anatase (TiO2)`` is anatase). A
+    number against a symbol (141 vs I41/amd) still differs: that needs a
+    table, not a rule."""
+    import re as _re
+    text = str(value).strip()
+    text = _re.sub(r"\s*\([^)]*\)\s*$", "", text)        # a trailing "(TiO2)"
+    text = _re.sub(r"\s*:\s*[A-Za-z0-9]{1,2}\s*$", "", text)  # a trailing ":2" / ":H" setting
+    return "".join(ch for ch in text.lower() if ch.isalnum())
 
 
 def identity_features(parameters: Any) -> Dict[str, Any]:
@@ -434,8 +480,16 @@ def identity_check(feats: Dict[str, Any], reference: Dict[str, Any]) -> Dict[str
                 if not any(c["min"] - tol <= p <= c["max"] + tol for p in mine):
                     drifted.append({"name": "position", "value": None, "reference": [c["min"], c["max"]],
                                     "missing": True})
-    return {"checked": compared > 0, "spread_known": n_units >= 2, "within": not drifted,
-            "drifted": drifted, "compared": compared}
+    out = {"checked": compared > 0, "spread_known": n_units >= 2, "within": not drifted,
+           "drifted": drifted, "compared": compared}
+    if compared == 0:
+        # said, never silent: a layout the reader finds no identity in (a
+        # flat XPS / EPR parameter set with no component label) is not
+        # checked, and the record says why
+        out["reason"] = ("the fitted parameters carry no names and no strong positions the reader recognises"
+                         if not (feats.get("names") or feats.get("positions"))
+                         else "the regime's units carry nothing comparable to what the recipe reports")
+    return out
 
 
 # ------------------------------------------------------------ select_recipe
