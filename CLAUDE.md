@@ -242,17 +242,52 @@ The three analysis agents each judged a replay of a locked recipe, said what
 and the copies drifted (#712). `exp_agents/_replay.py` now holds those
 policies by composition — no base class: a `verdict_record` (one dict shape,
 `verified` / `reason` / `decided_by` ∈ qc_gate · replay_gate · recipe ·
-excluded · none) that every agent STAMPS where it decides (a series unit at
-fit time, a cube or a run when its result is final, `results["verdict"]`) and
-that `analysis_verdict` and the swarm board only read; three replay gates with
-one verdict shape (`ScoreReplayGate` for the curve's R² and the image's vision
-score, `FeatureHealthGate` for an image strict replay, `MapReplayGate` for a
-hyperspectral map); and `select_recipe`, the one rule for choosing among a
-series' regime recipes on a reuse (today: in lock order, the first the gate
-calls good). The reconstruction from result shapes (`reconstructed_verdict`)
-serves results from before the stamp and is the reference the stamps are held
-to (`tests/test_verdict_parity.py`, no allow-list). A new agent-side decision
+excluded · none / `interpretation_checked`) that every agent STAMPS where it
+decides (a series unit at fit time, a cube or a run when its result is final,
+`results["verdict"]`) and that `analysis_verdict` and the swarm board only
+read; three replay gates with one verdict shape (`ScoreReplayGate` for the
+curve's R² and the image's vision score, `FeatureHealthGate` for an image
+strict replay, `MapReplayGate` for a hyperspectral map); `select_recipe`, the
+one rule for choosing among a series' regime recipes on a reuse; and the
+timeout policy (`_locked_exec.escalate_timeouts`: a slow script gets a doubled
+limit, up to the cap, before it is called broken — hyperspectral included,
+#699). The reconstruction from result shapes (`reconstructed_verdict`) serves
+results from before the stamp and is the reference the stamps are held to
+(`tests/test_verdict_parity.py`, no allow-list). A new agent-side decision
 about a replay or a verdict goes into `_replay.py`, not into one agent.
+
+**"Verified" covers the numbers; the interpretation only where a check
+exists** (#711). A replay gate judges fit quality — R², a vision score, a
+map's statistics — and says nothing about WHAT was measured: a recipe can fit
+a different phase perfectly. So a replay is held to two more checks, both
+inside `select_recipe`'s judge so a candidate that fails them falls through to
+the next regime's recipe: *is the new data the regime's STATE* — a
+`live/drift.py` `DriftMonitor` seeded with the regime's own units' data
+(`spectrum_NNNN/data.npy` of the prior run, else the anchor's curve stamped at
+lock time), model-free, the live loop's change signal, beyond `SAME_STATE_BAR`
+is not the regime's; and *did the recipe find what the regime found* —
+`identity_check`: the names it assigned (a phase, a space group — normalised,
+database ids ignored) and its STRONG positions (≥ 10 % of the strongest)
+matched to the units' by nearest neighbour, never by index, with a floor, so a
+weak peak an auto-detect recipe finds on some units and not others is not
+identity. Beyond either the gate verdict is `poor` (not verified); against one
+reference unit a difference is a flag; `interpretation_checked` on the record
+only when both ran against the regime's units and passed — never for a run
+its own verifier approved (the verifier reviews the fit, not the claims) nor
+for a follower verified by its recipe. A hyperspectral replay's required maps
+held to the anchor's statistics is its identity check; an image replay's
+feature health is not one. The swarm board posts a replay's CLAIMS as verified
+only when the interpretation was checked — its recipe, a script that ran,
+stays verified by the gate. **Which regime a reuse replays is read from the
+data** (#710), by the same monitor: the nearest regime is tried first
+(`select_recipe(strategy="nearest_first")`), and
+`reuse_validity.regime_choice` says the distances, the choice and whether two
+regimes were too close to tell apart (within a 2× ratio, or both under the
+material bar) — said in `source` and `message` too, since the attribution is
+read there. A peak-counting fingerprint was tried first and dropped: it
+separates phases and nothing below them (a lattice shift, a texture, a
+background tie at 1.0), as the live loop had already found. Images keep the
+first regime's recipe and say so.
 
 ## Data preparation is a stage, not an agent
 

@@ -226,34 +226,270 @@ class MapReplayGate:
         return replay_verdict("good" if ok else "poor", reasons=[reason], gate="map_health")
 
 
+# ------------------------------------------------------------ same state
+#: A measurement whose structure the regime's own curves cannot describe beyond
+#: this share is not the regime's state (``DriftMonitor.judge()["fraction"]``:
+#: 0 = nothing new, 1 = nothing in common; the live loop's material-change bar
+#: is 0.10, a different phase reads 0.7 and more).
+SAME_STATE_BAR = 0.25
+#: Two regimes are not told apart by the data when the second-nearest is
+#: within this ratio of the nearest, or both are under the material bar.
+AMBIGUITY_RATIO = 2.0
+
+
+def state_monitor(curves: Sequence[Tuple[Any, Any]] = (), *, state: Optional[Dict[str, Any]] = None):
+    """A ``live/drift.py`` ``DriftMonitor`` seeded with a regime's curves
+    (its units' data), or restored from a stamped ``drift_state`` (the
+    anchor's curve on the monitor's grid, recorded when the recipe was
+    locked). Model-free; the measure the live loop replaced its
+    peak-counting fingerprint with, for exactly this question."""
+    from ...live.drift import DriftMonitor
+    m = DriftMonitor()
+    if curves:
+        m.seed(list(curves))
+    elif state:
+        m.load_state(state)
+    return m
+
+
+def drift_state_of(x: Any, y: Any) -> Optional[Dict[str, Any]]:
+    """What a regime's recipe records about its anchor's data: the curve on
+    the monitor's grid (``DriftMonitor.to_state``), a few hundred numbers."""
+    try:
+        from ...live.drift import N_GRID
+        xa, ya = np.asarray(x, dtype=float).ravel(), np.asarray(y, dtype=float).ravel()
+        n = min(xa.size, ya.size)
+        xa, ya = xa[:n], ya[:n]
+        if n > N_GRID:                       # the record stays a few hundred numbers
+            xg = np.linspace(float(np.nanmin(xa)), float(np.nanmax(xa)), N_GRID)
+            order = np.argsort(xa)
+            xa, ya = xg, np.interp(xg, xa[order], ya[order])
+        m = state_monitor([(xa, ya)])
+        st = m.to_state()
+        return st if st.get("x") is not None and st.get("seed") else None
+    except Exception:  # noqa: BLE001 - a stamp is a side note on a lock
+        return None
+
+
+def state_distance(monitor, x: Any, y: Any) -> Optional[float]:
+    """How much of this curve the regime's curves cannot describe (0..1)."""
+    try:
+        out = monitor.judge(x, y)
+    except Exception:  # noqa: BLE001
+        return None
+    if not out.get("available"):
+        return None
+    return float(out["fraction"])
+
+
+# ------------------------------------------------------------ identity
+#: Without a spread (one reference sample) a numeric feature this far from it,
+#: as a fraction of its magnitude, is flagged — never silently verified.
+IDENTITY_TOLERANCE = 0.05
+#: A position within a component is one of these; the component's strength one
+#: of _STRENGTH_WORDS. Matched on the parameter's own name, not its component's.
+_POSITION_WORDS = ("center", "centre", "position", "pos", "mu", "x0", "shift", "spacing", "d_spacing", "dspacing",
+                   "energy", "wavenumber", "two_theta", "2theta", "theta", "angle", "loc")
+_NOT_POSITION = ("amplitude", "height", "intensity", "area", "width", "fwhm", "sigma", "gamma", "fraction", "ratio",
+                 "count", "error", "err", "std", "unc", "r2", "r_squared", "chi")
+_STRENGTH_WORDS = ("amplitude", "height", "intensity", "area", "integrated", "weight")
+#: A recipe that IDENTIFIES (a phase-search XRD recipe) reports its identity
+#: as names, not positions: these keys are categorical identity. A database
+#: id is not: the same phase has several entries.
+_IDENTITY_WORDS = ("phase", "space_group", "spacegroup", "symmetry", "polymorph", "structure_type", "assignment")
+#: Positions weaker than this share of the strongest are noise-level features
+#: an auto-detect recipe finds on some units and not others: not identity.
+STRONG_SHARE = 0.10
+#: The floor of a position's tolerance, as a share of the data's x-range,
+#: so a near-zero position does not get a near-zero tolerance.
+POSITION_FLOOR_SHARE = 0.01
+
+
+def _is_position(key: str) -> bool:
+    k = str(key).lower()
+    return any(w in k for w in _POSITION_WORDS) and not any(w in k for w in _NOT_POSITION)
+
+
+def _norm_label(value: Any) -> str:
+    return "".join(ch for ch in str(value).lower() if ch.isalnum())
+
+
+def identity_features(parameters: Any) -> Dict[str, Any]:
+    """What a curve fit says it found, as identity: ``names`` (a phase, a
+    space group — normalised), and ``positions`` as ``(position, strength)``
+    pairs per component (nested ``{peak_1: {center, amplitude}}`` or flat
+    ``peak1_center`` / ``peak1_amplitude`` layouts). Amplitudes and widths are
+    strengths and shapes, not identity; component COUNT is not identity (an
+    auto-detect recipe finds noise peaks on some units and not others)."""
+    out: Dict[str, Any] = {"names": {}, "positions": []}
+    if not isinstance(parameters, dict):
+        return out
+    groups: Dict[str, Dict[str, Any]] = {}
+    flat: set = set()
+    for k, v in parameters.items():
+        key = str(k)
+        if isinstance(v, dict):
+            groups.setdefault(key, {}).update({str(kk): vv for kk, vv in v.items()})
+        elif isinstance(v, str) and v.strip() and any(w in key.lower() for w in _IDENTITY_WORDS):
+            out["names"][key] = _norm_label(v)
+        elif isinstance(v, (int, float)) and not isinstance(v, bool):
+            # a flat layout: peak1_center / peak1_amplitude → component "peak1";
+            # bare center / amplitude / sigma → the one component of a single fit
+            stem, _, leaf = key.rpartition("_") if "_" in key else ("", "", key)
+            if _is_position(leaf) or any(w in leaf.lower() for w in _STRENGTH_WORDS):
+                groups.setdefault(stem, {})[leaf] = v
+                flat.add(stem)
+    for comp, fields in groups.items():
+        if comp in flat and not ("peak" in comp.lower() or any(
+                any(w in str(kk).lower() for w in _STRENGTH_WORDS) for kk in fields)):
+            # a lone flat number with a position-like name (activation_energy,
+            # mu_shift, fitted_zero_shift) is not a component's position
+            continue
+        pos = next((float(vv) for kk, vv in fields.items()
+                    if isinstance(vv, (int, float)) and not isinstance(vv, bool) and _is_position(kk)), None)
+        if pos is None or not math.isfinite(pos):
+            continue
+        strength = next((abs(float(vv)) for kk, vv in fields.items()
+                         if isinstance(vv, (int, float)) and not isinstance(vv, bool)
+                         and any(w in str(kk).lower() for w in _STRENGTH_WORDS)), None)
+        out["positions"].append((pos, strength))
+    return out
+
+
+def strong_positions(feats: Dict[str, Any]) -> List[float]:
+    pts = [(p, s) for p, s in feats.get("positions") or [] if p is not None]
+    if not pts:
+        return []
+    known = [s for _, s in pts if s is not None]
+    if not known:
+        return sorted(p for p, _ in pts)
+    top = max(known)
+    return sorted(p for p, s in pts if s is None or (top > 0 and s >= STRONG_SHARE * top))
+
+
+def identity_reference(samples: Sequence[Dict[str, Any]], *, x_range: Optional[float] = None) -> Dict[str, Any]:
+    """The reference an identity check compares against, from the regime's
+    units' identity features: per name, the set of values the units reported
+    (``n`` units); the units' strong positions clustered by nearest
+    neighbour, each cluster the range the units put it in; and the tolerance
+    floor (``POSITION_FLOOR_SHARE`` of the x-range)."""
+    samples = [s for s in samples if isinstance(s, dict)]
+    names: Dict[str, Dict[str, Any]] = {}
+    for s in samples:
+        for k, v in (s.get("names") or {}).items():
+            names.setdefault(k, {"values": set(), "n": 0})
+            names[k]["values"].add(v)
+            names[k]["n"] += 1
+    floor = POSITION_FLOOR_SHARE * float(x_range) if x_range else None
+    per_unit = [strong_positions(s) for s in samples]
+    allpos = sorted((p, i) for i, ps in enumerate(per_unit) for p in ps)
+    if floor is None and allpos:
+        span = allpos[-1][0] - allpos[0][0]
+        floor = 0.01 * span if span > 0 else max(abs(allpos[0][0]) * 0.01, 1e-6)
+    clusters: List[Dict[str, Any]] = []
+    for p, i in allpos:
+        if clusters and p - clusters[-1]["max"] <= 2 * (floor or 0):
+            clusters[-1]["max"] = p
+            clusters[-1]["units"].add(i)
+        else:
+            clusters.append({"min": p, "max": p, "units": {i}})
+    return {"names": {k: {"values": sorted(v["values"]), "n": v["n"]} for k, v in names.items()},
+            "clusters": [{"min": c["min"], "max": c["max"], "n_units": len(c["units"])} for c in clusters],
+            "n_units": len(samples), "floor": floor}
+
+
+def identity_check(feats: Dict[str, Any], reference: Dict[str, Any]) -> Dict[str, Any]:
+    """Is the replayed result the SAME KIND of thing the regime's units found?
+
+    Names: a value outside the set the units reported is drift (several units
+    agreeing is a spread of its own). Positions: each of the replay's STRONG
+    positions must fall in some cluster the units' strong positions formed
+    (widened by the cluster's own span, at least the floor), and each cluster
+    EVERY unit had must have a strong position near it — a new strong
+    feature, or a strong feature gone, is drift; a weak peak coming and going
+    is not. Returns ``{"checked", "spread_known", "within", "drifted",
+    "compared"}``; only a check against two or more units is a spread."""
+    drifted: List[Dict[str, Any]] = []
+    compared = 0
+    n_units = int(reference.get("n_units") or 0)
+    for name, ref in (reference.get("names") or {}).items():
+        got = (feats.get("names") or {}).get(name)
+        if got is None:
+            continue
+        compared += 1
+        if got not in (ref.get("values") or []):
+            drifted.append({"name": name, "value": got, "reference": list(ref.get("values") or [])})
+    clusters = reference.get("clusters") or []
+    floor = float(reference.get("floor") or 0.0)
+    mine = strong_positions(feats)
+    if clusters and mine:
+        compared += 1
+        for p in mine:
+            if not any(c["min"] - max(c["max"] - c["min"], floor) <= p <= c["max"] + max(c["max"] - c["min"], floor)
+                       for c in clusters):
+                drifted.append({"name": "position", "value": p, "reference": "no strong feature of the regime near it"})
+        for c in clusters:
+            if n_units and c["n_units"] >= n_units:          # a feature every unit had
+                tol = max(c["max"] - c["min"], floor)
+                if not any(c["min"] - tol <= p <= c["max"] + tol for p in mine):
+                    drifted.append({"name": "position", "value": None, "reference": [c["min"], c["max"]],
+                                    "missing": True})
+    return {"checked": compared > 0, "spread_known": n_units >= 2, "within": not drifted,
+            "drifted": drifted, "compared": compared}
+
+
 # ------------------------------------------------------------ select_recipe
 def select_recipe(candidates: Sequence[Tuple[str, Optional[str]]],
                   run: Callable[[int, str, Optional[str]], Dict[str, Any]],
-                  judge: Callable[[Dict[str, Any]], Dict[str, Any]],
-                  *, strategy: str = "first_good") -> Dict[str, Any]:
+                  judge: Callable[..., Dict[str, Any]],
+                  *, strategy: str = "first_good",
+                  distances: Optional[Sequence[Optional[float]]] = None,
+                  ambiguity_ratio: float = AMBIGUITY_RATIO, bar: float = 0.10) -> Dict[str, Any]:
     """Choose among a series' regime recipes on a reuse.
 
     ``candidates`` are ``(script, source)`` in lock order; ``run(n, script,
     source)`` replays one (the agent's own fit, in its own folder) and
-    returns the result; ``judge(result)`` is the replay gate's verdict for a
-    result that executed. The default strategy is today's rule: the FIRST
-    candidate the gate calls good is chosen; when none is good, the first
-    that executed (poor); when none executed, nothing. Returns
-    ``{"chosen": n | None, "result", "verdict", "tried": [...]}`` with one
-    entry per candidate tried (its index, source, executed, verdict)."""
-    if strategy != "first_good":
+    returns the result; ``judge(n, result)`` is the verdict on a result that
+    executed — the replay gate, and whatever else the caller holds a
+    candidate to (the same-state and identity checks of #711), so a
+    candidate that fits but is not the regime's falls through to the next.
+    ``first_good``: the FIRST candidate judged good is chosen; when none is
+    good, the first that executed (poor); when none executed, nothing.
+    ``nearest_first`` (#710): the candidates are tried in order of
+    ``distances`` (how much of the new data the regime's own curves cannot
+    describe; unknown ones last, lock order among ties), then the same rule;
+    the choice is ``ambiguous`` when the second-nearest is within
+    ``ambiguity_ratio`` of the nearest or both are under ``bar``. Returns
+    ``{"chosen": n | None, "result", "verdict", "source", "tried", "order",
+    "ambiguous", "margin"}``; ``n`` indexes ``candidates``."""
+    if strategy not in ("first_good", "nearest_first"):
         raise ValueError(f"unknown strategy {strategy!r}")
+    order = list(range(1, len(candidates) + 1))
+    ambiguous, margin = False, None
+    if strategy == "nearest_first":
+        dists = list(distances or [])
+        if len(dists) != len(candidates):
+            raise ValueError("nearest_first needs one distance (or None) per candidate")
+        known = [(d, n) for n, d in zip(order, dists) if isinstance(d, (int, float))]
+        order = ([n for _, n in sorted(known, key=lambda dn: (dn[0], dn[1]))]
+                 + [n for n, d in zip(order, dists) if not isinstance(d, (int, float))])
+        if len(known) >= 2:
+            best, second = sorted(d for d, _ in known)[:2]
+            margin = round(second - best, 4)
+            ambiguous = bool(second <= ambiguity_ratio * max(best, 1e-9) or (best <= bar and second <= bar))
     tried: List[Dict[str, Any]] = []
     kept: Optional[Dict[str, Any]] = None
     last_failed: Optional[Dict[str, Any]] = None
-    for n, (script, source) in enumerate(candidates, 1):
+    for n in order:
+        script, source = candidates[n - 1]
         result = run(n, script, source)
         if result.get("success"):
-            verdict = judge(result)
+            verdict = judge(n, result)
             tried.append({"n": n, "source": source, "executed": True, "verdict": verdict["verdict"],
                           "score": verdict.get("score")})
             if verdict["verdict"] == "good":
-                return {"chosen": n, "result": result, "verdict": verdict, "source": source, "tried": tried}
+                return {"chosen": n, "result": result, "verdict": verdict, "source": source, "tried": tried,
+                        "order": order, "ambiguous": ambiguous, "margin": margin}
             if kept is None:
                 kept = {"chosen": n, "result": result, "verdict": verdict, "source": source}
         else:
@@ -261,6 +497,6 @@ def select_recipe(candidates: Sequence[Tuple[str, Optional[str]]],
             tried.append({"n": n, "source": source, "executed": False, "verdict": "failed",
                           "error": result.get("error")})
     if kept is not None:
-        return {**kept, "tried": tried}
+        return {**kept, "tried": tried, "order": order, "ambiguous": ambiguous, "margin": margin}
     return {"chosen": None, "result": None, "verdict": None, "source": None, "tried": tried,
-            "last_failed": last_failed}
+            "last_failed": last_failed, "order": order, "ambiguous": ambiguous, "margin": margin}

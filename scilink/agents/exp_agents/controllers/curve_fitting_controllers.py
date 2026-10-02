@@ -1030,6 +1030,94 @@ def _degenerate_data_check(curve_data):
     return None
 
 
+def _drift_state(curve_data):
+    """What a regime's recipe records about its anchor's data (#710): the
+    curve on the drift monitor's grid (``_replay.drift_state_of``), or
+    ``None``; never raises."""
+    try:
+        from .._replay import drift_state_of
+        xy = _extract_xy(curve_data)
+        return None if xy is None else drift_state_of(xy[0], xy[1])
+    except Exception:  # noqa: BLE001 - a stamp is a side note on a lock
+        return None
+
+
+def _regime_of_named(state: dict) -> Optional[str]:
+    """When a reuse names a unit's script inside a series run, the regime that
+    unit belonged to (the reference a replay of it is held to); else None —
+    the whole run."""
+    from .._verification_record import named_recipe_file, unit_script_name
+    for raw_path in state.get("prior_analysis_paths") or []:
+        named = named_recipe_file(raw_path)
+        anchor_dir = _load_prior_curve_fit_state(raw_path)[0]
+        if named is None or anchor_dir is None:
+            continue
+        try:
+            data = json.loads((Path(anchor_dir) / "series_fit_results.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        for r in data.get("results") or []:
+            if isinstance(r, dict) and unit_script_name(r.get("name")) == named.stem:
+                return r.get("regime")
+    return None
+
+
+def _regime_references(state: dict, candidates: list) -> list:
+    """For each regime candidate of a reuse: a drift monitor seeded with the
+    regime's units' data from the prior run (``spectrum_NNNN/data.npy``),
+    else with the anchor's stamped ``drift_state``; and the identity
+    reference of its units' fitted parameters (``_replay.identity_reference``).
+    ``None`` entries where neither exists (an older run, a recipe file)."""
+    from .._replay import identity_features, identity_reference, state_monitor
+    out = []
+    rows_by_regime: Dict[Any, list] = {}
+    anchor_dir = None
+    for raw_path in state.get("prior_analysis_paths") or []:
+        anchor_dir = _load_prior_curve_fit_state(raw_path)[0]
+        if anchor_dir is not None:
+            break
+    rows = []
+    if anchor_dir is not None:
+        try:
+            data = json.loads((Path(anchor_dir) / "series_fit_results.json").read_text(encoding="utf-8"))
+            rows = [r for r in data.get("results") or [] if isinstance(r, dict) and r.get("success")]
+        except (OSError, ValueError):
+            rows = []
+    for r in rows:
+        rows_by_regime.setdefault(r.get("regime"), []).append(r)
+    for c in candidates:
+        regime = c.get("regime")
+        units = rows_by_regime.get(regime) if regime is not None else rows
+        units = units or []
+        curves = []
+        x_range = None
+        for r in units:
+            idx = r.get("index")
+            f = Path(anchor_dir) / f"spectrum_{int(idx):04d}" / "data.npy" if (anchor_dir is not None and isinstance(idx, int)) else None
+            if f is not None and f.is_file():
+                try:
+                    xy = _extract_xy(np.load(f))
+                except Exception:  # noqa: BLE001
+                    xy = None
+                if xy is not None:
+                    curves.append(xy)
+                    x_range = float(np.nanmax(xy[0]) - np.nanmin(xy[0]))
+        monitor = None
+        try:
+            if curves:
+                monitor = state_monitor(curves)
+            elif isinstance(c.get("drift_state"), dict):
+                monitor = state_monitor(state=c["drift_state"])
+                xs = c["drift_state"].get("x") or []
+                x_range = (max(xs) - min(xs)) if xs else None
+        except Exception:  # noqa: BLE001
+            monitor = None
+        samples = [identity_features(r.get("parameters")) for r in units if isinstance(r.get("parameters"), dict)]
+        identity = identity_reference(samples, x_range=x_range) if samples else None
+        out.append({"monitor": monitor, "identity": identity, "n_curves": len(curves), "regime": regime})
+    return out
+
+
 def _load_anchor_fingerprint(anchor_dir):
     """Data fingerprint of the anchor run's first successful spectrum.
 
@@ -1132,7 +1220,15 @@ def _prior_curve_fit_recipes(state: dict) -> list:
     is not replayed with the wrong one. The source names the run (or the
     file's folder) and, for a series or a named file, which script and why
     (``reuse_validity.source`` carries it)."""
-    from .._verification_record import named_recipe_file, prior_recipe_scripts
+    return [(c["script"], c["source"]) for c in _prior_curve_fit_candidates(state)]
+
+
+def _prior_curve_fit_candidates(state: dict) -> list:
+    """``_prior_curve_fit_recipes`` with everything a choice among regimes
+    needs: ``{script, source, regime, unit, verified, fingerprint}`` per
+    candidate, in lock order (#710: the fingerprint is the anchor's data as
+    recorded when the recipe was locked; absent on an older run)."""
+    from .._verification_record import named_recipe_file, prior_recipe_candidates
     paths = state.get("prior_analysis_paths") or []
     for raw_path in paths:
         anchor_dir, _summary, script_text, _label = _load_prior_curve_fit_state(raw_path)
@@ -1141,13 +1237,13 @@ def _prior_curve_fit_recipes(state: dict) -> list:
             continue
         run = anchor_dir if anchor_dir is not None else named.parent
         try:
-            found = prior_recipe_scripts(run, single_name="fitting_script.py", named=named)
+            found = prior_recipe_candidates(run, single_name="fitting_script.py", named=named)
         except Exception:  # noqa: BLE001 - an unreadable script contributes nothing
             continue
         if not found:
             continue
         name = run.name or str(run)
-        return [(text, f"{name}: {label}" if label else name) for text, label in found]
+        return [{**c, "source": f"{name}: {c['label']}" if c.get("label") else name} for c in found]
     return []
 
 
@@ -5092,13 +5188,14 @@ Return JSON with:
         #
         # A prior SERIES that locked several regimes offers one recipe per
         # regime (``_reuse_candidates``, #704). Each runs VERBATIM in a
-        # candidate folder of its own (the best-of-N layout, so the kept
-        # result's figure and fit.npy are its own), in lock order; the first
-        # the gate calls good is kept, else the first that executed (poor,
-        # flagged), and only if none executed is the first recipe given the
-        # correction ladder, as a single recipe is — the ladder's cost is
-        # paid once, not once per regime. A single recipe runs as it always
-        # did, in the spectrum's own folder.
+        # candidate folder of its own (the best-of-N layout), in order of how
+        # near the new data is to each regime's own data (#710, the drift
+        # monitor's measure); a candidate is kept when its gate passes AND the
+        # new data is its regime's state AND what it found is what the regime
+        # found (#711) — else the next is tried; when none is kept, the first
+        # that executed (poor, flagged); only if none executed is the nearest
+        # recipe given the correction ladder, once. A single recipe runs as it
+        # always did, in the spectrum's own folder, held to the same checks.
         from .._replay import ScoreReplayGate, select_recipe
         gate = ScoreReplayGate(self._accept_gate().is_accept, self.r2_threshold, "R²")
 
@@ -5109,50 +5206,173 @@ Return JSON with:
         extra = ctx.state.get("_reuse_candidates") or []
         if extra and extra[0].get("script") == ctx.reuse_script:
             candidates += [(c["script"], c["source"]) for c in extra[1:]]
+        # The regimes' references — a drift monitor on each regime's own data
+        # and the identity of what its units found — and the new data's
+        # distance to each regime (how much of it the regime's curves cannot
+        # describe). Older runs (no data, no stamp) keep lock order.
+        if len(extra) > 1:
+            refs = _regime_references(ctx.state, extra)
+        else:
+            # one recipe: the reference is the prior run (a named unit script
+            # inside a series run → that unit's regime; a recipe file with
+            # no run behind it → none)
+            regime = _regime_of_named(ctx.state) or (extra[0].get("regime") if extra else None)
+            refs = _regime_references(ctx.state, [{"regime": regime, "drift_state": (extra[0].get("drift_state") if extra else None)}])
+        xy = _extract_xy(ctx.data)
+        distances = None
+        if len(candidates) > 1 and refs and xy is not None and any(r.get("monitor") is not None for r in refs):
+            from .._replay import state_distance
+            distances = [state_distance(r["monitor"], xy[0], xy[1]) if r.get("monitor") is not None else None
+                         for r in refs]
         if len(candidates) == 1:
             reuse_result = self._run_reuse_candidate(ctx, ctx.reuse_script, ctx.reuse_source, None, 1, 1)
             if reuse_result.get("success"):
                 rv = gate.judge(r2_of(reuse_result))
-                return self._reuse_verdict(ctx, reuse_result, ctx.reuse_source, rv["score"], rv["verdict"], tried=1, of=1)
+                out = self._reuse_verdict(ctx, reuse_result, ctx.reuse_source, rv["score"], rv["verdict"], tried=1, of=1)
+                return self._apply_identity(ctx, out, (refs[0] if refs else None), xy)
             return self._reuse_failed(ctx, reuse_result, ctx.reuse_source)
-        # Several regimes: each recipe VERBATIM in its own folder, the shared
-        # choice rule (select_recipe: the first the gate calls good, else the
-        # first that executed), the chosen one promoted.
         subdirs: Dict[int, str] = {}
+        checks: Dict[int, dict] = {}
 
         def run(n: int, script: str, source: Optional[str]) -> dict:
             subdirs[n] = f"{CANDIDATES_DIR_NAME}/recipe_{n:02d}"
             out = self._run_reuse_candidate(ctx, script, source, subdirs[n], n, len(candidates), verbatim=True)
-            if not out.get("success") and n < len(candidates):
+            if not out.get("success") and len(subdirs) < len(candidates):
                 self.logger.info("   ↪ this regime's recipe could not execute verbatim; trying the next")
             return out
 
-        def judge(result: dict) -> dict:
+        def judge(n: int, result: dict) -> dict:
+            # the gate, then the regime's own checks: is this its state, and
+            # did the recipe find what the regime finds
             rv = gate.judge(r2_of(result))
-            if rv["verdict"] != "good" and len(subdirs) < len(candidates):     # a next candidate exists
-                self.logger.info(f"   ↪ R² = {rv['score']:.4f} below {self.r2_threshold:.3f}; "
-                                 "trying the next regime's recipe")
+            ref = refs[n - 1] if n - 1 < len(refs) else None
+            dist = distances[n - 1] if distances else None
+            checks[n] = self._identity_of(result, ref, xy, dist)
+            if rv["verdict"] == "good" and not checks[n]["same"]:
+                rv = {**rv, "verdict": "poor", "reasons": rv["reasons"] + [checks[n]["why"]]}
+            if rv["verdict"] != "good" and len(subdirs) < len(candidates):
+                why = checks[n]["why"] or f"R² = {rv['score']:.4f} below {self.r2_threshold:.3f}"
+                self.logger.info(f"   ↪ {why}; trying the next regime's recipe")
             return rv
-        chosen = select_recipe(candidates, run, judge)
+        chosen = select_recipe(candidates, run, judge,
+                               strategy="nearest_first" if distances else "first_good", distances=distances)
+        order = chosen.get("order", list(range(1, len(candidates) + 1)))
+        regime_choice = {
+            "by": "state_distance" if distances else "lock_order",
+            "ranking": [{"n": n, "regime": extra[n - 1].get("regime") if n - 1 < len(extra) else None,
+                         "distance": (distances[n - 1] if distances else None)} for n in order],
+            "ambiguous": bool(chosen.get("ambiguous")), "margin": chosen.get("margin"),
+        }
+        if regime_choice["ambiguous"]:
+            near = [x["regime"] for x in regime_choice["ranking"][:2]]
+            regime_choice["note"] = f"the data does not tell regimes {near[0]!r} and {near[1]!r} apart"
+            self.logger.warning(f"   ⚖️  Regime choice is AMBIGUOUS: {regime_choice['note']} "
+                                f"(distances {[x['distance'] for x in regime_choice['ranking'][:2]]}).")
+
+        def finish(out: dict, n: int) -> dict:
+            rv = out["reuse_validity"]
+            rv["regime_choice"] = {**regime_choice, "chosen_regime": extra[n - 1].get("regime") if n - 1 < len(extra) else None}
+            if n in checks:
+                rv["identity"] = checks[n]["identity"]
+                rv["state_distance"] = checks[n]["distance"]
+                if not checks[n]["same"]:
+                    rv["message"] += " " + checks[n]["why"]
+                    out["quality_warning"] = rv["message"]
+            if regime_choice["ambiguous"]:
+                # an ambiguous attribution is said where the attribution is read
+                rv["source"] = f"{rv.get('source')} [regime choice ambiguous: {regime_choice['note']}]"
+                rv["message"] += f" REGIME CHOICE AMBIGUOUS: {regime_choice['note']}."
+            return out
         if chosen["chosen"] is not None:
             n, reuse_result, rv = chosen["chosen"], chosen["result"], chosen["verdict"]
             self._promote_candidate_artifacts(reuse_result, ctx.item_idx, 0, subdir=subdirs[n])
-            return self._reuse_verdict(ctx, reuse_result, chosen["source"], rv["score"], rv["verdict"],
-                                       tried=len(chosen["tried"]), of=len(candidates),
-                                       kept_from=n if rv["verdict"] != "good" else None)
+            out = self._reuse_verdict(ctx, reuse_result, chosen["source"], rv["score"], rv["verdict"],
+                                      tried=len(chosen["tried"]), of=len(candidates),
+                                      kept_from=n if rv["verdict"] != "good" else None)
+            return finish(out, n)
         if ctx.state.get("_strict_replay"):
             failed = chosen["last_failed"]
-            return self._reuse_failed(ctx, failed["result"], failed["source"])
-        # None executed verbatim: the first recipe gets the correction ladder,
+            out = self._reuse_failed(ctx, failed["result"], failed["source"])
+            out["reuse_validity"]["regime_choice"] = {**regime_choice, "chosen_regime": None}
+            return out
+        # None executed verbatim: the NEAREST recipe gets the correction ladder,
         # as a single recipe would, in the spectrum's own folder.
-        script, source = candidates[0]
-        self.logger.info("   ↪ no regime's recipe ran verbatim; repairing the first as a single recipe would")
-        reuse_result = self._run_reuse_candidate(ctx, script, source, None, 1, len(candidates))
+        n = order[0]
+        script, source = candidates[n - 1]
+        self.logger.info("   ↪ no regime's recipe ran verbatim; repairing the nearest as a single recipe would")
+        reuse_result = self._run_reuse_candidate(ctx, script, source, None, n, len(candidates))
         if reuse_result.get("success"):
             rv = gate.judge(r2_of(reuse_result))
-            return self._reuse_verdict(ctx, reuse_result, source, rv["score"], rv["verdict"], tried=len(candidates),
-                                       of=len(candidates), kept_from=1)
-        return self._reuse_failed(ctx, reuse_result, source)
+            checks[n] = self._identity_of(reuse_result, refs[n - 1] if n - 1 < len(refs) else None, xy,
+                                          distances[n - 1] if distances else None)
+            if rv["verdict"] == "good" and not checks[n]["same"]:
+                rv = {**rv, "verdict": "poor"}
+            out = self._reuse_verdict(ctx, reuse_result, source, rv["score"], rv["verdict"], tried=len(candidates),
+                                      of=len(candidates), kept_from=n)
+            return finish(out, n)
+        out = self._reuse_failed(ctx, reuse_result, source)
+        if isinstance(out, dict):
+            out["reuse_validity"]["regime_choice"] = {**regime_choice, "chosen_regime": None}
+        return out
+
+    def _identity_of(self, result: dict, ref: Optional[dict], xy, distance: Optional[float]) -> dict:
+        """The two checks a replayed result is held to beyond its gate (#711):
+        is the new data the regime's STATE (the drift monitor's distance to
+        the regime's own curves), and is what the recipe found what the
+        regime's units found (``identity_check``: names, strong positions).
+        Returns ``{"same", "why", "identity", "distance"}``; a check that
+        cannot run (no reference) is not a failure, and says so."""
+        from .._replay import SAME_STATE_BAR, identity_check, identity_features
+        out = {"same": True, "why": "", "identity": {"checked": False}, "distance": distance}
+        if ref is None:
+            return out
+        try:
+            if distance is None and ref.get("monitor") is not None and xy is not None:
+                from .._replay import state_distance
+                distance = state_distance(ref["monitor"], xy[0], xy[1])
+                out["distance"] = distance
+            if isinstance(distance, (int, float)) and distance > SAME_STATE_BAR:
+                out["same"] = False
+                out["why"] = (f"STATE: {distance:.0%} of this measurement is structure the regime's own data does "
+                              f"not describe (bar {SAME_STATE_BAR:.0%}) — it is not the regime's state")
+            if ref.get("identity"):
+                chk = identity_check(identity_features(result.get("parameters")), ref["identity"])
+                out["identity"] = chk
+                if chk["checked"] and not chk["within"]:
+                    bits = []
+                    for d in chk["drifted"][:4]:
+                        if d["name"] == "position":
+                            bits.append(f"a strong feature at {d['value']:.4g} the regime has none near" if d.get("value") is not None
+                                        else f"the regime's feature at {d['reference'][0]:.4g}–{d['reference'][1]:.4g} missing")
+                        else:
+                            bits.append(f"{d['name']} = {d['value']!r} (the regime's units: {d['reference']})")
+                    why = "IDENTITY: " + "; ".join(bits) + " — the recipe found a different thing than the regime's units"
+                    out["why"] = (out["why"] + " " + why).strip() if out["why"] else why
+                    if chk["spread_known"]:
+                        out["same"] = False
+                    else:
+                        out["identity"]["flagged"] = True       # one reference unit: a flag, not a verdict
+        except Exception as exc:  # noqa: BLE001 - the checks are side notes on the gate
+            out["identity"] = {"checked": False, "error": str(exc)[:200]}
+        return out
+
+    def _apply_identity(self, ctx: QCItemContext, reuse_result: dict, ref: Optional[dict], xy) -> dict:
+        """The single-recipe path's version of the judge's checks: applied to
+        the one replayed result, downgrading the verdict when the data is not
+        the regime's state or the recipe found a different thing."""
+        rv = reuse_result.get("reuse_validity")
+        if not isinstance(rv, dict):
+            return reuse_result
+        chk = self._identity_of(reuse_result, ref, xy, None)
+        rv["identity"] = chk["identity"]
+        if chk["distance"] is not None:
+            rv["state_distance"] = chk["distance"]
+        if not chk["same"]:
+            rv["verdict"] = "poor"
+            rv["message"] = rv.get("message", "") + " " + chk["why"]
+            reuse_result["quality_warning"] = rv["message"]
+            self.logger.warning(f"   🧬 {chk['why']}")
+        return reuse_result
 
     def _run_reuse_candidate(self, ctx: QCItemContext, script: str, source: Optional[str],
                              subdir: Optional[str], n: int, of: int, *, verbatim: bool = False) -> dict:
@@ -7054,13 +7274,15 @@ Return JSON with:
         # deepen a prior result (re-running the script that produced it only
         # reproduces it).
         if state.get("reuse_locked_script"):
-            recipes = _prior_curve_fit_recipes(state)
-            reuse_script, reuse_source = recipes[0] if recipes else (None, None)
+            cands = _prior_curve_fit_candidates(state)
+            reuse_script, reuse_source = (cands[0]["script"], cands[0]["source"]) if cands else (None, None)
             # Several regimes locked by the prior series: every recipe is a
-            # candidate, tried in turn by qc_try_reuse — unless script_edits
-            # were validated against the first, which is then the only one.
-            state["_reuse_candidates"] = ([{"script": t, "source": src} for t, src in recipes]
-                                          if len(recipes) > 1 and not state.get("script_edits") else [])
+            # candidate, matched to the new data by fingerprint and tried by
+            # qc_try_reuse — unless script_edits were validated against the
+            # first, which is then the only one.
+            state["_reuse_candidates"] = ([{k: c.get(k) for k in ("script", "source", "regime", "unit", "drift_state")}
+                                           for c in cands]
+                                          if len(cands) > 1 and not state.get("script_edits") else [])
             reuse_script, reuse_source = _apply_reuse_script_edits(
                 state, reuse_script, reuse_source, self.logger)
         else:
@@ -7227,7 +7449,12 @@ Return JSON with:
                     if result.get("unit_verdict"):
                         recipe_by_regime[regime_name] = {
                             "unit": spectrum_name, "index": idx, "regime": regime_name,
-                            "verdict": result["unit_verdict"], "script": result["script"]}
+                            "verdict": result["unit_verdict"], "script": result["script"],
+                            # what this regime's data LOOKS like (#710): the anchor's
+                            # curve on the drift monitor's grid, so a later reuse
+                            # matches a new measurement to a regime by its data, not
+                            # by which regime happens to be first in lock order
+                            "drift_state": _drift_state(curve_data)}
                     if idx == 0:
                         state["base_fitting_script"] = result["script"]
                     self.logger.info(

@@ -3821,6 +3821,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 "task_success": bool(task_success),
                 "salvaged": (not task_success) and ctx.best_attempt["valid_count"] > 0,
                 "script": ctx.last_code or None,
+                **({"identity_checked": bool(getattr(ctx, "identity_checked", False))}
+                   if getattr(ctx, "locked_script", None) else {}),
                 # Locked-replay provenance: replay_verbatim=False means a
                 # mechanical execution repair modified the frozen script, so
                 # this run is NOT byte-comparable to the donor.
@@ -4156,6 +4158,12 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         _rv = MapReplayGate().judge(result_map, fit_mask, _ref,
                                                     feature_name in required_outputs)
                         is_valid, critique = _rv["verdict"] == "good", (_rv["reasons"] or [""])[0]
+                        if feature_name in required_outputs:
+                            # the identity check of a cube replay (#711): every required
+                            # map held to the anchor's own statistics, or not
+                            _held = bool(isinstance(_ref, dict) and not _ref.get("values_may_move")
+                                         and all(isinstance(_ref.get(k), (int, float)) for k in ("min", "max")))
+                            ctx.identity_checked = _held and getattr(ctx, "identity_checked", True)
                         self.logger.info(
                             f"    🔒 Deterministic replay gate on {feature_name}: "
                             f"{'pass' if is_valid else 'REJECT — ' + critique}")

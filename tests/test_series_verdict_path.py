@@ -613,8 +613,9 @@ class ScriptKeyedExecutor:
     name that script — so what is left on disk can be checked."""
     timeout = 30
 
-    def __init__(self, r2_by_script):
-        self.r2_by_script, self.calls = r2_by_script, []
+    def __init__(self, r2_by_script, centers=None, extra_params=None):
+        self.r2_by_script, self.calls, self.centers = r2_by_script, [], centers or {}
+        self.extra_params = extra_params or {}          # script -> extra top-level fitted parameters
 
     def execute_script(self, script, working_dir=None, timeout=None, **kw):
         wd = Path(working_dir)
@@ -624,18 +625,24 @@ class ScriptKeyedExecutor:
             return {"status": "error", "stdout": "", "stderr": "Traceback: boom", "message": f"{script} failed"}
         (wd / "visualization.png").write_bytes(f"png {script}".encode())
         (wd / "fit.npy").write_bytes(f"fit {script}".encode())
-        out = {"model_type": script, "parameters": {"peak_1": {"center": 144.0}}, "fit_quality": {"r_squared": r2}}
+        out = {"model_type": script, "parameters": {"peak_1": {"center": self.centers.get(script, 144.0), "amplitude": 1.0},
+                                                    **self.extra_params.get(script, {})},
+               "fit_quality": {"r_squared": r2}}
         return {"status": "success", "stdout": "FIT_RESULTS_JSON:" + json.dumps(out), "stderr": "", "message": ""}
 
 
-def _replay(tmp_path, monkeypatch, r2_by_script, *, strict=False, repaired=None):
+def _replay(tmp_path, monkeypatch, r2_by_script, *, strict=False, repaired=None, prior=None, data=None, centers=None,
+            extra_params=None):
     """The real qc_try_reuse → _fit_single_spectrum → stage_and_run path on a
     two-regime prior (LOW, HIGH); ``repaired`` is what the correction ladder
-    would hand back (counted), ``None`` makes a correction an error."""
+    would hand back (counted), ``None`` makes a correction an error. With
+    ``prior`` (a run folder) the candidates come through the real pick
+    (``_prior_curve_fit_candidates``, fingerprints included)."""
     from scilink.agents.exp_agents._qc_engine import QCItemContext
+    from scilink.agents.exp_agents.controllers.curve_fitting_controllers import _prior_curve_fit_candidates
     out = tmp_path / "new"
     out.mkdir(parents=True, exist_ok=True)
-    ex = ScriptKeyedExecutor(r2_by_script)
+    ex = ScriptKeyedExecutor(r2_by_script, centers, extra_params)
     ctrl = _controller(out, ex)
     corrections = []
 
@@ -646,13 +653,22 @@ def _replay(tmp_path, monkeypatch, r2_by_script, *, strict=False, repaired=None)
         return repaired, "repaired"
     monkeypatch.setattr(ctrl, "_correct_script", correct)
     monkeypatch.setattr(ctrl, "_correct_script_with_timeout_escalation", correct)
-    recipes = [("LOW", "prior: LOW (regime low, 1 of 2)"), ("HIGH", "prior: HIGH (regime high, 2 of 2)")]
+    if prior is not None:
+        cands = _prior_curve_fit_candidates({"prior_analysis_paths": [str(prior)]})
+        candidates = [{k: c.get(k) for k in ("script", "source", "regime", "unit", "drift_state")} for c in cands]
+        reuse_candidates = candidates if len(candidates) > 1 else []      # as the series controller sets it
+    else:
+        recipes = [("LOW", "prior: LOW (regime low, 1 of 2)"), ("HIGH", "prior: HIGH (regime high, 2 of 2)")]
+        candidates = [{"script": t, "source": s} for t, s in recipes]
+        reuse_candidates = candidates
     state = {"num_spectra": 1, "is_single_spectrum": True, "system_info": {}, "locked_fitting_config": {},
-             "_reuse_candidates": [{"script": t, "source": s} for t, s in recipes]}
+             "_reuse_candidates": reuse_candidates,
+             **({"prior_analysis_paths": [str(prior)], "reuse_locked_script": True} if prior is not None else {})}
     if strict:
         state["_strict_replay"] = True
-    ctx = QCItemContext(state=state, data=_spectrum(1), data_path=str(tmp_path / "new.txt"), item_name="spectrum_0000",
-                        item_idx=0, reuse_script="LOW", reuse_source=recipes[0][1])
+    ctx = QCItemContext(state=state, data=_spectrum(1) if data is None else data, data_path=str(tmp_path / "new.txt"),
+                        item_name="spectrum_0000", item_idx=0, reuse_script=candidates[0]["script"],
+                        reuse_source=candidates[0]["source"])
     res = ctrl.qc_try_reuse(ctx)
     return res, ex, corrections, out / "spectrum_0000"
 
