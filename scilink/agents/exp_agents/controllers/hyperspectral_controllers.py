@@ -2354,6 +2354,8 @@ class SelectRefinementTargetController:
                                 else "replay of a prior approved analysis script"),
                 "required_outputs": list(rec.get("required_outputs") or []),
                 "supplied_script": rec["script"],
+                **({"timeout_used_s": int(rec["timeout_used_s"])}
+                   if isinstance(rec.get("timeout_used_s"), (int, float)) else {}),
                 # #518: the donor's fit-scoping travels with the script — a
                 # replay must reproduce the donor's SCOPING, not only its
                 # arithmetic (the mask is re-derived on this cube downstream).
@@ -3361,6 +3363,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             if target.get("supplied_script"):
                 ctx.supplied_script = target["supplied_script"]
                 ctx.locked_script = target["supplied_script"]
+                ctx.locked_timeout_s = target.get("timeout_used_s")
                 self.logger.info(
                     "    🔒 Locked-script replay for this target: executing "
                     "the prior approved script (generation skipped; per-map "
@@ -3821,6 +3824,9 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 "task_success": bool(task_success),
                 "salvaged": (not task_success) and ctx.best_attempt["valid_count"] > 0,
                 "script": ctx.last_code or None,
+                # the execution limit this script needed (#699): a locked
+                # replay of it starts from here instead of the base
+                **({"timeout_used_s": int(ctx.timeout_used_s)} if getattr(ctx, "timeout_used_s", None) else {}),
                 # Locked-replay provenance: replay_verbatim=False means a
                 # mechanical execution repair modified the frozen script, so
                 # this run is NOT byte-comparable to the donor.
@@ -3960,18 +3966,35 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                             "(the parser compile-checks scripts, so a syntax "
                             "error also lands here). Raw response head:\n"
                             + str(response)[:2000])
-                    with ExecutionTimeout(seconds=self.executor_timeout):
-                        exec(code_str, global_scope, local_scope)
+                    # The timeout policy the curve and image agents run under
+                    # (#699, _locked_exec.escalate_timeouts): a script that is
+                    # merely slow gets more time — the same code, a doubled
+                    # limit, up to the cap — before it is treated as broken.
+                    # A locked replay starts from the limit its donor needed.
+                    from .._locked_exec import escalate_timeouts
+                    _base_timeout = max(int(self.executor_timeout),
+                                        int(getattr(ctx, "locked_timeout_s", 0) or 0))
 
-                        if "analyze_feature" not in local_scope:
-                            raise ValueError("Function 'analyze_feature' was not found in generated code.")
-
-                        self.logger.info(f"    Executing generated code (timeout: {self.executor_timeout}s)...")
-                        func = local_scope["analyze_feature"]
-                        result_dict = _invoke_analyze_feature(
-                            func, optimal_data, state["energy_axis"], reconstruction,
-                            auxiliary=auxiliary_operands, fit_mask=fit_mask,
-                        )
+                    def _attempt(_timeout_s: int):
+                        _scope_g, _scope_l = dict(global_scope), {}
+                        try:
+                            with ExecutionTimeout(seconds=_timeout_s):
+                                exec(code_str, _scope_g, _scope_l)
+                                if "analyze_feature" not in _scope_l:
+                                    raise ValueError("Function 'analyze_feature' was not found in generated code.")
+                                self.logger.info(f"    Executing generated code (timeout: {_timeout_s}s)...")
+                                return _invoke_analyze_feature(
+                                    _scope_l["analyze_feature"], optimal_data, state["energy_axis"], reconstruction,
+                                    auxiliary=auxiliary_operands, fit_mask=fit_mask,
+                                )
+                        except TimeoutError as _te:
+                            return _te
+                    result_dict, _timeout_used = escalate_timeouts(
+                        _attempt, base_timeout=_base_timeout,
+                        timed_out=lambda out: isinstance(out, TimeoutError), logger=self.logger)
+                    if isinstance(result_dict, TimeoutError):
+                        raise result_dict          # ladder currency, as before, once the budget is spent
+                    ctx.timeout_used_s = _timeout_used
                     if not isinstance(result_dict, dict):
                         raise ValueError("Function return must be a dict.")
                     # A not_measurable declaration that CONTRADICTS the
