@@ -272,10 +272,21 @@ data.npy` of the prior run, else the stamp), model-free, the live loop's
 change signal. Each is a flag on the record (`identity.flagged`,
 `state_flag`; a check that could not run says so: `state_check`,
 `identity.reason`, `curves_not_seeded`) and a caveat in the message;
-`interpretation_checked` only when both ran against the regime's units and
-agreed — never for a run its own verifier approved (the verifier reviews the
-fit, not the claims; a fresh cube's map reviewer likewise) nor for a follower
-verified by its recipe. The verdict stays the gate's, on the fast clock and
+`interpretation_checked` only on clean evidence — identity within, and the
+state distance under the CERTIFICATION bar (`CERTIFY_STATE_BAR`, tighter than
+the flag bar `SAME_STATE_BAR`: a fixed-position recipe cannot report an
+impurity or a low mixture, so the state distance is the only check that sees
+them, and they sit between the two bars) — never for a run its own verifier
+approved (the verifier reviews the fit, not the claims; a fresh cube's map
+reviewer likewise). A one-unit reference certifies on the same evidence (a
+spread is not required: a miss only withholds), and a series' followers are
+checked the same cheap way against their regime's anchor (`_check_follower`
+→ `regime_checks`), so a series whose anchor replayed a prior recipe can
+post a verified claim when every unit certified; without that, a single-run
+reuse and every series reuse were provisional forever. A hyperspectral
+replay's `identity_checked` is the map gate's range rule — every required
+map inside the anchor's plausible range — a weaker certificate than the
+curve's two checks. The verdict stays the gate's, on the fast clock and
 off it. Why not a verdict: a deterministic check asked an interpretive
 question ("same phase, read the same way?" — the question the live section
 says no gate can answer) has the precision to withhold a certificate, not to

@@ -674,8 +674,8 @@ def _claim_verified(row: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
     verified, why = _analysis_verified(row)
     if verified and row and row.get("decided_by") == "replay_gate" and not row.get("interpretation_checked"):
         return False, (f"analysis {row.get('analysis_id')}: a locked-script replay passed the replay gate "
-                       "(the numbers), but nothing checked that it measured the same thing as the anchor "
-                       "— its interpretation is not verified")
+                       "(the numbers), but its interpretation is not certified — the state and identity "
+                       "checks against the regime's units did not both agree, or could not run")
     return verified, why
 
 

@@ -34,7 +34,7 @@ import test_regime_choice as rc  # noqa: E402
 
 from scilink.agents.exp_agents import _replay  # noqa: E402
 from scilink.agents.exp_agents._verification_record import (  # noqa: E402
-    analysis_verdict, final_verdict_record, unit_verdict_for)
+    analysis_verdict, final_verdict_record, interpretation_checked_by, unit_verdict_for)
 from scilink.agents.meta_agent import board as board_mod  # noqa: E402
 
 
@@ -56,7 +56,11 @@ def test_identity_features_and_reference_read_what_a_recipe_found():
     # names match as one string without spaces (a group under its settings and spellings) or as token sets
     # (a qualifier in parentheses does not erase the phase: "TiO2 (anatase)" against "TiO2 (rutile)" differs)
     m = _replay.names_match
-    assert m(_replay._norm_label("I41/amd"), _replay._norm_label("I 41/a m d :2")) and m(_replay._norm_label("R -3 m :H"), "r 3 m")
+    assert m(_replay._norm_label("I41/amd"), _replay._norm_label("I 41/a m d :2")) and m(_replay._norm_label("R -3 m :H"), "r-3m")
+    # a bar is part of its digit's token (P-1 is not P1, R-3c is not R3c); a Greek letter is spelled out (alpha is not gamma)
+    assert not m(_replay._norm_label("R -3 m :H"), "r 3 m") and not m(_replay._norm_label("P-1"), "p1") and not m(_replay._norm_label("R-3c"), "r3c")
+    assert _replay._norm_label("α-Fe2O3") == "alpha fe2o3" and not m(_replay._norm_label("α-Fe2O3"), _replay._norm_label("γ-Fe2O3"))
+    assert m(_replay._norm_label("Pm−3m"), _replay._norm_label("P m -3 m"))                    # a minus sign is a bar
     assert m(_replay._norm_label("anatase (TiO2)"), "anatase") and m("tio2 anatase", "anatase")
     assert not m(_replay._norm_label("TiO2 (anatase)"), _replay._norm_label("TiO2 (rutile)")) and not m("hematite fe2o3", "maghemite fe2o3")
     assert not m("141", "i41amd")                                               # a number vs a symbol: still a table's job
@@ -136,7 +140,7 @@ def test_a_replay_is_held_to_the_regimes_state_and_to_what_it_found(tmp_path, mo
                                                 "LOW": {**rc.auto_detect_parameters(rc.RUTILE, shift=0.5, seed=93), "space_group": "P42/mnm"}})
     rv = res["reuse_validity"]
     assert [s for s, _ in ex.calls] == ["HIGH"] and rv["verdict"] == "good" and rv["regime_choice"]["chosen_regime"] == "high"
-    assert rv["identity"]["drifted"][0]["name"] == "space_group" and "space_group = 'f m 3 m'" in rv["message"]
+    assert rv["identity"]["drifted"][0]["name"] == "space_group" and "space_group = 'f m -3 m'" in rv["message"]
     assert unit_verdict_for({**res, "success": True})["interpretation_checked"] is False
     # the board's copy, a recipe file with no run behind it: nothing to compare, unchecked
     copy = tmp_path / "board" / "recipe.py"
@@ -204,7 +208,7 @@ def test_the_record_and_the_board_tell_numbers_from_interpretation(tmp_path):
     row = {"analysis_id": "r1", "status": "success", "output_directory": str(out), "agent_name": "CurveFittingAgent"}
     recs = board_mod.records_for(entry, {"key_findings": ["[r1] the low-temperature phase"], "analyses": [{**row, **analysis_verdict(unchecked)}]})
     assert [(r["kind"], r["status"]) for r in recs] == [("claim", "provisional"), ("recipe", "verified")]
-    assert "interpretation is not verified" in recs[0]["evidence"]["gate"]
+    assert "interpretation is not certified" in recs[0]["evidence"]["gate"]
     recs = board_mod.records_for(entry, {"key_findings": ["[r1] the high-temperature phase"], "analyses": [{**row, **analysis_verdict(final)}]})
     assert [(r["kind"], r["status"]) for r in recs] == [("claim", "verified"), ("recipe", "verified")]
     recs = board_mod.records_for(entry, {"key_findings": ["[r1] anatase"], "analyses": [{**row, **analysis_verdict(own)}]})
@@ -294,3 +298,68 @@ def test_a_series_anchored_by_a_replay_rests_on_the_replay_gate(tmp_path):
     # no roles (an older result): the first unit is the anchor
     assert final_verdict_record({"status": "success", "individual_results": [
         {"success": True, "unit_verdict": replay}, {"success": True, "unit_verdict": recipe}]})["decided_by"] == "replay_gate"
+
+
+def test_certification_needs_the_tight_bar_and_certifies_one_unit_references_and_followers(tmp_path, monkeypatch):
+    """Round 4: (A) a fixed-position recipe cannot report an impurity or a low
+    mixture, so the state distance is the only check that sees them — they
+    sit at 0.08–0.20, clean replays under ~0.07 — and certification needs the
+    tighter CERTIFY_STATE_BAR while the flag bar stays. (B) a single-run
+    prior and a series' followers could never be certified (a spread was
+    required; followers carried no checks); both certify on clean evidence
+    now — a one-unit reference under the tight bar with identity within, and
+    the cheap checks on each follower against its regime's anchor."""
+    assert _replay.CERTIFY_STATE_BAR < _replay.SAME_STATE_BAR
+    # (A) the record: a reuse at 0.15 — under the flag bar, above the certification bar — is good, unflagged, uncertified
+    rv = {"reused": True, "verdict": "good", "identity": {"checked": True, "within": True, "spread_known": True, "drifted": []},
+          "state_distance": 0.15}
+    assert interpretation_checked_by(rv) is False and interpretation_checked_by({**rv, "state_distance": 0.05}) is True
+    # ...through the real path: a fixed recipe (the regime's set reported as is) on anatase with a 15 % impurity line
+    prior = rc.prior_two_regime_run(tmp_path, names=True)
+    impure = rc.spectrum(rc.ANATASE, seed=4)
+    impure[:, 1] += 0.15 * np.exp(-0.5 * ((impure[:, 0] - 301.0) / 6.0) ** 2)
+    res, ex, _, _ = curve._replay(tmp_path / "a", monkeypatch, {"LOW": 0.99, "HIGH": 0.99}, prior=prior, data=impure,
+                                  extra_params={"LOW": {**rc.auto_detect_parameters(rc.ANATASE, seed=40), "space_group": "I41/amd"}})
+    rv = res["reuse_validity"]
+    assert rv["verdict"] == "good" and rv["identity"]["within"] and not rv.get("state_flag")
+    assert _replay.CERTIFY_STATE_BAR < rv["state_distance"] <= _replay.SAME_STATE_BAR, rv["state_distance"]
+    assert "above the certification bar" in rv["message"]
+    assert unit_verdict_for({**res, "success": True})["interpretation_checked"] is False
+    # (B) a single-run prior reused on the same kind of data: one reference unit, distance ~0, identity within → certified
+    single = tmp_path / "single"
+    (single / "scripts").mkdir(parents=True)
+    (single / "spectrum_0000").mkdir()
+    np.save(single / "spectrum_0000" / "data.npy", rc.spectrum(rc.ANATASE, seed=5))
+    (single / "scripts" / "fitting_script.py").write_text("ONE")
+    (single / "series_fit_results.json").write_text(json.dumps({"results": [
+        {"index": 0, "name": "s", "success": True, "parameters": rc.auto_detect_parameters(rc.ANATASE, seed=6)}]}))
+    res, ex, _, _ = curve._replay(tmp_path / "b", monkeypatch, {"ONE": 0.99}, prior=single, data=rc.spectrum(rc.ANATASE, seed=7),
+                                  extra_params={"ONE": rc.auto_detect_parameters(rc.ANATASE, seed=95, n_noise=3)})
+    rv = res["reuse_validity"]
+    assert rv["verdict"] == "good" and rv["state_distance"] < _replay.CERTIFY_STATE_BAR and not rv["identity"]["spread_known"]
+    assert unit_verdict_for({**res, "success": True})["interpretation_checked"] is True
+    # ...and a different finding against that one unit still withholds (flagged, uncertified)
+    res, ex, _, _ = curve._replay(tmp_path / "c", monkeypatch, {"ONE": 0.99}, prior=single, data=rc.spectrum(rc.ANATASE, seed=7),
+                                  extra_params={"ONE": {**rc.auto_detect_parameters(rc.ANATASE, seed=95), "peak_9": {"center": 450.0, "amplitude": 0.9}}})
+    assert res["reuse_validity"]["identity"]["flagged"] is True and unit_verdict_for({**res, "success": True})["interpretation_checked"] is False
+    # (B) followers: the real series path checks each follower against its regime's anchor and certifies the ones that agree
+    names6 = [f"spectrum_{i:04d}" for i in range(6)]
+    state, _ = curve.run_series(tmp_path / "lock", monkeypatch, names=names6, regimes=[[0, 1, 2], [3, 4, 5]],
+                                anchors={"spectrum_0000": curve.OK, "spectrum_0003": {**curve.OK, "script": "M3"}},
+                                follower_r2={n: 0.97 for n in names6})
+    results = curve.compile_results(tmp_path / "lock", state)
+    followers = [u for u in results["individual_results"] if u.get("role") != "anchor"]
+    assert followers and all(isinstance(u.get("regime_checks"), dict) for u in followers)
+    assert all(isinstance(u["regime_checks"]["state_distance"], (int, float)) for u in followers)
+    assert all(u["unit_verdict"]["decided_by"] == "recipe" and u["unit_verdict"]["interpretation_checked"] is True for u in followers)
+    # a series whose anchor is a certified replay and whose followers are certified posts a VERIFIED claim
+    replay = {"verified": True, "reason": "locked-script reuse passed the replay gate", "decided_by": "replay_gate", "interpretation_checked": True}
+    follower = {"verified": True, "reason": "replayed the locked recipe", "decided_by": "recipe", "interpretation_checked": True}
+    series = {"status": "success", "individual_results": [{"success": True, "role": "anchor", "unit_verdict": replay},
+                                                          {"success": True, "unit_verdict": follower}]}
+    v = final_verdict_record(series)
+    assert v["decided_by"] == "replay_gate" and v["interpretation_checked"] is True
+    row = {"analysis_id": "s1", "status": "success", "agent_name": "CurveFittingAgent", "series": True, **analysis_verdict({**series, "verdict": v})}
+    recs = board_mod.records_for({"index": 1, "label": "series", "mode": "analysis", "status": "success"},
+                                 {"key_findings": ["[s1] the series shows anatase"], "analyses": [row]})
+    assert [(r["kind"], r["status"]) for r in recs] == [("claim", "verified")]

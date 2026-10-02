@@ -5378,11 +5378,12 @@ Return JSON with:
         otherwise. The verdict stays the gate's: a deterministic check asked
         an interpretive question (same phase, read the same way?) has the
         precision to withhold a certificate, not to issue a negative verdict
-        that drives fall-through, a judge and re-derivation — three review
-        rounds moved its false positives from one threshold to the next.
+        that drives fall-through, a judge and re-derivation (CLAUDE.md says
+        why). Certification needs the state distance under the tighter
+        ``CERTIFY_STATE_BAR``; the flag bar is ``SAME_STATE_BAR``.
         Returns ``{"caveat", "identity", "distance", "state_flag", "state_check"}``;
         a check that cannot run (no reference) says so."""
-        from .._replay import SAME_STATE_BAR, identity_check, identity_features
+        from .._replay import CERTIFY_STATE_BAR, SAME_STATE_BAR, identity_check, identity_features
         out = {"caveat": "", "identity": {"checked": False}, "distance": distance, "state_flag": False}
         if ref is None:
             return out
@@ -5400,6 +5401,10 @@ Return JSON with:
                 out["state_flag"] = True
                 out["caveat"] = (f"STATE: {distance:.0%} of this measurement is structure the regime's own data does "
                                  f"not describe (bar {SAME_STATE_BAR:.0%}) — flagged: it may not be the regime's state")
+            elif isinstance(distance, (int, float)) and distance > CERTIFY_STATE_BAR:
+                out["caveat"] = (f"STATE: {distance:.0%} of this measurement is structure the regime's own data does "
+                                 f"not describe — under the flag bar ({SAME_STATE_BAR:.0%}) but above the certification "
+                                 f"bar ({CERTIFY_STATE_BAR:.0%}): the interpretation is not certified")
             if ref.get("curves_not_seeded"):
                 out["curves_not_seeded"] = int(ref["curves_not_seeded"])
             if ref.get("identity"):
@@ -5421,10 +5426,34 @@ Return JSON with:
             out["identity"] = {"checked": False, "error": str(exc)[:200]}
         return out
 
+    def _check_follower(self, result: dict, recipe: Optional[dict], anchor_params: Any, curve_data) -> None:
+        """The cheap checks on a series FOLLOWER against its regime's anchor
+        (the anchor's curve as the lock stamped it, what the anchor found),
+        recorded as ``result["regime_checks"]`` for its unit verdict's
+        ``interpretation_checked``: a follower is certified when they agree,
+        like a replay; nothing else changes (not the verdict, not the
+        refit). Without them every follower was uncertified and a series
+        whose anchor replayed a prior recipe could never post a verified
+        claim."""
+        if not (isinstance(result, dict) and result.get("success") and isinstance(recipe, dict)
+                and isinstance(recipe.get("drift_state"), dict)):
+            return
+        try:
+            from .._replay import identity_features, identity_reference, state_monitor
+            ref: Dict[str, Any] = {"monitor": state_monitor(state=recipe["drift_state"]), "regime": recipe.get("regime")}
+            if isinstance(anchor_params, dict) and anchor_params:
+                ref["identity"] = identity_reference([identity_features(anchor_params)], x_range=recipe.get("x_range"))
+            chk = self._identity_of(result, ref, _extract_xy(curve_data), None)
+            result["regime_checks"] = {"state_distance": chk["distance"], "identity": chk["identity"],
+                                       "state_flag": bool(chk.get("state_flag")),
+                                       **({"state_check": chk["state_check"]} if chk.get("state_check") else {})}
+        except Exception as exc:  # noqa: BLE001 - a check that could not run leaves the follower uncertified
+            self.logger.debug(f"follower checks not run: {exc}")
+
     def _apply_identity(self, ctx: QCItemContext, reuse_result: dict, ref: Optional[dict], xy) -> dict:
         """The single-recipe path's version of the judge's checks: applied to
-        the one replayed result, downgrading the verdict when the data is not
-        the regime's state or the recipe found a different thing."""
+        the one replayed result, recorded as flags (the verdict is the
+        gate's), which decide only whether the interpretation is certified."""
         rv = reuse_result.get("reuse_validity")
         if not isinstance(rv, dict):
             return reuse_result
@@ -7403,6 +7432,7 @@ Return JSON with:
         # followers replayed it (unit_verdict_for): a later refit of the
         # anchor changes nothing here.
         recipe_by_regime: Dict[str, dict] = {}
+        anchor_params_by_regime: Dict[str, Any] = {}      # what each regime's anchor found, for the followers' checks
         base_scripts: Dict[str, str] = {}  # keyed by regime name
         locked_preprocessing_strategy = None
         original_locked_config = state.get("locked_fitting_config", {})
@@ -7519,6 +7549,7 @@ Return JSON with:
                 stamp_unit_verdict(result, regime=regime_name)
                 if result["success"] and result.get("script"):
                     base_scripts[regime_name] = result["script"]
+                    anchor_params_by_regime[regime_name] = result.get("parameters")
                     if result.get("unit_verdict"):
                         recipe_by_regime[regime_name] = {
                             "unit": spectrum_name, "index": idx, "regime": regime_name,
@@ -7570,6 +7601,8 @@ Return JSON with:
                     spectrum_name=spectrum_name, spectrum_idx=idx,
                     base_script=base_script,
                 )
+                self._check_follower(result, recipe_by_regime.get(regime_name),
+                                     anchor_params_by_regime.get(regime_name), curve_data)
                 from .._verification_record import stamp_unit_verdict
                 stamp_unit_verdict(result, recipe=recipe_by_regime.get(regime_name), regime=regime_name)
 
@@ -7635,6 +7668,8 @@ Return JSON with:
                             "script": job["base_script"],
                             "script_errors": [],
                         }
+                    self._check_follower(result, recipe_by_regime.get(job["regime_name"]),
+                                         anchor_params_by_regime.get(job["regime_name"]), job["curve_data"])
                     from .._verification_record import stamp_unit_verdict
                     stamp_unit_verdict(result, recipe=recipe_by_regime.get(job["regime_name"]), regime=job["regime_name"])
                     if regime_configs:

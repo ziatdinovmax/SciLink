@@ -329,7 +329,10 @@ def unit_verdict_for(unit: Dict[str, Any], *, recipe: Optional[Dict[str, Any]] =
                               reason="fitted without a locked recipe (its regime's anchor produced none)")
     rv = recipe.get("verdict") or {}
     if rv.get("verified"):
+        # a follower is certified by the cheap checks against its regime's
+        # anchor (``regime_checks``, the series driver's), when they agree
         return verdict_record(verified=True, decided_by="recipe", regime=regime, recipe_of=recipe.get("unit"),
+                              interpretation_checked=interpretation_checked_by(unit.get("regime_checks")),
                               reason=f"replayed the locked recipe of unit {recipe.get('unit')}, whose gate passed")
     return verdict_record(verified=False, decided_by="recipe", regime=regime, recipe_of=recipe.get("unit"),
                           reason=f"replayed the locked recipe of unit {recipe.get('unit')}, which was "
@@ -546,18 +549,22 @@ def _hyperspectral_cube_verdict(hs_records: List[Any]) -> Dict[str, Any]:
         return {"verified": True, "reason": "every target passed verification"}
 
 
-def interpretation_checked_by(rv: Dict[str, Any]) -> bool:
+def interpretation_checked_by(rv: Optional[Dict[str, Any]]) -> bool:
     """A replay's numbers passing the gate says nothing about WHAT was
-    measured (#711); the interpretation counts as checked only when both
-    checks ran against the regime's units and passed: the data is the
-    regime's state (``state_distance`` under the bar) and what the recipe
-    found is what the units found (``identity`` within, with a spread)."""
-    from ._replay import SAME_STATE_BAR
+    measured (#711); the interpretation counts as checked only on clean
+    evidence: the identity check ran and was within (against one reference
+    unit too — a miss only withholds), and the data is the regime's state
+    under the CERTIFICATION bar (``CERTIFY_STATE_BAR``, tighter than the flag
+    bar: a fixed-position recipe cannot report an impurity or a low mixture,
+    so the state distance is the only check that sees them). Reads the
+    ``identity`` / ``state_distance`` keys of a reuse record or of a series
+    follower's ``regime_checks``."""
+    from ._replay import CERTIFY_STATE_BAR
     rv = rv or {}
     idc = rv.get("identity") or {}
     dist = rv.get("state_distance")
-    return bool(idc.get("checked") and idc.get("within") and idc.get("spread_known")
-                and isinstance(dist, (int, float)) and dist <= SAME_STATE_BAR)
+    return bool(idc.get("checked") and idc.get("within")
+                and isinstance(dist, (int, float)) and dist <= CERTIFY_STATE_BAR)
 
 
 def final_verdict_record(final: Dict[str, Any]) -> Dict[str, Any]:

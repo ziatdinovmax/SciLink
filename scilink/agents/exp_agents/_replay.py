@@ -231,7 +231,10 @@ class MapReplayGate:
 #: this share is not the regime's state (``DriftMonitor.judge()["fraction"]``:
 #: 0 = nothing new, 1 = nothing in common; the live loop's material-change bar
 #: is 0.10, a different phase reads 0.7 and more).
-SAME_STATE_BAR = 0.25
+SAME_STATE_BAR = 0.25               # the FLAG bar: beyond it the record says the data may not be the regime's
+CERTIFY_STATE_BAR = 0.10            # the CERTIFICATION bar: only under it may the interpretation be called
+                                    # checked — a fixed-position recipe cannot report an impurity or a low
+                                    # mixture, which sit at 0.08–0.20 while clean replays sit under ~0.07
 #: Two regimes are not told apart by the data when the second-nearest is
 #: within this ratio of the nearest, or both are under the material bar.
 AMBIGUITY_RATIO = 2.0
@@ -347,17 +350,28 @@ def _is_position(key: str) -> bool:
     return any(w in k for w in _POSITION_WORDS) and not any(w in k for w in _NOT_POSITION)
 
 
+_GREEK = {"α": "alpha", "β": "beta", "γ": "gamma", "δ": "delta", "ε": "epsilon", "ζ": "zeta", "η": "eta",
+          "θ": "theta", "κ": "kappa", "λ": "lambda", "μ": "mu", "ν": "nu", "ξ": "xi", "π": "pi", "ρ": "rho",
+          "σ": "sigma", "τ": "tau", "φ": "phi", "χ": "chi", "ψ": "psi", "ω": "omega"}
+
+
 def _norm_label(value: Any) -> str:
-    """A name as identity: lower case, a trailing space-group SETTING
-    dropped (``I 41/a m d :2`` and ``I41/amd`` are one group), every run of
+    """A name as identity: lower case, a Greek letter spelled out (α-Fe2O3 is
+    not γ-Fe2O3), a trailing space-group SETTING dropped (``I 41/a m d :2``
+    and ``I41/amd`` are one group), a bar kept on the digit it negates
+    (``P-1`` is not ``P1``, ``R-3c`` is not ``R3c``), every other run of
     non-alphanumerics one space — so the TOKENS survive (``TiO2 (anatase)``
     is {tio2, anatase}, not "tio2": a stripped qualifier erased the phase).
     ``names_match`` compares two of these. A number against a symbol (141
     vs I41/amd) still differs: that needs a table, not a rule."""
     import re as _re
-    text = str(value).strip()
-    text = _re.sub(r"\s*:\s*[A-Za-z0-9]{1,2}\s*$", "", text)  # a trailing ":2" / ":H" setting
-    return " ".join(_re.split(r"[^0-9a-z]+", text.lower())).strip()
+    text = str(value).strip().lower()
+    for g, latin in _GREEK.items():
+        text = text.replace(g, latin + " ")
+    text = _re.sub(r"\s*:\s*[a-z0-9]{1,2}\s*$", "", text)       # a trailing ":2" / ":h" setting
+    text = _re.sub(r"[\u2212\u2013\u2014]", "-", text)             # a minus or a dash is a bar
+    text = _re.sub(r"-(?!\d)", " ", text)                           # a hyphen not before a digit separates
+    return " ".join(_re.split(r"[^0-9a-z\-]+", text)).strip()
 
 
 def names_match(a: str, b: str) -> bool:

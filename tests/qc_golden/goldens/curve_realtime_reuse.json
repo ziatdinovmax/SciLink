@@ -49,7 +49,7 @@
     "task_mode": "fitting",
     "verdict": {
       "decided_by": "replay_gate",
-      "interpretation_checked": false,
+      "interpretation_checked": true,
       "own_gate": true,
       "reason": "locked-script reuse passed the replay gate",
       "regime": null,
