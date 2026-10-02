@@ -1716,7 +1716,7 @@ class AnalysisOrchestratorAgent:
                     # — copies from; the meta leaves it off the rows its
                     # model reads (_summarize_delegation_result).
                     "recipes": series_recipes(rec.get("full_result")),
-                    # a replay that failed its checks and was explained by
+                    # a replay whose certificate was withheld and was explained by
                     # the judge (#712 escalation): an opinion beside the
                     # verdict, which the board posts as a provisional claim
                     "escalation": replay_escalation(rec.get("full_result")),

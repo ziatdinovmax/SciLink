@@ -622,7 +622,7 @@ def _analysis_records(entry: Dict[str, Any], result: Dict[str, Any]) -> List[Dic
 
 
 def _escalation_records(aid: str, rec: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """The judge's reading of a replay that failed its checks (#712
+    """The judge's reading of a replay whose certificate was withheld (#712
     escalation), posted as a PROVISIONAL claim beside the replay's own
     records: a model's explanation of what differed, which passed no gate
     and is never read back by a swarm item (the reader gets verified records
@@ -637,7 +637,7 @@ def _escalation_records(aid: str, rec: Dict[str, Any]) -> List[Dict[str, Any]]:
             + f" — {esc.get('what_changed')}")
     return [{"kind": "claim", "payload": {"text": text[:1500]}, "status": "provisional",
              "evidence": {"analysis_ids": [aid],
-                          "gate": ("replay escalation: a judge's reading of a replay that failed its checks "
+                          "gate": ("replay escalation: a judge's reading of a replay whose certificate was withheld "
                                    f"(trigger {esc.get('trigger')}, {esc.get('confidence')} confidence); no gate")}}]
 
 
@@ -660,6 +660,10 @@ def _recipe_specs(aid: str, rec: Dict[str, Any]) -> List[Dict[str, Any]]:
             out.append({"kind": "recipe",
                         "payload": {"analysis_id": aid, "agent": rec.get("agent_name"), "unit": r["unit"],
                                     "regime": r.get("regime"),
+                                    # what the recipe was approved under and what it is: a replay of
+                                    # the board's copy is held to this gate (#717)
+                                    **({"quality_gate": r["gate"]} if isinstance(r.get("gate"), dict) else {}),
+                                    **({"model": r["model"]} if r.get("model") else {}),
                                     "note": ("the locked script of this regime's anchor, as its followers "
                                              "replayed it; a copy the board owns")},
                         "status": "verified" if ok else "provisional",
@@ -672,8 +676,10 @@ def _recipe_specs(aid: str, rec: Dict[str, Any]) -> List[Dict[str, Any]]:
         return out                     # a series from before the record: no recipe
     script = _recipe_script(rec.get("output_directory"), None)
     if script is not None:
+        gate = _run_gate(rec.get("output_directory"))
         out.append({"kind": "recipe",
                     "payload": {"analysis_id": aid, "agent": rec.get("agent_name"),
+                                **({"quality_gate": gate} if gate else {}),
                                 "note": "the run's approved script; a copy the board owns"},
                     "status": "verified" if run_verified else "provisional",
                     "evidence": {"analysis_ids": [aid],
@@ -681,6 +687,17 @@ def _recipe_specs(aid: str, rec: Dict[str, Any]) -> List[Dict[str, Any]]:
                                           else "script of an unapproved run: ") + run_why},
                     "_source": str(script), "_name": script.name})
     return out
+
+
+def _run_gate(out_dir: Any) -> Optional[Dict[str, Any]]:
+    """The gate a single run was held to (``analysis_results.json``'s
+    ``quality_gate``), to travel with the board's copy of its script."""
+    try:
+        rec = json.loads((Path(out_dir) / "analysis_results.json").read_text(encoding="utf-8"))
+        g = rec.get("quality_gate")
+        return g if isinstance(g, dict) else None
+    except Exception:  # noqa: BLE001 - a run with no record has no gate to carry
+        return None
 
 
 def _safe(name: Any) -> str:
@@ -881,6 +898,15 @@ def _materialize_recipe(board: Board, entry: Dict[str, Any], spec: Dict[str, Any
         text = Path(source).read_text(encoding="utf-8", errors="replace")
     dest = _write_once(folder, name, text)
     spec["payload"]["path"] = str(dest)
+    # the copy's sidecar: the gate the recipe was approved under and what it
+    # is, which a replay of the copy reads (a script file alone lost them —
+    # a figure-of-merit recipe replayed under the R² default, #717)
+    side = {k: spec["payload"][k] for k in ("quality_gate", "model", "regime", "unit", "analysis_id") if spec["payload"].get(k)}
+    if side.get("quality_gate"):
+        try:
+            _write_once(folder, f"{Path(name).stem}.recipe.json", json.dumps(side, indent=1, default=str))
+        except Exception:  # noqa: BLE001 - the script copy stands without its sidecar
+            pass
     if source:
         spec["payload"]["source"] = str(source)
     spec.setdefault("evidence", {})["files"] = [str(dest)] + ([str(source)] if source else [])

@@ -969,6 +969,10 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
             # Effective quality gate (curve_fit_controllers reads via _gate()).
             "quality_gate": effective_gate,
+            # whether the caller ASKED for this gate (quality_gate= or
+            # r2_threshold=): a replay is then held to it, not to the gate
+            # its recipe was approved under
+            "quality_gate_explicit": bool(quality_gate is not None or r2_threshold is not None),
 
             # First spectrum (for planning)
             "data_path": spectrum_paths[0] if spectrum_paths else first_spectrum_name,

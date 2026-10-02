@@ -1108,32 +1108,25 @@ def _regime_of_named(state: dict) -> Optional[str]:
     return None
 
 
-def _overlay_png(xy, anchor_curve, regime: Any) -> Optional[bytes]:
+def _overlay_png(xy, anchor_curve, regime: Any, system_info: Optional[dict] = None) -> Optional[bytes]:
     """The new curve over the regime's anchor curve, each scaled to its own
-    maximum, as PNG bytes; None when either is missing or plotting fails."""
+    maximum, as PNG bytes (the shared ``render_curve_overlay``, with the
+    run's axis labels); None when either is missing or plotting fails."""
     if xy is None or anchor_curve is None:
         return None
     try:
-        import io
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        ax_, ay_ = np.asarray(anchor_curve[0], dtype=float), np.asarray(anchor_curve[1], dtype=float)
-        nx_, ny_ = np.asarray(xy[0], dtype=float), np.asarray(xy[1], dtype=float)
+        from scilink.utils.curve_preview import render_curve_overlay
 
-        def scaled(y):
+        def scaled(x, y):
+            x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
             top = float(np.nanmax(np.abs(y))) if y.size else 0.0
-            return y / top if top > 0 else y
-        fig, ax = plt.subplots(figsize=(8, 3.6), dpi=110)
-        ax.plot(ax_, scaled(ay_), color="0.6", lw=1.4, label=f"regime {regime!r} anchor")
-        ax.plot(nx_, scaled(ny_), color="black", lw=1.0, label="new measurement")
-        ax.set_ylabel("scaled intensity")
-        ax.legend(loc="best", fontsize=8)
-        fig.tight_layout()
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png")
-        plt.close(fig)
-        return buf.getvalue()
+            return np.column_stack([x, y / top if top > 0 else y])
+        info = dict(system_info or {})
+        info["ylabel"] = "scaled intensity"
+        info.setdefault("title", "Replay")
+        return render_curve_overlay([{"label": f"regime {regime!r} anchor", "curve_data": scaled(*anchor_curve)},
+                                     {"label": "new measurement", "curve_data": scaled(*xy)}],
+                                    info, title_suffix=" — new measurement over the regime's anchor")
     except Exception:  # noqa: BLE001 - a figure the judge does without
         return None
 
@@ -5463,8 +5456,9 @@ Return JSON with:
     def _replay_gate(self, state: dict):
         """The gate a replayed result is held to, and how its score is read.
         First the gate the RECIPE was approved under (``_reuse_gate``: recorded
-        on the recipe at lock time, or the prior run's recorded gate), else
-        the RUN's effective :class:`QualityGate` — the rule ``_detect_outliers``
+        on the recipe at lock time, or the prior run's recorded gate) — unless
+        the caller asked for a gate on this run (``quality_gate_explicit``),
+        which wins with a warning — else the RUN's effective :class:`QualityGate` — the rule ``_detect_outliers``
         holds a series' followers to — where an R² gate is the driver's live
         ``r2_threshold`` (so ``adjust_threshold`` is observed) and a skill's
         own metric (``peak_region_r2``, a figure of merit) is read from the
@@ -5477,6 +5471,16 @@ Return JSON with:
         from ..quality_gate import from_mapping
         recorded = state.get("_reuse_gate")
         g = None
+        if isinstance(recorded, dict) and state.get("quality_gate_explicit"):
+            # the caller asked for a gate on THIS run (quality_gate= or
+            # r2_threshold=): it wins, as resolve_gate's priority says, and
+            # the record keeps what the recipe was approved under
+            own = _gate(state)
+            if (own.metric, float(own.accept_threshold)) != (recorded.get("metric"), float(recorded.get("accept_threshold") or 0)):
+                self.logger.warning(f"   ⚠️  The recipe was approved under {recorded.get('metric')} "
+                                    f"{recorded.get('accept_threshold')}; this run asked for {own.metric} "
+                                    f"{own.accept_threshold}, which the replay is held to.")
+            recorded = None
         if isinstance(recorded, dict):
             # the gate the RECIPE was approved under (recorded with it at
             # lock time, or the prior run's): a reuse run resolves a gate of
@@ -5617,8 +5621,9 @@ Return JSON with:
 
     def _escalate_reuse(self, ctx: QCItemContext, result: dict, refs: list, xy,
                         chosen_ref: Optional[dict] = None) -> dict:
-        """A replay that failed its checks, or whose regime the data cannot
-        tell, is handed to a JUDGE for an explanation (#712 follow-up): one
+        """A replay whose certificate was withheld for a stated reason — a
+        flag on its state or identity, or a regime the data cannot tell — is
+        handed to a JUDGE for an explanation (#712 follow-up): one
         model call shown the deterministic findings as quoted data, the
         replayed fit and the new curve over the regime's anchor, and the
         active skill's interpretation guidance. The answer goes on
@@ -5630,8 +5635,9 @@ Return JSON with:
         from .._replay import (MAX_REPLAY_ESCALATIONS, escalation_evidence, escalation_question,
                                escalation_trigger, read_escalation_answer)
         rv = result.get("reuse_validity") if isinstance(result, dict) else None
-        if not isinstance(rv, dict) or ctx.state.get("_strict_replay") or self.max_verification_iterations <= 0:
-            return result
+        if (not isinstance(rv, dict) or ctx.state.get("_strict_replay") or ctx.state.get("_qc_profile") == "realtime"
+                or self.max_verification_iterations <= 0):
+            return result                   # the fast clock, strict or not, makes no synchronous judge call
         attended = bool(getattr(self, "enable_human_feedback", False))
         trigger = escalation_trigger(rv, attended=attended)
         if trigger is None or rv.get("escalation") is not None:
@@ -5651,9 +5657,9 @@ Return JSON with:
             parts.append("\n\n**The replayed fit on the new measurement:**")
             parts.append({"mime_type": "image/png", "data": result["visualization_bytes"]})
         ref = chosen_ref if chosen_ref is not None else (refs[0] if refs else None)
-        overlay = _overlay_png(xy, (ref or {}).get("anchor_curve"), (ref or {}).get("regime"))
+        overlay = _overlay_png(xy, (ref or {}).get("anchor_curve"), (ref or {}).get("regime"), ctx.state.get("system_info"))
         if overlay:
-            parts.append("\n\n**The new measurement (black) over the chosen regime's anchor (grey), each scaled to its maximum:**")
+            parts.append("\n\n**The new measurement over the chosen regime's anchor, each scaled to its maximum:**")
             parts.append({"mime_type": "image/png", "data": overlay})
         _append_skill_context(parts, ctx.state, "interpretation")
         record: Dict[str, Any] = {"trigger": trigger, "decided_by": "judge",

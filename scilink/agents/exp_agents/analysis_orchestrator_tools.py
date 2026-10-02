@@ -3488,6 +3488,19 @@ class AnalysisOrchestratorTools:
                             response["reuse_warning"] = reuse_validity.get(
                                 "message", ""
                             )
+                        # the judge's reading of a replay whose certificate
+                        # was withheld (#712): an opinion that usually sits on
+                        # a GOOD verdict (the gate's), so it is a caveat of its
+                        # own, not folded into "proceed normally"
+                        esc = reuse_validity.get("escalation") if isinstance(reuse_validity, dict) else None
+                        if isinstance(esc, dict) and esc.get("what_changed"):
+                            response["reuse_caveat"] = (
+                                f"JUDGE (an opinion, no gate; the verdict stays the gate's): this replay's "
+                                f"certificate was withheld ({esc.get('trigger')}); the judge reads the measurement as "
+                                f"belonging to {esc.get('belongs_to')!r}"
+                                + (f", same interpretation: {esc.get('same_interpretation')}"
+                                   if esc.get("same_interpretation") is not None else "")
+                                + f" — {esc.get('what_changed')} [{esc.get('confidence')} confidence]")
                     # Hyperspectral locked-replay summary (#509/#518): carries
                     # verbatim-ness and any degraded-harmonization scoping
                     # warnings — a harmonized fan-out follower must narrate a
@@ -3768,7 +3781,13 @@ class AnalysisOrchestratorTools:
                         "(which the planning-side feature-table append strictly "
                         "requires). The run then reports a `reuse_validity` "
                         "verdict (`good` / `poor` / `script_failed`) — read it "
-                        "and act on a non-`good` verdict. Do NOT set it for "
+                        "and act on a non-`good` verdict. A `good` verdict is the "
+                        "GATE's (the numbers fit); the replay's interpretation is "
+                        "certified only when `interpretation_checked` is true, and a "
+                        "`reuse_caveat` carries a judge's reading of a replay whose "
+                        "certificate was withheld — an opinion that can sit on a "
+                        "good verdict, never a verdict itself; relay it, do not "
+                        "treat the result as settled. Do NOT set it for "
                         "verification or deeper-analysis follow-ups, or for a "
                         "different kind of measurement — leave it false so the "
                         "agent decides how to use the prior run as reference. "

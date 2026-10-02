@@ -394,11 +394,12 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
 
 
 def replay_escalation(full_result: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """The judge's reading of a replay that failed its checks (#712
+    """The judge's reading of a replay whose certificate was withheld (#712
     escalation), as the ``analyses`` row carries it: trigger, belongs_to,
-    same_interpretation, what_changed (clipped), confidence — or None when
-    the run was not escalated or the judge's answer could not be had. An
-    opinion beside the verdict, never part of it."""
+    same_interpretation, what_changed (clipped), confidence, and the note
+    that it is an opinion — or None when the run was not escalated or the
+    judge's answer could not be had. It sits beside the verdict, which is
+    the gate's and is usually ``good``: a reading never changes it."""
     rv = (full_result or {}).get("reuse_validity") or {}
     esc = rv.get("escalation") if isinstance(rv, dict) else None
     if not isinstance(esc, dict) or esc.get("error") or esc.get("skipped") or not esc.get("what_changed"):
@@ -406,7 +407,8 @@ def replay_escalation(full_result: Optional[Dict[str, Any]]) -> Optional[Dict[st
     return {"trigger": esc.get("trigger"), "belongs_to": esc.get("belongs_to"),
             "same_interpretation": esc.get("same_interpretation"),
             "what_changed": str(esc.get("what_changed"))[:600], "confidence": esc.get("confidence"),
-            "decided_by": "judge"}
+            "decided_by": "judge",
+            "note": esc.get("note") or "a judge's reading of the evidence; no gate, no verdict, no re-run"}
 
 
 def reconstructed_verdict(full: Dict[str, Any]) -> Dict[str, Any]:
@@ -752,7 +754,16 @@ def prior_recipe_candidates(anchor_dir, *, single_name: str, named=None) -> List
     # the gate the prior RUN was held to: what a recipe with no gate of its
     # own (a single run's script, a named unit script) is replayed under
     run_gate = recorded.get("quality_gate") if isinstance(recorded.get("quality_gate"), dict) else None
-    if named is not None or not pairs or pairs[0][1] is None or "locked recipe" not in (pairs[0][1] or ""):
+    if named is not None:
+        # a script FILE: the board's copy carries its gate and model in a
+        # sidecar (<stem>.recipe.json); a unit script inside a run takes the
+        # run's gate
+        side = recipe_sidecar(named)
+        return [{"script": t, "label": lbl, "regime": side.get("regime"), "unit": side.get("unit"), "verified": None,
+                 "drift_state": None, "x_range": None, "model": side.get("model"),
+                 "gate": side.get("quality_gate") if isinstance(side.get("quality_gate"), dict) else run_gate}
+                for t, lbl in pairs]
+    if not pairs or pairs[0][1] is None or "locked recipe" not in (pairs[0][1] or ""):
         return [{"script": t, "label": lbl, "regime": None, "unit": None, "verified": None, "drift_state": None,
                  "x_range": None, "model": None, "gate": run_gate} for t, lbl in pairs]
     recipes = series_recipes(recorded)
@@ -769,6 +780,21 @@ def prior_recipe_script(anchor_dir, *, single_name: str, named=None):
     ``(None, None)``."""
     found = prior_recipe_scripts(anchor_dir, single_name=single_name, named=named)
     return found[0] if found else (None, None)
+
+
+def recipe_sidecar(named) -> Dict[str, Any]:
+    """What travels beside a copied recipe script (``<stem>.recipe.json``,
+    written by the swarm board): the gate it was approved under, the plan's
+    model, its regime and unit. Empty when there is none."""
+    try:
+        p = Path(named)
+        side = p.with_name(f"{p.stem}.recipe.json")
+        if side.is_file():
+            data = json.loads(side.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+    except (OSError, ValueError, TypeError):
+        pass
+    return {}
 
 
 def named_recipe_file(raw_path) -> Optional[Path]:
