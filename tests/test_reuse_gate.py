@@ -492,3 +492,19 @@ def test_the_judges_reading_reaches_the_orchestrator_as_a_caveat(tmp_path, monke
     assert out["reuse_validity"]["verdict"] == "good" and "reuse_warning" not in out
     assert out["reuse_caveat"].startswith("JUDGE (an opinion, no gate; the verdict stays the gate's)")
     assert "belonging to 'rutile'" in out["reuse_caveat"] and "new reflections at 27.4" in out["reuse_caveat"]
+
+
+def test_a_malformed_record_and_an_accepted_threshold(tmp_path, monkeypatch):
+    """Follow-ups from the approval: a decision with no usable record is
+    main's path for the units (a hand-edited gate must not let the snapshot
+    beat a person's 0.80); a recipe a person accepted at 0.80 is recorded at
+    0.80, so a later reuse is not judged at the 0.95 snapshot."""
+    from unittest.mock import MagicMock
+    from scilink.agents.exp_agents.controllers.curve_fitting_controllers import _recorded_gate
+    ctrl = _loose_controller(tmp_path, MagicMock(), 0.95)
+    bad = {"_reuse_gate": {"metric": "r_squared", "accept_threshold": "abc"}, "_replayed_regimes": {"default": True}}
+    assert ctrl._series_gate(bad) is None and ctrl._unit_gate_resolver(bad)({"regime": None}) is None
+    ctrl.r2_threshold = 0.80
+    assert _recorded_gate(ctrl, {"quality_gate_explicit": "threshold"}).accept_threshold == 0.80
+    assert _recorded_gate(ctrl, {}).accept_threshold == 0.95                 # no ask: the run's gate as before
+    assert _recorded_gate(ctrl, {"quality_gate_explicit": "threshold", "quality_gate": FOM}).metric == "figure_of_merit"

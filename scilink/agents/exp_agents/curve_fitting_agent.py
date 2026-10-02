@@ -2210,7 +2210,14 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # held to the same one (a reuse run resolves its own gate from
         # whatever skill it was or was not given, which is not the recipe's)
         if gate_record(state.get("quality_gate")) is not None:
-            results["quality_gate"] = gate_record(state.get("quality_gate"))
+            # at a person's accepted threshold when they adjusted it (the
+            # series driver records its recipes the same way)
+            recorded = state.get("quality_gate")
+            thr = state.get("_accepted_r2_threshold")
+            if state.get("quality_gate_explicit") == "threshold" and recorded.metric == "r_squared" \
+                    and isinstance(thr, (int, float)) and abs(float(thr) - float(recorded.accept_threshold)) > 1e-9:
+                recorded = recorded.with_accept_threshold(float(thr))
+            results["quality_gate"] = gate_record(recorded)
         try:
             results["verdict"] = final_verdict_record(results)
         except Exception as exc:  # noqa: BLE001 - a stamp never fails a run

@@ -1171,6 +1171,21 @@ def gate_record(gate: Any) -> Optional[dict]:
     return _rec(gate)
 
 
+def _recorded_gate(ctrl, state: dict):
+    """The gate a recipe or a run is RECORDED under: the run's effective gate,
+    at the driver's LIVE threshold when a person adjusted it at the poor-fit
+    review (``quality_gate_explicit == "threshold"`` and an R² gate) — so a
+    recipe accepted at 0.80 is not later replayed at the 0.95 snapshot."""
+    g = _gate(state)
+    try:
+        if state.get("quality_gate_explicit") == "threshold" and g.metric == "r_squared" \
+                and abs(float(g.accept_threshold) - float(ctrl.r2_threshold)) > 1e-9:
+            return g.with_accept_threshold(float(ctrl.r2_threshold))
+    except Exception:  # noqa: BLE001 - the snapshot, as before
+        pass
+    return g
+
+
 def _regime_model(state: dict, regime_name: Any) -> Optional[str]:
     """The series plan's one-line model for ``regime_name`` (None when the
     plan has no such regime, or no plan)."""
@@ -5499,16 +5514,18 @@ Return JSON with:
         reader of the gate keys on — the outlier pass, the refit's re-scan
         and its scoring-gated skip), else None, which is ``main``'s path (the
         run's gate, the driver's live R² threshold). With no regime named,
-        the gate applies when every replayed regime is the run's (a
-        single-regime reuse); a run that replayed nothing — no reuse, a
-        reuse that failed into fresh code, a multi-regime plan that skipped
-        it — gets None."""
+        the gate applies when any regime replayed (today: the one regime of
+        a reuse — a multi-regime plan blocks the reuse); a run that replayed
+        nothing — no reuse, a reuse that failed into fresh code, a
+        multi-regime plan that skipped it — gets None, as does a decision
+        with no usable record."""
         replayed = state.get("_replayed_regimes") or {}
         if not replayed or not state.get("_reuse_gate"):
             return None
         if regime is not None and regime not in replayed:
             return None
-        return self._reuse_gate_decision(state, warn=False)[0]
+        gate, source = self._reuse_gate_decision(state, warn=False)
+        return None if source == "none" else gate      # a malformed record is no record: main's path
 
     def _unit_gate_resolver(self, state: dict):
         """``row → gate`` for the outlier pass and the refit's re-scan: a unit
@@ -6539,8 +6556,10 @@ Return JSON with:
                 if feedback_result.get("action") == "adjust_threshold":
                     self.r2_threshold = feedback_result["new_threshold"]
                     # a person's threshold is an explicit ask: it binds the
-                    # replay and the units over a reused recipe's R² gate too
+                    # replay and the units over a reused recipe's R² gate too,
+                    # and the run and its recipes are recorded at it
                     state["quality_gate_explicit"] = "threshold"
+                    state["_accepted_r2_threshold"] = float(self.r2_threshold)
                     # _accept_gate() rebuilds from the just-mutated threshold.
                     if self._accept_gate().is_accept(ctx.best_score):
                         self.logger.info(f"✅ Best fit now meets adjusted threshold")
@@ -7892,7 +7911,7 @@ Return JSON with:
                             "model": _regime_model(state, regime_name),
                             # the gate this recipe was approved under: what a
                             # later replay of it is held to
-                            "gate": gate_record(_gate(state))}
+                            "gate": gate_record(_recorded_gate(self, state))}
                     if idx == 0:
                         state["base_fitting_script"] = result["script"]
                     self.logger.info(
