@@ -651,7 +651,8 @@ def series_recipes(full_result: Optional[dict]) -> List[Dict[str, Any]]:
             out.append({"regime": r.get("regime") or regime, "unit": str(r["unit"]), "index": r.get("index"),
                         "verified": bool((r.get("verdict") or {}).get("verified")),
                         "reason": (r.get("verdict") or {}).get("reason"), "script": r["script"],
-                        "drift_state": r.get("drift_state") if isinstance(r.get("drift_state"), dict) else None})
+                        "drift_state": r.get("drift_state") if isinstance(r.get("drift_state"), dict) else None,
+                        "x_range": r.get("x_range") if isinstance(r.get("x_range"), (int, float)) else None})
     out.sort(key=lambda r: (r.get("index") if isinstance(r.get("index"), int) else 1 << 30))
     return out
 
@@ -719,8 +720,8 @@ def prior_recipe_candidates(anchor_dir, *, single_name: str, named=None) -> List
     time; ``None`` on an older run)."""
     pairs = prior_recipe_scripts(anchor_dir, single_name=single_name, named=named)
     if named is not None or not pairs or pairs[0][1] is None or "locked recipe" not in (pairs[0][1] or ""):
-        return [{"script": t, "label": lbl, "regime": None, "unit": None, "verified": None, "drift_state": None}
-                for t, lbl in pairs]
+        return [{"script": t, "label": lbl, "regime": None, "unit": None, "verified": None, "drift_state": None,
+                 "x_range": None} for t, lbl in pairs]
     try:
         recorded = json.loads((Path(anchor_dir) / "analysis_results.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -729,7 +730,7 @@ def prior_recipe_candidates(anchor_dir, *, single_name: str, named=None) -> List
     out = []
     for (t, lbl), r in zip(pairs, recipes):
         out.append({"script": t, "label": lbl, "regime": r.get("regime"), "unit": r.get("unit"),
-                    "verified": r.get("verified"), "drift_state": r.get("drift_state")})
+                    "verified": r.get("verified"), "drift_state": r.get("drift_state"), "x_range": r.get("x_range")})
     return out
 
 

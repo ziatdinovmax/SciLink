@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_series_verdict_path as curve  # noqa: E402
 
 from scilink.agents.exp_agents import _replay  # noqa: E402
+from scilink.agents.exp_agents._verification_record import unit_verdict_for  # noqa: E402
 from scilink.agents.exp_agents.controllers.curve_fitting_controllers import (  # noqa: E402
     _drift_state, _prior_curve_fit_candidates, _regime_references)
 
@@ -149,14 +150,15 @@ def test_the_lock_records_the_anchors_curve_and_a_reuse_matches_the_regime_by_it
                                   extra_params={"LOW": auto_detect_parameters(ANATASE, shift=0.6, seed=52, n_noise=8),
                                                 "HIGH": auto_detect_parameters(RUTILE, seed=53)})
     assert res["script"] == "LOW" and res["reuse_validity"]["regime_choice"]["chosen_regime"] == "low"
-    # the nearest regime's recipe failing the GATE falls through to the next; that one is not the regime's
-    # state, so it is poor too, and the kept result is the nearest (first executed)
+    # the nearest regime's recipe failing the GATE falls through to the next; that one's gate passes, so it is
+    # kept (good) — the checks flag that the data is not its state, they do not decide
     res, ex, _, _ = curve._replay(tmp_path / "c", monkeypatch, {"LOW": 0.999, "HIGH": 0.70}, prior=prior,
                                   data=spectrum(RUTILE, shift=0.5, seed=13),
                                   extra_params={"HIGH": auto_detect_parameters(RUTILE, shift=0.5, seed=54),
                                                 "LOW": auto_detect_parameters(RUTILE, shift=0.5, seed=55)})
-    assert [s for s, _ in ex.calls] == ["HIGH", "LOW"] and res["script"] == "HIGH"
-    assert res["reuse_validity"]["verdict"] == "poor" and res["reuse_validity"]["recipes_tried"] == 2
+    assert [s for s, _ in ex.calls] == ["HIGH", "LOW"] and res["script"] == "LOW"
+    rv = res["reuse_validity"]
+    assert rv["verdict"] == "good" and rv["recipes_tried"] == 2 and rv["state_flag"] is True
     # an older run (no data files, no stamps): lock order, as before this commit
     old = prior_two_regime_run(tmp_path / "old", data=False, stamps=False)
     res, ex, _, _ = curve._replay(tmp_path / "d", monkeypatch, {"LOW": 0.999, "HIGH": 0.999}, prior=old,
@@ -299,3 +301,45 @@ def test_a_curve_the_monitor_cannot_grid_is_said_not_silent(tmp_path, monkeypatc
     cands = _prior_curve_fit_candidates({"prior_analysis_paths": [str(prior)]})
     refs = _regime_references({"prior_analysis_paths": [str(prior)]}, cands)
     assert refs[0]["curves_not_seeded"] == 1 and "curves_not_seeded" not in refs[1]
+    # the re-stamp counts the curves the monitor SEEDED, and the count reaches the reuse record
+    recipes = json.loads((prior / "analysis_results.json").read_text())["locked_recipes"]
+    from scilink.agents.exp_agents.controllers.curve_fitting_controllers import _restamp_regimes
+    _restamp_regimes(prior, recipes, rows)
+    assert recipes["low"]["drift_state_units"] == 2 and recipes["high"]["drift_state_units"] == 3
+    res, ex, _, _ = curve._replay(tmp_path / "b", monkeypatch, {"LOW": 0.999, "HIGH": 0.999}, prior=prior,
+                                  data=spectrum(ANATASE, seed=12), extra_params={"LOW": auto_detect_parameters(ANATASE, seed=52)})
+    assert res["reuse_validity"]["curves_not_seeded"] == 1
+
+
+def test_a_single_regime_series_is_re_stamped_and_a_single_recipe_reuse_reads_the_stamp(tmp_path, monkeypatch):
+    """Round 3, finding 2: rows carry no regime tag without a regime plan, so
+    the re-stamp (keyed by regime) found no units for the one recipe
+    ("default"), and the single-recipe reuse path passed no stamp at all —
+    with the data files pruned the state check silently did not run on the
+    most common series shape."""
+    names4 = [f"spectrum_{i:04d}" for i in range(4)]
+    state, _ = curve.run_series(tmp_path / "lock", monkeypatch, names=names4, anchors={"spectrum_0000": curve.OK},
+                                follower_r2={n: 0.97 for n in names4})
+    results = curve.compile_results(tmp_path / "lock", state)
+    (rec,) = results["locked_recipes"].values()
+    assert rec["drift_state_units"] == 4 and len(rec["drift_state"]["seed"]) == 4 and rec["x_range"] > 0
+    # a single-regime prior whose data files are gone: the one recipe's stamp (its units) still gives the state
+    prior = tmp_path / "prior"
+    (prior / "scripts").mkdir(parents=True)
+    units = [spectrum(ANATASE, shift=0.5 * i, seed=i) for i in range(4)]
+    rows = [{"index": i, "name": f"spectrum_{i:04d}", "success": True,
+             "parameters": auto_detect_parameters(ANATASE, shift=0.5 * i, seed=i, n_noise=4)} for i in range(4)]
+    (prior / "series_fit_results.json").write_text(json.dumps({"results": rows}))
+    (prior / "analysis_results.json").write_text(json.dumps({"locked_recipes": {"default": {
+        "unit": "spectrum_0000", "index": 0, "regime": "default", "script": "ONE", "verdict": {"verified": True},
+        "drift_state": _replay.drift_state_of_curves([(u[:, 0], u[:, 1]) for u in units]), "x_range": 700.0}}}))
+    res, ex, _, _ = curve._replay(tmp_path / "a", monkeypatch, {"ONE": 0.99}, prior=prior, data=spectrum(ANATASE, shift=1.0, seed=9),
+                                  extra_params={"ONE": auto_detect_parameters(ANATASE, shift=1.0, seed=50, n_noise=3)})
+    rv = res["reuse_validity"]
+    assert "state_check" not in rv and isinstance(rv.get("state_distance"), (int, float)) and rv["state_distance"] < _replay.SAME_STATE_BAR
+    assert rv["identity"]["checked"] and rv["identity"]["within"]
+    assert unit_verdict_for({**res, "success": True})["interpretation_checked"] is True
+    # and the identity floor is the recorded x_range's 1 %, the same as with the data present
+    from scilink.agents.exp_agents.controllers.curve_fitting_controllers import _regime_references
+    refs = _regime_references({"prior_analysis_paths": [str(prior)]}, [{"regime": "default", "drift_state": None, "x_range": 700.0}])
+    assert refs[0]["identity"]["floor"] == 7.0

@@ -348,16 +348,29 @@ def _is_position(key: str) -> bool:
 
 
 def _norm_label(value: Any) -> str:
-    """A name as identity: lower-case alphanumerics, without a trailing
-    space-group SETTING (``I 41/a m d :2`` and ``I41/amd`` are one group)
-    or a parenthetical qualifier (``anatase (TiO2)`` is anatase). A
-    number against a symbol (141 vs I41/amd) still differs: that needs a
-    table, not a rule."""
+    """A name as identity: lower case, a trailing space-group SETTING
+    dropped (``I 41/a m d :2`` and ``I41/amd`` are one group), every run of
+    non-alphanumerics one space — so the TOKENS survive (``TiO2 (anatase)``
+    is {tio2, anatase}, not "tio2": a stripped qualifier erased the phase).
+    ``names_match`` compares two of these. A number against a symbol (141
+    vs I41/amd) still differs: that needs a table, not a rule."""
     import re as _re
     text = str(value).strip()
-    text = _re.sub(r"\s*\([^)]*\)\s*$", "", text)        # a trailing "(TiO2)"
     text = _re.sub(r"\s*:\s*[A-Za-z0-9]{1,2}\s*$", "", text)  # a trailing ":2" / ":H" setting
-    return "".join(ch for ch in text.lower() if ch.isalnum())
+    return " ".join(_re.split(r"[^0-9a-z]+", text.lower())).strip()
+
+
+def names_match(a: str, b: str) -> bool:
+    """Two normalised names are one identity when they are the same string
+    with the spaces removed (``i 41 a m d`` vs ``i41 amd``), or when one's
+    tokens are a subset of the other's (``tio2 anatase`` ⊇ ``anatase``);
+    ``tio2 anatase`` against ``tio2 rutile`` is neither."""
+    if not a or not b:
+        return False
+    if a.replace(" ", "") == b.replace(" ", ""):
+        return True
+    ta, tb = set(a.split()), set(b.split())
+    return bool(ta and tb) and (ta <= tb or tb <= ta)
 
 
 def identity_features(parameters: Any) -> Dict[str, Any]:
@@ -463,7 +476,7 @@ def identity_check(feats: Dict[str, Any], reference: Dict[str, Any]) -> Dict[str
         if got is None:
             continue
         compared += 1
-        if got not in (ref.get("values") or []):
+        if not any(names_match(got, v) for v in (ref.get("values") or [])):
             drifted.append({"name": name, "value": got, "reference": list(ref.get("values") or [])})
     clusters = reference.get("clusters") or []
     floor = float(reference.get("floor") or 0.0)

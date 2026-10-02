@@ -662,7 +662,7 @@ def _replay(tmp_path, monkeypatch, r2_by_script, *, strict=False, repaired=None,
     monkeypatch.setattr(ctrl, "_correct_script_with_timeout_escalation", correct)
     if prior is not None:
         cands = _prior_curve_fit_candidates({"prior_analysis_paths": [str(prior)]})
-        candidates = [{k: c.get(k) for k in ("script", "source", "regime", "unit", "drift_state")} for c in cands]
+        candidates = [{k: c.get(k) for k in ("script", "source", "regime", "unit", "drift_state", "x_range")} for c in cands]
         reuse_candidates = candidates if len(candidates) > 1 else []      # as the series controller sets it
     else:
         recipes = [("LOW", "prior: LOW (regime low, 1 of 2)"), ("HIGH", "prior: HIGH (regime high, 2 of 2)")]

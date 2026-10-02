@@ -13,14 +13,13 @@ removed: the top-level `verdict` everywhere, and the hyperspectral rows'
 stamped in stage 2, so theirs stay).
 
 PR B's allow-list for THIS parity (stamp vs reconstruction) is empty:
-- #699 changes when a script is called broken, not how a result is judged;
 - #710 changes which regime recipe a reuse tries first; the verdict of the
   result it produces is read as before;
-- #711 moves the identity check INTO the replay gate, so a drifted replay is
-  ``poor`` on the result itself (``reuse_validity.verdict``) and the stamp and
-  the reconstruction read the same thing (the case is here, `reused_drifted`);
-  what #711 changes beyond the gate is the CLAIMS' status on the board,
-  which is not a verdict — see tests/test_identity_check.py.
+- #711's checks WITHHOLD CERTIFICATION and decide no verdict (round 3 of
+  the review), so ``reuse_validity.verdict`` is the gate's as on ``main`` and
+  the stamp and the reconstruction read the same thing (the drifted case is
+  here, `reused_drifted`); what #711 changes is the CLAIMS' status on the
+  board, which is not a verdict — see tests/test_identity_check.py.
 """
 
 import copy
@@ -148,8 +147,9 @@ def test_curve_single_run_stamp_equals_the_reconstruction(tmp_path, name):
 def test_curve_single_run_through_the_real_reuse_path(tmp_path, monkeypatch):
     """The reuse verdict the gate writes (good / poor / failed → re-derive)
     reaches the compile and the stamp through the real qc_try_reuse — and a
-    replay whose identity drifted beyond the anchor's spread (#711) is poor
-    on the result itself, so stamp and reconstruction agree on it too."""
+    replay whose identity drifted beyond the regime's spread (#711) keeps
+    the gate's verdict (the checks withhold certification only), so stamp
+    and reconstruction agree on it too: verified, interpretation unchecked."""
     for label, scripts in (("good", {"LOW": 0.80, "HIGH": 0.985}), ("poor", {"LOW": 0.70, "HIGH": 0.75})):
         res, ex, _, item = curve._replay(tmp_path / label, monkeypatch, scripts)
         unit = {**res, "name": "spectrum_0000", "index": 0, "success": True}
@@ -163,7 +163,8 @@ def test_curve_single_run_through_the_real_reuse_path(tmp_path, monkeypatch):
                                   data=rc.spectrum(rc.RUTILE, shift=0.5, seed=2),
                                   extra_params={"LOW": rc.auto_detect_parameters(rc.RUTILE, shift=0.5, seed=2)})
     final = _single_curve(tmp_path / "reused_drifted" / "compiled", {**res, "name": "spectrum_0000", "index": 0, "success": True})
-    assert final["reuse_validity"]["verdict"] == "poor" and not final["verdict"]["verified"]
+    assert final["reuse_validity"]["verdict"] == "good" and final["verdict"]["verified"]
+    assert final["verdict"]["interpretation_checked"] is False and final["reuse_validity"]["identity"]["flagged"] is True
     _check(final, "curve single reuse drifted (identity)")
 
 

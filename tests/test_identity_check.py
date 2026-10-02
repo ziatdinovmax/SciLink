@@ -6,17 +6,19 @@ STATE (``DriftMonitor`` seeded with the regime's own units' data — model-
 free, the live loop's change signal), and did the recipe find what the
 regime's units found (``identity_check``: the names it assigned, normalised
 and without database ids; its STRONG positions matched to the units' by
-nearest neighbour, never by index, with a floor). Beyond the regime a replay
-is ``poor`` (not verified); against one reference unit a difference is a
-flag; the record says ``interpretation_checked`` only when both checks ran
-against the regime's units and passed — never for a run its own verifier
-approved (the verifier reviews the fit, not the claims) nor for a follower
-verified by its recipe. The swarm board posts a replay's claims as verified
+nearest neighbour, never by index, with a floor). The checks WITHHOLD
+CERTIFICATION and decide nothing: a difference is a flag on the record and
+a caveat in the message, the verdict stays the gate's, and the record says
+``interpretation_checked`` only when both checks ran against the regime's
+units and agreed — never for a run its own verifier approved (the verifier
+reviews the fit, not the claims) nor for a follower verified by its recipe
+(round 3 of the review: three rounds moved a deciding identity check's
+false positives from one threshold to the next; a deterministic check asked
+an interpretive question can withhold a certificate, not issue a verdict). The swarm board posts a replay's claims as verified
 only then; its recipe (a script that ran) stays verified by the gate. The
-behaviour this commit changes is exactly: a replay that fits but is not the
-regime's state or found a different thing (good → poor), and a replay's
-CLAIMS on the board (verified → provisional unless the interpretation was
-checked).
+behaviour this commit changes is exactly: a replay's CLAIMS on the board
+(verified → provisional unless the interpretation was checked); no verdict
+changes.
 """
 
 import json
@@ -50,15 +52,21 @@ def test_identity_features_and_reference_read_what_a_recipe_found():
     xrd = {"identified_phase": "O2 Ti", "space_group": "I 41/a m d :2", "database_id": "2310710", "figure_of_merit": 0.69,
            "fitted_zero_shift": 0.0, "fitted_lattice_scale": 1.022, "strongest_peak_2theta": 25.31}
     fx = _replay.identity_features(xrd)
-    assert fx["names"] == {"identified_phase": "o2ti", "space_group": "i41amd"} and "database_id" not in fx["names"]
-    # one group under its settings and spellings; a qualifier in parentheses is not identity
-    assert _replay.identity_features({"space_group": "I41/amd"})["names"]["space_group"] == "i41amd"
-    assert _replay.identity_features({"space_group": "I 41/a m d :2"})["names"]["space_group"] == "i41amd"
-    assert _replay.identity_features({"space_group": "R -3 m :H"})["names"]["space_group"] == "r3m"
-    assert _replay.identity_features({"phase": "anatase (TiO2)"})["names"]["phase"] == "anatase"
-    assert _replay.identity_features({"phase": "141"})["names"]["phase"] != "i41amd"          # a number vs a symbol: still a table's job
-    ref = _replay.identity_reference([fx, {**fx, "names": {"identified_phase": "o2ti", "space_group": "p42mnm"}}], x_range=50)
-    assert ref["names"]["space_group"] == {"values": ["i41amd", "p42mnm"], "n": 2} and ref["floor"] == 0.5
+    assert fx["names"] == {"identified_phase": "o2 ti", "space_group": "i 41 a m d"} and "database_id" not in fx["names"]
+    # names match as one string without spaces (a group under its settings and spellings) or as token sets
+    # (a qualifier in parentheses does not erase the phase: "TiO2 (anatase)" against "TiO2 (rutile)" differs)
+    m = _replay.names_match
+    assert m(_replay._norm_label("I41/amd"), _replay._norm_label("I 41/a m d :2")) and m(_replay._norm_label("R -3 m :H"), "r 3 m")
+    assert m(_replay._norm_label("anatase (TiO2)"), "anatase") and m("tio2 anatase", "anatase")
+    assert not m(_replay._norm_label("TiO2 (anatase)"), _replay._norm_label("TiO2 (rutile)")) and not m("hematite fe2o3", "maghemite fe2o3")
+    assert not m("141", "i41amd")                                               # a number vs a symbol: still a table's job
+    ref = _replay.identity_reference([fx, {**fx, "names": {"identified_phase": "o2 ti", "space_group": "p42 mnm"}}], x_range=50)
+    assert ref["names"]["space_group"] == {"values": ["i 41 a m d", "p42 mnm"], "n": 2} and ref["floor"] == 0.5
+    chk = _replay.identity_check({"names": {"space_group": "p 42 m n m"}, "positions": []}, ref)
+    assert chk["checked"] and chk["within"]                                     # spelling: the same group
+    chk = _replay.identity_check({"names": {"identified_phase": "tio2 rutile"}, "positions": []},
+                                 _replay.identity_reference([{"names": {"identified_phase": "tio2 anatase"}, "positions": []}] * 3, x_range=50))
+    assert chk["checked"] and not chk["within"]                                 # the phase, not the formula
     # a near-zero position gets the floor, not a near-zero tolerance
     near = _replay.identity_reference([{"names": {}, "positions": [(0.01, 1.0)]}, {"names": {}, "positions": [(0.02, 1.0)]}], x_range=10)
     chk = _replay.identity_check({"names": {}, "positions": [(0.08, 1.0)]}, near)
@@ -106,28 +114,30 @@ def test_a_replay_is_held_to_the_regimes_state_and_to_what_it_found(tmp_path, mo
     assert rv["identity"]["within"] and rv["identity"]["spread_known"] and rv["identity"]["compared"] == 2
     uv = unit_verdict_for({**res, "success": True})
     assert uv["verified"] and uv["decided_by"] == "replay_gate" and uv["interpretation_checked"] is True
-    # the anatase recipe FORCED (named file) on rutile data: not the LOW regime's state → poor, falls nowhere,
-    # not verified — however well it "fits" and whatever it identified
+    # the anatase recipe FORCED (named file) on rutile data fits at R² 0.99999: the gate's verdict stands (good,
+    # the numbers), both checks flag it, and it is NOT certified — its claims are provisional on the board
     (prior / "scripts" / "spectrum_0000.py").write_text("LOW")
     res, ex, _, _ = curve._replay(tmp_path / "b", monkeypatch, {"LOW": 0.99999}, prior=prior / "scripts" / "spectrum_0000.py",
                                   data=rc.spectrum(rc.RUTILE, shift=0.5, seed=2),
                                   extra_params={"LOW": {**rc.auto_detect_parameters(rc.RUTILE, shift=0.5, seed=91), "space_group": "P 42/m n m"}})
     rv = res["reuse_validity"]
-    assert rv["verdict"] == "poor" and rv["identity"]["drifted"] and rv["identity"]["spread_known"]
-    assert "IDENTITY:" in rv["message"] and res.get("quality_warning") and "IDENTITY:" in res["quality_warning"]
+    assert rv["verdict"] == "good" and not res.get("quality_warning")
+    assert rv["identity"]["drifted"] and rv["identity"]["spread_known"] and rv["identity"]["flagged"] is True
+    assert "IDENTITY:" in rv["message"] and "flagged" in rv["message"]
     assert rv["state_distance"] > _replay.SAME_STATE_BAR and rv["state_flag"] is True and "STATE:" in rv["message"]
     uv = unit_verdict_for({**res, "success": True})
-    assert not uv["verified"] and uv["interpretation_checked"] is False
-    # the data IS the regime's state but the recipe found a different thing (a wrong phase label): poor
+    assert uv["verified"] and uv["decided_by"] == "replay_gate" and uv["interpretation_checked"] is False
+    # the data IS the regime's state but the recipe found a different thing (a wrong phase label): the gate
+    # decides (good), the first candidate is KEPT (no fall-through on a check), the name drift is flagged
     res, ex, _, _ = curve._replay(tmp_path / "c", monkeypatch, {"LOW": 0.999, "HIGH": 0.999}, prior=prior,
                                   data=rc.spectrum(rc.RUTILE, shift=0.5, seed=3),
                                   extra_params={"HIGH": {**rc.auto_detect_parameters(rc.RUTILE, shift=0.5, seed=92),
                                                          "space_group": "F m -3 m"},
                                                 "LOW": {**rc.auto_detect_parameters(rc.RUTILE, shift=0.5, seed=93), "space_group": "P42/mnm"}})
     rv = res["reuse_validity"]
-    assert [s for s, _ in ex.calls] == ["HIGH", "LOW"]                   # HIGH judged poor on identity, LOW tried
-    assert rv["verdict"] == "poor" and rv["regime_choice"]["chosen_regime"] == "high"      # the kept: first executed
-    assert rv["identity"]["drifted"][0]["name"] == "space_group" and "space_group = 'fm3m'" in rv["message"]
+    assert [s for s, _ in ex.calls] == ["HIGH"] and rv["verdict"] == "good" and rv["regime_choice"]["chosen_regime"] == "high"
+    assert rv["identity"]["drifted"][0]["name"] == "space_group" and "space_group = 'f m 3 m'" in rv["message"]
+    assert unit_verdict_for({**res, "success": True})["interpretation_checked"] is False
     # the board's copy, a recipe file with no run behind it: nothing to compare, unchecked
     copy = tmp_path / "board" / "recipe.py"
     copy.parent.mkdir()
@@ -201,13 +211,15 @@ def test_the_record_and_the_board_tell_numbers_from_interpretation(tmp_path):
     assert recs[0]["status"] == "verified"
 
 
-def test_the_state_distance_is_a_flag_and_only_identity_with_a_spread_decides(tmp_path, monkeypatch):
-    """Review of 59a56cee: a monitor seeded from one or a few curves calls a
-    same-phase thermal shift of a few cm⁻¹ "not the same state" (a 2 cm⁻¹
-    shift against a single-run prior: 4 of 5 poor, R² 0.99 throughout). The
-    state is a flag — in the message, ``state_flag`` on the record,
-    ``interpretation_checked`` False — and the verdict is the gate's unless
-    identity, checked against a spread, also fails."""
+def test_the_checks_withhold_certification_and_never_decide(tmp_path, monkeypatch):
+    """Round 2: a monitor seeded from one or a few curves calls a same-phase
+    thermal shift of a few cm⁻¹ "not the same state" (a 2 cm⁻¹ shift against
+    a single-run prior: 4 of 5 poor at R² 0.99). Round 3: identity then took
+    over as the false-positive source (a same-phase shift beyond a multi-unit
+    regime was poor from +12 cm⁻¹, every peak "new" and "missing"), and a
+    deciding check let the fall-through adopt a far regime. So neither
+    decides: the gate's verdict stands everywhere, the checks withhold
+    ``interpretation_checked`` and flag."""
     # a single-run prior (one unit): the same phase shifted 4 cm-1 (peak sigma 6) is far by the monitor
     single = tmp_path / "single"
     (single / "scripts").mkdir(parents=True)
@@ -223,34 +235,38 @@ def test_the_state_distance_is_a_flag_and_only_identity_with_a_spread_decides(tm
     assert "STATE:" in rv["message"] and "flagged" in rv["message"] and not res.get("quality_warning")
     uv = unit_verdict_for({**res, "success": True})
     assert uv["verified"] and uv["interpretation_checked"] is False
-    # a two-regime prior: rutile data, the anatase recipe FORCED, but the recipe reports the anatase set anyway
-    # (a fixed-model recipe): identity within, the state far → good with the flag, not poor
+    # a same-phase shift of 14 cm-1 beyond a three-unit regime (round 3's case): good, flagged on identity, unchecked
     prior = rc.prior_two_regime_run(tmp_path, names=True)
-    (prior / "scripts" / "spectrum_0000.py").write_text("LOW")
-    res, ex, _, _ = curve._replay(tmp_path / "b", monkeypatch, {"LOW": 0.99}, prior=prior / "scripts" / "spectrum_0000.py",
-                                  data=rc.spectrum(rc.RUTILE, shift=0.5, seed=2),
-                                  extra_params={"LOW": {**rc.auto_detect_parameters(rc.ANATASE, seed=96), "space_group": "I41/amd"}})
+    res, ex, _, _ = curve._replay(tmp_path / "b", monkeypatch, {"LOW": 0.999, "HIGH": 0.999}, prior=prior,
+                                  data=rc.spectrum(rc.ANATASE, shift=14.0, seed=8),
+                                  extra_params={"LOW": {**rc.auto_detect_parameters(rc.ANATASE, shift=14.0, seed=96), "space_group": "I41/amd"}})
     rv = res["reuse_validity"]
-    assert rv["verdict"] == "good" and rv["state_flag"] is True and rv["identity"]["within"]
+    assert rv["verdict"] == "good" and res["script"] == "LOW" and not res.get("quality_warning")
+    assert rv["identity"].get("flagged") is True and unit_verdict_for({**res, "success": True})["interpretation_checked"] is False
+    # round 3's finding 1: the nearest regime's identity flickering must not hand the choice to a far regime —
+    # the fall-through runs on the GATE only; the nearest (distance ~0) is kept although its identity flags
+    res, ex, _, _ = curve._replay(tmp_path / "c", monkeypatch, {"LOW": 0.999, "HIGH": 0.999}, prior=prior,
+                                  data=rc.spectrum(rc.RUTILE, shift=0.5, seed=3),
+                                  extra_params={"HIGH": {**rc.auto_detect_parameters(rc.RUTILE, shift=0.5, seed=92), "peak_9": {"center": 300.0, "amplitude": 0.9}}})
+    rv = res["reuse_validity"]
+    assert [s for s, _ in ex.calls] == ["HIGH"] and rv["regime_choice"]["chosen_regime"] == "high" and rv["verdict"] == "good"
+    assert rv["identity"].get("flagged") is True and rv["state_distance"] < _replay.SAME_STATE_BAR
+    # the gate failing on the nearest still falls through, as on main: the next whose gate passes is kept
+    # (good), with the state flagged — a far regime adopted by the GATE is said, not decided against
+    res, ex, _, _ = curve._replay(tmp_path / "d", monkeypatch, {"LOW": 0.999, "HIGH": 0.70}, prior=prior,
+                                  data=rc.spectrum(rc.RUTILE, shift=0.5, seed=13),
+                                  extra_params={"HIGH": rc.auto_detect_parameters(rc.RUTILE, shift=0.5, seed=54),
+                                                "LOW": rc.auto_detect_parameters(rc.RUTILE, shift=0.5, seed=55)})
+    assert [s for s, _ in ex.calls] == ["HIGH", "LOW"] and res["script"] == "LOW"
+    assert res["reuse_validity"]["verdict"] == "good" and res["reuse_validity"]["state_flag"] is True
     assert unit_verdict_for({**res, "success": True})["interpretation_checked"] is False
-    # the same with the recipe reporting rutile (identity drift, 3 units): poor — the original #711 case
-    res, ex, _, _ = curve._replay(tmp_path / "c", monkeypatch, {"LOW": 0.99}, prior=prior / "scripts" / "spectrum_0000.py",
-                                  data=rc.spectrum(rc.RUTILE, shift=0.5, seed=2),
-                                  extra_params={"LOW": {**rc.auto_detect_parameters(rc.RUTILE, shift=0.5, seed=97), "space_group": "P42/mnm"}})
-    assert res["reuse_validity"]["verdict"] == "poor" and res.get("quality_warning")
-    # under a STRICT replay (the live loop's fast clock) nothing decides: the same drift is a caveat, the gate's verdict stands
-    res, ex, _, _ = curve._replay(tmp_path / "d", monkeypatch, {"LOW": 0.99}, prior=prior / "scripts" / "spectrum_0000.py",
+    # a STRICT replay (the live loop's fast clock): the same record, the same verdict — nothing decides anywhere
+    (prior / "scripts" / "spectrum_0000.py").write_text("LOW")
+    res, ex, _, _ = curve._replay(tmp_path / "e", monkeypatch, {"LOW": 0.99}, prior=prior / "scripts" / "spectrum_0000.py",
                                   data=rc.spectrum(rc.RUTILE, shift=0.5, seed=2), strict=True,
                                   extra_params={"LOW": {**rc.auto_detect_parameters(rc.RUTILE, shift=0.5, seed=97), "space_group": "P42/mnm"}})
     rv = res["reuse_validity"]
-    assert rv["verdict"] == "good" and rv["identity"].get("flagged") is True and "(flagged)" in rv["message"] and not res.get("quality_warning")
-    assert unit_verdict_for({**res, "success": True})["verified"] and unit_verdict_for({**res, "success": True})["interpretation_checked"] is False
-    # the multi-regime path: the nearest regime's recipe reporting the wrong set falls through on IDENTITY, as before
-    res, ex, _, _ = curve._replay(tmp_path / "e", monkeypatch, {"LOW": 0.999, "HIGH": 0.999}, prior=prior,
-                                  data=rc.spectrum(rc.RUTILE, shift=0.5, seed=3),
-                                  extra_params={"HIGH": {**rc.auto_detect_parameters(rc.RUTILE, shift=0.5, seed=92), "space_group": "F m -3 m"},
-                                                "LOW": {**rc.auto_detect_parameters(rc.RUTILE, shift=0.5, seed=93), "space_group": "P42/mnm"}})
-    assert [s for s, _ in ex.calls] == ["HIGH", "LOW"] and res["reuse_validity"]["verdict"] == "poor"
+    assert rv["verdict"] == "good" and rv["identity"].get("flagged") is True and rv["state_flag"] is True and not res.get("quality_warning")
 
 
 def test_a_series_anchored_by_a_replay_rests_on_the_replay_gate(tmp_path):

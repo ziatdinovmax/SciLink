@@ -257,51 +257,59 @@ about a replay or a verdict goes into `_replay.py`, not into one agent.
 **"Verified" covers the numbers; the interpretation only where a check
 exists** (#711). A replay gate judges fit quality — R², a vision score, a
 map's statistics — and says nothing about WHAT was measured: a recipe can fit
-a different phase perfectly. So a replay is held to two more checks, both
-inside `select_recipe`'s judge so a candidate that fails them falls through to
-the next regime's recipe. *Did the recipe find what the regime found* —
-`identity_check`: the names it assigned (a phase, a space group — normalised,
-settings and parenthetical qualifiers stripped, database ids ignored) and its
-STRONG positions (≥ 10 % of the strongest) matched to the units' by nearest
-neighbour, never by index, with a floor, so a weak peak an auto-detect recipe
-finds on some units and not others is not identity. This is the check that
-DECIDES: drift against a known spread (≥ 2 units) makes the gate verdict
-`poor`; against one reference unit a difference is a flag. *Is the new data
-the regime's STATE* — a `live/drift.py` `DriftMonitor` seeded with the regime's
-own units' data (`spectrum_NNNN/data.npy` of the prior run, else the stamp),
-model-free, the live loop's change signal — is a FLAG only (`state_flag`, a
-caveat in the message): seeded from one or a few curves it calls a same-phase
-thermal shift of a few cm⁻¹ "not the same state" (review: a 2 cm⁻¹ shift
-against a single-run prior, 4 of 5 poor at R² 0.99), and a flag is what a
-difference against a thin reference is. Under a strict replay nothing decides
-(the live loop has its own monitor and audits; a downgrade here would turn a
-change into a fit breach and bypass `on_change`). `interpretation_checked` on
-the record only when both ran against the regime's units and passed — never
-for a run its own verifier approved (the verifier reviews the fit, not the
-claims; a fresh cube's map reviewer likewise) nor for a follower verified by
-its recipe. A hyperspectral replay's required maps held to the anchor's
-statistics is its identity check; an image replay's feature health is not
-one. The swarm board posts a replay's CLAIMS as verified only when the
-interpretation was checked — its recipe, a script that ran, stays verified by
-the gate — and a series whose ANCHOR replayed a prior recipe rests on the
-replay gate like the single replay does (followers that replay the series'
-own anchor, a hyperspectral series, are its mechanics). **Which regime a
-reuse replays is read from the data** (#710), by the same monitor: the
-nearest regime is tried first (`select_recipe(strategy="nearest_first")`),
-and `reuse_validity.regime_choice` says the distances, the choice and whether
-two regimes were too close to tell apart (within a 2× ratio, or both under
-the material bar) — said in `source` and `message` too, since the
-attribution is read there. **A regime's stamp is its units' curves on the
-monitor's own grid** (`drift_state_of_curves`: at most 12 curves evenly
-spaced along the regime, each at its own x, a long one reduced by block
-means — never a point interpolation, which samples the noise and inflated a
-curve's distance to its own stamp 2–4×): the anchor's curve at lock time,
-re-stamped with the regime's units when the series is done
-(`_restamp_regimes`), because an anchor-only stamp failed half of a regime's
-own units. A peak-counting fingerprint was tried first and dropped: it
-separates phases and nothing below them (a lattice shift, a texture, a
-background tie at 1.0), as the live loop had already found. Images keep the
-first regime's recipe and say so.
+a different phase perfectly. So a replay is held to two more checks, and the
+checks may do one thing only: **withhold certification**. They never decide a
+verdict. *Did the recipe find what the regime found* — `identity_check`: the
+names it assigned (a phase, a space group — normalised, compared as one
+string or as token sets, so settings, spellings and a formula beside the
+phase are one name and "TiO2 (anatase)" against "TiO2 (rutile)" is not) and
+its STRONG positions (≥ 10 % of the strongest) matched to the units' by
+nearest neighbour, never by index, with a floor of 1 % of the axis (recorded
+with the recipe as `x_range`, so it is the same with and without the data
+files). *Is the new data the regime's STATE* — a `live/drift.py`
+`DriftMonitor` seeded with the regime's own units' data (`spectrum_NNNN/
+data.npy` of the prior run, else the stamp), model-free, the live loop's
+change signal. Each is a flag on the record (`identity.flagged`,
+`state_flag`; a check that could not run says so: `state_check`,
+`identity.reason`, `curves_not_seeded`) and a caveat in the message;
+`interpretation_checked` only when both ran against the regime's units and
+agreed — never for a run its own verifier approved (the verifier reviews the
+fit, not the claims; a fresh cube's map reviewer likewise) nor for a follower
+verified by its recipe. The verdict stays the gate's, on the fast clock and
+off it. Why not a verdict: a deterministic check asked an interpretive
+question ("same phase, read the same way?" — the question the live section
+says no gate can answer) has the precision to withhold a certificate, not to
+issue a negative one that drives fall-through, a judge and re-derivation;
+three review rounds of a deciding identity check each moved its false
+positives to the next threshold (index matching, the strong-peak bar, the
+floor and the spread), and a false alarm that only withholds certification
+is cheap. A negative verdict on interpretation is a separate, measured step:
+a fixed corpus of cases first, a rule adopted only when it measures well
+across all of them (the candidate: the monitor's distance after a bounded
+alignment, one table for the regime choice and the verdict), the declined
+variants recorded here. The swarm board posts a replay's CLAIMS as verified
+only when the interpretation was checked — its recipe, a script that ran,
+stays verified by the gate — and a series whose ANCHOR replayed a prior
+recipe rests on the replay gate like the single replay does (followers that
+replay the series' own anchor, a hyperspectral series, are its mechanics).
+**Which regime a reuse replays is read from the data** (#710), by the same
+monitor: the nearest regime is tried first (`select_recipe(strategy=
+"nearest_first")`), the GATE decides whether a candidate is kept (so a flag
+on the nearest can never hand the choice to a far regime), and
+`reuse_validity.regime_choice` says the distances, the choice and whether two
+regimes were too close to tell apart (within a 2× ratio, or both under the
+material bar) — said in `source` and `message` too, since the attribution is
+read there. **A regime's stamp is its units' curves on the monitor's own
+grid** (`drift_state_of_curves`: at most 12 curves evenly spaced along the
+regime, each at its own x, a long one reduced by block means — never a point
+interpolation, which samples the noise instead of averaging it): the
+anchor's curve at lock time, re-stamped with the regime's units when the
+series is done (`_restamp_regimes`, every series shape, a single regime
+included; `drift_state_units` counts the curves the monitor seeded), because
+an anchor-only stamp failed units of its own regime. A peak-counting
+fingerprint was tried first and dropped: it separates phases and nothing
+below them (a lattice shift, a texture, a background tie at 1.0), as the live
+loop had already found. Images keep the first regime's recipe and say so.
 
 ## Data preparation is a stage, not an agent
 
