@@ -807,10 +807,25 @@ class MeasurementLoop:
                   "results": [{**last, "index": 0}],
                   "derived_from": {"series_dir": str(series_dir), "index": idx}}
         (dest / "series_fit_results.json").write_text(json.dumps(single, indent=1, default=str))
+        # the gate the frame's recipe was approved under travels with the
+        # anchor (the regime's recorded gate, else the series run's), so a
+        # replay of a figure-of-merit or peak-region recipe is held to it
+        # rather than to the R² default
+        gate = None
+        try:
+            run = json.loads((series_dir / "analysis_results.json").read_text())
+            recipes = run.get("locked_recipes") or {}
+            rec = recipes.get(last.get("regime")) if last.get("regime") in recipes else (
+                next(iter(recipes.values())) if len(recipes) == 1 else None)
+            gate = (rec or {}).get("gate") if isinstance(rec, dict) else None
+            gate = gate if isinstance(gate, dict) else (run.get("quality_gate") if isinstance(run.get("quality_gate"), dict) else None)
+        except (OSError, ValueError, TypeError):
+            gate = None
         (dest / "analysis_results.json").write_text(json.dumps({
             "status": "success", "model_type": last.get("model_type"),
             "fitting_parameters": last.get("parameters") or {},
-            "fit_quality": last.get("fit_quality") or {}}, indent=1, default=str))
+            "fit_quality": last.get("fit_quality") or {},
+            **({"quality_gate": gate} if gate else {})}, indent=1, default=str))
         arrays = series_dir / f"spectrum_{idx:04d}"
         if arrays.is_dir():
             shutil.copytree(arrays, dest / "spectrum_0000", dirs_exist_ok=True)

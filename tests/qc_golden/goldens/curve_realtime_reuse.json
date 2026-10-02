@@ -23,6 +23,15 @@
     "model_type": "Gaussian + linear background",
     "output_directory": "<OUTDIR>",
     "profile": "realtime",
+    "quality_gate": {
+      "accept_threshold": 0.95,
+      "best_value": 1.0,
+      "direction": "higher_is_better",
+      "hard_reject_threshold": 0.9,
+      "metric": "r_squared",
+      "physical_review": true,
+      "value_source": "result"
+    },
     "quality_history": {
       "produced_under_profile": "realtime"
     },
@@ -37,8 +46,10 @@
         "within": true
       },
       "message": "Reused the locked fitting script from prior run 'prior'; R² = 0.9950 meets the acceptance threshold 0.950.",
+      "metric": "r_squared",
       "r_squared": 0.995,
       "reused": true,
+      "score": 0.995,
       "source": "prior",
       "state_distance": 0.0,
       "threshold": 0.95,
@@ -69,8 +80,10 @@
       "within": true
     },
     "message": "Reused the locked fitting script from prior run 'prior'; R² = 0.9950 meets the acceptance threshold 0.950.",
+    "metric": "r_squared",
     "r_squared": 0.995,
     "reused": true,
+    "score": 0.995,
     "source": "prior",
     "state_distance": 0.0,
     "threshold": 0.95,

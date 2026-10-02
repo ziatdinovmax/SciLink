@@ -314,6 +314,18 @@ def resolve_gate(
     return R_SQUARED_DEFAULT
 
 
+def gate_record(gate: Any) -> Optional[dict]:
+    """A gate as a small JSON record (the fields ``from_mapping`` reads), so
+    a run and a locked recipe can say which gate approved them and a later
+    replay is held to THAT gate. None for anything that is not a gate."""
+    if not isinstance(gate, QualityGate):
+        return None
+    return {"metric": gate.metric, "accept_threshold": gate.accept_threshold,
+            "hard_reject_threshold": gate.hard_reject_threshold, "direction": gate.direction,
+            "physical_review": gate.physical_review, "value_source": gate.value_source,
+            **({"best_value": gate.best_value} if gate.best_value is not None else {})}
+
+
 def from_mapping(data: dict) -> QualityGate:
     """Construct a QualityGate from a frontmatter-style mapping."""
     metric = str(data.get("metric", R_SQUARED_DEFAULT.metric))

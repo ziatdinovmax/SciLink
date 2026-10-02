@@ -324,6 +324,55 @@ fingerprint was tried first and dropped: it separates phases and nothing
 below them (a lattice shift, a texture, a background tie at 1.0), as the live
 loop had already found. Images keep the first regime's recipe and say so.
 
+**The replay gate is the gate the recipe was approved under, and a withheld
+certificate is explained, not re-judged.** A replayed recipe is held first to
+the gate recorded with it (`gate_record` on each regime's recipe at lock time
+and on every run's results; the swarm board's copy of a script carries it in
+a `<stem>.recipe.json` sidecar with the plan's model; the live loop's
+series-derived anchor records the locked frame's regime gate) — a reuse run
+resolves a gate of its own from whatever skill it was or was not given, which
+is not the recipe's. A caller who asks for a gate on the reuse run
+wins, with a warning (`quality_gate_explicit`: a full `quality_gate=`, or an
+`r2_threshold=` that `resolve_gate` honoured and that the recipe's own R²
+metric can take — a bare number cannot replace a recipe's figure of merit,
+and a number the skill's metric guard dropped was no ask; a constructor-level
+default is not an ask). One predicate carries the decision to every
+reader of the gate — "this regime's anchor REPLAYED the recipe"
+(`_replayed_regimes`, set where the anchor's result is known: a verbatim or
+ladder-repaired replay counts, a reuse that failed into fresh code or a
+regime fitted fresh beside a replayed one does not) — through
+`_series_gate(state, regime)` and `_unit_gate_resolver` into the outlier
+pass, the refit's re-scan and its scoring-gated skip. Off the predicate
+everything is `main`'s path (a non-R² skill gate, else the driver's LIVE R²
+threshold — never the R² snapshot in state, which once beat a person's
+`adjust_threshold`; that adjustment is itself an explicit threshold ask). A
+non-reuse series flags, refits and stamps exactly as `main`
+(`test_non_reuse_series_are_mains_path_exactly`). Else the run's effective `QualityGate` (`_replay_gate`: an R² gate
+at the driver's live `r2_threshold`, a skill's own metric at the skill's
+threshold and direction, the rule `_detect_outliers` already applied to a
+series' followers; a metric the replayed script does not report is a reject). The
+deterministic checks decide verified / not verified and say THAT something
+differs; what a difference MEANS — a thermal shift against a new band, an
+impurity line, a polymorph — is a skill-bearing model's question, so a replay
+that is NOT CERTIFIED for a stated reason — flagged on its state or its
+identity, or whose regime the data cannot tell — is escalated to a JUDGE
+(`_escalate_reuse`, the live loop's shape: a model-free signal triggers the
+slow-clock look; a state distance merely above the certification bar is
+withheld with nothing to explain, and is not): one model call shown the findings as
+quoted data between markers, the replayed fit and the new curve over the
+regime's anchor, and the skill's `interpretation` section, asked which regime
+the measurement belongs to and what changed. The answer is an opinion on the
+record (`reuse_validity.escalation`, `decided_by: judge`), in the message, on
+the `analyses` row and on the board as a PROVISIONAL claim; the verdict and
+`interpretation_checked` do not move, nothing is re-run, and a regime the
+judge names against an ambiguous choice is `regime_choice.suggested` — listed
+for the caller, never taken. Never on a certified or clean pass, on the fast clock, when
+the caller asked for no review, on a replay that did not execute, on the
+gate alone failing, and at most once per item; a flag against one reference
+unit is escalated only when nobody attends (`enable_human_feedback` off).
+Do not make the judge a gate: the per-map reviewer that re-judged replays is
+why replays are gated on evidence.
+
 ## Data preparation is a stage, not an agent
 
 Some instruments hand over a container that sits *upstream* of what the
@@ -1176,7 +1225,10 @@ A live measurement loop (`scilink/live/`) has no analysis skills of its own.
 Its slow clock — the reference analysis and every re-anchor — is an ordinary
 `CurveFittingAgent.analyze()`, so the same technique skill (`curve_fitting/raman`,
 `xrd_profile`, ...) is auto-selected there as in a chat run; the per-frame fast
-path replays a locked script and reads no skill. **Do not add a live-flavoured
+path replays a locked script and reads no skill — and is held to the gate the
+reference's recipe was approved under (recorded on the anchor, also when the
+anchor is a series' last frame laid out as one), not to whatever gate a frame
+with no skill would resolve. **Do not add a live-flavoured
 copy of an analysis skill**: a technique missing from `curve_fitting/` is
 missing for chat runs too, and that is where it gets added.
 

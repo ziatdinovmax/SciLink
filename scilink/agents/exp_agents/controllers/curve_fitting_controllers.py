@@ -1108,6 +1108,94 @@ def _regime_of_named(state: dict) -> Optional[str]:
     return None
 
 
+def _overlay_png(xy, anchor_curve, regime: Any, system_info: Optional[dict] = None) -> Optional[bytes]:
+    """The new curve over the regime's anchor curve, each scaled to its own
+    maximum, as PNG bytes (the shared ``render_curve_overlay``, with the
+    run's axis labels); None when either is missing or plotting fails."""
+    if xy is None or anchor_curve is None:
+        return None
+    try:
+        from scilink.utils.curve_preview import render_curve_overlay
+
+        def scaled(x, y):
+            x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+            top = float(np.nanmax(np.abs(y))) if y.size else 0.0
+            return np.column_stack([x, y / top if top > 0 else y])
+        info = dict(system_info or {})
+        info["ylabel"] = "scaled intensity"
+        info.setdefault("title", "Replay")
+        return render_curve_overlay([{"label": f"regime {regime!r} anchor", "curve_data": scaled(*anchor_curve)},
+                                     {"label": "new measurement", "curve_data": scaled(*xy)}],
+                                    info, title_suffix=" — new measurement over the regime's anchor")
+    except Exception:  # noqa: BLE001 - a figure the judge does without
+        return None
+
+
+def _prior_regimes(state: dict, refs: list) -> list:
+    """The regimes of the prior run a judge may name — ALL of them, from the
+    run's recorded recipes (a replay of one regime's recipe, a named unit
+    script, must still be attributable to another regime), each with its
+    anchor unit, the plan's model and its unit count; the references given
+    when the run recorded none."""
+    from .._verification_record import series_recipes
+    anchor_dir = None
+    for raw_path in state.get("prior_analysis_paths") or []:
+        anchor_dir = _load_prior_curve_fit_state(raw_path)[0]
+        if anchor_dir is not None:
+            break
+    out = []
+    if anchor_dir is not None:
+        try:
+            recorded = json.loads((Path(anchor_dir) / "analysis_results.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            recorded = None
+        counts: Dict[Any, int] = {}
+        try:
+            rows = json.loads((Path(anchor_dir) / "series_fit_results.json").read_text(encoding="utf-8")).get("results") or []
+            for r in rows:
+                if isinstance(r, dict) and r.get("success"):
+                    counts[r.get("regime")] = counts.get(r.get("regime"), 0) + 1
+        except (OSError, ValueError, AttributeError):
+            pass
+        for r in series_recipes(recorded if isinstance(recorded, dict) else None):
+            out.append({"regime": r.get("regime"), "unit": r.get("unit"), "model": r.get("model"),
+                        "n_units": counts.get(r.get("regime")), "drift_state": r.get("drift_state")})
+    if not out:
+        out = [{"regime": r.get("regime"), "model": r.get("model"), "unit": r.get("unit"), "n_units": r.get("n_units")}
+               for r in (refs or []) if isinstance(r, dict) and r.get("regime")]
+    return out
+
+
+def gate_record(gate: Any) -> Optional[dict]:
+    from ..quality_gate import gate_record as _rec
+    return _rec(gate)
+
+
+def _recorded_gate(ctrl, state: dict):
+    """The gate a recipe or a run is RECORDED under: the run's effective gate,
+    at the driver's LIVE threshold when a person adjusted it at the poor-fit
+    review (``quality_gate_explicit == "threshold"`` and an R² gate) — so a
+    recipe accepted at 0.80 is not later replayed at the 0.95 snapshot."""
+    g = _gate(state)
+    try:
+        if state.get("quality_gate_explicit") == "threshold" and g.metric == "r_squared" \
+                and abs(float(g.accept_threshold) - float(ctrl.r2_threshold)) > 1e-9:
+            return g.with_accept_threshold(float(ctrl.r2_threshold))
+    except Exception:  # noqa: BLE001 - the snapshot, as before
+        pass
+    return g
+
+
+def _regime_model(state: dict, regime_name: Any) -> Optional[str]:
+    """The series plan's one-line model for ``regime_name`` (None when the
+    plan has no such regime, or no plan)."""
+    plan = state.get("series_analysis_plan") or {}
+    for r in plan.get("regimes") or []:
+        if isinstance(r, dict) and r.get("name") == regime_name and isinstance(r.get("physical_model"), str):
+            return r["physical_model"][:300]
+    return None
+
+
 def _regime_references(state: dict, candidates: list) -> list:
     """For each regime candidate of a reuse: a drift monitor seeded with the
     regime's units' data from the prior run (``spectrum_NNNN/data.npy``),
@@ -1168,8 +1256,22 @@ def _regime_references(state: dict, candidates: list) -> list:
             monitor = None
         samples = [identity_features(r.get("parameters")) for r in units if isinstance(r.get("parameters"), dict)]
         identity = identity_reference(samples, x_range=x_range) if samples else None
+        anchor_curve = None
+        if curves:
+            anchor_curve = curves[0]
+        elif isinstance(c.get("drift_state"), dict) and c["drift_state"].get("seed"):
+            # the anchor's curve as the lock recorded it: block means on the grid
+            try:
+                xs = np.asarray(c["drift_state"].get("x") or [], dtype=float)
+                row = np.asarray(c["drift_state"]["seed"][0], dtype=float)
+                if xs.size and row.size and xs.size >= row.size:
+                    block = xs.size // row.size
+                    anchor_curve = (xs[:row.size * block].reshape(-1, block).mean(axis=1), row)
+            except Exception:  # noqa: BLE001
+                anchor_curve = None
         out.append({"monitor": monitor, "identity": identity, "n_curves": len(curves), "regime": regime,
-                    **({"curves_not_seeded": dropped} if dropped else {})})
+                    "n_units": len(units), "unit": c.get("unit"), "model": c.get("model"),
+                    "anchor_curve": anchor_curve, **({"curves_not_seeded": dropped} if dropped else {})})
     return out
 
 
@@ -1280,9 +1382,10 @@ def _prior_curve_fit_recipes(state: dict) -> list:
 
 def _prior_curve_fit_candidates(state: dict) -> list:
     """``_prior_curve_fit_recipes`` with everything a choice among regimes
-    needs: ``{script, source, regime, unit, verified, fingerprint}`` per
-    candidate, in lock order (#710: the fingerprint is the anchor's data as
-    recorded when the recipe was locked; absent on an older run)."""
+    needs: ``{script, source, regime, unit, verified, drift_state, model}``
+    per candidate, in lock order (#710: ``drift_state`` is the anchor's curve
+    as recorded when the recipe was locked; ``model`` the plan's one line for
+    the regime; both absent on an older run)."""
     from .._verification_record import named_recipe_file, prior_recipe_candidates
     paths = state.get("prior_analysis_paths") or []
     for raw_path in paths:
@@ -5251,11 +5354,8 @@ Return JSON with:
         # that executed (poor, flagged); only if none executed is the nearest
         # recipe given the correction ladder, once. A single recipe runs as it
         # always did, in the spectrum's own folder, held to the same checks.
-        from .._replay import ScoreReplayGate, select_recipe
-        gate = ScoreReplayGate(self._accept_gate().is_accept, self.r2_threshold, "R²")
-
-        def r2_of(result: dict) -> float:
-            return float(result.get("fit_quality", {}).get("r_squared") or 0 or 0.0)
+        from .._replay import select_recipe
+        gate, r2_of = self._replay_gate(ctx.state)
 
         candidates = [(ctx.reuse_script, ctx.reuse_source)]
         extra = ctx.state.get("_reuse_candidates") or []
@@ -5289,7 +5389,8 @@ Return JSON with:
             if reuse_result.get("success"):
                 rv = gate.judge(r2_of(reuse_result))
                 out = self._reuse_verdict(ctx, reuse_result, ctx.reuse_source, rv["score"], rv["verdict"], tried=1, of=1)
-                return self._apply_identity(ctx, out, (refs[0] if refs else None), xy)
+                out = self._apply_identity(ctx, out, (refs[0] if refs else None), xy)
+                return self._escalate_reuse(ctx, out, refs, xy)
             return self._reuse_failed(ctx, reuse_result, ctx.reuse_source)
         subdirs: Dict[int, str] = {}
         checks: Dict[int, dict] = {}
@@ -5309,7 +5410,8 @@ Return JSON with:
             dist = distances[n - 1] if distances else None
             checks[n] = self._identity_of(result, ref, xy, dist)
             if rv["verdict"] != "good" and len(subdirs) < len(candidates):
-                self.logger.info(f"   ↪ R² = {rv['score']:.4f} below {self.r2_threshold:.3f}; trying the next regime's recipe")
+                why = "; ".join(rv.get("reasons") or []) or f"{gate.metric} below {gate.threshold:.3f}"
+                self.logger.info(f"   ↪ {why}; trying the next regime's recipe")
             return rv
         chosen = select_recipe(candidates, run, judge,
                                strategy="nearest_first" if distances else "first_good", distances=distances)
@@ -5335,7 +5437,7 @@ Return JSON with:
                 # an ambiguous attribution is said where the attribution is read
                 rv["source"] = f"{rv.get('source')} [regime choice ambiguous: {regime_choice['note']}]"
                 rv["message"] += f" REGIME CHOICE AMBIGUOUS: {regime_choice['note']}."
-            return out
+            return self._escalate_reuse(ctx, out, refs, xy, chosen_ref=(refs[n - 1] if n - 1 < len(refs) else None))
         if chosen["chosen"] is not None:
             n, reuse_result, rv = chosen["chosen"], chosen["result"], chosen["verdict"]
             self._promote_candidate_artifacts(reuse_result, ctx.item_idx, 0, subdir=subdirs[n])
@@ -5365,6 +5467,107 @@ Return JSON with:
         if isinstance(out, dict):
             out["reuse_validity"]["regime_choice"] = {**regime_choice, "chosen_regime": None}
         return out
+
+    def _reuse_gate_decision(self, state: dict, *, warn: bool = True):
+        """Which :class:`QualityGate` a REUSE run holds its replays and its
+        series units to, and why: ``(gate, source)`` with ``source`` one of
+        ``recipe`` (the gate recorded with the recipe — the default), ``run``
+        (the caller asked for a gate on this run: a full ``quality_gate=``, or
+        an ``r2_threshold=`` that resolve_gate honoured AND that the recipe's
+        own R² metric can take), or ``none`` (nothing recorded: the run's
+        effective gate, as before). A malformed record is no record. The
+        warning, once per decision when ``warn``, says what was asked over
+        what the recipe was approved under; a threshold asked against a
+        recipe gated on another metric is not applied, and says so."""
+        from ..quality_gate import from_mapping
+        recorded = state.get("_reuse_gate")
+        rec = None
+        if isinstance(recorded, dict):
+            try:
+                rec = from_mapping(recorded)
+            except Exception:  # noqa: BLE001 - a malformed record is no record
+                rec = None
+        own = _gate(state)
+        if rec is None:
+            return own, "none"
+        explicit = state.get("quality_gate_explicit")
+        if explicit == "gate":
+            if warn and (own.metric, float(own.accept_threshold)) != (rec.metric, float(rec.accept_threshold)):
+                self.logger.warning(f"   ⚠️  The recipe was approved under {rec.metric} {rec.accept_threshold}; this run "
+                                    f"asked for {own.metric} {own.accept_threshold}, which the replay is held to.")
+            return own, "run"
+        if explicit == "threshold":
+            if rec.metric == "r_squared":
+                if warn and abs(float(rec.accept_threshold) - float(self.r2_threshold)) > 1e-9:
+                    self.logger.warning(f"   ⚠️  The recipe was approved at R² {rec.accept_threshold}; this run asked for "
+                                        f"R² {self.r2_threshold}, which the replay is held to.")
+                return rec.with_accept_threshold(float(self.r2_threshold)), "run"
+            if warn:
+                self.logger.warning(f"   ⚠️  R² override {self.r2_threshold} ignored: the recipe is gated on "
+                                    f"{rec.metric} {rec.accept_threshold}, which the replay is held to.")
+        return rec, "recipe"
+
+    def _series_gate(self, state: dict, regime: Any = None):
+        """The gate a series UNIT is held to beyond the run's own, or None:
+        the reuse decision's gate when the unit's regime was anchored by a
+        replay of the recipe (``_replayed_regimes``, the one predicate every
+        reader of the gate keys on — the outlier pass, the refit's re-scan
+        and its scoring-gated skip), else None, which is ``main``'s path (the
+        run's gate, the driver's live R² threshold). With no regime named,
+        the gate applies when any regime replayed (today: the one regime of
+        a reuse — a multi-regime plan blocks the reuse); a run that replayed
+        nothing — no reuse, a reuse that failed into fresh code, a
+        multi-regime plan that skipped it — gets None, as does a decision
+        with no usable record."""
+        replayed = state.get("_replayed_regimes") or {}
+        if not replayed or not state.get("_reuse_gate"):
+            return None
+        if regime is not None and regime not in replayed:
+            return None
+        gate, source = self._reuse_gate_decision(state, warn=False)
+        return None if source == "none" else gate      # a malformed record is no record: main's path
+
+    def _unit_gate_resolver(self, state: dict):
+        """``row → gate`` for the outlier pass and the refit's re-scan: a unit
+        of a replayed regime on the reuse decision's gate (``_series_gate``);
+        any other unit on ``main``'s path — the run's skill gate when it is
+        not R², else None, which is the driver's LIVE R² threshold (never the
+        R² snapshot in state: a person's ``adjust_threshold`` changes the live
+        value, and the snapshot beating it was a regression)."""
+        own = _gate(state)
+        fallback = own if own.metric != "r_squared" else None
+
+        def resolve(row):
+            g = self._series_gate(state, (row.get("regime") if isinstance(row, dict) else None) or "default")
+            return g if g is not None else fallback
+        return resolve
+
+    def _replay_gate(self, state: dict, *, warn: bool = True):
+        """The ``ScoreReplayGate`` a replayed result is held to, and how its
+        score is read, from ``_reuse_gate_decision``: the gate the RECIPE was
+        approved under (recorded on the recipe at lock time, or the prior
+        run's recorded gate) unless the caller asked for a gate on this run,
+        else the RUN's effective gate — the rule ``_detect_outliers`` holds a
+        series' followers to. An R² gate with nothing recorded is the driver's
+        live ``r2_threshold``; a skill's own metric (``peak_region_r2``, a
+        figure of merit) is read from the result with its threshold and
+        direction; a metric the replayed script does not report is a reject.
+        Before this, a reuse was judged on global R² whatever gate approved
+        the recipe."""
+        from .._replay import ScoreReplayGate
+        g, source = self._reuse_gate_decision(state, warn=warn)
+        if source == "none" and (g.metric == "r_squared" or g.value_source != "result"):
+            def score_of(result: dict) -> float:
+                return float((result.get("fit_quality") or {}).get("r_squared") or 0.0)
+            return ScoreReplayGate(self._accept_gate().is_accept, float(self.r2_threshold), "R²", key="r_squared"), score_of
+        if g.metric == "r_squared" or g.value_source != "result":
+            def score_of(result: dict) -> float:
+                return float((result.get("fit_quality") or {}).get("r_squared") or 0.0)
+            return ScoreReplayGate(g.is_accept, float(g.accept_threshold), "R²", key="r_squared"), score_of
+
+        def score_of(result: dict) -> Optional[float]:
+            return g.extract(result.get("fit_quality"))
+        return ScoreReplayGate(g.is_accept, float(g.accept_threshold), g.label, key=g.metric), score_of
 
     def _identity_of(self, result: dict, ref: Optional[dict], xy, distance: Optional[float]) -> dict:
         """The two checks a replayed result is held to beyond its gate (#711),
@@ -5476,6 +5679,102 @@ Return JSON with:
             rv["message"] = (rv.get("message") or "") + " " + chk["caveat"]
             self.logger.info(f"   🧬 {chk['caveat']}")
 
+    def _escalate_reuse(self, ctx: QCItemContext, result: dict, refs: list, xy,
+                        chosen_ref: Optional[dict] = None) -> dict:
+        """A replay whose certificate was withheld for a stated reason — a
+        flag on its state or identity, or a regime the data cannot tell — is
+        handed to a JUDGE for an explanation (#712 follow-up): one
+        model call shown the deterministic findings as quoted data, the
+        replayed fit and the new curve over the regime's anchor, and the
+        active skill's interpretation guidance. The answer goes on
+        ``reuse_validity.escalation`` and into the message; the verdict and
+        ``interpretation_checked`` do not move, nothing is re-run. Never on
+        a clean pass, on the fast clock (``_strict_replay``), when the caller
+        asked for no review (``max_verification_iterations == 0``), or more
+        than ``MAX_REPLAY_ESCALATIONS`` times per item."""
+        from .._replay import (MAX_REPLAY_ESCALATIONS, escalation_evidence, escalation_question,
+                               escalation_trigger, read_escalation_answer)
+        rv = result.get("reuse_validity") if isinstance(result, dict) else None
+        if (not isinstance(rv, dict) or ctx.state.get("_strict_replay") or ctx.state.get("_qc_profile") == "realtime"
+                or self.max_verification_iterations <= 0):
+            return result                   # the fast clock, strict or not, makes no synchronous judge call
+        attended = bool(getattr(self, "enable_human_feedback", False))
+        trigger = escalation_trigger(rv, attended=attended)
+        if trigger is None or rv.get("escalation") is not None:
+            return result
+        spent = ctx.state.setdefault("_replay_escalations", {})          # item index -> calls made
+        count = int(spent.get(ctx.item_idx) or 0)
+        if count >= MAX_REPLAY_ESCALATIONS:
+            rv["escalation"] = {"trigger": trigger, "skipped": f"budget of {MAX_REPLAY_ESCALATIONS} per item spent"}
+            return result
+        spent[ctx.item_idx] = count + 1
+        regimes = _prior_regimes(ctx.state, refs)
+        evidence = escalation_evidence(rv)
+        self._complete_regime_ranking(ctx, evidence, regimes, xy)
+        self.logger.info(f"   ⚖️  Replay escalated to the judge ({trigger}): an explanation, not a verdict")
+        parts: list = [escalation_question(evidence, regimes, trigger=trigger)]
+        if result.get("visualization_bytes"):
+            parts.append("\n\n**The replayed fit on the new measurement:**")
+            parts.append({"mime_type": "image/png", "data": result["visualization_bytes"]})
+        ref = chosen_ref if chosen_ref is not None else (refs[0] if refs else None)
+        overlay = _overlay_png(xy, (ref or {}).get("anchor_curve"), (ref or {}).get("regime"), ctx.state.get("system_info"))
+        if overlay:
+            parts.append("\n\n**The new measurement over the chosen regime's anchor, each scaled to its maximum:**")
+            parts.append({"mime_type": "image/png", "data": overlay})
+        _append_skill_context(parts, ctx.state, "interpretation")
+        record: Dict[str, Any] = {"trigger": trigger, "decided_by": "judge",
+                                  "note": "a judge's reading of the evidence; no gate, no verdict, no re-run"}
+        try:
+            response = self.model.generate_content(contents=parts, generation_config=self.generation_config,
+                                                   safety_settings=self.safety_settings)
+            parsed, error = self._parse(response)
+            if error or not isinstance(parsed, dict):
+                raise ValueError(str(error or "no JSON object in the judge's answer"))
+            record.update(read_escalation_answer(parsed, regimes))
+        except Exception as exc:  # noqa: BLE001 - an explanation that could not be had is recorded as such
+            record["error"] = str(exc)[:300]
+            self.logger.warning(f"   ⚖️  The judge's answer could not be had: {record['error']}")
+            rv["escalation"] = record
+            return result
+        rv["escalation"] = record
+        line = (f"JUDGE (no gate): belongs to {record['belongs_to']!r}"
+                + (f", same interpretation: {record['same_interpretation']}" if record["same_interpretation"] is not None else "")
+                + (f" — {record['what_changed']}" if record["what_changed"] else "")
+                + f" [{record['confidence']} confidence]")
+        rv["message"] = (rv.get("message") or "") + " " + line
+        rc = rv.get("regime_choice")
+        if (isinstance(rc, dict) and rc.get("ambiguous") and record["belongs_to"] not in ("none", "cannot_tell")
+                and record["belongs_to"] != rc.get("chosen_regime")):
+            # the attribution the judge reads, listed beside the one the data gave; a decision for the caller
+            rc["suggested"] = record["belongs_to"]
+        self.logger.info(f"   ⚖️  {line}")
+        return result
+
+    def _complete_regime_ranking(self, ctx: QCItemContext, evidence: dict, regimes: list, xy) -> None:
+        """The judge is shown the new data's distance to EVERY regime of the
+        prior run, not only to the one whose recipe was replayed: a named
+        unit script runs the single-recipe path, whose ranking has one entry,
+        and "not this regime" is a weaker answer than "that one, at 0.0".
+        Distances come from the same monitors (the regimes' units' data,
+        else the stamped curve); a regime with neither is listed unmeasured."""
+        if xy is None:
+            return
+        try:
+            from .._replay import state_distance
+            ranking = evidence.setdefault("regimes", {}).setdefault("ranking", [])
+            known = {x.get("regime") for x in ranking}
+            missing = [r for r in regimes if r.get("regime") and r["regime"] not in known]
+            if not missing:
+                return
+            more = _regime_references(ctx.state, [{"regime": r["regime"], "drift_state": r.get("drift_state")} for r in missing])
+            for r, ref in zip(missing, more):
+                d = state_distance(ref["monitor"], xy[0], xy[1]) if ref.get("monitor") is not None else None
+                ranking.append({"regime": r["regime"], "distance": d})
+            ranking.sort(key=lambda x: (x.get("distance") is None, x.get("distance") if x.get("distance") is not None else 0.0))
+            evidence["regimes"]["note"] = "distances to every regime of the prior run; the replayed recipe's regime is 'chosen'"
+        except Exception:  # noqa: BLE001 - the judge does with the ranking it has
+            return
+
     def _run_reuse_candidate(self, ctx: QCItemContext, script: str, source: Optional[str],
                              subdir: Optional[str], n: int, of: int, *, verbatim: bool = False) -> dict:
         """One replay of ``script`` on the item: in ``subdir`` under the
@@ -5520,43 +5819,53 @@ Return JSON with:
         return None
 
     def _reuse_verdict(self, ctx: QCItemContext, reuse_result: dict, source: Optional[str],
-                       reuse_r2: float, verdict: str, *, tried: int, of: int,
+                       reuse_r2: Optional[float], verdict: str, *, tried: int, of: int,
                        kept_from: Optional[int] = None) -> dict:
-        """Attach the reuse verdict (``reuse_validity``) to a replayed result."""
+        """Attach the reuse verdict (``reuse_validity``) to a replayed result.
+        ``reuse_r2`` is the score the run's gate judged (R² under an R² gate,
+        the skill's metric otherwise); ``r_squared`` on the record is always
+        the fit's R² (portability reads it), ``score`` / ``metric`` /
+        ``threshold`` are the gate's."""
+        gate, _ = self._replay_gate(ctx.state, warn=False)
+        label, thr = gate.metric, gate.threshold
+        shown = f"{reuse_r2:.4f}" if isinstance(reuse_r2, (int, float)) else "not reported"
         regimes = (f" ({of} regime recipes tried; this is recipe {kept_from or tried})" if of > 1 else "")
         if verdict == "good":
             self.logger.info(
-                f"   ✅ Reused script fits well (R² = {reuse_r2:.4f} ≥ "
-                f"{self.r2_threshold:.3f}) — model re-derivation skipped"
+                f"   ✅ Reused script fits well ({label} = {shown} meets "
+                f"{thr:.3f}) — model re-derivation skipped"
             )
             message = (
                 f"Reused the locked fitting script from prior run "
-                f"'{source or 'prior'}'; R² = {reuse_r2:.4f} "
+                f"'{source or 'prior'}'; {label} = {shown} "
                 f"meets the acceptance threshold "
-                f"{self.r2_threshold:.3f}.{regimes}"
+                f"{thr:.3f}.{regimes}"
             )
         else:
             self.logger.warning(
-                f"   ⚠️  Reused script fits poorly (R² = "
-                f"{reuse_r2:.4f} < {self.r2_threshold:.3f}). Keeping "
+                f"   ⚠️  Reused script fits poorly ({label} = "
+                f"{shown}, threshold {thr:.3f}). Keeping "
                 f"the result to preserve feature-schema consistency; "
                 f"flagging it as low-confidence."
             )
             message = (
                 f"Reused the locked fitting script from prior run "
-                f"'{source or 'prior'}', but R² = "
-                f"{reuse_r2:.4f} is below the acceptance threshold "
-                f"{self.r2_threshold:.3f}. The new measurement may "
+                f"'{source or 'prior'}', but {label} = "
+                f"{shown} does not meet the acceptance threshold "
+                f"{thr:.3f}. The new measurement may "
                 f"not belong to this series, or measurement "
                 f"conditions shifted. Extracted parameters are "
                 f"schema-consistent but should be treated as "
                 f"low-confidence.{regimes}"
             )
+        fit_r2 = (reuse_result.get("fit_quality") or {}).get("r_squared")
         reuse_result["reuse_validity"] = {
             "reused": True,
             "source": source,
-            "r_squared": reuse_r2,
-            "threshold": self.r2_threshold,
+            "r_squared": (float(fit_r2) if isinstance(fit_r2, (int, float)) else reuse_r2),
+            "metric": gate.key,
+            "score": reuse_r2,
+            "threshold": thr,
             "verdict": verdict,
             "message": message,
         }
@@ -6246,6 +6555,11 @@ Return JSON with:
             if feedback_result:
                 if feedback_result.get("action") == "adjust_threshold":
                     self.r2_threshold = feedback_result["new_threshold"]
+                    # a person's threshold is an explicit ask: it binds the
+                    # replay and the units over a reused recipe's R² gate too,
+                    # and the run and its recipes are recorded at it
+                    state["quality_gate_explicit"] = "threshold"
+                    state["_accepted_r2_threshold"] = float(self.r2_threshold)
                     # _accept_gate() rebuilds from the just-mutated threshold.
                     if self._accept_gate().is_accept(ctx.best_score):
                         self.logger.info(f"✅ Best fit now meets adjusted threshold")
@@ -7103,12 +7417,28 @@ Return JSON with:
         # fit has a high gate metric but a low global R² — flagging on global R²
         # false-flags it. Fall back to r_squared when there is no such gate
         # (legacy behavior, unchanged).
-        self._outlier_gate = gate if (gate is not None and gate.metric != "r_squared") else None
+        # ``gate`` is one gate for the series, or a callable row → gate (a
+        # replayed regime's units on the recipe's gate, the rest on the
+        # run's: ``_series_gate(state, regime)``). A gate is "its own" when
+        # it is not the driver's live R²: a non-R² metric, or an R² threshold
+        # other than ``self.r2_threshold`` (a reused recipe's).
+        def _own(g):
+            return g if (g is not None and (g.metric != "r_squared"
+                                            or abs(float(g.accept_threshold) - float(self.r2_threshold)) > 1e-9)) else None
+        gate_for = gate if callable(gate) else (lambda r, _g=gate: _g)
+
+        def _gate_of(r):
+            try:
+                return _own(gate_for(r))
+            except Exception:  # noqa: BLE001 - a unit the resolver cannot place is on the run's gate
+                return None
+        self._outlier_gate = _own(gate) if not callable(gate) else None
 
         def _score(r):
             fq = r.get("fit_quality", {})
-            if self._outlier_gate is not None:
-                return self._outlier_gate.extract(fq)
+            g = _gate_of(r)
+            if g is not None:
+                return g.extract(fq)
             return fq.get("r_squared")
 
         self._score_fn = _score
@@ -7186,7 +7516,7 @@ Return JSON with:
             if r2 is None:
                 continue
 
-            g = self._outlier_gate
+            g = _gate_of(r)
             if g is not None:
                 below_threshold = not g.is_accept(r2)
                 worse = (median_r2 - r2) if g.direction == "higher_is_better" else (r2 - median_r2)
@@ -7385,6 +7715,10 @@ Return JSON with:
             state["_reuse_candidates"] = ([{k: c.get(k) for k in ("script", "source", "regime", "unit", "drift_state", "x_range")}
                                            for c in cands]
                                           if len(cands) > 1 and not state.get("script_edits") else [])
+            # the gate the recipe was approved under (the prior run's), which
+            # the replay is held to; None on an older run (the run's own gate).
+            # One run stamps one gate, so the first candidate's stands for all.
+            state["_reuse_gate"] = cands[0].get("gate") if cands else None
             reuse_script, reuse_source = _apply_reuse_script_edits(
                 state, reuse_script, reuse_source, self.logger)
         else:
@@ -7415,6 +7749,7 @@ Return JSON with:
                 "multi-regime — reuse skipped."
             )
             reuse_script, reuse_source = None, None
+            state["_reuse_gate"] = None                 # nothing replays: the run's gate everywhere
         elif reuse_script:
             self.logger.info(
                 f"   ♻️  Locked-script reuse (opt-in) — anchor will reuse the "
@@ -7550,6 +7885,15 @@ Return JSON with:
                 if result["success"] and result.get("script"):
                     base_scripts[regime_name] = result["script"]
                     anchor_params_by_regime[regime_name] = result.get("parameters")
+                    # THE predicate every reader of the gate keys on: this
+                    # regime's anchor REPLAYED the recipe (verbatim, or repaired
+                    # by the ladder — the same lineage). A reuse that failed
+                    # into fresh code, or a regime fitted fresh beside a
+                    # replayed one, is on the run's gate like any series.
+                    rv0 = result.get("reuse_validity") or {}
+                    if rv0.get("reused") and rv0.get("verdict") not in ("script_failed", "failed") \
+                            and result.get("fitted_from") != "fresh_code":
+                        state.setdefault("_replayed_regimes", {})[regime_name] = True
                     if result.get("unit_verdict"):
                         recipe_by_regime[regime_name] = {
                             "unit": spectrum_name, "index": idx, "regime": regime_name,
@@ -7561,7 +7905,13 @@ Return JSON with:
                             "drift_state": _drift_state(curve_data),
                             # the axis span the identity floor is 1 % of, so the
                             # floor is the same with and without the data files
-                            "x_range": _x_range(curve_data)}
+                            "x_range": _x_range(curve_data),
+                            # what the plan says this regime IS, for a judge later
+                            # asked why a replay of it differs (#712 escalation)
+                            "model": _regime_model(state, regime_name),
+                            # the gate this recipe was approved under: what a
+                            # later replay of it is held to
+                            "gate": gate_record(_recorded_gate(self, state))}
                     if idx == 0:
                         state["base_fitting_script"] = result["script"]
                     self.logger.info(
@@ -7695,7 +8045,7 @@ Return JSON with:
         
         flagged_spectra = []
         if num_spectra > 1:
-            flagged_spectra = self._detect_outliers(series_results, gate=_gate(state))
+            flagged_spectra = self._detect_outliers(series_results, gate=self._unit_gate_resolver(state))
             
             if flagged_spectra:
                 report = self._generate_outlier_report(flagged_spectra, series_results)
@@ -8509,7 +8859,9 @@ Return JSON: {{"script": "<the complete modified script>"}}
         # 100+ min "re-analysis" grind on real in-situ series: each flagged frame
         # was being re-fit under the R² verification loop.) R² skills (all curve
         # fitting) are unaffected — they fall through to the refit below.
-        if _gate(state).metric != "r_squared":
+        def _unit_gate(regime):
+            return self._fitting_helper._series_gate(state, regime or "default") or _gate(state)
+        if _gate(state).metric != "r_squared" and not state.get("_replayed_regimes"):
             self.logger.info(
                 "\n🔄 Adaptive refit: scoring-gated skill (non-R² gate) — the phase "
                 "set is locked by design; skipping per-frame model re-derivation. "
@@ -8523,6 +8875,16 @@ Return JSON: {{"script": "<the complete modified script>"}}
             return state
 
         refit_candidates = [f for f in flagged_spectra if f["reason"] in self.REFIT_REASONS]
+        # a unit whose regime replayed a scoring-gated (non-R²) recipe is the
+        # skill's case above, whatever gate the run itself resolved: its
+        # lower score is the physics, not a fit to repair under R²
+        by_idx = {r.get("index"): r for r in (state.get("series_results") or []) if isinstance(r, dict)}
+        locked = [f for f in refit_candidates
+                  if _unit_gate((by_idx.get(f["index"]) or {}).get("regime")).metric != "r_squared"]
+        if locked:
+            self.logger.info(f"\n🔄 Adaptive refit: {len(locked)} flagged unit(s) replay a scoring-gated recipe — "
+                             "the phase set is locked by design; their lower scores are reported as physical evolution.")
+            refit_candidates = [f for f in refit_candidates if f not in locked]
         if not refit_candidates:
             self.logger.info("\n🔄 Adaptive refit: Flagged spectra are statistical outliers only, skipping.")
             return state
@@ -8712,7 +9074,9 @@ Return JSON: {{"script": "<the complete modified script>"}}
         state["refit_summary"] = refit_summary
 
         # Re-run outlier detection with updated results
-        updated_flagged = self._fitting_helper._detect_outliers(series_results)
+        # the same per-unit gate the series pass used: a replayed regime's
+        # units stay held to the recipe's gate through the refit's re-scan
+        updated_flagged = self._fitting_helper._detect_outliers(series_results, gate=self._fitting_helper._unit_gate_resolver(state))
         state["flagged_spectra"] = updated_flagged
 
         improved_count = sum(1 for r in refit_summary if r["improved"])

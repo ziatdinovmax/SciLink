@@ -105,13 +105,14 @@ def _refitter(tmp_path, executor):
 
 
 def run_series(tmp_path, monkeypatch, *, names, anchors, follower_r2, refits=None, regimes=None,
-               max_series_refits=None, fresh_script="FRESH: np.load('data.npy')", cold_start=None):
+               max_series_refits=None, fresh_script="FRESH: np.load('data.npy')", cold_start=None,
+               state_extra=None, executor=None):
     """Drive the real series + refit path. ``anchors``: name -> canned anchor
     kwargs (the QC loop's output); ``follower_r2``: name -> the R² the
     replayed script "achieves"; ``refits``: name -> canned refit kwargs (the
     refit QC loop's output); ``regimes``: list of index lists."""
     Path(tmp_path).mkdir(parents=True, exist_ok=True)
-    executor = FakeExecutor(follower_r2)
+    executor = executor if executor is not None else FakeExecutor(follower_r2)
     ctrl = _controller(tmp_path, executor)
 
     def fake_best_of_n(state, curve_data, data_path, spectrum_name, spectrum_idx, **kw):
@@ -142,6 +143,7 @@ def run_series(tmp_path, monkeypatch, *, names, anchors, follower_r2, refits=Non
         state["max_series_refits"] = max_series_refits
     if cold_start:                       # a script-bank cold start: the anchor is asked to reuse it
         state["_cold_start_reuse"] = {"script": cold_start, "id": "bank-1"}
+    state.update(state_extra or {})
     state = ctrl.execute(state)
     # the stack names units spectrum_NNNN; map the caller's names onto them
     # (the controller names from the stack, so anchors/follower_r2 use those)
@@ -620,9 +622,10 @@ class ScriptKeyedExecutor:
     name that script — so what is left on disk can be checked."""
     timeout = 30
 
-    def __init__(self, r2_by_script, centers=None, extra_params=None):
+    def __init__(self, r2_by_script, centers=None, extra_params=None, extra_quality=None):
         self.r2_by_script, self.calls, self.centers = r2_by_script, [], centers or {}
         self.extra_params = extra_params or {}          # script -> extra top-level fitted parameters
+        self.extra_quality = extra_quality or {}        # script -> extra fit_quality metrics (a skill's own)
 
     def execute_script(self, script, working_dir=None, timeout=None, **kw):
         wd = Path(working_dir)
@@ -634,12 +637,12 @@ class ScriptKeyedExecutor:
         (wd / "fit.npy").write_bytes(f"fit {script}".encode())
         out = {"model_type": script, "parameters": {"peak_1": {"center": self.centers.get(script, 144.0), "amplitude": 1.0},
                                                     **self.extra_params.get(script, {})},
-               "fit_quality": {"r_squared": r2}}
+               "fit_quality": {"r_squared": r2, **self.extra_quality.get(script, {})}}
         return {"status": "success", "stdout": "FIT_RESULTS_JSON:" + json.dumps(out), "stderr": "", "message": ""}
 
 
 def _replay(tmp_path, monkeypatch, r2_by_script, *, strict=False, repaired=None, prior=None, data=None, centers=None,
-            extra_params=None):
+            extra_params=None, extra_quality=None, quality_gate=None, state_extra=None, controller=None):
     """The real qc_try_reuse → _fit_single_spectrum → stage_and_run path on a
     two-regime prior (LOW, HIGH); ``repaired`` is what the correction ladder
     would hand back (counted), ``None`` makes a correction an error. With
@@ -649,8 +652,8 @@ def _replay(tmp_path, monkeypatch, r2_by_script, *, strict=False, repaired=None,
     from scilink.agents.exp_agents.controllers.curve_fitting_controllers import _prior_curve_fit_candidates
     out = tmp_path / "new"
     out.mkdir(parents=True, exist_ok=True)
-    ex = ScriptKeyedExecutor(r2_by_script, centers, extra_params)
-    ctrl = _controller(out, ex)
+    ex = ScriptKeyedExecutor(r2_by_script, centers, extra_params, extra_quality)
+    ctrl = controller(out, ex) if controller is not None else _controller(out, ex)
     corrections = []
 
     def correct(state, script, error):
@@ -664,15 +667,19 @@ def _replay(tmp_path, monkeypatch, r2_by_script, *, strict=False, repaired=None,
         cands = _prior_curve_fit_candidates({"prior_analysis_paths": [str(prior)]})
         candidates = [{k: c.get(k) for k in ("script", "source", "regime", "unit", "drift_state", "x_range")} for c in cands]
         reuse_candidates = candidates if len(candidates) > 1 else []      # as the series controller sets it
+        reuse_gate = cands[0].get("gate") if cands else None
     else:
         recipes = [("LOW", "prior: LOW (regime low, 1 of 2)"), ("HIGH", "prior: HIGH (regime high, 2 of 2)")]
         candidates = [{"script": t, "source": s} for t, s in recipes]
-        reuse_candidates = candidates
+        reuse_candidates, reuse_gate = candidates, None
     state = {"num_spectra": 1, "is_single_spectrum": True, "system_info": {}, "locked_fitting_config": {},
-             "_reuse_candidates": reuse_candidates,
+             "_reuse_candidates": reuse_candidates, "_reuse_gate": reuse_gate,
              **({"prior_analysis_paths": [str(prior)], "reuse_locked_script": True} if prior is not None else {})}
     if strict:
         state["_strict_replay"] = True
+    if quality_gate is not None:
+        state["quality_gate"] = quality_gate
+    state.update(state_extra or {})
     ctx = QCItemContext(state=state, data=_spectrum(1) if data is None else data, data_path=str(tmp_path / "new.txt"),
                         item_name="spectrum_0000", item_idx=0, reuse_script=candidates[0]["script"],
                         reuse_source=candidates[0]["source"])

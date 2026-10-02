@@ -64,6 +64,20 @@ def _empty_auxiliary_state() -> dict:
     return {"auxiliary_items": []}
 
 
+def explicit_gate_ask(quality_gate, r2_threshold, effective_gate) -> Optional[str]:
+    """Whether a call ASKED for its gate: ``"gate"`` (a full ``quality_gate=``),
+    ``"threshold"`` (an ``r2_threshold=`` that ``resolve_gate`` honoured —
+    its metric guard drops a bare R² number under a skill's non-R² gate, and
+    a dropped ask is no ask), else None. A constructor default is not an
+    ask. A replay, and a reuse's series units, are held to an asked-for gate
+    over the gate the recipe was approved under."""
+    if quality_gate is not None:
+        return "gate"
+    if r2_threshold is not None and getattr(effective_gate, "metric", None) == "r_squared":
+        return "threshold"
+    return None
+
+
 class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
     Unified Curve Fitting Agent for spectroscopic analysis.
@@ -969,6 +983,13 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
             # Effective quality gate (curve_fit_controllers reads via _gate()).
             "quality_gate": effective_gate,
+            # whether the caller ASKED for this gate on THIS call — "gate" (a
+            # full quality_gate=) or "threshold" (an r2_threshold= that
+            # resolve_gate honoured: its metric guard drops a bare R² number
+            # under a skill's non-R² gate, and a dropped ask is no ask) — so a
+            # replay is held to it rather than to the gate its recipe was
+            # approved under. A constructor-level default is not an ask.
+            "quality_gate_explicit": explicit_gate_ask(quality_gate, r2_threshold, effective_gate),
 
             # First spectrum (for planning)
             "data_path": spectrum_paths[0] if spectrum_paths else first_spectrum_name,
@@ -2184,6 +2205,19 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # units' stamps. What "verified" means to a reader — the board,
         # run_task's rows — is decided here, never reconstructed later.
         from ._verification_record import final_verdict_record
+        from .quality_gate import gate_record
+        # the gate this run was held to, so a later replay of its recipe is
+        # held to the same one (a reuse run resolves its own gate from
+        # whatever skill it was or was not given, which is not the recipe's)
+        if gate_record(state.get("quality_gate")) is not None:
+            # at a person's accepted threshold when they adjusted it (the
+            # series driver records its recipes the same way)
+            recorded = state.get("quality_gate")
+            thr = state.get("_accepted_r2_threshold")
+            if state.get("quality_gate_explicit") == "threshold" and recorded.metric == "r_squared" \
+                    and isinstance(thr, (int, float)) and abs(float(thr) - float(recorded.accept_threshold)) > 1e-9:
+                recorded = recorded.with_accept_threshold(float(thr))
+            results["quality_gate"] = gate_record(recorded)
         try:
             results["verdict"] = final_verdict_record(results)
         except Exception as exc:  # noqa: BLE001 - a stamp never fails a run
