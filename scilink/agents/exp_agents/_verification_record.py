@@ -621,7 +621,7 @@ def final_verdict_record(final: Dict[str, Any]) -> Dict[str, Any]:
         decided = "none"
     return verdict_record(verified=v["verified"], reason=v["reason"], decided_by=decided,
                           interpretation_checked=bool(checked and v["verified"]),
-                          score=next((v for v in (rv.get("r_squared"), rv.get("quality_score"),
+                          score=next((v for v in (rv.get("score"), rv.get("r_squared"), rv.get("quality_score"),
                                                   (final.get("quality_history") or {}).get("final_r2"),
                                                   (final.get("quality_history") or {}).get("final_score"))
                                       if isinstance(v, (int, float))), None),

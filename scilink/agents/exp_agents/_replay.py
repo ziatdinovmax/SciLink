@@ -83,10 +83,15 @@ class ScoreReplayGate:
         self.accept, self.threshold, self.metric = accept, threshold, metric
 
     def judge(self, score: Any) -> Dict[str, Any]:
+        if score is None:
+            # the metric the run's gate reads is not in the result: a reject,
+            # never a pass by a default (0 would pass a lower-is-better gate)
+            return replay_verdict("poor", score=None, threshold=self.threshold, gate=self.metric,
+                                  reasons=[f"{self.metric} not reported by the replayed script"])
         value = float(score or 0.0)
         ok = bool(self.accept(value))
         return replay_verdict("good" if ok else "poor", score=value, threshold=self.threshold,
-                              reasons=[] if ok else [f"{self.metric} {value:.4f} below the acceptance "
+                              reasons=[] if ok else [f"{self.metric} {value:.4f} does not meet the acceptance "
                                                      f"threshold {self.threshold:.3f}"],
                               gate=self.metric)
 

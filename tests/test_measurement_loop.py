@@ -579,6 +579,7 @@ class TestStrictReplay:
         host._run_reuse_candidate = lambda *a, **kw: C._run_reuse_candidate(host, *a, **kw)
         host._reuse_failed = lambda *a, **kw: C._reuse_failed(host, *a, **kw)
         host._accept_gate = lambda: SimpleNamespace(is_accept=lambda r2: r2 >= 0.95)
+        host._replay_gate = lambda state: C._replay_gate(host, state)
         host.r2_threshold = 0.95
         ctx = QCItemContext(state={"_strict_replay": strict}, data=None, data_path="f.csv",
                             item_name="f", item_idx=0, reuse_script="s",

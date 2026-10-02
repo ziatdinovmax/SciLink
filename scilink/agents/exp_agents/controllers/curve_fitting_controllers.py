@@ -5251,11 +5251,8 @@ Return JSON with:
         # that executed (poor, flagged); only if none executed is the nearest
         # recipe given the correction ladder, once. A single recipe runs as it
         # always did, in the spectrum's own folder, held to the same checks.
-        from .._replay import ScoreReplayGate, select_recipe
-        gate = ScoreReplayGate(self._accept_gate().is_accept, self.r2_threshold, "R²")
-
-        def r2_of(result: dict) -> float:
-            return float(result.get("fit_quality", {}).get("r_squared") or 0 or 0.0)
+        from .._replay import select_recipe
+        gate, r2_of = self._replay_gate(ctx.state)
 
         candidates = [(ctx.reuse_script, ctx.reuse_source)]
         extra = ctx.state.get("_reuse_candidates") or []
@@ -5309,7 +5306,8 @@ Return JSON with:
             dist = distances[n - 1] if distances else None
             checks[n] = self._identity_of(result, ref, xy, dist)
             if rv["verdict"] != "good" and len(subdirs) < len(candidates):
-                self.logger.info(f"   ↪ R² = {rv['score']:.4f} below {self.r2_threshold:.3f}; trying the next regime's recipe")
+                why = "; ".join(rv.get("reasons") or []) or f"{gate.metric} below {gate.threshold:.3f}"
+                self.logger.info(f"   ↪ {why}; trying the next regime's recipe")
             return rv
         chosen = select_recipe(candidates, run, judge,
                                strategy="nearest_first" if distances else "first_good", distances=distances)
@@ -5365,6 +5363,28 @@ Return JSON with:
         if isinstance(out, dict):
             out["reuse_validity"]["regime_choice"] = {**regime_choice, "chosen_regime": None}
         return out
+
+    def _replay_gate(self, state: dict):
+        """The gate a replayed result is held to, and how its score is read:
+        the RUN's effective :class:`QualityGate` — the same rule
+        ``_detect_outliers`` holds a series' followers to. An R² gate is the
+        driver's live ``r2_threshold`` (so ``adjust_threshold`` is observed);
+        a skill's own metric (``peak_region_r2``, a figure of merit) is read
+        from the result with the skill's threshold and direction. Before
+        this, a reuse was judged on global R² whatever the skill declared:
+        a correct low-SNR profile fit (high ``peak_region_r2``, low R²) and a
+        phase-identification recipe (R² negative by construction) could
+        never replay as ``good``."""
+        from .._replay import ScoreReplayGate
+        g = _gate(state)
+        if g.metric == "r_squared" or g.value_source != "result":
+            def score_of(result: dict) -> float:
+                return float((result.get("fit_quality") or {}).get("r_squared") or 0.0)
+            return ScoreReplayGate(self._accept_gate().is_accept, float(self.r2_threshold), "R²"), score_of
+
+        def score_of(result: dict) -> Optional[float]:
+            return g.extract(result.get("fit_quality"))
+        return ScoreReplayGate(g.is_accept, float(g.accept_threshold), g.label), score_of
 
     def _identity_of(self, result: dict, ref: Optional[dict], xy, distance: Optional[float]) -> dict:
         """The two checks a replayed result is held to beyond its gate (#711),
@@ -5520,43 +5540,53 @@ Return JSON with:
         return None
 
     def _reuse_verdict(self, ctx: QCItemContext, reuse_result: dict, source: Optional[str],
-                       reuse_r2: float, verdict: str, *, tried: int, of: int,
+                       reuse_r2: Optional[float], verdict: str, *, tried: int, of: int,
                        kept_from: Optional[int] = None) -> dict:
-        """Attach the reuse verdict (``reuse_validity``) to a replayed result."""
+        """Attach the reuse verdict (``reuse_validity``) to a replayed result.
+        ``reuse_r2`` is the score the run's gate judged (R² under an R² gate,
+        the skill's metric otherwise); ``r_squared`` on the record is always
+        the fit's R² (portability reads it), ``score`` / ``metric`` /
+        ``threshold`` are the gate's."""
+        gate, _ = self._replay_gate(ctx.state)
+        label, thr = gate.metric, gate.threshold
+        shown = f"{reuse_r2:.4f}" if isinstance(reuse_r2, (int, float)) else "not reported"
         regimes = (f" ({of} regime recipes tried; this is recipe {kept_from or tried})" if of > 1 else "")
         if verdict == "good":
             self.logger.info(
-                f"   ✅ Reused script fits well (R² = {reuse_r2:.4f} ≥ "
-                f"{self.r2_threshold:.3f}) — model re-derivation skipped"
+                f"   ✅ Reused script fits well ({label} = {shown} meets "
+                f"{thr:.3f}) — model re-derivation skipped"
             )
             message = (
                 f"Reused the locked fitting script from prior run "
-                f"'{source or 'prior'}'; R² = {reuse_r2:.4f} "
+                f"'{source or 'prior'}'; {label} = {shown} "
                 f"meets the acceptance threshold "
-                f"{self.r2_threshold:.3f}.{regimes}"
+                f"{thr:.3f}.{regimes}"
             )
         else:
             self.logger.warning(
-                f"   ⚠️  Reused script fits poorly (R² = "
-                f"{reuse_r2:.4f} < {self.r2_threshold:.3f}). Keeping "
+                f"   ⚠️  Reused script fits poorly ({label} = "
+                f"{shown}, threshold {thr:.3f}). Keeping "
                 f"the result to preserve feature-schema consistency; "
                 f"flagging it as low-confidence."
             )
             message = (
                 f"Reused the locked fitting script from prior run "
-                f"'{source or 'prior'}', but R² = "
-                f"{reuse_r2:.4f} is below the acceptance threshold "
-                f"{self.r2_threshold:.3f}. The new measurement may "
+                f"'{source or 'prior'}', but {label} = "
+                f"{shown} does not meet the acceptance threshold "
+                f"{thr:.3f}. The new measurement may "
                 f"not belong to this series, or measurement "
                 f"conditions shifted. Extracted parameters are "
                 f"schema-consistent but should be treated as "
                 f"low-confidence.{regimes}"
             )
+        fit_r2 = (reuse_result.get("fit_quality") or {}).get("r_squared")
         reuse_result["reuse_validity"] = {
             "reused": True,
             "source": source,
-            "r_squared": reuse_r2,
-            "threshold": self.r2_threshold,
+            "r_squared": (float(fit_r2) if isinstance(fit_r2, (int, float)) else reuse_r2),
+            "metric": label,
+            "score": reuse_r2,
+            "threshold": thr,
             "verdict": verdict,
             "message": message,
         }
