@@ -333,9 +333,11 @@ followers; a metric the replayed script does not report is a reject). The
 deterministic checks decide verified / not verified and say THAT something
 differs; what a difference MEANS — a thermal shift against a new band, an
 impurity line, a polymorph — is a skill-bearing model's question, so a replay
-whose state or identity check fails, or whose regime the data cannot tell, is
-escalated to a JUDGE (`_escalate_reuse`, the live loop's shape: a model-free
-signal triggers the slow-clock look): one model call shown the findings as
+that is NOT CERTIFIED for a stated reason — flagged on its state or its
+identity, or whose regime the data cannot tell — is escalated to a JUDGE
+(`_escalate_reuse`, the live loop's shape: a model-free signal triggers the
+slow-clock look; a state distance merely above the certification bar is
+withheld with nothing to explain, and is not): one model call shown the findings as
 quoted data between markers, the replayed fit and the new curve over the
 regime's anchor, and the skill's `interpretation` section, asked which regime
 the measurement belongs to and what changed. The answer is an opinion on the
@@ -343,7 +345,7 @@ record (`reuse_validity.escalation`, `decided_by: judge`), in the message, on
 the `analyses` row and on the board as a PROVISIONAL claim; the verdict and
 `interpretation_checked` do not move, nothing is re-run, and a regime the
 judge names against an ambiguous choice is `regime_choice.suggested` — listed
-for the caller, never taken. Never on a clean pass, on the fast clock, when
+for the caller, never taken. Never on a certified or clean pass, on the fast clock, when
 the caller asked for no review, on a replay that did not execute, on the
 gate alone failing, and at most once per item; a flag against one reference
 unit is escalated only when nobody attends (`enable_human_feedback` off).

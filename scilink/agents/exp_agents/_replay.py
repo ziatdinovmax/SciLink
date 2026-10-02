@@ -554,18 +554,22 @@ ESCALATION_MARK_CLOSE = "<<< end of replay evidence >>>"
 
 
 def escalation_trigger(rv: Any, *, attended: bool = True) -> Optional[str]:
-    """Why a replayed result is handed to the judge, or ``None``:
-    ``"state"`` — the data is not the chosen regime's state; ``"identity"``
-    — the recipe found a different thing than the regime's units (with a
-    spread); ``"ambiguous"`` — two regimes the data cannot tell apart;
-    ``"flag"`` — a difference against ONE reference unit with nobody
-    attending (an automatic chain), where a flag would otherwise be read by
-    no one. Never on a clean pass, on a replay that did not execute, or on a
-    result that is not a replay."""
+    """Why a replayed result is handed to the judge, or ``None``. The checks
+    decide no verdict; they withhold certification for a stated reason, and
+    that reason is what the judge is asked to explain:
+    ``"state"`` — the data is flagged as not the chosen regime's state
+    (``state_flag``); ``"identity"`` — the recipe found a different thing
+    than the regime's units, against a spread (``identity.flagged``);
+    ``"ambiguous"`` — two regimes the data cannot tell apart; ``"flag"`` — an
+    identity difference against ONE reference unit with nobody attending (an
+    automatic chain), where a flag would otherwise be read by no one. Never on
+    a certified or clean pass, on a state distance merely above the
+    certification bar (withheld, but nothing to explain), on a replay that
+    did not execute, or on a result that is not a replay."""
     if not isinstance(rv, dict) or not rv.get("reused") or rv.get("verdict") not in ("good", "poor"):
         return None
     dist = rv.get("state_distance")
-    if isinstance(dist, (int, float)) and dist > SAME_STATE_BAR:
+    if rv.get("state_flag") or (isinstance(dist, (int, float)) and dist > SAME_STATE_BAR):
         return "state"
     idc = rv.get("identity") or {}
     if idc.get("checked") and idc.get("within") is False and idc.get("drifted"):

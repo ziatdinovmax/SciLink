@@ -69,11 +69,12 @@ def _images_of(prompt):
 
 
 def test_the_trigger_fires_on_the_three_findings_and_on_nothing_else():
-    base = {"reused": True, "verdict": "good", "state_distance": 0.01,
+    base = {"reused": True, "verdict": "good", "state_distance": 0.01, "state_flag": False,
             "identity": {"checked": True, "within": True, "spread_known": True, "drifted": []},
             "regime_choice": {"ambiguous": False}}
     assert _replay.escalation_trigger(base) is None                                             # a clean pass
-    assert _replay.escalation_trigger({**base, "state_distance": 0.6}) == "state"
+    assert _replay.escalation_trigger({**base, "state_distance": 0.6, "state_flag": True}) == "state"
+    assert _replay.escalation_trigger({**base, "state_distance": 0.6}) == "state"                 # the distance alone says it too
     drift = {"checked": True, "within": False, "spread_known": True, "drifted": [{"name": "position", "value": 27.3}]}
     assert _replay.escalation_trigger({**base, "identity": drift}) == "identity"
     flag = {**drift, "spread_known": False}
@@ -138,13 +139,13 @@ def test_a_replay_that_fails_its_checks_is_explained_and_the_verdict_does_not_mo
                                   extra_params={"LOW": {**rc.auto_detect_parameters(rc.RUTILE, shift=0.5, seed=91), "space_group": "P 42/m n m"}},
                                   controller=_judged(tmp_path, judge))
     rv = res["reuse_validity"]
-    assert rv["verdict"] == "poor" and rv["state_distance"] > _replay.SAME_STATE_BAR          # the verdict: the checks'
+    assert rv["verdict"] == "good" and rv["state_flag"] is True and rv["identity"]["flagged"] is True   # the gate's verdict; the checks' flags
     esc = rv["escalation"]
     assert esc["trigger"] == "state" and esc["decided_by"] == "judge" and esc["belongs_to"] == "high"
     assert esc["same_interpretation"] is False and "27.3°" in esc["what_changed"] and esc["confidence"] == "high"
     assert "JUDGE (no gate): belongs to 'high', same interpretation: False — New strong reflections" in rv["message"]
     uv = unit_verdict_for({**res, "success": True})
-    assert not uv["verified"] and uv["interpretation_checked"] is False                        # the judge moved nothing
+    assert uv["verified"] and uv["interpretation_checked"] is False                            # the judge moved nothing
     assert len(judge.prompts) == 1
     text = _text_of(judge.prompts[0])
     assert _replay.ESCALATION_MARK_OPEN in text and "because the new measurement is NOT the chosen regime's state" in text
@@ -160,11 +161,12 @@ def test_a_replay_that_fails_its_checks_is_explained_and_the_verdict_does_not_mo
     full["verdict"] = final_verdict_record(full)
     row = {"analysis_id": "r1", "status": "success", "agent_name": "CurveFittingAgent", "output_directory": str(tmp_path / "none"),
            **analysis_verdict(full), "escalation": replay_escalation(full)}
-    assert row["verified"] is False and row["escalation"]["belongs_to"] == "high" and row["escalation"]["decided_by"] == "judge"
+    assert row["verified"] is True and row["interpretation_checked"] is False
+    assert row["escalation"]["belongs_to"] == "high" and row["escalation"]["decided_by"] == "judge"
     recs = board_mod.records_for({"index": 1, "label": "replay", "mode": "analysis", "status": "success"},
                                  {"key_findings": ["[r1] the pattern is anatase"], "analyses": [row]})
     kinds = [(r["kind"], r["status"]) for r in recs]
-    assert kinds == [("claim", "provisional"), ("claim", "provisional")]
+    assert kinds == [("claim", "provisional"), ("claim", "provisional")]     # the claim withheld, the judge's reading beside it
     judge_rec = recs[1]
     assert judge_rec["payload"]["text"].startswith("Replay of analysis r1 escalated (state): the judge reads it as belonging to 'high'")
     assert judge_rec["evidence"]["gate"].startswith("replay escalation: a judge's reading") and "no gate" in judge_rec["evidence"]["gate"]
@@ -186,11 +188,11 @@ def test_the_judge_is_not_asked_on_a_clean_pass_the_fast_clock_or_no_review(tmp_
     params = {"LOW": {**rc.auto_detect_parameters(rc.RUTILE, shift=0.5, seed=91), "space_group": "P 42/m n m"}}
     res, ex, _, _ = curve._replay(tmp_path / "b", monkeypatch, {"LOW": 0.99999}, prior=prior / "scripts" / "spectrum_0000.py",
                                   data=data, extra_params=params, strict=True, controller=_judged(tmp_path, judge))
-    assert res["reuse_validity"]["verdict"] == "poor" and "escalation" not in res["reuse_validity"] and judge.prompts == []
+    assert res["reuse_validity"]["state_flag"] is True and "escalation" not in res["reuse_validity"] and judge.prompts == []
     # the caller asked for no review (max_verification_iterations == 0) → no call
     res, ex, _, _ = curve._replay(tmp_path / "c", monkeypatch, {"LOW": 0.99999}, prior=prior / "scripts" / "spectrum_0000.py",
                                   data=data, extra_params=params, controller=_judged(tmp_path, judge, max_verification_iterations=0))
-    assert res["reuse_validity"]["verdict"] == "poor" and "escalation" not in res["reuse_validity"] and judge.prompts == []
+    assert res["reuse_validity"]["state_flag"] is True and "escalation" not in res["reuse_validity"] and judge.prompts == []
     # a replay that did not execute: failed, no call
     res, ex, _, _ = curve._replay(tmp_path / "d", monkeypatch, {}, prior=prior / "scripts" / "spectrum_0000.py",
                                   data=data, strict=True, controller=_judged(tmp_path, judge))
@@ -201,9 +203,15 @@ def test_the_judge_is_not_asked_on_a_clean_pass_the_fast_clock_or_no_review(tmp_
                                   extra_params={"HIGH": rc.auto_detect_parameters(rc.RUTILE, shift=0.5, seed=54),
                                                 "LOW": rc.auto_detect_parameters(rc.RUTILE, shift=0.5, seed=55)},
                                   controller=_judged(tmp_path, judge))
-    assert res["reuse_validity"]["verdict"] == "poor" and res["reuse_validity"]["recipes_tried"] == 2
-    # ...but LOW was tried on rutile data: the kept result is HIGH (gate), whose state check passed → no escalation
-    assert "escalation" not in res["reuse_validity"] and judge.prompts == []
+    # the gate failing on HIGH falls through to LOW, whose gate passes: kept (good), its state flagged → escalated on "state"
+    # (the flag is the reason a judge is asked; the verdict is the gate's)
+    assert res["reuse_validity"]["verdict"] == "good" and res["reuse_validity"]["recipes_tried"] == 2
+    assert res["reuse_validity"]["state_flag"] is True and res["reuse_validity"]["escalation"]["trigger"] == "state"
+    judge.prompts.clear()
+    # a state distance merely above the certification bar (nothing flagged): nothing to explain, no call
+    rv_band = {"reused": True, "verdict": "good", "state_distance": 0.15, "identity": {"checked": True, "within": True, "drifted": []},
+               "regime_choice": {"ambiguous": False}}
+    assert _replay.escalation_trigger(rv_band) is None
 
 
 def test_an_ambiguous_choice_is_escalated_and_the_judges_regime_is_listed_not_taken(tmp_path, monkeypatch):
@@ -246,7 +254,7 @@ def test_a_judge_that_fails_or_cannot_tell_is_recorded_as_such_and_asked_once(tm
                                   data=data, extra_params=params, controller=_judged(tmp_path, judge))
     esc = res["reuse_validity"]["escalation"]
     assert esc["trigger"] == "state" and "provider down" in esc["error"] and "belongs_to" not in esc
-    assert res["reuse_validity"]["verdict"] == "poor" and "JUDGE" not in res["reuse_validity"]["message"]
+    assert res["reuse_validity"]["verdict"] == "good" and "JUDGE" not in res["reuse_validity"]["message"]
     assert replay_escalation({"reuse_validity": res["reuse_validity"]}) is None
     # cannot_tell is a fine answer
     judge = ScriptedJudge({"belongs_to": "cannot_tell", "what_changed": "The pattern is too noisy to place.", "confidence": "low"})
@@ -257,7 +265,7 @@ def test_a_judge_that_fails_or_cannot_tell_is_recorded_as_such_and_asked_once(tm
     judge = ScriptedJudge("I think it is rutile.")
     res, ex, _, _ = curve._replay(tmp_path / "c", monkeypatch, {"LOW": 0.99999}, prior=prior / "scripts" / "spectrum_0000.py",
                                   data=data, extra_params=params, controller=_judged(tmp_path, judge))
-    assert "error" in res["reuse_validity"]["escalation"] and res["reuse_validity"]["verdict"] == "poor"
+    assert "error" in res["reuse_validity"]["escalation"] and res["reuse_validity"]["verdict"] == "good"
     # the budget: a second escalation of the same item is skipped
     judge = ScriptedJudge({"belongs_to": "high", "what_changed": "x", "confidence": "low"})
     res, ex, _, _ = curve._replay(tmp_path / "d", monkeypatch, {"LOW": 0.99999}, prior=prior / "scripts" / "spectrum_0000.py",
