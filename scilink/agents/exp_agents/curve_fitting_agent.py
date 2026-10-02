@@ -64,6 +64,20 @@ def _empty_auxiliary_state() -> dict:
     return {"auxiliary_items": []}
 
 
+def explicit_gate_ask(quality_gate, r2_threshold, effective_gate) -> Optional[str]:
+    """Whether a call ASKED for its gate: ``"gate"`` (a full ``quality_gate=``),
+    ``"threshold"`` (an ``r2_threshold=`` that ``resolve_gate`` honoured —
+    its metric guard drops a bare R² number under a skill's non-R² gate, and
+    a dropped ask is no ask), else None. A constructor default is not an
+    ask. A replay, and a reuse's series units, are held to an asked-for gate
+    over the gate the recipe was approved under."""
+    if quality_gate is not None:
+        return "gate"
+    if r2_threshold is not None and getattr(effective_gate, "metric", None) == "r_squared":
+        return "threshold"
+    return None
+
+
 class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
     Unified Curve Fitting Agent for spectroscopic analysis.
@@ -975,9 +989,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # under a skill's non-R² gate, and a dropped ask is no ask) — so a
             # replay is held to it rather than to the gate its recipe was
             # approved under. A constructor-level default is not an ask.
-            "quality_gate_explicit": ("gate" if quality_gate is not None
-                                      else ("threshold" if r2_threshold is not None and effective_gate.metric == "r_squared"
-                                            else None)),
+            "quality_gate_explicit": explicit_gate_ask(quality_gate, r2_threshold, effective_gate),
 
             # First spectrum (for planning)
             "data_path": spectrum_paths[0] if spectrum_paths else first_spectrum_name,

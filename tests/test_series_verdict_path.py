@@ -105,13 +105,14 @@ def _refitter(tmp_path, executor):
 
 
 def run_series(tmp_path, monkeypatch, *, names, anchors, follower_r2, refits=None, regimes=None,
-               max_series_refits=None, fresh_script="FRESH: np.load('data.npy')", cold_start=None):
+               max_series_refits=None, fresh_script="FRESH: np.load('data.npy')", cold_start=None,
+               state_extra=None, executor=None):
     """Drive the real series + refit path. ``anchors``: name -> canned anchor
     kwargs (the QC loop's output); ``follower_r2``: name -> the R² the
     replayed script "achieves"; ``refits``: name -> canned refit kwargs (the
     refit QC loop's output); ``regimes``: list of index lists."""
     Path(tmp_path).mkdir(parents=True, exist_ok=True)
-    executor = FakeExecutor(follower_r2)
+    executor = executor if executor is not None else FakeExecutor(follower_r2)
     ctrl = _controller(tmp_path, executor)
 
     def fake_best_of_n(state, curve_data, data_path, spectrum_name, spectrum_idx, **kw):
@@ -142,6 +143,7 @@ def run_series(tmp_path, monkeypatch, *, names, anchors, follower_r2, refits=Non
         state["max_series_refits"] = max_series_refits
     if cold_start:                       # a script-bank cold start: the anchor is asked to reuse it
         state["_cold_start_reuse"] = {"script": cold_start, "id": "bank-1"}
+    state.update(state_extra or {})
     state = ctrl.execute(state)
     # the stack names units spectrum_NNNN; map the caller's names onto them
     # (the controller names from the stack, so anchors/follower_r2 use those)

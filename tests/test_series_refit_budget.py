@@ -19,7 +19,9 @@ class _Ctl(AdaptiveRefitController):
         self.logger = logging.getLogger("t")
         self.enable_human_feedback = False
         self.refitted = []
-        self._fitting_helper = SimpleNamespace(_detect_outliers=lambda results: [])
+        self._fitting_helper = SimpleNamespace(_detect_outliers=lambda results, gate=None: [],
+                                               _series_gate=lambda state, regime=None: None,
+                                               _unit_gate_resolver=lambda state: (lambda row: None))
 
     def _load_spectrum(self, idx, *a, **k):
         self.refitted.append(idx)

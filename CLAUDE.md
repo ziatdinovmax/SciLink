@@ -336,9 +336,18 @@ wins, with a warning (`quality_gate_explicit`: a full `quality_gate=`, or an
 `r2_threshold=` that `resolve_gate` honoured and that the recipe's own R²
 metric can take — a bare number cannot replace a recipe's figure of merit,
 and a number the skill's metric guard dropped was no ask; a constructor-level
-default is not an ask). The same decision holds a reuse's SERIES UNITS
-(`_series_gate` → `_detect_outliers`): a profile-gated recipe replayed over
-a series with no skill is not flagged and refit on R². Else the run's effective `QualityGate` (`_replay_gate`: an R² gate
+default is not an ask). One predicate carries the decision to every
+reader of the gate — "this regime's anchor REPLAYED the recipe"
+(`_replayed_regimes`, set where the anchor's result is known: a verbatim or
+ladder-repaired replay counts, a reuse that failed into fresh code or a
+regime fitted fresh beside a replayed one does not) — through
+`_series_gate(state, regime)` and `_unit_gate_resolver` into the outlier
+pass, the refit's re-scan and its scoring-gated skip. Off the predicate
+everything is `main`'s path (a non-R² skill gate, else the driver's LIVE R²
+threshold — never the R² snapshot in state, which once beat a person's
+`adjust_threshold`; that adjustment is itself an explicit threshold ask). A
+non-reuse series flags, refits and stamps exactly as `main`
+(`test_non_reuse_series_are_mains_path_exactly`). Else the run's effective `QualityGate` (`_replay_gate`: an R² gate
 at the driver's live `r2_threshold`, a skill's own metric at the skill's
 threshold and direction, the rule `_detect_outliers` already applied to a
 series' followers; a metric the replayed script does not report is a reject). The

@@ -5492,15 +5492,38 @@ Return JSON with:
                                     f"{rec.metric} {rec.accept_threshold}, which the replay is held to.")
         return rec, "recipe"
 
-    def _series_gate(self, state: dict):
-        """The gate a series' UNITS are held to (outlier flags, refits): the
-        reuse decision's gate when the run replays a recipe, else the run's
-        effective gate — the follower half of the rule, so a profile- or
-        figure-of-merit-gated recipe replayed over a series with no skill
-        does not have every unit flagged on R² and refit."""
-        if state.get("_reuse_gate"):
-            return self._reuse_gate_decision(state, warn=False)[0]
-        return _gate(state)
+    def _series_gate(self, state: dict, regime: Any = None):
+        """The gate a series UNIT is held to beyond the run's own, or None:
+        the reuse decision's gate when the unit's regime was anchored by a
+        replay of the recipe (``_replayed_regimes``, the one predicate every
+        reader of the gate keys on — the outlier pass, the refit's re-scan
+        and its scoring-gated skip), else None, which is ``main``'s path (the
+        run's gate, the driver's live R² threshold). With no regime named,
+        the gate applies when every replayed regime is the run's (a
+        single-regime reuse); a run that replayed nothing — no reuse, a
+        reuse that failed into fresh code, a multi-regime plan that skipped
+        it — gets None."""
+        replayed = state.get("_replayed_regimes") or {}
+        if not replayed or not state.get("_reuse_gate"):
+            return None
+        if regime is not None and regime not in replayed:
+            return None
+        return self._reuse_gate_decision(state, warn=False)[0]
+
+    def _unit_gate_resolver(self, state: dict):
+        """``row → gate`` for the outlier pass and the refit's re-scan: a unit
+        of a replayed regime on the reuse decision's gate (``_series_gate``);
+        any other unit on ``main``'s path — the run's skill gate when it is
+        not R², else None, which is the driver's LIVE R² threshold (never the
+        R² snapshot in state: a person's ``adjust_threshold`` changes the live
+        value, and the snapshot beating it was a regression)."""
+        own = _gate(state)
+        fallback = own if own.metric != "r_squared" else None
+
+        def resolve(row):
+            g = self._series_gate(state, (row.get("regime") if isinstance(row, dict) else None) or "default")
+            return g if g is not None else fallback
+        return resolve
 
     def _replay_gate(self, state: dict, *, warn: bool = True):
         """The ``ScoreReplayGate`` a replayed result is held to, and how its
@@ -6515,6 +6538,9 @@ Return JSON with:
             if feedback_result:
                 if feedback_result.get("action") == "adjust_threshold":
                     self.r2_threshold = feedback_result["new_threshold"]
+                    # a person's threshold is an explicit ask: it binds the
+                    # replay and the units over a reused recipe's R² gate too
+                    state["quality_gate_explicit"] = "threshold"
                     # _accept_gate() rebuilds from the just-mutated threshold.
                     if self._accept_gate().is_accept(ctx.best_score):
                         self.logger.info(f"✅ Best fit now meets adjusted threshold")
@@ -7372,15 +7398,28 @@ Return JSON with:
         # fit has a high gate metric but a low global R² — flagging on global R²
         # false-flags it. Fall back to r_squared when there is no such gate
         # (legacy behavior, unchanged).
-        # an R² gate at a threshold other than the driver's (a reused
-        # recipe's) counts as a gate of its own too
-        self._outlier_gate = gate if (gate is not None and (gate.metric != "r_squared"
-                                                             or abs(float(gate.accept_threshold) - float(self.r2_threshold)) > 1e-9)) else None
+        # ``gate`` is one gate for the series, or a callable row → gate (a
+        # replayed regime's units on the recipe's gate, the rest on the
+        # run's: ``_series_gate(state, regime)``). A gate is "its own" when
+        # it is not the driver's live R²: a non-R² metric, or an R² threshold
+        # other than ``self.r2_threshold`` (a reused recipe's).
+        def _own(g):
+            return g if (g is not None and (g.metric != "r_squared"
+                                            or abs(float(g.accept_threshold) - float(self.r2_threshold)) > 1e-9)) else None
+        gate_for = gate if callable(gate) else (lambda r, _g=gate: _g)
+
+        def _gate_of(r):
+            try:
+                return _own(gate_for(r))
+            except Exception:  # noqa: BLE001 - a unit the resolver cannot place is on the run's gate
+                return None
+        self._outlier_gate = _own(gate) if not callable(gate) else None
 
         def _score(r):
             fq = r.get("fit_quality", {})
-            if self._outlier_gate is not None:
-                return self._outlier_gate.extract(fq)
+            g = _gate_of(r)
+            if g is not None:
+                return g.extract(fq)
             return fq.get("r_squared")
 
         self._score_fn = _score
@@ -7458,7 +7497,7 @@ Return JSON with:
             if r2 is None:
                 continue
 
-            g = self._outlier_gate
+            g = _gate_of(r)
             if g is not None:
                 below_threshold = not g.is_accept(r2)
                 worse = (median_r2 - r2) if g.direction == "higher_is_better" else (r2 - median_r2)
@@ -7691,6 +7730,7 @@ Return JSON with:
                 "multi-regime — reuse skipped."
             )
             reuse_script, reuse_source = None, None
+            state["_reuse_gate"] = None                 # nothing replays: the run's gate everywhere
         elif reuse_script:
             self.logger.info(
                 f"   ♻️  Locked-script reuse (opt-in) — anchor will reuse the "
@@ -7826,6 +7866,15 @@ Return JSON with:
                 if result["success"] and result.get("script"):
                     base_scripts[regime_name] = result["script"]
                     anchor_params_by_regime[regime_name] = result.get("parameters")
+                    # THE predicate every reader of the gate keys on: this
+                    # regime's anchor REPLAYED the recipe (verbatim, or repaired
+                    # by the ladder — the same lineage). A reuse that failed
+                    # into fresh code, or a regime fitted fresh beside a
+                    # replayed one, is on the run's gate like any series.
+                    rv0 = result.get("reuse_validity") or {}
+                    if rv0.get("reused") and rv0.get("verdict") not in ("script_failed", "failed") \
+                            and result.get("fitted_from") != "fresh_code":
+                        state.setdefault("_replayed_regimes", {})[regime_name] = True
                     if result.get("unit_verdict"):
                         recipe_by_regime[regime_name] = {
                             "unit": spectrum_name, "index": idx, "regime": regime_name,
@@ -7977,7 +8026,7 @@ Return JSON with:
         
         flagged_spectra = []
         if num_spectra > 1:
-            flagged_spectra = self._detect_outliers(series_results, gate=self._series_gate(state))
+            flagged_spectra = self._detect_outliers(series_results, gate=self._unit_gate_resolver(state))
             
             if flagged_spectra:
                 report = self._generate_outlier_report(flagged_spectra, series_results)
@@ -8791,7 +8840,9 @@ Return JSON: {{"script": "<the complete modified script>"}}
         # 100+ min "re-analysis" grind on real in-situ series: each flagged frame
         # was being re-fit under the R² verification loop.) R² skills (all curve
         # fitting) are unaffected — they fall through to the refit below.
-        if _gate(state).metric != "r_squared":
+        def _unit_gate(regime):
+            return self._fitting_helper._series_gate(state, regime or "default") or _gate(state)
+        if _gate(state).metric != "r_squared" and not state.get("_replayed_regimes"):
             self.logger.info(
                 "\n🔄 Adaptive refit: scoring-gated skill (non-R² gate) — the phase "
                 "set is locked by design; skipping per-frame model re-derivation. "
@@ -8805,6 +8856,16 @@ Return JSON: {{"script": "<the complete modified script>"}}
             return state
 
         refit_candidates = [f for f in flagged_spectra if f["reason"] in self.REFIT_REASONS]
+        # a unit whose regime replayed a scoring-gated (non-R²) recipe is the
+        # skill's case above, whatever gate the run itself resolved: its
+        # lower score is the physics, not a fit to repair under R²
+        by_idx = {r.get("index"): r for r in (state.get("series_results") or []) if isinstance(r, dict)}
+        locked = [f for f in refit_candidates
+                  if _unit_gate((by_idx.get(f["index"]) or {}).get("regime")).metric != "r_squared"]
+        if locked:
+            self.logger.info(f"\n🔄 Adaptive refit: {len(locked)} flagged unit(s) replay a scoring-gated recipe — "
+                             "the phase set is locked by design; their lower scores are reported as physical evolution.")
+            refit_candidates = [f for f in refit_candidates if f not in locked]
         if not refit_candidates:
             self.logger.info("\n🔄 Adaptive refit: Flagged spectra are statistical outliers only, skipping.")
             return state
@@ -8994,11 +9055,9 @@ Return JSON: {{"script": "<the complete modified script>"}}
         state["refit_summary"] = refit_summary
 
         # Re-run outlier detection with updated results
-        # the same gate the series pass used: a reuse's units stay held to
-        # the recipe's gate through the refit's re-scan
-        series_gate = getattr(self._fitting_helper, "_series_gate", None)
-        updated_flagged = (self._fitting_helper._detect_outliers(series_results, gate=series_gate(state))
-                           if callable(series_gate) else self._fitting_helper._detect_outliers(series_results))
+        # the same per-unit gate the series pass used: a replayed regime's
+        # units stay held to the recipe's gate through the refit's re-scan
+        updated_flagged = self._fitting_helper._detect_outliers(series_results, gate=self._fitting_helper._unit_gate_resolver(state))
         state["flagged_spectra"] = updated_flagged
 
         improved_count = sum(1 for r in refit_summary if r["improved"])

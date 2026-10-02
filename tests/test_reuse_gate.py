@@ -314,26 +314,181 @@ def test_a_series_derived_live_reference_carries_the_frames_gate(tmp_path):
 
 
 def test_series_units_of_a_reuse_are_held_to_the_recipes_gate(tmp_path, monkeypatch):
-    """#717 round 2, item 1: a profile-gated recipe reused over a series with
-    no skill had its anchor good on peak_region_r2 and every unit flagged
-    below_threshold on R² 0.95, with LLM refits. The units are held to the
-    reuse decision's gate (_series_gate), as the replay is."""
+    """#717 rounds 2–3: a profile-gated recipe reused over a series with no
+    skill had its anchor good on peak_region_r2 and every unit flagged
+    below_threshold on R² 0.95, with LLM refits. ONE predicate decides —
+    "this regime's anchor replayed the recipe" (`_replayed_regimes`) — and
+    every reader of the gate keys on it: the outlier pass, the refit's
+    re-scan, the scoring-gated skip. Off the predicate everything is main's
+    path: a run with no reuse, a reuse that failed into fresh code, a
+    multi-regime plan that skipped it."""
     from unittest.mock import MagicMock
+    from scilink.agents.exp_agents.controllers.curve_fitting_controllers import _gate
     ctrl = _loose_controller(tmp_path, MagicMock(), 0.95)
     rows = [{"index": i, "name": f"s{i}", "success": True, "fit_quality": {"r_squared": 0.80 + 0.01 * i, "peak_region_r2": 0.96 + 0.005 * i}}
             for i in range(5)]
-    # the run's own gate is the R² default (no skill): every unit flagged on main's rule
-    flagged = ctrl._detect_outliers(rows, gate=ctrl._series_gate({}))
-    assert [f["reason"] for f in flagged] == ["below_threshold"] * 5
-    # the run replays a profile-gated recipe: the units are held to peak_region_r2 ≥ 0.90 — none flagged
-    state = {"_reuse_gate": gate_record(PROFILE)}
-    assert ctrl._series_gate(state).metric == "peak_region_r2"
-    assert ctrl._detect_outliers(rows, gate=ctrl._series_gate(state)) == []
-    # a recipe approved at R² 0.90 reused on a run whose driver sits at 0.95: units at 0.92 are not flagged
-    state = {"_reuse_gate": gate_record(QualityGate(metric="r_squared", accept_threshold=0.90, hard_reject_threshold=0.75))}
+    per_unit = ctrl._unit_gate_resolver
+    # no reuse: main's rule, every unit flagged on R² 0.95
+    assert [f["reason"] for f in ctrl._detect_outliers(rows, gate=per_unit({}))] == ["below_threshold"] * 5
+    # a recorded recipe gate but NOTHING replayed (a reuse that failed into fresh code, a skipped plan): main's rule
+    assert ctrl._series_gate({"_reuse_gate": gate_record(PROFILE)}) is None
+    assert [f["reason"] for f in ctrl._detect_outliers(rows, gate=per_unit({"_reuse_gate": gate_record(PROFILE)}))] == ["below_threshold"] * 5
+    # the regime's anchor replayed the recipe: its units are held to peak_region_r2 ≥ 0.90 — none flagged
+    state = {"_reuse_gate": gate_record(PROFILE), "_replayed_regimes": {"default": True}}
+    assert ctrl._series_gate(state).metric == "peak_region_r2" and ctrl._series_gate(state, "default").metric == "peak_region_r2"
+    assert ctrl._detect_outliers(rows, gate=per_unit(state)) == []
+    # per regime: a replayed regime beside a fresh one — each on its own gate
+    mixed = [{**r, "regime": "a" if i < 3 else "b"} for i, r in enumerate(rows)]
+    state = {"_reuse_gate": gate_record(PROFILE), "_replayed_regimes": {"a": True}}
+    assert ctrl._series_gate(state, "a") is not None and ctrl._series_gate(state, "b") is None
+    assert sorted(f["index"] for f in ctrl._detect_outliers(mixed, gate=per_unit(state))) == [3, 4]
+    # a recipe approved at R² 0.90 replayed on a 0.95 driver: units at 0.92 not flagged; main flags all five
+    state = {"_reuse_gate": gate_record(QualityGate(metric="r_squared", accept_threshold=0.90, hard_reject_threshold=0.75)),
+             "_replayed_regimes": {"default": True}}
     rows2 = [{"index": i, "name": f"s{i}", "success": True, "fit_quality": {"r_squared": 0.92}} for i in range(5)]
-    assert ctrl._detect_outliers(rows2, gate=ctrl._series_gate(state)) == []
-    assert [f["reason"] for f in ctrl._detect_outliers(rows2, gate=ctrl._series_gate({}))] == ["below_threshold"] * 5
-    # the caller's ask on the reuse run binds the units too
-    state = {"_reuse_gate": gate_record(PROFILE), "quality_gate_explicit": "gate", "quality_gate": FOM}
+    assert ctrl._detect_outliers(rows2, gate=per_unit(state)) == []
+    assert [f["reason"] for f in ctrl._detect_outliers(rows2, gate=per_unit({}))] == ["below_threshold"] * 5
+    # the caller's ask binds the units too; a person's adjust_threshold is such an ask
+    state = {"_reuse_gate": gate_record(PROFILE), "_replayed_regimes": {"default": True}, "quality_gate_explicit": "gate", "quality_gate": FOM}
     assert ctrl._series_gate(state).metric == "figure_of_merit"
+    ctrl.r2_threshold = 0.80
+    state = {"_reuse_gate": gate_record(QualityGate(metric="r_squared", accept_threshold=0.95, hard_reject_threshold=0.90)),
+             "_replayed_regimes": {"default": True}, "quality_gate_explicit": "threshold"}
+    assert ctrl._series_gate(state).accept_threshold == 0.80
+
+
+def test_non_reuse_series_are_mains_path_exactly(tmp_path, monkeypatch):
+    """The guard against a fourth round (PR A's parity discipline): a series
+    that replays nothing — including the cases that broke — flags, refits and
+    stamps exactly as ``main`` does, by main's rule (the driver's LIVE R²
+    threshold), whatever gate record is lying in state."""
+    from scilink.agents.exp_agents.controllers.curve_fitting_controllers import _gate
+    names5 = [f"spectrum_{i:04d}" for i in range(5)]
+    follower = {names5[0]: 0.99, names5[1]: 0.91, names5[2]: 0.985, names5[3]: 0.90, names5[4]: 0.99}
+
+    def mains_flags(r2s, thr):
+        return sorted(i for i, v in enumerate(r2s) if v < thr)
+
+    def below(flagged):
+        return sorted(f["index"] for f in flagged if "below_threshold" in f["reason"])
+    # (1) a human adjust_threshold mid-run: the live threshold binds, not the 0.95 snapshot in state
+    state, _ = curve.run_series(tmp_path / "a", monkeypatch, names=names5, anchors={names5[0]: curve.OK}, follower_r2=follower)
+    ctrl = curve._controller(tmp_path / "a", curve.FakeExecutor(follower))
+    rows = state["series_results"]
+    ctrl.r2_threshold = 0.80                               # what "threshold 0.80" at the poor-fit review does
+    state_after = {**state, "quality_gate_explicit": "threshold"}
+    flagged = ctrl._detect_outliers(rows, gate=ctrl._unit_gate_resolver(state_after))
+    assert below(flagged) == mains_flags([r["fit_quality"]["r_squared"] for r in rows], 0.80) == []
+    ctrl.r2_threshold = 0.95
+    flagged = ctrl._detect_outliers(rows, gate=ctrl._unit_gate_resolver(state))
+    assert below(flagged) == mains_flags([r["fit_quality"]["r_squared"] for r in rows], 0.95) == [1, 3]
+    # (2) a recipe gate recorded but the plan skipped the reuse (nothing replayed): main's flags
+    state2 = {**state, "_reuse_gate": gate_record(PROFILE)}
+    flagged = ctrl._detect_outliers(rows, gate=ctrl._unit_gate_resolver(state2))
+    assert below(flagged) == [1, 3]
+    # (3) a run whose own skill gate is non-R² and nothing replayed: main's path — the skill gate for every unit
+    assert ctrl._series_gate({**state, "quality_gate": FOM}) is None
+    assert ctrl._unit_gate_resolver({**state, "quality_gate": PROFILE})(rows[0]).metric == "peak_region_r2"
+    # (4) an R² run: the resolver returns None for every unit (the live threshold), never the state's snapshot
+    assert all(ctrl._unit_gate_resolver(state)(r) is None for r in rows)
+    # and the real series path on a non-reuse run writes no predicate
+    assert "_replayed_regimes" not in state
+
+
+class _ProfileExecutor(curve.FakeExecutor):
+    """Followers that report peak_region_r2 beside a low global R² (a correct
+    low-SNR profile fit)."""
+
+    def execute_script(self, script, working_dir=None, timeout=None, **kw):
+        out = super().execute_script(script, working_dir=working_dir, timeout=timeout, **kw)
+        if out.get("status") == "success":
+            payload = json.loads(out["stdout"].split("FIT_RESULTS_JSON:", 1)[1])
+            payload["fit_quality"]["peak_region_r2"] = 0.97
+            out["stdout"] = "FIT_RESULTS_JSON:" + json.dumps(payload)
+        return out
+
+
+def test_the_predicate_is_set_by_a_replayed_anchor_and_the_followers_follow_it(tmp_path, monkeypatch):
+    """Through the real series + refit path: a profile-gated recipe whose
+    anchor REPLAYED it (a canned reused anchor), followers at R² 0.80 with
+    peak_region_r2 0.97 and no skill on the run — none flagged, no refit; the
+    same series with the anchor fitted fresh (the reuse failed into fresh
+    code) is main's path: every follower flagged on R² 0.95."""
+    names5 = [f"spectrum_{i:04d}" for i in range(5)]
+    low = {n: 0.80 for n in names5}
+    reused = {**curve.OK, "reused": "good"}
+    state, _ = curve.run_series(tmp_path / "a", monkeypatch, names=names5, anchors={names5[0]: reused}, follower_r2=low,
+                                executor=_ProfileExecutor(low), state_extra={"_reuse_gate": gate_record(PROFILE)})
+    assert state.get("_replayed_regimes") == {"default": True}
+    assert [f["index"] for f in state["flagged_spectra"]] == []
+    assert not state.get("refit_summary")
+    # the predicate is per regime and set only by an actual replay: the anchor fitted fresh → main's flags
+    state, _ = curve.run_series(tmp_path / "b", monkeypatch, names=names5, anchors={names5[0]: curve.OK}, follower_r2=low,
+                                executor=_ProfileExecutor(low), state_extra={"_reuse_gate": gate_record(PROFILE)})
+    assert "_replayed_regimes" not in state
+    assert sorted(f["index"] for f in state["flagged_spectra"]) == [1, 2, 3, 4]
+    # a reuse whose replay FAILED (script_failed) is no replay either
+    failed_reuse = {**curve.OK, "reused": "script_failed"}
+    state, _ = curve.run_series(tmp_path / "c", monkeypatch, names=names5, anchors={names5[0]: failed_reuse}, follower_r2=low,
+                                executor=_ProfileExecutor(low), state_extra={"_reuse_gate": gate_record(PROFILE)})
+    assert "_replayed_regimes" not in state and sorted(f["index"] for f in state["flagged_spectra"]) == [1, 2, 3, 4]
+    # a replayed FOM recipe: the flagged unit (its phase consumed) is not refit under R² — the skill's own rule
+    fom_low = {n: 0.80 for n in names5}
+
+    class _FomExecutor(curve.FakeExecutor):
+        def execute_script(self, script, working_dir=None, timeout=None, **kw):
+            out = super().execute_script(script, working_dir=working_dir, timeout=timeout, **kw)
+            if out.get("status") == "success":
+                payload = json.loads(out["stdout"].split("FIT_RESULTS_JSON:", 1)[1])
+                wd = str(working_dir)
+                payload["fit_quality"]["figure_of_merit"] = 0.225 if "spectrum_0003" in wd else 0.9
+                out["stdout"] = "FIT_RESULTS_JSON:" + json.dumps(payload)
+            return out
+    state, _ = curve.run_series(tmp_path / "d", monkeypatch, names=names5, anchors={names5[0]: reused}, follower_r2=fom_low,
+                                executor=_FomExecutor(fom_low), state_extra={"_reuse_gate": gate_record(FOM)},
+                                refits={names5[3]: {**curve.OK, "script": "REFIT"}})
+    assert [f["index"] for f in state["flagged_spectra"]] == [3]           # the consumed phase, by the figure of merit
+    assert not state.get("refit_summary")                                    # and not refit under R²
+
+
+def test_the_explicit_ask_helper_is_the_agents():
+    """The flag the agent writes, from the function it writes it with — not
+    a re-typed expression."""
+    from scilink.agents.exp_agents.curve_fitting_agent import explicit_gate_ask
+    from scilink.agents.exp_agents.quality_gate import resolve_gate
+    assert explicit_gate_ask(FOM, None, FOM) == "gate" and explicit_gate_ask(FOM, 0.9, FOM) == "gate"
+    r2 = resolve_gate(user_threshold=0.9)
+    assert explicit_gate_ask(None, 0.9, r2) == "threshold"
+    dropped = resolve_gate(user_threshold=0.9, skill_meta={"quality_gate": gate_record(PROFILE)})
+    assert dropped.metric == "peak_region_r2" and explicit_gate_ask(None, 0.9, dropped) is None
+    assert explicit_gate_ask(None, None, resolve_gate(legacy_threshold=0.95)) is None       # a constructor default is no ask
+
+
+def test_the_judges_reading_reaches_the_orchestrator_as_a_caveat(tmp_path, monkeypatch):
+    """#717: run_analysis's result carries the judge's reading as
+    `reuse_caveat` on a GOOD verdict, beside the verdict, not folded into
+    "proceed normally"; `reuse_warning` stays the non-good verdicts'."""
+    import contextlib, io
+    import numpy as np
+    from scilink.agents.exp_agents.analysis_orchestrator import AnalysisOrchestratorAgent, AnalysisMode
+    x = np.linspace(0, 100, 300)
+    csv = tmp_path / "s.csv"
+    np.savetxt(csv, np.column_stack([x, np.exp(-0.5 * ((x - 40) / 4) ** 2)]), delimiter=",", header="x,y", comments="")
+    reading = {"trigger": "state", "decided_by": "judge", "belongs_to": "rutile", "same_interpretation": False,
+               "what_changed": "new reflections at 27.4 and 36.1", "confidence": "high",
+               "note": "a judge's reading of the evidence; no gate, no verdict, no re-run"}
+
+    class _Agent:
+        def analyze(self, data=None, system_info=None, **kw):
+            return {"status": "success", "detailed_analysis": "ok", "scientific_claims": [], "output_dir": kw.get("output_dir"),
+                    "reuse_validity": {"reused": True, "verdict": "good", "r_squared": 0.99, "threshold": 0.95,
+                                       "message": "Reused ... STATE flagged", "state_flag": True, "escalation": reading}}
+    with contextlib.redirect_stdout(io.StringIO()):
+        orch = AnalysisOrchestratorAgent(base_dir=str(tmp_path / "s"), api_key="sk-dummy", model_name="claude-opus-4-6",
+                                         analysis_mode=AnalysisMode.AUTONOMOUS)
+        orch.create_agent_for_analysis = lambda agent_id, out_dir, **kw: _Agent()
+        out = json.loads(orch.tools.execute_tool("run_analysis", data_path=str(csv), analysis_goal="Raman spectrum; fit the band",
+                                                  prior_analysis_paths=[str(tmp_path)], reuse_locked_script=True))
+    assert out["reuse_validity"]["verdict"] == "good" and "reuse_warning" not in out
+    assert out["reuse_caveat"].startswith("JUDGE (an opinion, no gate; the verdict stays the gate's)")
+    assert "belonging to 'rutile'" in out["reuse_caveat"] and "new reflections at 27.4" in out["reuse_caveat"]
