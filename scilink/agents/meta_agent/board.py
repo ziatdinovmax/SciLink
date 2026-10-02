@@ -605,8 +605,11 @@ def _analysis_records(entry: Dict[str, Any], result: Dict[str, Any]) -> List[Dic
         rec = status_by_id.get(aid or "")
         # ``verified`` is the agent's own verdict (analysis_verdict): a
         # salvaged, unverified or unapproved result is "success" too, and
-        # stays provisional here with the reason as its gate.
-        verified, why = _analysis_verified(rec)
+        # stays provisional here with the reason as its gate. A claim is an
+        # INTERPRETATION: when the replay gate decided (the numbers passed)
+        # and nothing checked what was measured (#711), the claim stays
+        # provisional — the recipe, a script that ran, is still verified.
+        verified, why = _claim_verified(rec)
         if not claim:
             continue
         out.append({"kind": "claim", "payload": {"text": claim[:1500]},
@@ -661,6 +664,19 @@ def _recipe_specs(aid: str, rec: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def _safe(name: Any) -> str:
     return "".join(c if c.isalnum() or c in ("_", "-", ".") else "_" for c in str(name)) or "recipe"
+
+
+def _claim_verified(row: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
+    """``_analysis_verified`` for a CLAIM: a replay's numbers passing its
+    gate verifies the measurement, not the interpretation attached to it;
+    the claim is verified only when the identity check held the result to
+    what the anchor measured (``interpretation_checked``)."""
+    verified, why = _analysis_verified(row)
+    if verified and row and row.get("decided_by") == "replay_gate" and not row.get("interpretation_checked"):
+        return False, (f"analysis {row.get('analysis_id')}: a locked-script replay passed the replay gate "
+                       "(the numbers), but nothing checked that it measured the same thing as the anchor "
+                       "— its interpretation is not verified")
+    return verified, why
 
 
 def _analysis_verified(row: Optional[Dict[str, Any]]) -> Tuple[bool, str]:

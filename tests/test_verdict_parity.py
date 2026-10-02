@@ -11,6 +11,16 @@ The reference is `reconstructed_verdict` on the result with the new stamps
 removed: the top-level `verdict` everywhere, and the hyperspectral rows'
 `unit_verdict` (main had none; the curve and image units were already
 stamped in stage 2, so theirs stay).
+
+PR B's allow-list for THIS parity (stamp vs reconstruction) is empty:
+- #699 changes when a script is called broken, not how a result is judged;
+- #710 changes which regime recipe a reuse tries first; the verdict of the
+  result it produces is read as before;
+- #711 moves the identity check INTO the replay gate, so a drifted replay is
+  ``poor`` on the result itself (``reuse_validity.verdict``) and the stamp and
+  the reconstruction read the same thing (the case is here, `reused_drifted`);
+  what #711 changes beyond the gate is the CLAIMS' status on the board,
+  which is not a verdict — see tests/test_identity_check.py.
 """
 
 import copy
@@ -43,7 +53,10 @@ def _reference(final: dict, *, hs_rows: bool = False) -> dict:
 
 def _check(final: dict, label: str, *, hs_rows: bool = False):
     assert is_verdict_record(final.get("verdict")), f"{label}: no stamp"
-    stamped = analysis_verdict(final)
+    read = analysis_verdict(final)
+    # the two decision fields (#711) ride beside the verdict; the verdict itself is the parity
+    assert set(read) == {"verified", "reason", "decided_by", "interpretation_checked"}, label
+    stamped = {"verified": read["verified"], "reason": read["reason"]}
     assert stamped == {"verified": final["verdict"]["verified"], "reason": final["verdict"]["reason"]}, label
     assert stamped == _reference(final, hs_rows=hs_rows), label
     assert final["verdict"]["decided_by"] in ("qc_gate", "replay_gate", "recipe", "excluded", "none"), label
@@ -134,13 +147,24 @@ def test_curve_single_run_stamp_equals_the_reconstruction(tmp_path, name):
 
 def test_curve_single_run_through_the_real_reuse_path(tmp_path, monkeypatch):
     """The reuse verdict the gate writes (good / poor / failed → re-derive)
-    reaches the compile and the stamp through the real qc_try_reuse."""
+    reaches the compile and the stamp through the real qc_try_reuse — and a
+    replay whose identity drifted beyond the anchor's spread (#711) is poor
+    on the result itself, so stamp and reconstruction agree on it too."""
     for label, scripts in (("good", {"LOW": 0.80, "HIGH": 0.985}), ("poor", {"LOW": 0.70, "HIGH": 0.75})):
         res, ex, _, item = curve._replay(tmp_path / label, monkeypatch, scripts)
         unit = {**res, "name": "spectrum_0000", "index": 0, "success": True}
         final = _single_curve(tmp_path / label / "compiled", unit)
         assert final["reuse_validity"]["verdict"] == label
         _check(final, f"curve single reuse {label}")
+    import test_regime_choice as rc
+    prior = rc.prior_two_regime_run(tmp_path / "drift", names=True)
+    (prior / "scripts" / "spectrum_0000.py").write_text("LOW")
+    res, ex, _, _ = curve._replay(tmp_path / "reused_drifted", monkeypatch, {"LOW": 0.999}, prior=prior / "scripts" / "spectrum_0000.py",
+                                  data=rc.spectrum(rc.RUTILE, shift=0.5, seed=2),
+                                  extra_params={"LOW": rc.auto_detect_parameters(rc.RUTILE, shift=0.5, seed=2)})
+    final = _single_curve(tmp_path / "reused_drifted" / "compiled", {**res, "name": "spectrum_0000", "index": 0, "success": True})
+    assert final["reuse_validity"]["verdict"] == "poor" and not final["verdict"]["verified"]
+    _check(final, "curve single reuse drifted (identity)")
 
 
 # ------------------------------------------------------------- image series
