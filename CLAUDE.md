@@ -324,6 +324,32 @@ fingerprint was tried first and dropped: it separates phases and nothing
 below them (a lattice shift, a texture, a background tie at 1.0), as the live
 loop had already found. Images keep the first regime's recipe and say so.
 
+**The replay gate is the run's gate, and a failed check is explained, not
+re-judged.** A replayed recipe is held to the run's effective `QualityGate`
+(`_replay_gate`: an R² gate at the driver's live `r2_threshold`, a skill's
+own metric — `peak_region_r2`, a figure of merit — at the skill's threshold
+and direction, the rule `_detect_outliers` already applied to a series'
+followers; a metric the replayed script does not report is a reject). The
+deterministic checks decide verified / not verified and say THAT something
+differs; what a difference MEANS — a thermal shift against a new band, an
+impurity line, a polymorph — is a skill-bearing model's question, so a replay
+whose state or identity check fails, or whose regime the data cannot tell, is
+escalated to a JUDGE (`_escalate_reuse`, the live loop's shape: a model-free
+signal triggers the slow-clock look): one model call shown the findings as
+quoted data between markers, the replayed fit and the new curve over the
+regime's anchor, and the skill's `interpretation` section, asked which regime
+the measurement belongs to and what changed. The answer is an opinion on the
+record (`reuse_validity.escalation`, `decided_by: judge`), in the message, on
+the `analyses` row and on the board as a PROVISIONAL claim; the verdict and
+`interpretation_checked` do not move, nothing is re-run, and a regime the
+judge names against an ambiguous choice is `regime_choice.suggested` — listed
+for the caller, never taken. Never on a clean pass, on the fast clock, when
+the caller asked for no review, on a replay that did not execute, on the
+gate alone failing, and at most once per item; a flag against one reference
+unit is escalated only when nobody attends (`enable_human_feedback` off).
+Do not make the judge a gate: the per-map reviewer that re-judged replays is
+why replays are gated on evidence.
+
 ## Data preparation is a stage, not an agent
 
 Some instruments hand over a container that sits *upstream* of what the

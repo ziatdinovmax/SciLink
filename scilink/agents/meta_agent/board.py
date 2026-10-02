@@ -617,7 +617,28 @@ def _analysis_records(entry: Dict[str, Any], result: Dict[str, Any]) -> List[Dic
                     "evidence": {"analysis_ids": [aid] if aid else [], "gate": why}})
     for aid, rec in status_by_id.items():
         out += _recipe_specs(aid, rec)
+        out += _escalation_records(aid, rec)
     return out
+
+
+def _escalation_records(aid: str, rec: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The judge's reading of a replay that failed its checks (#712
+    escalation), posted as a PROVISIONAL claim beside the replay's own
+    records: a model's explanation of what differed, which passed no gate
+    and is never read back by a swarm item (the reader gets verified records
+    only). It is on the board so a person and the ledger see WHY a replay
+    was not verified, not only that it was not."""
+    esc = rec.get("escalation")
+    if not isinstance(esc, dict) or not esc.get("what_changed"):
+        return []
+    text = (f"Replay of analysis {aid} escalated ({esc.get('trigger')}): the judge reads it as belonging to "
+            f"{esc.get('belongs_to')!r}"
+            + (f", same interpretation: {esc.get('same_interpretation')}" if esc.get("same_interpretation") is not None else "")
+            + f" — {esc.get('what_changed')}")
+    return [{"kind": "claim", "payload": {"text": text[:1500]}, "status": "provisional",
+             "evidence": {"analysis_ids": [aid],
+                          "gate": ("replay escalation: a judge's reading of a replay that failed its checks "
+                                   f"(trigger {esc.get('trigger')}, {esc.get('confidence')} confidence); no gate")}}]
 
 
 def _recipe_specs(aid: str, rec: Dict[str, Any]) -> List[Dict[str, Any]]:

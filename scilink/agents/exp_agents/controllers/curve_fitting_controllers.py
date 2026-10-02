@@ -1108,6 +1108,81 @@ def _regime_of_named(state: dict) -> Optional[str]:
     return None
 
 
+def _overlay_png(xy, anchor_curve, regime: Any) -> Optional[bytes]:
+    """The new curve over the regime's anchor curve, each scaled to its own
+    maximum, as PNG bytes; None when either is missing or plotting fails."""
+    if xy is None or anchor_curve is None:
+        return None
+    try:
+        import io
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        ax_, ay_ = np.asarray(anchor_curve[0], dtype=float), np.asarray(anchor_curve[1], dtype=float)
+        nx_, ny_ = np.asarray(xy[0], dtype=float), np.asarray(xy[1], dtype=float)
+
+        def scaled(y):
+            top = float(np.nanmax(np.abs(y))) if y.size else 0.0
+            return y / top if top > 0 else y
+        fig, ax = plt.subplots(figsize=(8, 3.6), dpi=110)
+        ax.plot(ax_, scaled(ay_), color="0.6", lw=1.4, label=f"regime {regime!r} anchor")
+        ax.plot(nx_, scaled(ny_), color="black", lw=1.0, label="new measurement")
+        ax.set_ylabel("scaled intensity")
+        ax.legend(loc="best", fontsize=8)
+        fig.tight_layout()
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png")
+        plt.close(fig)
+        return buf.getvalue()
+    except Exception:  # noqa: BLE001 - a figure the judge does without
+        return None
+
+
+def _prior_regimes(state: dict, refs: list) -> list:
+    """The regimes of the prior run a judge may name — ALL of them, from the
+    run's recorded recipes (a replay of one regime's recipe, a named unit
+    script, must still be attributable to another regime), each with its
+    anchor unit, the plan's model and its unit count; the references given
+    when the run recorded none."""
+    from .._verification_record import series_recipes
+    anchor_dir = None
+    for raw_path in state.get("prior_analysis_paths") or []:
+        anchor_dir = _load_prior_curve_fit_state(raw_path)[0]
+        if anchor_dir is not None:
+            break
+    out = []
+    if anchor_dir is not None:
+        try:
+            recorded = json.loads((Path(anchor_dir) / "analysis_results.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            recorded = None
+        counts: Dict[Any, int] = {}
+        try:
+            rows = json.loads((Path(anchor_dir) / "series_fit_results.json").read_text(encoding="utf-8")).get("results") or []
+            for r in rows:
+                if isinstance(r, dict) and r.get("success"):
+                    counts[r.get("regime")] = counts.get(r.get("regime"), 0) + 1
+        except (OSError, ValueError, AttributeError):
+            pass
+        for r in series_recipes(recorded if isinstance(recorded, dict) else None):
+            out.append({"regime": r.get("regime"), "unit": r.get("unit"), "model": r.get("model"),
+                        "n_units": counts.get(r.get("regime"))})
+    if not out:
+        out = [{"regime": r.get("regime"), "model": r.get("model"), "unit": r.get("unit"), "n_units": r.get("n_units")}
+               for r in (refs or []) if isinstance(r, dict) and r.get("regime")]
+    return out
+
+
+def _regime_model(state: dict, regime_name: Any) -> Optional[str]:
+    """The series plan's one-line model for ``regime_name`` (None when the
+    plan has no such regime, or no plan)."""
+    plan = state.get("series_analysis_plan") or {}
+    for r in plan.get("regimes") or []:
+        if isinstance(r, dict) and r.get("name") == regime_name and isinstance(r.get("physical_model"), str):
+            return r["physical_model"][:300]
+    return None
+
+
 def _regime_references(state: dict, candidates: list) -> list:
     """For each regime candidate of a reuse: a drift monitor seeded with the
     regime's units' data from the prior run (``spectrum_NNNN/data.npy``),
@@ -1168,8 +1243,22 @@ def _regime_references(state: dict, candidates: list) -> list:
             monitor = None
         samples = [identity_features(r.get("parameters")) for r in units if isinstance(r.get("parameters"), dict)]
         identity = identity_reference(samples, x_range=x_range) if samples else None
+        anchor_curve = None
+        if curves:
+            anchor_curve = curves[0]
+        elif isinstance(c.get("drift_state"), dict) and c["drift_state"].get("seed"):
+            # the anchor's curve as the lock recorded it: block means on the grid
+            try:
+                xs = np.asarray(c["drift_state"].get("x") or [], dtype=float)
+                row = np.asarray(c["drift_state"]["seed"][0], dtype=float)
+                if xs.size and row.size and xs.size >= row.size:
+                    block = xs.size // row.size
+                    anchor_curve = (xs[:row.size * block].reshape(-1, block).mean(axis=1), row)
+            except Exception:  # noqa: BLE001
+                anchor_curve = None
         out.append({"monitor": monitor, "identity": identity, "n_curves": len(curves), "regime": regime,
-                    **({"curves_not_seeded": dropped} if dropped else {})})
+                    "n_units": len(units), "unit": c.get("unit"), "model": c.get("model"),
+                    "anchor_curve": anchor_curve, **({"curves_not_seeded": dropped} if dropped else {})})
     return out
 
 
@@ -1280,9 +1369,10 @@ def _prior_curve_fit_recipes(state: dict) -> list:
 
 def _prior_curve_fit_candidates(state: dict) -> list:
     """``_prior_curve_fit_recipes`` with everything a choice among regimes
-    needs: ``{script, source, regime, unit, verified, fingerprint}`` per
-    candidate, in lock order (#710: the fingerprint is the anchor's data as
-    recorded when the recipe was locked; absent on an older run)."""
+    needs: ``{script, source, regime, unit, verified, drift_state, model}``
+    per candidate, in lock order (#710: ``drift_state`` is the anchor's curve
+    as recorded when the recipe was locked; ``model`` the plan's one line for
+    the regime; both absent on an older run)."""
     from .._verification_record import named_recipe_file, prior_recipe_candidates
     paths = state.get("prior_analysis_paths") or []
     for raw_path in paths:
@@ -5286,7 +5376,8 @@ Return JSON with:
             if reuse_result.get("success"):
                 rv = gate.judge(r2_of(reuse_result))
                 out = self._reuse_verdict(ctx, reuse_result, ctx.reuse_source, rv["score"], rv["verdict"], tried=1, of=1)
-                return self._apply_identity(ctx, out, (refs[0] if refs else None), xy)
+                out = self._apply_identity(ctx, out, (refs[0] if refs else None), xy)
+                return self._escalate_reuse(ctx, out, refs, xy)
             return self._reuse_failed(ctx, reuse_result, ctx.reuse_source)
         subdirs: Dict[int, str] = {}
         checks: Dict[int, dict] = {}
@@ -5333,7 +5424,7 @@ Return JSON with:
                 # an ambiguous attribution is said where the attribution is read
                 rv["source"] = f"{rv.get('source')} [regime choice ambiguous: {regime_choice['note']}]"
                 rv["message"] += f" REGIME CHOICE AMBIGUOUS: {regime_choice['note']}."
-            return out
+            return self._escalate_reuse(ctx, out, refs, xy, chosen_ref=(refs[n - 1] if n - 1 < len(refs) else None))
         if chosen["chosen"] is not None:
             n, reuse_result, rv = chosen["chosen"], chosen["result"], chosen["verdict"]
             self._promote_candidate_artifacts(reuse_result, ctx.item_idx, 0, subdir=subdirs[n])
@@ -5495,6 +5586,74 @@ Return JSON with:
         if chk.get("caveat"):
             rv["message"] = (rv.get("message") or "") + " " + chk["caveat"]
             self.logger.info(f"   🧬 {chk['caveat']}")
+
+    def _escalate_reuse(self, ctx: QCItemContext, result: dict, refs: list, xy,
+                        chosen_ref: Optional[dict] = None) -> dict:
+        """A replay that failed its checks, or whose regime the data cannot
+        tell, is handed to a JUDGE for an explanation (#712 follow-up): one
+        model call shown the deterministic findings as quoted data, the
+        replayed fit and the new curve over the regime's anchor, and the
+        active skill's interpretation guidance. The answer goes on
+        ``reuse_validity.escalation`` and into the message; the verdict and
+        ``interpretation_checked`` do not move, nothing is re-run. Never on
+        a clean pass, on the fast clock (``_strict_replay``), when the caller
+        asked for no review (``max_verification_iterations == 0``), or more
+        than ``MAX_REPLAY_ESCALATIONS`` times per item."""
+        from .._replay import (MAX_REPLAY_ESCALATIONS, escalation_evidence, escalation_question,
+                               escalation_trigger, read_escalation_answer)
+        rv = result.get("reuse_validity") if isinstance(result, dict) else None
+        if not isinstance(rv, dict) or ctx.state.get("_strict_replay") or self.max_verification_iterations <= 0:
+            return result
+        attended = bool(getattr(self, "enable_human_feedback", False))
+        trigger = escalation_trigger(rv, attended=attended)
+        if trigger is None or rv.get("escalation") is not None:
+            return result
+        spent = ctx.state.setdefault("_replay_escalations", {})          # item index -> calls made
+        count = int(spent.get(ctx.item_idx) or 0)
+        if count >= MAX_REPLAY_ESCALATIONS:
+            rv["escalation"] = {"trigger": trigger, "skipped": f"budget of {MAX_REPLAY_ESCALATIONS} per item spent"}
+            return result
+        spent[ctx.item_idx] = count + 1
+        regimes = _prior_regimes(ctx.state, refs)
+        evidence = escalation_evidence(rv)
+        self.logger.info(f"   ⚖️  Replay escalated to the judge ({trigger}): an explanation, not a verdict")
+        parts: list = [escalation_question(evidence, regimes, trigger=trigger)]
+        if result.get("visualization_bytes"):
+            parts.append("\n\n**The replayed fit on the new measurement:**")
+            parts.append({"mime_type": "image/png", "data": result["visualization_bytes"]})
+        ref = chosen_ref if chosen_ref is not None else (refs[0] if refs else None)
+        overlay = _overlay_png(xy, (ref or {}).get("anchor_curve"), (ref or {}).get("regime"))
+        if overlay:
+            parts.append("\n\n**The new measurement (black) over the chosen regime's anchor (grey), each scaled to its maximum:**")
+            parts.append({"mime_type": "image/png", "data": overlay})
+        _append_skill_context(parts, ctx.state, "interpretation")
+        record: Dict[str, Any] = {"trigger": trigger, "decided_by": "judge",
+                                  "note": "a judge's reading of the evidence; no gate, no verdict, no re-run"}
+        try:
+            response = self.model.generate_content(contents=parts, generation_config=self.generation_config,
+                                                   safety_settings=self.safety_settings)
+            parsed, error = self._parse(response)
+            if error or not isinstance(parsed, dict):
+                raise ValueError(str(error or "no JSON object in the judge's answer"))
+            record.update(read_escalation_answer(parsed, regimes))
+        except Exception as exc:  # noqa: BLE001 - an explanation that could not be had is recorded as such
+            record["error"] = str(exc)[:300]
+            self.logger.warning(f"   ⚖️  The judge's answer could not be had: {record['error']}")
+            rv["escalation"] = record
+            return result
+        rv["escalation"] = record
+        line = (f"JUDGE (no gate): belongs to {record['belongs_to']!r}"
+                + (f", same interpretation: {record['same_interpretation']}" if record["same_interpretation"] is not None else "")
+                + (f" — {record['what_changed']}" if record["what_changed"] else "")
+                + f" [{record['confidence']} confidence]")
+        rv["message"] = (rv.get("message") or "") + " " + line
+        rc = rv.get("regime_choice")
+        if (isinstance(rc, dict) and rc.get("ambiguous") and record["belongs_to"] not in ("none", "cannot_tell")
+                and record["belongs_to"] != rc.get("chosen_regime")):
+            # the attribution the judge reads, listed beside the one the data gave; a decision for the caller
+            rc["suggested"] = record["belongs_to"]
+        self.logger.info(f"   ⚖️  {line}")
+        return result
 
     def _run_reuse_candidate(self, ctx: QCItemContext, script: str, source: Optional[str],
                              subdir: Optional[str], n: int, of: int, *, verbatim: bool = False) -> dict:
@@ -7591,7 +7750,10 @@ Return JSON with:
                             "drift_state": _drift_state(curve_data),
                             # the axis span the identity floor is 1 % of, so the
                             # floor is the same with and without the data files
-                            "x_range": _x_range(curve_data)}
+                            "x_range": _x_range(curve_data),
+                            # what the plan says this regime IS, for a judge later
+                            # asked why a replay of it differs (#712 escalation)
+                            "model": _regime_model(state, regime_name)}
                     if idx == 0:
                         state["base_fitting_script"] = result["script"]
                     self.logger.info(
