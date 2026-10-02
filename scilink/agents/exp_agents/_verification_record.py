@@ -390,6 +390,22 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
     return reconstructed_verdict(full)
 
 
+def replay_escalation(full_result: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The judge's reading of a replay that failed its checks (#712
+    escalation), as the ``analyses`` row carries it: trigger, belongs_to,
+    same_interpretation, what_changed (clipped), confidence — or None when
+    the run was not escalated or the judge's answer could not be had. An
+    opinion beside the verdict, never part of it."""
+    rv = (full_result or {}).get("reuse_validity") or {}
+    esc = rv.get("escalation") if isinstance(rv, dict) else None
+    if not isinstance(esc, dict) or esc.get("error") or esc.get("skipped") or not esc.get("what_changed"):
+        return None
+    return {"trigger": esc.get("trigger"), "belongs_to": esc.get("belongs_to"),
+            "same_interpretation": esc.get("same_interpretation"),
+            "what_changed": str(esc.get("what_changed"))[:600], "confidence": esc.get("confidence"),
+            "decided_by": "judge"}
+
+
 def reconstructed_verdict(full: Dict[str, Any]) -> Dict[str, Any]:
     """The verdict read from the shapes an agent writes, for a result that
     carries no stamped ``verdict`` (a run from before the record), and the
@@ -641,7 +657,8 @@ def series_recipes(full_result: Optional[dict]) -> List[Dict[str, Any]]:
             out.append({"regime": r.get("regime") or regime, "unit": str(r["unit"]), "index": r.get("index"),
                         "verified": bool((r.get("verdict") or {}).get("verified")),
                         "reason": (r.get("verdict") or {}).get("reason"), "script": r["script"],
-                        "drift_state": r.get("drift_state") if isinstance(r.get("drift_state"), dict) else None})
+                        "drift_state": r.get("drift_state") if isinstance(r.get("drift_state"), dict) else None,
+                        "model": r.get("model") if isinstance(r.get("model"), str) else None})
     out.sort(key=lambda r: (r.get("index") if isinstance(r.get("index"), int) else 1 << 30))
     return out
 
@@ -709,8 +726,8 @@ def prior_recipe_candidates(anchor_dir, *, single_name: str, named=None) -> List
     time; ``None`` on an older run)."""
     pairs = prior_recipe_scripts(anchor_dir, single_name=single_name, named=named)
     if named is not None or not pairs or pairs[0][1] is None or "locked recipe" not in (pairs[0][1] or ""):
-        return [{"script": t, "label": lbl, "regime": None, "unit": None, "verified": None, "drift_state": None}
-                for t, lbl in pairs]
+        return [{"script": t, "label": lbl, "regime": None, "unit": None, "verified": None, "drift_state": None,
+                 "model": None} for t, lbl in pairs]
     try:
         recorded = json.loads((Path(anchor_dir) / "analysis_results.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -719,7 +736,7 @@ def prior_recipe_candidates(anchor_dir, *, single_name: str, named=None) -> List
     out = []
     for (t, lbl), r in zip(pairs, recipes):
         out.append({"script": t, "label": lbl, "regime": r.get("regime"), "unit": r.get("unit"),
-                    "verified": r.get("verified"), "drift_state": r.get("drift_state")})
+                    "verified": r.get("verified"), "drift_state": r.get("drift_state"), "model": r.get("model")})
     return out
 
 

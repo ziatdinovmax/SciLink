@@ -13,7 +13,7 @@ import inspect
 import json
 from scilink.utils.text_io import atomic_write_json
 import logging
-from ._verification_record import analysis_verdict, series_anchor_unit, series_recipes
+from ._verification_record import analysis_verdict, replay_escalation, series_anchor_unit, series_recipes
 import os
 import time
 from pathlib import Path
@@ -1716,6 +1716,10 @@ class AnalysisOrchestratorAgent:
                     # — copies from; the meta leaves it off the rows its
                     # model reads (_summarize_delegation_result).
                     "recipes": series_recipes(rec.get("full_result")),
+                    # a replay that failed its checks and was explained by
+                    # the judge (#712 escalation): an opinion beside the
+                    # verdict, which the board posts as a provisional claim
+                    "escalation": replay_escalation(rec.get("full_result")),
                 } for rec in new_analyses
             ],
             "warnings": warnings,
