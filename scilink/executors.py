@@ -899,8 +899,19 @@ class WarmScriptExecutor(ScriptExecutor):
                         pass
 
 
+class SandboxTimeout(TimeoutError):
+    """The sandbox's own limit fired (``ExecutionTimeout``), on either path —
+    the SIGALRM handler on the main thread, the asynchronous injection into
+    a worker thread. A ``TimeoutError`` a script raises itself is not one.
+    The injected instance carries no message (``PyThreadState_SetAsyncExc``
+    takes a class), so callers test the TYPE, never the text."""
+
+    def __str__(self) -> str:
+        return super().__str__() or "Code execution timed out (the sandbox's limit)."
+
+
 class ExecutionTimeout:
-    """Context manager that raises TimeoutError if exec() exceeds a time limit.
+    """Context manager that raises SandboxTimeout if exec() exceeds a time limit.
 
     Strategy:
     1. SIGALRM — used when running in the main thread on Unix (fast, reliable).
@@ -914,9 +925,11 @@ class ExecutionTimeout:
         self._old_handler = None
         self._watchdog: threading.Timer | None = None
         self._target_tid: int | None = None
+        self.fired = False                  # set when the limit went off, on either path
 
     def _handler(self, signum, frame):
-        raise TimeoutError(
+        self.fired = True
+        raise SandboxTimeout(
             f"Code execution timed out after {self.seconds}s. "
             "Consider vectorized operations or reducing iteration count."
         )
@@ -928,13 +941,14 @@ class ExecutionTimeout:
         )
 
     def _inject_timeout(self):
-        """Raise TimeoutError asynchronously in the target thread."""
+        """Raise SandboxTimeout asynchronously in the target thread."""
         import ctypes
         tid = self._target_tid
         if tid is None:
             return
+        self.fired = True
         ret = ctypes.pythonapi.PyThreadState_SetAsyncExc(
-            ctypes.c_ulong(tid), ctypes.py_object(TimeoutError)
+            ctypes.c_ulong(tid), ctypes.py_object(SandboxTimeout)
         )
         if ret == 0:
             logging.warning("ExecutionTimeout: target thread no longer exists")

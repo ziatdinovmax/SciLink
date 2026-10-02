@@ -1038,10 +1038,14 @@ def _map_valid_coverage(result_map) -> tuple[float, int]:
 
 
 def _sandbox_timeout(exc: BaseException) -> bool:
-    """The sandbox's own limit (``ExecutionTimeout``), not a ``TimeoutError``
-    a script raised itself (a socket, a future): only the former means
-    "merely slow"."""
-    return isinstance(exc, TimeoutError) and "Code execution timed out after" in str(exc)
+    """The sandbox's own limit (``ExecutionTimeout`` → ``SandboxTimeout``, on
+    the main thread AND injected into a worker thread), not a
+    ``TimeoutError`` a script raised itself (a socket, a future): only the
+    former means "merely slow". The TYPE, never the message: the injected
+    instance has none, and nearly every interactive surface runs off the
+    main thread."""
+    from ....executors import SandboxTimeout
+    return isinstance(exc, SandboxTimeout)
 
 
 # The per-map replay gate lives with the shared replay policies (#712); the
@@ -3987,10 +3991,19 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                                         int(getattr(ctx, "locked_timeout_s", 0) or 0))
                     ctx.timeout_used_s = None            # per attempt: a swallowed or failed run leaves none
                     _run_deadline = state.get("_run_deadline")
+                    _loop_t0 = getattr(ctx, "loop_started", None)
+                    _loop_budget = getattr(self, "qc_time_budget_s", None)
 
                     def _remaining_s():
-                        # what is left on the run's deadline, if it has one
-                        return None if _run_deadline is None else _run_deadline - _time_mod.monotonic()
+                        # what is left for a RETRY: the run's deadline and the
+                        # verification loop's own wall-clock budget, whichever
+                        # is nearer (a 1800 s budget must not hold a 3600 s cap)
+                        left = []
+                        if _run_deadline is not None:
+                            left.append(_run_deadline - _time_mod.monotonic())
+                        if _loop_budget and _loop_t0 is not None:
+                            left.append(float(_loop_budget) - (_time_mod.monotonic() - _loop_t0))
+                        return min(left) if left else None
 
                     def _attempt(_timeout_s: int):
                         _scope_g, _scope_l = dict(global_scope), {}
@@ -4005,11 +4018,15 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                                     auxiliary=auxiliary_operands, fit_mask=fit_mask,
                                 )
                         except Exception as _exc:    # noqa: BLE001 - the sandbox's TimeoutError is the policy's
+                            # the attempt's scopes hold the script's arrays: let
+                            # them go whatever the error, before the same script
+                            # runs again (a timeout) or a repaired one does (any
+                            # other error, through the repair call); a timeout's
+                            # traceback is dropped too, an error's is the
+                            # correction prompt's and is dropped at the re-raise
+                            _scope_g.clear(); _scope_l.clear()
                             if _sandbox_timeout(_exc):   # outcome; anything else is re-raised below
-                                # the timed-out attempt's frames hold the script's arrays:
-                                # let them go before the same script runs again
                                 _exc.__traceback__ = None
-                                _scope_g.clear(); _scope_l.clear()
                             return _exc
                     result_dict, _timeout_used = escalate_timeouts(
                         _attempt, base_timeout=_base_timeout,
@@ -4017,13 +4034,19 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         logger=self.logger, remaining_s=_remaining_s,
                         # a live frame must fail fast: no escalation on the fast clock
                         escalations=0 if state.get("_strict_replay") else None)
-                    if isinstance(result_dict, TimeoutError) and _sandbox_timeout(result_dict):
-                        raise result_dict          # ladder currency, as before, once the budget is spent
                     if isinstance(result_dict, Exception):
                         # Raised here, without this wrapper's frame, so the
-                        # traceback the correction prompt shows is the script's.
-                        _tb = result_dict.__traceback__
-                        raise result_dict.with_traceback(_tb.tb_next if _tb is not None and _tb.tb_next else _tb)
+                        # traceback the correction prompt shows is the script's
+                        # (a sandbox timeout is ladder currency, as before, once
+                        # the budget is spent). This frame's own references go
+                        # at the re-raise, or they would live on in the
+                        # traceback through the repair call and double the peak.
+                        _exc_out, _tb = result_dict, result_dict.__traceback__
+                        del result_dict
+                        try:
+                            raise _exc_out.with_traceback(_tb.tb_next if _tb is not None and _tb.tb_next else _tb)
+                        finally:
+                            del _exc_out, _tb
                     ctx.timeout_used_s = _timeout_used
                     if not isinstance(result_dict, dict):
                         raise ValueError("Function return must be a dict.")
