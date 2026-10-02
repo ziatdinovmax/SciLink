@@ -332,8 +332,13 @@ a `<stem>.recipe.json` sidecar with the plan's model; the live loop's
 series-derived anchor records the locked frame's regime gate) — a reuse run
 resolves a gate of its own from whatever skill it was or was not given, which
 is not the recipe's. A caller who asks for a gate on the reuse run
-(`quality_gate=` or `r2_threshold=`, `quality_gate_explicit`) wins, with a
-warning. Else the run's effective `QualityGate` (`_replay_gate`: an R² gate
+wins, with a warning (`quality_gate_explicit`: a full `quality_gate=`, or an
+`r2_threshold=` that `resolve_gate` honoured and that the recipe's own R²
+metric can take — a bare number cannot replace a recipe's figure of merit,
+and a number the skill's metric guard dropped was no ask; a constructor-level
+default is not an ask). The same decision holds a reuse's SERIES UNITS
+(`_series_gate` → `_detect_outliers`): a profile-gated recipe replayed over
+a series with no skill is not flagged and refit on R². Else the run's effective `QualityGate` (`_replay_gate`: an R² gate
 at the driver's live `r2_threshold`, a skill's own metric at the skill's
 threshold and direction, the rule `_detect_outliers` already applied to a
 series' followers; a metric the replayed script does not report is a reject). The

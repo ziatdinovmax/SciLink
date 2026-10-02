@@ -789,12 +789,29 @@ def recipe_sidecar(named) -> Dict[str, Any]:
     try:
         p = Path(named)
         side = p.with_name(f"{p.stem}.recipe.json")
-        if side.is_file():
-            data = json.loads(side.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
+        if not side.is_file():
+            return {}
+        data = json.loads(side.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {}
+        out: Dict[str, Any] = {}
+        for k in ("regime", "unit", "model", "analysis_id"):
+            if data.get(k) is not None:
+                out[k] = str(data[k])[:300]
+        gate = data.get("quality_gate")
+        if isinstance(gate, dict):
+            # a malformed gate is no gate: it must round-trip through the
+            # gate's own reader, or the replay falls back to the run's
+            try:
+                from .quality_gate import from_mapping, gate_record
+                rec = gate_record(from_mapping(gate))
+                if rec:
+                    out["quality_gate"] = rec
+            except Exception:  # noqa: BLE001
+                pass
+        return out
     except (OSError, ValueError, TypeError):
-        pass
-    return {}
+        return {}
 
 
 def named_recipe_file(raw_path) -> Optional[Path]:

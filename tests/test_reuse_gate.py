@@ -15,6 +15,7 @@ metric and threshold; under an R² gate nothing changes (the live
 ``r2_threshold``, as before).
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -179,21 +180,43 @@ def test_an_explicit_gate_on_the_reuse_run_wins_with_a_warning(tmp_path, monkeyp
     loose = QualityGate(metric="r_squared", accept_threshold=0.80, hard_reject_threshold=0.70)
     with caplog.at_level(logging.WARNING):
         res, ex, _, _ = curve._replay(tmp_path / "b", monkeypatch, {"LOW": 0.80, "HIGH": 0.915}, prior=prior, data=data, extra_params=params,
-                                      quality_gate=loose, state_extra={"quality_gate_explicit": True},
+                                      quality_gate=loose, state_extra={"quality_gate_explicit": "gate"},
                                       controller=lambda out, ex: _loose_controller(out, ex, 0.80))
     assert res["reuse_validity"]["verdict"] == "good" and res["reuse_validity"]["threshold"] == 0.80
     assert any("approved under r_squared 0.95" in r.message and "asked for r_squared 0.8" in r.message for r in caplog.records)
     # asked for 0.99: judged at 0.99, not the recipe's 0.95
     strict = QualityGate(metric="r_squared", accept_threshold=0.99, hard_reject_threshold=0.95)
     res, ex, _, _ = curve._replay(tmp_path / "c", monkeypatch, {"LOW": 0.80, "HIGH": 0.97}, prior=prior, data=data, extra_params=params,
-                                  quality_gate=strict, state_extra={"quality_gate_explicit": True},
+                                  quality_gate=strict, state_extra={"quality_gate_explicit": "gate"},
                                   controller=lambda out, ex: _loose_controller(out, ex, 0.99))
     assert res["reuse_validity"]["verdict"] == "poor" and res["reuse_validity"]["threshold"] == 0.99
     # an explicit figure-of-merit gate on the reuse run is applied to a recipe approved under R²
     res, ex, _, _ = curve._replay(tmp_path / "d", monkeypatch, {"LOW": 0.80, "HIGH": 0.915}, prior=prior, data=data,
                                   extra_params=params, extra_quality={"HIGH": {"figure_of_merit": 0.9}},
-                                  quality_gate=FOM, state_extra={"quality_gate_explicit": True})
+                                  quality_gate=FOM, state_extra={"quality_gate_explicit": "gate"})
     assert res["reuse_validity"]["verdict"] == "good" and res["reuse_validity"]["metric"] == "figure_of_merit"
+    # an r2_threshold= ask (honoured by resolve_gate: "threshold") moves an R² recipe's threshold...
+    res, ex, _, _ = curve._replay(tmp_path / "e", monkeypatch, {"LOW": 0.80, "HIGH": 0.915}, prior=prior, data=data, extra_params=params,
+                                  state_extra={"quality_gate_explicit": "threshold"},
+                                  controller=lambda out, ex: _loose_controller(out, ex, 0.80))
+    assert res["reuse_validity"]["verdict"] == "good" and res["reuse_validity"]["threshold"] == 0.80 and res["reuse_validity"]["metric"] == "r_squared"
+    # ...but cannot replace a recipe's figure-of-merit gate: the recipe's stands, and the log says the override was ignored
+    fom_prior = rc.prior_two_regime_run(tmp_path / "fp")
+    _recorded(fom_prior, FOM)
+    with caplog.at_level(logging.WARNING):
+        caplog.clear()
+        res, ex, _, _ = curve._replay(tmp_path / "f", monkeypatch, {"LOW": 0.05, "HIGH": 0.057}, prior=fom_prior, data=data,
+                                      extra_params=params, extra_quality={"HIGH": {"figure_of_merit": 0.88}},
+                                      state_extra={"quality_gate_explicit": "threshold"},
+                                      controller=lambda out, ex: _loose_controller(out, ex, 0.90))
+    assert res["reuse_validity"]["verdict"] == "good" and res["reuse_validity"]["metric"] == "figure_of_merit"
+    assert any("R² override 0.9 ignored" in r.message for r in caplog.records)
+    # the agent sets the flag from resolve_gate's outcome: a bare number under a skill's non-R² gate is no ask
+    from scilink.agents.exp_agents.quality_gate import resolve_gate
+    eff = resolve_gate(user_threshold=0.9, skill_meta={"quality_gate": gate_record(PROFILE)})
+    assert eff.metric == "peak_region_r2"                                   # the guard dropped the number
+    flag = "gate" if False else ("threshold" if 0.9 is not None and eff.metric == "r_squared" else None)
+    assert flag is None
 
 
 def _loose_controller(out, ex, r2):
@@ -224,9 +247,27 @@ def test_the_boards_copy_of_a_recipe_carries_its_gate_and_model(tmp_path, monkey
     copy = Path(rec["payload"]["path"])
     assert rec["payload"]["quality_gate"] == gate_record(FOM) and rec["payload"]["model"] == "rutile TiO2, P42/mnm"
     side = recipe_sidecar(copy)
-    assert side["quality_gate"] == gate_record(FOM) and side["model"] == "rutile TiO2, P42/mnm" and side["regime"] == "rutile"
+    same = lambda rec, g: from_mapping(rec) == from_mapping(gate_record(g))      # noqa: E731 - the reader fills a known best value
+    assert same(side["quality_gate"], FOM) and side["model"] == "rutile TiO2, P42/mnm" and side["regime"] == "rutile"
     cands = prior_recipe_candidates(copy.parent, single_name="fitting_script.py", named=copy)
-    assert cands[0]["gate"] == gate_record(FOM) and cands[0]["model"] == "rutile TiO2, P42/mnm" and cands[0]["regime"] == "rutile"
+    assert same(cands[0]["gate"], FOM) and cands[0]["model"] == "rutile TiO2, P42/mnm" and cands[0]["regime"] == "rutile"
+    # the sidecar sits beside the script it describes, also when the copy's name was taken (u_1-2.py)
+    board_mod.post_delegation(board, {**entry, "index": 2, "label": "xrd"}, {"analyses": [{**row, "analysis_id": "s1",
+                              "recipes": [{**row["recipes"][0], "script": "OTHER"}]}]})
+    copies = sorted(copy.parent.glob("*.py"))
+    assert len(copies) == 2 and all(c.with_name(f"{c.stem}.recipe.json").is_file() for c in copies)
+    # a malformed sidecar is no sidecar: the replay falls back to the run's gate and the step does not crash
+    bad = tmp_path / "bad" / "recipe.py"
+    bad.parent.mkdir()
+    bad.write_text("HIGH")
+    bad.with_name("recipe.recipe.json").write_text(json.dumps({"quality_gate": {"metric": "figure_of_merit", "accept_threshold": "abc"},
+                                                               "regime": ["not", "a", "string"], "unit": 7}))
+    side = recipe_sidecar(bad)
+    assert "quality_gate" not in side and side["regime"] == "['not', 'a', 'string']" and side["unit"] == "7"
+    res, ex, _, _ = curve._replay(tmp_path / "g", monkeypatch, {"HIGH": 0.99}, prior=bad, data=rc.spectrum(rc.RUTILE, seed=4),
+                                  extra_params={"HIGH": rc.auto_detect_parameters(rc.RUTILE, seed=61)},
+                                  state_extra={"quality_gate_explicit": "threshold"})
+    assert res["reuse_validity"]["verdict"] == "good" and res["reuse_validity"]["metric"] == "r_squared"
     # a replay of the copy, with no skill on the reuse run: judged on the recipe's figure of merit, R² -0.5 beside it
     res, ex, _, _ = curve._replay(tmp_path / "a", monkeypatch, {"HIGH": -0.5}, prior=copy, data=rc.spectrum(rc.RUTILE, seed=3),
                                   extra_quality={"HIGH": {"figure_of_merit": 1.0}},
@@ -237,13 +278,13 @@ def test_the_boards_copy_of_a_recipe_carries_its_gate_and_model(tmp_path, monkey
     run_dir = tmp_path / "single_run"
     (run_dir / "scripts").mkdir(parents=True)
     (run_dir / "scripts" / "fitting_script.py").write_text("ONE")
-    import json
     (run_dir / "analysis_results.json").write_text(json.dumps({"status": "success", "quality_gate": gate_record(PROFILE)}))
     row2 = {"analysis_id": "r2", "status": "success", "verified": True, "reason": "ok", "agent_name": "CurveFittingAgent",
             "output_directory": str(run_dir)}
     board_mod.post_delegation(board, {**entry, "index": 3}, {"analyses": [row2]})
     rec2 = next(r for r in board.records() if r["kind"] == "recipe" and r["payload"]["analysis_id"] == "r2")
-    assert rec2["payload"]["quality_gate"] == gate_record(PROFILE) and recipe_sidecar(Path(rec2["payload"]["path"]))["quality_gate"] == gate_record(PROFILE)
+    assert rec2["payload"]["quality_gate"] == gate_record(PROFILE)
+    assert same(recipe_sidecar(Path(rec2["payload"]["path"]))["quality_gate"], PROFILE)
 
 
 def test_a_series_derived_live_reference_carries_the_frames_gate(tmp_path):
@@ -270,3 +311,29 @@ def test_a_series_derived_live_reference_carries_the_frames_gate(tmp_path):
     (series / "analysis_results.json").write_text(json.dumps({"quality_gate": gate_record(PROFILE), "locked_recipes": {}}))
     MeasurementLoop._single_frame_anchor(series, dest, ["a.txt", "b.txt"])
     assert json.loads((dest / "analysis_results.json").read_text())["quality_gate"] == gate_record(PROFILE)
+
+
+def test_series_units_of_a_reuse_are_held_to_the_recipes_gate(tmp_path, monkeypatch):
+    """#717 round 2, item 1: a profile-gated recipe reused over a series with
+    no skill had its anchor good on peak_region_r2 and every unit flagged
+    below_threshold on R² 0.95, with LLM refits. The units are held to the
+    reuse decision's gate (_series_gate), as the replay is."""
+    from unittest.mock import MagicMock
+    ctrl = _loose_controller(tmp_path, MagicMock(), 0.95)
+    rows = [{"index": i, "name": f"s{i}", "success": True, "fit_quality": {"r_squared": 0.80 + 0.01 * i, "peak_region_r2": 0.96 + 0.005 * i}}
+            for i in range(5)]
+    # the run's own gate is the R² default (no skill): every unit flagged on main's rule
+    flagged = ctrl._detect_outliers(rows, gate=ctrl._series_gate({}))
+    assert [f["reason"] for f in flagged] == ["below_threshold"] * 5
+    # the run replays a profile-gated recipe: the units are held to peak_region_r2 ≥ 0.90 — none flagged
+    state = {"_reuse_gate": gate_record(PROFILE)}
+    assert ctrl._series_gate(state).metric == "peak_region_r2"
+    assert ctrl._detect_outliers(rows, gate=ctrl._series_gate(state)) == []
+    # a recipe approved at R² 0.90 reused on a run whose driver sits at 0.95: units at 0.92 are not flagged
+    state = {"_reuse_gate": gate_record(QualityGate(metric="r_squared", accept_threshold=0.90, hard_reject_threshold=0.75))}
+    rows2 = [{"index": i, "name": f"s{i}", "success": True, "fit_quality": {"r_squared": 0.92}} for i in range(5)]
+    assert ctrl._detect_outliers(rows2, gate=ctrl._series_gate(state)) == []
+    assert [f["reason"] for f in ctrl._detect_outliers(rows2, gate=ctrl._series_gate({}))] == ["below_threshold"] * 5
+    # the caller's ask on the reuse run binds the units too
+    state = {"_reuse_gate": gate_record(PROFILE), "quality_gate_explicit": "gate", "quality_gate": FOM}
+    assert ctrl._series_gate(state).metric == "figure_of_merit"

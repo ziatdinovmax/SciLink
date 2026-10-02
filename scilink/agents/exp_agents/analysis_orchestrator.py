@@ -390,7 +390,12 @@ examine_data returns data_type:
   things or merely reproduce the result you meant to check.
 - After such a run, READ the `reuse_validity` field in the `run_analysis`
   result and act on its `verdict`:
-  - `good` — the reused recipe fits the new measurement well; proceed normally.
+  - `good` — the reused recipe fits the new measurement well (the GATE's
+    verdict, the numbers). If the result also carries a `reuse_caveat`, the
+    replay's certificate was withheld and a judge read the measurement
+    differently (another regime, a changed phase): relay that reading to the
+    user as an opinion beside the verified numbers — it changes no verdict,
+    and the result is not settled until the user has seen it.
   - `poor` — the row is still schema-consistent and safe to append, but the
     reused recipe fits this measurement poorly. Surface the `reuse_warning` to
     the user: the new measurement may not belong to this series, or conditions

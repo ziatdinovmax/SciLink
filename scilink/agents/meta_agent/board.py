@@ -904,7 +904,7 @@ def _materialize_recipe(board: Board, entry: Dict[str, Any], spec: Dict[str, Any
     side = {k: spec["payload"][k] for k in ("quality_gate", "model", "regime", "unit", "analysis_id") if spec["payload"].get(k)}
     if side.get("quality_gate"):
         try:
-            _write_once(folder, f"{Path(name).stem}.recipe.json", json.dumps(side, indent=1, default=str))
+            _write_once(folder, f"{dest.stem}.recipe.json", json.dumps(side, indent=1, default=str))
         except Exception:  # noqa: BLE001 - the script copy stands without its sidecar
             pass
     if source:

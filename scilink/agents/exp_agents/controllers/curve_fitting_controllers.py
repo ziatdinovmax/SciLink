@@ -5453,57 +5453,77 @@ Return JSON with:
             out["reuse_validity"]["regime_choice"] = {**regime_choice, "chosen_regime": None}
         return out
 
-    def _replay_gate(self, state: dict):
-        """The gate a replayed result is held to, and how its score is read.
-        First the gate the RECIPE was approved under (``_reuse_gate``: recorded
-        on the recipe at lock time, or the prior run's recorded gate) — unless
-        the caller asked for a gate on this run (``quality_gate_explicit``),
-        which wins with a warning — else the RUN's effective :class:`QualityGate` — the rule ``_detect_outliers``
-        holds a series' followers to — where an R² gate is the driver's live
-        ``r2_threshold`` (so ``adjust_threshold`` is observed) and a skill's
-        own metric (``peak_region_r2``, a figure of merit) is read from the
-        result with the skill's threshold and direction. Before this, a reuse
-        was judged on global R² whatever gate approved the recipe: a correct
-        low-SNR profile fit (high ``peak_region_r2``, low R²) and a
-        phase-identification recipe (R² negative by construction) could never
-        replay as ``good``."""
-        from .._replay import ScoreReplayGate
+    def _reuse_gate_decision(self, state: dict, *, warn: bool = True):
+        """Which :class:`QualityGate` a REUSE run holds its replays and its
+        series units to, and why: ``(gate, source)`` with ``source`` one of
+        ``recipe`` (the gate recorded with the recipe — the default), ``run``
+        (the caller asked for a gate on this run: a full ``quality_gate=``, or
+        an ``r2_threshold=`` that resolve_gate honoured AND that the recipe's
+        own R² metric can take), or ``none`` (nothing recorded: the run's
+        effective gate, as before). A malformed record is no record. The
+        warning, once per decision when ``warn``, says what was asked over
+        what the recipe was approved under; a threshold asked against a
+        recipe gated on another metric is not applied, and says so."""
         from ..quality_gate import from_mapping
         recorded = state.get("_reuse_gate")
-        g = None
-        if isinstance(recorded, dict) and state.get("quality_gate_explicit"):
-            # the caller asked for a gate on THIS run (quality_gate= or
-            # r2_threshold=): it wins, as resolve_gate's priority says, and
-            # the record keeps what the recipe was approved under
-            own = _gate(state)
-            if (own.metric, float(own.accept_threshold)) != (recorded.get("metric"), float(recorded.get("accept_threshold") or 0)):
-                self.logger.warning(f"   ⚠️  The recipe was approved under {recorded.get('metric')} "
-                                    f"{recorded.get('accept_threshold')}; this run asked for {own.metric} "
-                                    f"{own.accept_threshold}, which the replay is held to.")
-            recorded = None
+        rec = None
         if isinstance(recorded, dict):
-            # the gate the RECIPE was approved under (recorded with it at
-            # lock time, or the prior run's): a reuse run resolves a gate of
-            # its own from whatever skill it was or was not given, which is
-            # not the recipe's — live, a phase-identification recipe approved
-            # at figure_of_merit >= 0.70 replayed under the R² default
             try:
-                g = from_mapping(recorded)
-            except (TypeError, ValueError):
-                g = None
-        if g is not None and g.value_source == "result" and g.metric != "r_squared":
-            def score_of(result: dict) -> Optional[float]:
-                return g.extract(result.get("fit_quality"))
-            return ScoreReplayGate(g.is_accept, float(g.accept_threshold), g.label, key=g.metric), score_of
-        if g is not None and g.metric == "r_squared":
-            def score_of(result: dict) -> float:
-                return float((result.get("fit_quality") or {}).get("r_squared") or 0.0)
-            return ScoreReplayGate(g.is_accept, float(g.accept_threshold), "R²", key="r_squared"), score_of
-        g = _gate(state)
-        if g.metric == "r_squared" or g.value_source != "result":
+                rec = from_mapping(recorded)
+            except Exception:  # noqa: BLE001 - a malformed record is no record
+                rec = None
+        own = _gate(state)
+        if rec is None:
+            return own, "none"
+        explicit = state.get("quality_gate_explicit")
+        if explicit == "gate":
+            if warn and (own.metric, float(own.accept_threshold)) != (rec.metric, float(rec.accept_threshold)):
+                self.logger.warning(f"   ⚠️  The recipe was approved under {rec.metric} {rec.accept_threshold}; this run "
+                                    f"asked for {own.metric} {own.accept_threshold}, which the replay is held to.")
+            return own, "run"
+        if explicit == "threshold":
+            if rec.metric == "r_squared":
+                if warn and abs(float(rec.accept_threshold) - float(self.r2_threshold)) > 1e-9:
+                    self.logger.warning(f"   ⚠️  The recipe was approved at R² {rec.accept_threshold}; this run asked for "
+                                        f"R² {self.r2_threshold}, which the replay is held to.")
+                return rec.with_accept_threshold(float(self.r2_threshold)), "run"
+            if warn:
+                self.logger.warning(f"   ⚠️  R² override {self.r2_threshold} ignored: the recipe is gated on "
+                                    f"{rec.metric} {rec.accept_threshold}, which the replay is held to.")
+        return rec, "recipe"
+
+    def _series_gate(self, state: dict):
+        """The gate a series' UNITS are held to (outlier flags, refits): the
+        reuse decision's gate when the run replays a recipe, else the run's
+        effective gate — the follower half of the rule, so a profile- or
+        figure-of-merit-gated recipe replayed over a series with no skill
+        does not have every unit flagged on R² and refit."""
+        if state.get("_reuse_gate"):
+            return self._reuse_gate_decision(state, warn=False)[0]
+        return _gate(state)
+
+    def _replay_gate(self, state: dict, *, warn: bool = True):
+        """The ``ScoreReplayGate`` a replayed result is held to, and how its
+        score is read, from ``_reuse_gate_decision``: the gate the RECIPE was
+        approved under (recorded on the recipe at lock time, or the prior
+        run's recorded gate) unless the caller asked for a gate on this run,
+        else the RUN's effective gate — the rule ``_detect_outliers`` holds a
+        series' followers to. An R² gate with nothing recorded is the driver's
+        live ``r2_threshold``; a skill's own metric (``peak_region_r2``, a
+        figure of merit) is read from the result with its threshold and
+        direction; a metric the replayed script does not report is a reject.
+        Before this, a reuse was judged on global R² whatever gate approved
+        the recipe."""
+        from .._replay import ScoreReplayGate
+        g, source = self._reuse_gate_decision(state, warn=warn)
+        if source == "none" and (g.metric == "r_squared" or g.value_source != "result"):
             def score_of(result: dict) -> float:
                 return float((result.get("fit_quality") or {}).get("r_squared") or 0.0)
             return ScoreReplayGate(self._accept_gate().is_accept, float(self.r2_threshold), "R²", key="r_squared"), score_of
+        if g.metric == "r_squared" or g.value_source != "result":
+            def score_of(result: dict) -> float:
+                return float((result.get("fit_quality") or {}).get("r_squared") or 0.0)
+            return ScoreReplayGate(g.is_accept, float(g.accept_threshold), "R²", key="r_squared"), score_of
 
         def score_of(result: dict) -> Optional[float]:
             return g.extract(result.get("fit_quality"))
@@ -5766,7 +5786,7 @@ Return JSON with:
         the skill's metric otherwise); ``r_squared`` on the record is always
         the fit's R² (portability reads it), ``score`` / ``metric`` /
         ``threshold`` are the gate's."""
-        gate, _ = self._replay_gate(ctx.state)
+        gate, _ = self._replay_gate(ctx.state, warn=False)
         label, thr = gate.metric, gate.threshold
         shown = f"{reuse_r2:.4f}" if isinstance(reuse_r2, (int, float)) else "not reported"
         regimes = (f" ({of} regime recipes tried; this is recipe {kept_from or tried})" if of > 1 else "")
@@ -7352,7 +7372,10 @@ Return JSON with:
         # fit has a high gate metric but a low global R² — flagging on global R²
         # false-flags it. Fall back to r_squared when there is no such gate
         # (legacy behavior, unchanged).
-        self._outlier_gate = gate if (gate is not None and gate.metric != "r_squared") else None
+        # an R² gate at a threshold other than the driver's (a reused
+        # recipe's) counts as a gate of its own too
+        self._outlier_gate = gate if (gate is not None and (gate.metric != "r_squared"
+                                                             or abs(float(gate.accept_threshold) - float(self.r2_threshold)) > 1e-9)) else None
 
         def _score(r):
             fq = r.get("fit_quality", {})
@@ -7635,7 +7658,8 @@ Return JSON with:
                                            for c in cands]
                                           if len(cands) > 1 and not state.get("script_edits") else [])
             # the gate the recipe was approved under (the prior run's), which
-            # the replay is held to; None on an older run (the run's own gate)
+            # the replay is held to; None on an older run (the run's own gate).
+            # One run stamps one gate, so the first candidate's stands for all.
             state["_reuse_gate"] = cands[0].get("gate") if cands else None
             reuse_script, reuse_source = _apply_reuse_script_edits(
                 state, reuse_script, reuse_source, self.logger)
@@ -7953,7 +7977,7 @@ Return JSON with:
         
         flagged_spectra = []
         if num_spectra > 1:
-            flagged_spectra = self._detect_outliers(series_results, gate=_gate(state))
+            flagged_spectra = self._detect_outliers(series_results, gate=self._series_gate(state))
             
             if flagged_spectra:
                 report = self._generate_outlier_report(flagged_spectra, series_results)
@@ -8970,7 +8994,7 @@ Return JSON: {{"script": "<the complete modified script>"}}
         state["refit_summary"] = refit_summary
 
         # Re-run outlier detection with updated results
-        updated_flagged = self._fitting_helper._detect_outliers(series_results)
+        updated_flagged = self._fitting_helper._detect_outliers(series_results, gate=self._fitting_helper._series_gate(state))
         state["flagged_spectra"] = updated_flagged
 
         improved_count = sum(1 for r in refit_summary if r["improved"])
