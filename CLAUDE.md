@@ -247,8 +247,16 @@ decides (a series unit at fit time, a cube or a run when its result is final,
 `results["verdict"]`) and that `analysis_verdict` and the swarm board only
 read; three replay gates with one verdict shape (`ScoreReplayGate` for the
 curve's R² and the image's vision score, `FeatureHealthGate` for an image
-strict replay, `MapReplayGate` for a hyperspectral map); and `select_recipe`,
-the one rule for choosing among a series' regime recipes on a reuse. The
+strict replay, `MapReplayGate` for a hyperspectral map); `select_recipe`,
+the one rule for choosing among a series' regime recipes on a reuse; and the
+timeout policy (`_locked_exec.escalate_timeouts`: a slow script gets a doubled
+limit, up to the cap, before it is called broken — hyperspectral included,
+#699; the FIRST limit is never clamped, a started script finishes; the retries
+are bounded by the run's deadline and the loop's budget; the sandbox's limit is
+one type on both threads, `executors.SandboxTimeout`, because the message test
+missed every worker-thread surface; a failed attempt's arrays are released
+before the retry or the repair, the traceback's frames cleared along
+`__cause__` / `__context__`). The
 reconstruction from result shapes (`reconstructed_verdict`) serves
 results from before the stamp and is the reference the stamps are held to
 (`tests/test_verdict_parity.py`, no allow-list). A new agent-side decision
@@ -285,7 +293,7 @@ checked the same cheap way against their regime's anchor (`_check_follower`
 post a verified claim when every unit certified; without that, a single-run
 reuse and every series reuse were provisional forever. This is the curve
 agent's: an image reuse has no identity check on its `reuse_validity` and
-is never certified, so its claims stay provisional (verified on `main`). A hyperspectral
+is never certified, so its claims stay provisional. A hyperspectral
 replay's `identity_checked` is the map gate's range rule — every required
 map inside the anchor's plausible range — a weaker certificate than the
 curve's two checks. The verdict stays the gate's, on the fast clock and
@@ -805,7 +813,11 @@ delegations of any mode concurrently, each on an **ephemeral worker**
 too) in `<meta_session>/swarm/<NN>_<slug>/`, each an ordinary ledger
 delegation. The design, its stages and what each stage left open are in
 `docs/proposals/agent-swarms.md`; stages 0, 1 (#697) and 2 (the board, #702)
-and 3 (reactions, #708) are on `main`, stage 4 (scheduling) is next.
+and 3 (reactions, #708) are on `main`, the replay policies the board's
+"verified" rests on were settled between stages (#712: #713, #714, #717,
+#715), and stage 4 (scheduling) is next — the local scheduler first, the AWS
+worker tasks as their own PR with the hosted-campaigns work (the proposal's
+"Between stage 3 and stage 4" says why).
 Settled rules, each learned from a live run or a review:
 
 - **A swarm item is a fresh agent.** It does not remember earlier delegations;
