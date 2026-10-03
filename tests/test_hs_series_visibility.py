@@ -38,15 +38,18 @@ DOSES = [1, 2, 3]
 SCRIPT = "def analyze_feature(data, axis):\n    return {'maps': {'Mean_Map': data.mean(2)}}\n"
 
 
-def _series_dir(tmp_path):
+def _series_dir(tmp_path, repeat_series_variable=False):
     d = tmp_path / "cubes"
     d.mkdir()
     for i, (exp, dose) in enumerate(zip(EXPOSURES, DOSES)):
         np.save(d / f"cube_{i}.npy", np.full((4, 4, 8), float(i + 1), dtype=np.float32))
-        # a bundle-wide condition index, the series variable repeated under
-        # another name, and an acquisition field that differs per unit
-        (d / f"cube_{i}.json").write_text(json.dumps(
-            {"condition_index": 7 + i, "dose_mC": dose, "exposure_s": exp}))
+        # a bundle-wide condition index and an acquisition field that differs
+        # per unit (the live shape); optionally the series variable under
+        # another name, as an older sidecar would carry it
+        side = {"condition_index": 7 + i, "exposure_s": exp}
+        if repeat_series_variable:
+            side["dose_mC"] = dose
+        (d / f"cube_{i}.json").write_text(json.dumps(side))
     return d
 
 
@@ -94,6 +97,11 @@ def _orchestrator(tmp_path, monkeypatch, seen, fail=(), salvage=()):
     return orch, calls
 
 
+def _table(result):
+    with open(Path(result["analyses"][0]["output_directory"]) / "features.csv", newline="") as fh:
+        return list(csv.DictReader(fh))
+
+
 def _run(orch, data_dir):
     def chat(prompt):
         out = json.loads(orch.tools.execute_tool(
@@ -139,8 +147,7 @@ def test_a_partial_series_says_how_partial_it_is(tmp_path, monkeypatch):
     assert [t["unit"] for t in table] == ["cube_0", "cube_1", "cube_2"]
     assert [t["verified"] for t in table] == ["False", "False", "False"]
     assert [t["flag_reason"] for t in table] == ["analysis_failed", "analysis_failed", "unverified"]
-    assert [float(t["dose"]) for t in table] == DOSES
-    assert "dose_mC" not in table[0]                         # it only repeated the series variable
+    assert [float(t["dose"]) for t in table] == DOSES       # the series variable is in the table
     assert [t["condition_index"] for t in table] == ["7", "8", "9"]
     assert [t["exposure_s"] for t in table] == ["0.1", "1.7", "0.5"]
     # no recipe locked: the flag does not promise a re-analysis
@@ -158,8 +165,13 @@ def test_with_a_locked_recipe_a_failed_unit_is_still_promised_a_refit(tmp_path, 
     earlier failures CAN be refit and their flag says so."""
     seen = []
     orch, _ = _orchestrator(tmp_path, monkeypatch, seen, fail=("cube_0",))
-    result = _run(orch, _series_dir(tmp_path))
+    result = _run(orch, _series_dir(tmp_path, repeat_series_variable=True))
     out = Path(result["analyses"][0]["output_directory"])
+    # a sidecar column already holding the series variable keeps its name, as
+    # tables had it before (a planning campaign keyed on it still finds it);
+    # the series variable is not added a second time
+    table = _table(result)
+    assert [float(t["dose_mC"]) for t in table] == DOSES and "dose" not in table[0]
     from scilink.agents.exp_agents.controllers.hyperspectral_series import FLAGGED_FILENAME
     flags = json.loads((out / FLAGGED_FILENAME).read_text())["flagged_datasets"]
     recs = [f["recommendation"] for f in flags if f.get("reason") == "analysis_failed"]

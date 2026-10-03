@@ -164,9 +164,9 @@ def _unit_conditions(series_meta: Any, r: Dict[str, Any]) -> Dict[str, Any]:
     its sidecar's fields (a sidecar field of the same name wins — it is the
     unit's own record). The series variable is always kept: a strict
     fallback dropped it whenever a sidecar existed, and fusion then read a
-    bundle-wide condition index instead (#723). A sidecar column that only
-    repeats the series variable under another name is removed table-wide by
-    ``_drop_repeated_conditions``."""
+    bundle-wide condition index instead (#723). Where a sidecar column already
+    holds the series variable under another name, the sidecar's column is the
+    one kept (``_drop_repeated_conditions``)."""
     return {**_series_conditions(series_meta, r.get("index"), r.get("data_path")),
             **_sidecar_conditions(r.get("data_path"))}
 
@@ -189,9 +189,13 @@ def _unit_status(r: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _drop_repeated_conditions(rows: List[Dict[str, Any]], series_meta: Any) -> List[Dict[str, Any]]:
-    """Remove a sidecar column whose value equals the series variable's in
-    EVERY row: one quantity under two names (sidecar ``temperature_C`` beside
-    the series' ``temperature``) would be counted twice by a consumer."""
+    """Remove the series variable's column where a sidecar column already
+    carries the same value in EVERY row: one quantity under two names
+    (sidecar ``temperature_C`` beside the series' ``temperature``) would be
+    counted twice by a consumer, and the sidecar's name is the one tables
+    had before the series variable was always added — a planning campaign
+    keyed on it must keep finding it. The series variable stays where no
+    sidecar column holds it (#723)."""
     if not isinstance(series_meta, dict) or not rows:
         return rows
     blocks = [series_meta] + [b for b in (series_meta.get("secondary_variables") or []) if isinstance(b, dict)]
@@ -200,11 +204,9 @@ def _drop_repeated_conditions(rows: List[Dict[str, Any]], series_meta: Any) -> L
     for var in series_vars:
         if not all(var in row for row in rows):
             continue
-        for key in rows[0]:
-            if key in series_vars or key in drop or key in ("unit", "verified", "flag_reason"):
-                continue
-            if all(key in row and row[key] == row[var] for row in rows):
-                drop.add(key)
+        others = [k for k in rows[0] if k not in series_vars and k not in ("unit",) + STATUS_COLUMNS]
+        if any(all(k in row and row[k] == row[var] for row in rows) for k in others):
+            drop.add(var)
     return [{k: v for k, v in row.items() if k not in drop} for row in rows] if drop else rows
 
 
