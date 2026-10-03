@@ -4033,7 +4033,13 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                                 # IS this exception — a cycle only the GC would break,
                                 # while the repaired run already allocates. Drop the
                                 # locals; file, line and code stay for the prompt.
-                                traceback.clear_frames(_exc.__traceback__)
+                                # An error raised while handling another keeps that
+                                # one's frames on __cause__ / __context__: those too.
+                                _seen, _e = set(), _exc
+                                while _e is not None and id(_e) not in _seen:
+                                    _seen.add(id(_e))
+                                    traceback.clear_frames(_e.__traceback__)
+                                    _e = _e.__cause__ or _e.__context__
                             return _exc
                     result_dict, _timeout_used = escalate_timeouts(
                         _attempt, base_timeout=_base_timeout,

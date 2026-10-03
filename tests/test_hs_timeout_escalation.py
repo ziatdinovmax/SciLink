@@ -150,6 +150,29 @@ def analyze_feature(data, axis):
     raise ValueError("the script's own error")
 '''
 
+# The same arrays, but held only by a frame reachable through the error's
+# __cause__ / __context__: a script that raises while handling another error.
+_CHAINED_TEMPLATE = '''
+def analyze_feature(data, axis):
+    import numpy as np
+    import weakref
+    import builtins
+    _HELD = builtins._HS_HELD
+    class Holder:
+        pass
+    def inner():
+        h = Holder()
+        h.big = np.zeros((2_000_000,), dtype=np.float64)
+        _HELD.append(weakref.ref(h))
+        raise KeyError("missing band")
+    try:
+        inner()
+    except KeyError as e:
+        raise ValueError("the script's own error"){link}
+'''
+CAUSE_ERROR_SCRIPT = _CHAINED_TEMPLATE.format(link=" from e")      # __cause__
+CONTEXT_ERROR_SCRIPT = _CHAINED_TEMPLATE.format(link="")           # __context__
+
 
 def test_the_escalation_happens_in_a_worker_thread_too(tmp_path, monkeypatch):
     """#715 review, item 1: off the main thread ExecutionTimeout injected a
@@ -187,7 +210,7 @@ def test_the_escalation_happens_in_a_worker_thread_too(tmp_path, monkeypatch):
     assert rec["task_success"] and rec["timeout_used_s"] == 2
 
 
-def _error_releases_before_repair(tmp_path, monkeypatch):
+def _error_releases_before_repair(tmp_path, monkeypatch, script=HEAVY_ERROR_SCRIPT):
     """Runs the heavy-error script and reports what the repair call saw:
     (the script's holder already gone, the number of repair calls)."""
     import builtins, gc
@@ -204,7 +227,7 @@ def _error_releases_before_repair(tmp_path, monkeypatch):
             raise AssertionError("no repair here")                     # the attempt then fails into the ladder
     gc.disable()
     try:
-        state = _dynamic(tmp_path, monkeypatch, hs._records(HEAVY_ERROR_SCRIPT), seconds=5, model=ProbeModel())
+        state = _dynamic(tmp_path, monkeypatch, hs._records(script), seconds=5, model=ProbeModel())
     finally:
         gc.enable()
     [rec] = state["dynamic_analysis_records"]
@@ -233,6 +256,24 @@ def test_a_scripts_own_error_releases_its_arrays_before_the_repair(tmp_path, mon
     t.start()
     t.join(60)
     assert out.get("seen") == [True]
+
+
+def test_a_chained_errors_arrays_are_released_too(tmp_path, monkeypatch):
+    """A script that raises while handling another error: the arrays are held
+    only by frames reachable through ``__cause__`` / ``__context__``, which
+    clearing the outer traceback alone leaves alive. Cyclic GC off, main
+    thread and a worker thread, both links."""
+    import threading
+    for i, script in enumerate((CAUSE_ERROR_SCRIPT, CONTEXT_ERROR_SCRIPT)):
+        assert _error_releases_before_repair(tmp_path / f"m{i}", monkeypatch, script) == [True]
+        out = {}
+
+        def run():
+            out["seen"] = _error_releases_before_repair(tmp_path / f"w{i}", monkeypatch, script)
+        t = threading.Thread(target=run)
+        t.start()
+        t.join(60)
+        assert out.get("seen") == [True]
 
 
 def test_the_first_limit_is_never_clamped_and_the_loop_budget_bounds_retries(tmp_path, monkeypatch):
