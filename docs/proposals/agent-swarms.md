@@ -10,8 +10,11 @@ items in "After stage 2". The recipe-reuse dependency (#704, #705) merged
 on 2026-10-01 (#707, head c2c95f71) after two review rounds. Stage 3
 (reactions) merged on 2026-10-01 (#708, head a7663b2b) after three review
 rounds, built as "Starting stage 3" describes, with what changed on the way
-under the stage in "Build order" and its open items in "After stage 3";
-stage 4 (scheduling) is next. The design notes were
+under the stage in "Build order" and its open items in "After stage 3".
+Between stage 3 and stage 4 the replay policies the board's "verified"
+rests on were made shared and settled (#712: PR A #713, PR B #714, #717,
+#715 — all on `main` by 2026-10-03; see "Between stage 3 and stage 4"
+below). Stage 4 (scheduling) is next, local first. The design notes were
 drafted 2026-09-28 against `main` at b988c7cd (Release 0.0.83), based on a source audit of the meta
 agent (`meta_orchestrator.py`, `meta_orchestrator_tools.py`, `fanout.py`,
 `telemetry.py`), the three mode orchestrators' `run_task`, the executors, the
@@ -1567,6 +1570,84 @@ references are to `main` at bed2f7f8.
 - Everything open after stage 2 still stands (no retraction from a worker,
   common-ancestry independence, string subjects, persistent specialists read
   nothing, no Mission Control board view).
+
+## Between stage 3 and stage 4: the replay policies (#712)
+
+Stage 2 made the board's "verified" rest on the agents' own gates, and its
+review (eight rounds) kept finding the three analysis agents judging a replay,
+saying what "verified" means and choosing among a series' regime recipes each
+in their own way. #712 settled those as shared policies before stage 4
+serialises the records across processes. Four PRs, all on `main`:
+
+- **PR A (#713, 4177b01d):** `exp_agents/_replay.py` by composition — the
+  `verdict_record` every agent STAMPS where it decides (`decided_by` ∈ qc_gate
+  · replay_gate · recipe · excluded · none, `interpretation_checked`); three
+  replay gates with one verdict shape; `select_recipe`; the parity test that
+  holds the stamps to the reconstruction from result shapes, no allow-list.
+- **PR B (#714, d64ffc5d, five rounds):** which regime a reuse replays is read
+  from the DATA (a `live/drift.py` `DriftMonitor` seeded with each regime's
+  own units; the nearest first; ambiguity said where the attribution is read);
+  the identity and state checks that only WITHHOLD CERTIFICATION
+  (`interpretation_checked`, never a verdict — three rounds of a deciding
+  check moved its false positives threshold to threshold); the certification
+  bar tighter than the flag bar; one-unit references and series followers
+  certified on clean evidence; the regime's stamp as its units' curves on the
+  monitor's own grid; a replay-anchored series on the replay gate; names as
+  token sets (settings, subscripts, screw axes, bars for space groups, Greek
+  letters). The board posts a replay's CLAIMS verified only when the
+  interpretation was certified; its recipe stays verified by the gate.
+- **#717 (1fb449b3, four rounds):** a replay is held to the gate its RECIPE
+  was approved under (`gate_record` on the recipe at lock time, on every
+  run's results, in the board copy's `<stem>.recipe.json` sidecar, on the live
+  anchor) unless the caller asked for a gate on the reuse run; ONE predicate —
+  "this regime's anchor replayed the recipe" — drives every reader of the gate
+  (the replay gate, the outlier pass, the refit's re-scan and its
+  scoring-gated skip), and off it everything is `main`'s path, pinned by a
+  guard test; a replay whose certificate is withheld for a stated reason is
+  explained by a JUDGE (one model call, the findings as quoted data between
+  markers, an opinion on the record and a provisional claim on the board,
+  `reuse_caveat` to the orchestrator — never a verdict).
+- **#715 (78f0814d, three rounds):** the hyperspectral timeout escalation
+  (#699): one `SandboxTimeout` type on both threads (the message test missed
+  every worker-thread surface), a failed attempt's arrays released before the
+  repair (frames cleared along `__cause__` / `__context__`), the first limit
+  never clamped, retries bounded by the deadline and the loop budget.
+
+**What this gives stage 4.** The records the scheduler will serialise and
+reconcile are settled: a unit's verdict is stamped where the information is
+and never reconstructed; "verified" is the numbers, "certified" is the
+interpretation, and a provisional claim is the default for anything a gate did
+not pass; a recipe carries its gate; the judge is an opinion a worker task can
+emit and a coordinator can ignore. Nothing in stage 4 should add a judge or a
+new way to decide a verdict.
+
+**Open on #712 (the step-2 piece and smaller):** a measured NEGATIVE verdict on
+interpretation against a fixed corpus (the candidate rule: the monitor's
+distance after a bounded alignment, in d or Q for XRD, one table for the regime
+choice and the verdict); the certification bar scaled to the reference's own
+noise and followers checked against the regime's units seen so far (a fixed
+0.10 under-certifies one-unit references); hysteresis on the 10 % strong-peak
+bar; number ↔ symbol space-group names; positions in flat XPS/EPR layouts;
+an impurity ≥ 12 % on same-phase data as a flag; a recipe approved on physics
+grounds inside the soft band having no deterministic replay gate; the
+`_prior_regimes` re-parse and `DriftMonitor.locate` for the judge; per-metric
+outlier pools when a mixed replayed/fresh regime becomes reachable. From
+#715: #718 (a fan-out branch's own depth keys never reach the child, a
+pre-existing bug) and #719 (re-escalation on every ladder attempt, test
+hygiene, a broad guard pinning `main`).
+
+**Stage 4 scoping, decided 2026-10-03.** The first stage-4 PR is the LOCAL
+scheduler only — swarm budgets with reservation, the circuit breaker, process
+workers for heavy items, the memory plan sized from measured peaks per item
+class and the runtime guard — verified on this machine. The AWS items (worker
+tasks per item class, OOM and Spot reconciliation against ECS, per-campaign
+provider quotas) follow as their own PR with the hosted-campaigns work: Bedrock
+via IAM is blocked until the account is verified (nothing in an ECS task can
+call the model, so it cannot be live-checked), they are infrastructure rather
+than scheduling logic, and they reuse the local coordinator's decisions, which
+must settle first. The ECS worker contract (task spec, item class → task size,
+the reconciliation events) may be written into this proposal before the local
+PR so that PR already stamps what the AWS layer will read.
 
 ## Starting stage 2 (the board)
 
