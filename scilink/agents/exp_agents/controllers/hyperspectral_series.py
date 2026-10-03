@@ -168,6 +168,10 @@ def build_series_row(index: int, data_path: str, result: Dict[str, Any],
     else:
         uv = verdict_record(verified=True, reason="every target approved", decided_by=(
             "replay_gate" if (result.get("script_reuse") or {}).get("verbatim") else "qc_gate"))
+    from .._verification_record import ungated_outputs
+    ungated = ungated_outputs(result.get("extracted_features"))
+    if ungated:
+        uv["ungated"] = ungated            # reported, but no gate checked them (#722)
     row["unit_verdict"] = uv
     reuse = result.get("script_reuse")
     if reuse:

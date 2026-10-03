@@ -1178,7 +1178,10 @@ def _extract_scalar_records(result_dict: dict, raw_units) -> list:
     is a single finite number (numpy scalars coerced); anything else — arrays,
     strings, NaN/inf — is dropped silently rather than failing the attempt,
     since scalars are a reporting channel, not a QC-gated deliverable. Capped
-    at ``_MAX_SCALARS_PER_TASK`` to keep the feature table a table.
+    at ``_MAX_SCALARS_PER_TASK`` to keep the feature table a table. Each
+    record says so (``gated: False``): no map review and no replay gate
+    looked at it, so a claim resting on the run cannot be called verified on
+    its account (#722; ``_verification_record.ungated_outputs``).
     """
     scalars = result_dict.get("scalars")
     if not isinstance(scalars, dict):
@@ -1202,6 +1205,7 @@ def _extract_scalar_records(result_dict: dict, raw_units) -> list:
             "description": ("Global (non-map) numeric deliverable returned "
                             "via the task's `scalars` channel."),
             "scalar": v,
+            "gated": False,
         })
     return records
     

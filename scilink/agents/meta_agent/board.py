@@ -708,12 +708,27 @@ def _claim_verified(row: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
     """``_analysis_verified`` for a CLAIM: a replay's numbers passing its
     gate verifies the measurement, not the interpretation attached to it;
     the claim is verified only when the identity check held the result to
-    what the anchor measured (``interpretation_checked``)."""
+    what the anchor measured (``interpretation_checked``). Nor is a claim of
+    a run that reported outputs no gate checked (``ungated_outputs``, #722):
+    the claim cannot say which outputs it rests on. The recipe — a script
+    that ran and passed — stays verified either way."""
     verified, why = _analysis_verified(row)
-    if verified and row and row.get("decided_by") == "replay_gate" and not row.get("interpretation_checked"):
-        return False, (f"analysis {row.get('analysis_id')}: a locked-script replay passed the replay gate "
-                       "(the numbers), but its interpretation is not certified — the state and identity "
-                       "checks against the regime's units did not both agree, or could not run")
+    if not verified:
+        return verified, why
+    held = []                                  # every reason that holds, not the first
+    if row.get("decided_by") == "replay_gate" and not row.get("interpretation_checked"):
+        held.append("a locked-script replay passed the replay gate (the numbers), but its interpretation "
+                    "is not certified — the state and identity checks against the regime's units did not "
+                    "both agree, or could not run")
+    ungated = row.get("ungated_outputs") or []
+    if ungated:
+        # #722: the gate approved what it checked (a cube's maps); the run
+        # also reported outputs nothing checked, and a claim may rest on them.
+        shown = ", ".join(map(str, ungated[:6])) + (f" (+{len(ungated) - 6} more)" if len(ungated) > 6 else "")
+        held.append(f"its gate approved the outputs it checks, but the run also reported outputs no gate "
+                    f"checked ({shown}), which a claim may rest on")
+    if held:
+        return False, f"analysis {row.get('analysis_id')}: " + "; and ".join(held)
     return verified, why
 
 

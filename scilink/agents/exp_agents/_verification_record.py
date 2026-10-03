@@ -585,6 +585,37 @@ def interpretation_checked_by(rv: Optional[Dict[str, Any]]) -> bool:
                 and isinstance(dist, (int, float)) and dist <= CERTIFY_STATE_BAR)
 
 
+def ungated_outputs(features: Any) -> List[str]:
+    """The names of the outputs a run reported that NO gate checked — the
+    records their producer marked ``gated: False`` (a hyperspectral task's
+    ``scalars`` channel: no map review, no replay gate). The verdict covers
+    what was gated; a claim may rest on these too, so the board keeps such a
+    run's claims provisional (#722). Read from the producer's mark, never
+    guessed from a value or a name."""
+    return sorted({str(m["name"]) for m in features or []
+                   if isinstance(m, dict) and m.get("gated") is False and m.get("name")})
+
+
+def ungated_outputs_of(full_result: Optional[Dict[str, Any]]) -> List[str]:
+    """``ungated_outputs`` of a whole result: the stamp's, else (a result
+    from before the stamp) read from its records — a single run's
+    ``extracted_features``, a series' units'."""
+    full = full_result or {}
+    stamped = full.get("verdict")
+    if isinstance(stamped, dict) and "verified" in stamped:
+        return list(stamped.get("ungated") or [])
+    return _ungated_from_records(full)
+
+
+def _ungated_from_records(full: Dict[str, Any]) -> List[str]:
+    names = set(ungated_outputs(full.get("extracted_features")))
+    for u in full.get("individual_results") or []:
+        if isinstance(u, dict) and u.get("success"):
+            names.update(ungated_outputs(u.get("feature_records")))
+            names.update((u.get("unit_verdict") or {}).get("ungated") or [])
+    return sorted(names)
+
+
 def final_verdict_record(final: Dict[str, Any]) -> Dict[str, Any]:
     """The verdict an agent stamps on its result when it is final
     (``final["verdict"]``): a single curve or image run, a series (the
@@ -637,14 +668,18 @@ def final_verdict_record(final: Dict[str, Any]) -> Dict[str, Any]:
         checked = False                     # the verifier reviews the fit, not the claims
     else:
         decided = "none"
-    return verdict_record(verified=v["verified"], reason=v["reason"], decided_by=decided,
-                          interpretation_checked=bool(checked and v["verified"]),
-                          score=next((v for v in (rv.get("score"), rv.get("r_squared"), rv.get("quality_score"),
-                                                  (final.get("quality_history") or {}).get("final_r2"),
-                                                  (final.get("quality_history") or {}).get("final_score"))
-                                      if isinstance(v, (int, float))), None),
-                          threshold=next((v for v in (rv.get("threshold"), (final.get("quality_history") or {}).get("threshold"))
-                                          if isinstance(v, (int, float))), None))
+    rec = verdict_record(verified=v["verified"], reason=v["reason"], decided_by=decided,
+                         interpretation_checked=bool(checked and v["verified"]),
+                         score=next((v for v in (rv.get("score"), rv.get("r_squared"), rv.get("quality_score"),
+                                                 (final.get("quality_history") or {}).get("final_r2"),
+                                                 (final.get("quality_history") or {}).get("final_score"))
+                                     if isinstance(v, (int, float))), None),
+                         threshold=next((v for v in (rv.get("threshold"), (final.get("quality_history") or {}).get("threshold"))
+                                         if isinstance(v, (int, float))), None))
+    ungated = _ungated_from_records(final)
+    if ungated:
+        rec["ungated"] = ungated           # reported, but no gate checked them (#722)
+    return rec
 
 
 def _single_run_verdict(full: Dict[str, Any], rv: Dict[str, Any]) -> Dict[str, Any]:

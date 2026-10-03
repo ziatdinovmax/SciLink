@@ -2037,9 +2037,21 @@ class AnalysisOrchestratorTools:
                 "derived_from": (record or {}).get("analysis_id"), "sources": sources,
                 "full_result": res, "novelty_assessment": None})
             if res.get("status") != "success":
+                # A failed attempt can leave products on disk; they failed the
+                # derivation's own checks, and were once cited as findings (#722).
+                left = sorted(str(f) for f in out_dir.rglob("*")
+                              if f.is_file() and "_scratch" not in f.relative_to(out_dir).parts) \
+                    if out_dir.is_dir() else []
                 return json.dumps({"status": "error", "derive_id": derive_id,
                                    "output_directory": str(out_dir), "sources": sources,
-                                   **{k: v for k, v in res.items() if k != "status"}}, default=str)
+                                   **{k: v for k, v in res.items() if k != "status"},
+                                   **({"unverified_files": left} if left else {}),
+                                   "note": ("The derivation FAILED its checks: nothing was derived. "
+                                            + ("Files it left behind are listed as unverified_files; "
+                                               "they are not results — do not cite their values. "
+                                               if left else "")
+                                            + "Report that the derivation failed and why.")},
+                                  default=str)
             return json.dumps({
                 "status": "success", "derive_id": derive_id, "derived_from": (record or {}).get("analysis_id"),
                 "sources": sources, "output_directory": str(out_dir),

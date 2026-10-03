@@ -300,7 +300,9 @@ rather than fabricate a result).
   with `reads_board` gets the verified findings on its subject as hints when it
   starts, and an item that checks other work is tagged `check` and reads
   nothing. A board finding is context for a delegation, never its target.
-  An analysis row's `verified` is its gate's (the numbers); `interpretation_checked`
+  An analysis row's `verified` is its gate's (the outputs that gate checks);
+  `ungated_outputs` names numbers the run also reported that no gate checked,
+  which `verified` does not cover; `interpretation_checked`
   says whether a replay's reading was certified, and `escalation` carries a
   judge's reading of a replay whose certificate was withheld — an opinion that
   usually sits on a `verified` row and never changes it.
