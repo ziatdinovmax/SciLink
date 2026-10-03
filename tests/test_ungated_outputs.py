@@ -29,6 +29,11 @@ os.environ.setdefault("UNSAFE_EXECUTION_OK", "true")
 from scilink.agents.exp_agents import hyperspectral_analysis_agent as hsa
 from scilink.agents.exp_agents.controllers.hyperspectral_controllers import RunDynamicAnalysisController
 from scilink.agents.meta_agent import board as board_mod
+from scilink.agents.meta_agent import reactions
+
+# a subscription as the meta declares one: on a claim, status left to its default
+ON_A_CLAIM = reactions.normalize_subscriptions(
+    [{"on": {"kind": "claim"}, "enqueue": {"mode": "planning", "task": "design a test of {finding.text}"}}])[0][0]
 
 AXIS = {"technique": "UV-vis transmission", "sample": "film",
         "energy_range": {"start": 400.0, "end": 900.0, "units": "nm"}}
@@ -145,12 +150,28 @@ def test_a_claim_resting_on_ungated_scalars_is_provisional_and_its_recipe_verifi
     assert claims and all(c["status"] == "provisional" for c in claims)
     assert "no gate checked (Band1_Depth, Band1_Position_nm)" in claims[0]["evidence"]["gate"]
     assert recipes and all(r["status"] == "verified" for r in recipes)
+    # a subscription on claims (status defaults to verified) does not fire
+    assert not any(reactions.matches(ON_A_CLAIM, c) for c in claims)
 
 
 def test_a_run_with_nothing_ungated_posts_as_before(tmp_path, monkeypatch):
     result, recs = _run_task_through_the_board(tmp_path, SCRIPT_MAPS_ONLY, monkeypatch)
     assert result["analyses"][0]["ungated_outputs"] == []
-    assert [r["status"] for r in recs if r["kind"] == "claim"] == ["verified"]
+    claims = [r for r in recs if r["kind"] == "claim"]
+    assert [r["status"] for r in claims] == ["verified"]
+    assert all(reactions.matches(ON_A_CLAIM, c) for c in claims)
+
+
+def test_every_reason_a_claim_is_held_is_given():
+    """A replay whose interpretation is not certified AND that reported
+    ungated outputs: the claim's reason names both."""
+    row = {"analysis_id": "r1", "status": "success", "verified": True, "reason": "replay gate passed",
+           "decided_by": "replay_gate", "interpretation_checked": False, "ungated_outputs": ["n_fitted_pixels"]}
+    verified, why = board_mod._claim_verified(row)
+    assert not verified
+    assert "interpretation is not certified" in why and "no gate checked (n_fitted_pixels)" in why
+    verified, why = board_mod._claim_verified({**row, "interpretation_checked": True})
+    assert not verified and "certified" not in why and "n_fitted_pixels" in why
 
 
 def test_a_series_carries_its_units_ungated_outputs(tmp_path, monkeypatch):
