@@ -535,6 +535,50 @@ def _render_data_facts(data, axis, axis_units: str, max_peaks: int = 4) -> str:
     return _data_facts(data, axis, axis_units, max_peaks).get("text", "")
 
 
+def _declares_unmeasured(result_dict: dict, required_outputs) -> bool:
+    """A ``not_measurable`` declaration stands when every REQUIRED output is
+    absent or entirely NaN — diagnostic maps beside it (a mask, an SNR map)
+    do not cancel it. Observed live (#723): scripts returned their required
+    maps all-NaN, a declaration with numeric evidence AND one diagnostic
+    mask; the old rule (no maps at all) ignored the declaration, and the
+    all-NaN critique pushed the model away from the honest null for five
+    rounds per unit. With no required outputs named, no maps at all."""
+    if not isinstance(result_dict.get("not_measurable"), dict):
+        return False
+    maps = result_dict.get("maps") or {}
+    if not isinstance(maps, dict):
+        return False
+    required = [r for r in (required_outputs or []) if r]
+    if not required:
+        return not maps
+
+    def _unmeasured(name):
+        if name not in maps:
+            return True
+        try:
+            return not np.isfinite(np.asarray(maps[name], dtype=float)).any()
+        except Exception:  # noqa: BLE001 - a non-numeric map is not a measurement
+            return True
+    return all(_unmeasured(r) for r in required)
+
+
+def _diagnostic_maps(result_dict: dict, required_outputs) -> list:
+    """What an honest null returned beside its declaration: names and simple
+    statistics, recorded with the determination — never committed as
+    features, since no map review looked at them."""
+    out = []
+    for name, arr in (result_dict.get("maps") or {}).items():
+        try:
+            a = np.asarray(arr, dtype=float)
+            fin = a[np.isfinite(a)]
+            out.append({"name": str(name), "required": name in (required_outputs or []),
+                        "finite_fraction": round(float(fin.size / max(a.size, 1)), 4),
+                        **({"mean": float(fin.mean())} if fin.size else {})})
+        except Exception:  # noqa: BLE001
+            out.append({"name": str(name), "required": name in (required_outputs or [])})
+    return out
+
+
 class _NotMeasurableContradiction(Exception):
     """A not_measurable declaration that contradicts the deterministic data
     facts — handled as a mechanical correction, not a ladder failure."""
@@ -985,7 +1029,9 @@ If it is genuinely NOT measurable, return
 {{"maps": {{}}, "not_measurable": {{"feature": "<what was requested>",
 "evidence": "<the NUMBERS: prominence vs noise sigma, and where you looked>",
 "description": "<one-line determination>"}}}}
-instead of estimator outputs — centroid/moment values computed on flat noise
+(every REQUIRED output omitted or entirely NaN; a diagnostic map such as a
+mask or an SNR map may accompany the declaration — it is recorded with the
+determination, not reported as a result) instead of estimator outputs — centroid/moment values computed on flat noise
 look plausible and are worse than an honest null. A judge reviews every
 not_measurable declaration against the deterministic band-flux evidence:
 declaring it without numeric evidence, or to dodge a hard but real fit, is
@@ -4100,8 +4146,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     # place like an execution error — no ladder budget, no
                     # judge call — so the model re-issues the fit at once.
                     _f = ctx.session.get("facts") or {}
-                    if (isinstance(result_dict.get("not_measurable"), dict)
-                            and not result_dict.get("maps") and _f.get("measurable")):
+                    if _declares_unmeasured(result_dict, required_outputs) and _f.get("measurable"):
                         raise _NotMeasurableContradiction(
                             f"not_measurable declared, but the DATA FACTS show the "
                             f"strongest field-mean feature at {_f.get('strongest_sigma', 0):.0f} "
@@ -4138,7 +4183,10 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             # exactly the churn the wall-clock budget otherwise has to kill).
             # A rejected declaration raises -> the normal retry feedback path.
             _nm = result_dict.get("not_measurable")
-            if isinstance(_nm, dict) and not result_dict.get("maps"):
+            if _declares_unmeasured(result_dict, required_outputs):
+                _diag = _diagnostic_maps(result_dict, required_outputs)
+                if _diag:
+                    _nm = {**_nm, "diagnostic_maps": _diag}
                 # Strict replay: the approved script's own declaration stands
                 # (it carries its numeric evidence); a live loop reads a missing
                 # named output as a change, which is what it is.
@@ -4164,6 +4212,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                                          "(judged honest null)",
                         "evidence": str(_nm.get("evidence"))[:400],
                         "description": str(_nm.get("description"))[:300],
+                        **({"diagnostic_maps": [d["name"] for d in _nm["diagnostic_maps"]]}
+                           if _nm.get("diagnostic_maps") else {}),
                     })
                     ctx.retries = retries + 1
                     return {"success": True, "task_success": True,
@@ -4455,7 +4505,19 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         "np.repeat along both axes, then crop) before returning; state "
                         "the effective resolution in the description.")
                 _nan_req = [n for n in missing_required if n in nan_only_maps]
-                if _nan_req:
+                if isinstance(result_dict.get("not_measurable"), dict):
+                    # The declaration was not honoured because a required
+                    # output came back WITH values: say that, not the
+                    # all-NaN text, which reads as "fix your fitter" and
+                    # pushed live runs away from an honest null (#723).
+                    _valued = [n for n in required_outputs if n in maps_dict and n not in nan_only_maps]
+                    detail_parts.append(
+                        "a not_measurable declaration was returned but NOT honoured: it stands only "
+                        "when every required output is absent or entirely NaN, and "
+                        f"{_valued or 'some required output'} came back with values. Either measure "
+                        "every required output, or return them all-NaN (or omit them) with the "
+                        "declaration; diagnostic maps may accompany it.")
+                elif _nan_req:
                     # Observed live: a script whose try/except returned NaN
                     # maps failed three attempts with no diagnosis — the
                     # retry feedback said nothing because no map reached QC.
