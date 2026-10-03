@@ -1103,11 +1103,12 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
             # child applies it to every run_analysis call of the branch.
             _depth = {k: branch.get(k) for k in ("profile", "targets", "time_budget_s")
                       if branch.get(k)}
-            # the branch's wall-clock budget is the child's run deadline
-            # (_run_deadline) when the branch names no time budget of its
-            # own, so a retry inside the child never runs past the branch
-            if "time_budget_s" not in _depth and branch.get("_budget_s"):
-                _depth["time_budget_s"] = float(branch["_budget_s"])
+            # The branch's wall-clock budget is NOT handed to the child as a
+            # run deadline: the fan-out's hard cancel already bounds the
+            # branch, and a run deadline counts human wait (an AUTOPILOT plan
+            # gate) where the branch budget does not — it would expire a
+            # branch main completes, and every child would lose its own
+            # time_budget_s choice.
             result = child.run_task(
                 task_text,
                 context=branch.get("context"),

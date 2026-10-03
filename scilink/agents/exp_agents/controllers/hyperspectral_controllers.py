@@ -4027,6 +4027,13 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                             _scope_g.clear(); _scope_l.clear()
                             if _sandbox_timeout(_exc):   # outcome; anything else is re-raised below
                                 _exc.__traceback__ = None
+                            else:
+                                # the traceback's frames hold the script's locals, and
+                                # the chain reaches the policy's own frame, whose "out"
+                                # IS this exception — a cycle only the GC would break,
+                                # while the repaired run already allocates. Drop the
+                                # locals; file, line and code stay for the prompt.
+                                traceback.clear_frames(_exc.__traceback__)
                             return _exc
                     result_dict, _timeout_used = escalate_timeouts(
                         _attempt, base_timeout=_base_timeout,

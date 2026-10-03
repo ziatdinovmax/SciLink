@@ -187,28 +187,52 @@ def test_the_escalation_happens_in_a_worker_thread_too(tmp_path, monkeypatch):
     assert rec["task_success"] and rec["timeout_used_s"] == 2
 
 
-def test_a_scripts_own_error_releases_its_arrays_before_the_repair(tmp_path, monkeypatch):
-    """#715 review, item 2: the attempt returned the exception as a value and
-    the controller kept it (and its traceback's frames, with the script's
-    arrays) through the repair call and the next exec — twice the peak. The
-    scopes are cleared on any error and the frame's references go at the
-    re-raise."""
+def _error_releases_before_repair(tmp_path, monkeypatch):
+    """Runs the heavy-error script and reports what the repair call saw:
+    (the script's holder already gone, the number of repair calls)."""
     import builtins, gc
     builtins._HS_HELD = _HELD
     _HELD.clear()
     seen = []
 
     class ProbeModel:
-        """The repair call: at THIS moment the failed attempt's arrays must be gone."""
+        """The repair call: at THIS moment the failed attempt's arrays must be gone —
+        with the cyclic GC OFF, so only reference counting may have freed them."""
 
         def generate_content(self, *a, **k):
-            gc.collect()
             seen.append(bool(_HELD) and all(ref() is None for ref in _HELD))
             raise AssertionError("no repair here")                     # the attempt then fails into the ladder
-    state = _dynamic(tmp_path / "e", monkeypatch, hs._records(HEAVY_ERROR_SCRIPT), seconds=5, model=ProbeModel())
+    gc.disable()
+    try:
+        state = _dynamic(tmp_path, monkeypatch, hs._records(HEAVY_ERROR_SCRIPT), seconds=5, model=ProbeModel())
+    finally:
+        gc.enable()
     [rec] = state["dynamic_analysis_records"]
     assert not rec["task_success"]
-    assert seen and seen[0] is True                                    # released BEFORE the repair call, not after the run
+    return seen
+
+
+def test_a_scripts_own_error_releases_its_arrays_before_the_repair(tmp_path, monkeypatch):
+    """#715 review, item 2 then A: the attempt returned the exception as a
+    value and the controller kept it — and after the direct references were
+    dropped, the traceback's frame chain still reached the policy's frame
+    whose ``out`` IS the exception, a cycle only the GC would break, so the
+    failed 800 MB was alive during the repaired exec (+1306 MB on the main
+    thread, +1765 in a worker, against main's +990). The scopes are cleared
+    and the traceback's frames too (``clear_frames``: locals go, file, line
+    and code stay for the prompt). Checked with the cyclic GC disabled, on
+    the main thread and in a worker thread, and the repair is called once."""
+    import threading
+    seen = _error_releases_before_repair(tmp_path / "e", monkeypatch)
+    assert seen == [True]                                               # released before the ONE repair call
+    out = {}
+
+    def run():
+        out["seen"] = _error_releases_before_repair(tmp_path / "w", monkeypatch)
+    t = threading.Thread(target=run)
+    t.start()
+    t.join(60)
+    assert out.get("seen") == [True]
 
 
 def test_the_first_limit_is_never_clamped_and_the_loop_budget_bounds_retries(tmp_path, monkeypatch):
@@ -236,11 +260,52 @@ def test_the_first_limit_is_never_clamped_and_the_loop_budget_bounds_retries(tmp
     assert not rec["task_success"] and time.monotonic() - t0 < 6
 
 
-def test_the_fan_out_branch_budget_is_the_childs_run_deadline():
-    """#715 review: the branch's wall-clock budget was never stamped into the
-    child as its run deadline; it is now the child's time_budget_s unless the
-    branch names one of its own."""
-    import inspect
-    from scilink.agents.meta_agent import fanout
-    src = inspect.getsource(fanout)
-    assert '_depth["time_budget_s"] = float(branch["_budget_s"])' in src and '"time_budget_s" not in _depth' in src
+def test_a_fan_out_child_gets_no_run_deadline_from_the_branch_budget(tmp_path):
+    """Pins main: a fan-out child's run_task carries no time_budget_s. The
+    branch's wall-clock budget is the fan-out's hard cancel, not the child's
+    run deadline (which counts human wait where the branch budget does not,
+    and would expire a branch main completes); a stamp of the budget into the
+    child was asked for and withdrawn in #715's review."""
+    import json, os
+    import numpy as np
+    from scilink.agents.meta_agent import fanout as fo
+    from scilink.agents.meta_agent.meta_orchestrator import MetaOrchestratorAgent, MetaMode
+    import scilink.agents.exp_agents.analysis_orchestrator  # noqa: F401  (worker-side lazy import)
+    paths = [str(tmp_path / f"{n}.npy") for n in "AB"]
+    for p in paths:
+        np.save(p, np.zeros((8, 8)))
+    calls = []
+
+    def fake_child(orch, base_dir):
+        class C:
+            def run_task(self, task, context=None, autonomy=None, **kw):
+                calls.append(dict(kw))
+                return {"status": "success", "summary": "ok", "key_findings": ["finding"], "files_produced": []}
+        return C()
+
+    def fake_llm(orch, prompt, extra_parts=None):
+        if "SCRIPT CONTRACT" in prompt or "AUDITING a computed" in prompt:
+            return {"verdict": "accept", "issues": [], "refinement_instructions": "", "method": "qualitative",
+                    "rationale": "r", "script": ""}
+        if "complementary measurements of ONE system" in prompt:
+            return {"detailed_analysis": "fused", "scientific_claims": []}
+        return {"verdict": "complementary", "confidence": 0.9, "rationale": "r", "join_axis": "T",
+                "join_type": "shared_parameter_axis", "fanout_set": list(paths), "redundant_clusters": [],
+                "unrelated": [], "excluded_notes": ""}
+    orig_child, orig_llm = fo._make_ephemeral_analysis_child, fo._llm_json
+    fo._make_ephemeral_analysis_child, fo._llm_json = fake_child, fake_llm
+    try:
+        ag = MetaOrchestratorAgent(base_dir=str(tmp_path / "s1"), api_key="sk-dummy", meta_mode=MetaMode.AUTONOMOUS)
+        out = json.loads(ag._run_fanout([{"data_path": p, "task": f"Analyze {p}", "label": os.path.basename(p)} for p in paths],
+                                        branch_time_budget_s=30))
+        assert out.get("status") == "success" and len(calls) == 2
+        assert all("time_budget_s" not in kw for kw in calls)             # the branch budget is the hard cancel only
+        calls.clear()
+        ag2 = MetaOrchestratorAgent(base_dir=str(tmp_path / "s2"), api_key="sk-dummy", meta_mode=MetaMode.AUTONOMOUS)
+        out = json.loads(ag2._run_fanout([{"data_path": p, "task": f"Analyze {p}", "label": os.path.basename(p), "time_budget_s": 7}
+                                          for p in paths], branch_time_budget_s=30))
+        # main's normalisation (run_fanout → norm) carries no depth keys from the tool's branch dicts either:
+        # the children's kwargs are the same with or without a branch time_budget_s — pinned as is
+        assert out.get("status") == "success" and [kw.get("time_budget_s") for kw in calls] == [None, None]
+    finally:
+        fo._make_ephemeral_analysis_child, fo._llm_json = orig_child, orig_llm

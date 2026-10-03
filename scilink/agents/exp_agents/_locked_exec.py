@@ -206,7 +206,7 @@ def escalate_timeouts(attempt, *, base_timeout: int, timed_out, logger=None,
                 why = (f"escalation budget exhausted ({budget} retr{'y' if budget == 1 else 'ies'})" if budget
                        else "no escalation on this clock")
             elif r is not None and next_timeout >= r:
-                why = f"the run's remaining time ({r}s) allows no longer retry"
+                why = f"the time left ({r}s, the run's deadline or the loop's budget) allows no longer retry"
             else:
                 why = f"the {TIMEOUT_HARD_CAP_S}s cap allows no longer retry"
             log.warning(f"    ⏱  Timed out at {current}s; {why} — handing the timeout to the correction loop.")
