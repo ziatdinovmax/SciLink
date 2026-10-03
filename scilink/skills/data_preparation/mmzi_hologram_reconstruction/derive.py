@@ -1,6 +1,6 @@
 """``derive_phase_products`` tool — piston-immune observables from a wrapped
 relative-phase stack: steady-state difference maps between the first and last
-condition of a run, band-profile ROI traces vs time, and a template-amplitude
+condition of a run, ROI phase traces vs time (per-frame 2D unwrap), and a template-amplitude
 trace, each with same-stem JSON sidecars so downstream curve/image agents can
 consume them directly.
 
@@ -35,6 +35,103 @@ def _unwrap2d(d, valid):
     u = np.asarray(unwrap_phase(np.ma.array(d, mask=~valid))).astype(np.float64)
     u[~valid] = np.nan
     return u
+
+
+def _largest_component(valid):
+    """The largest 4-connected region of ``valid``: a 2D unwrap fixes the 2pi
+    offset of each disconnected island independently, so only one connected
+    region gives within-frame differences free of island offsets."""
+    from scipy.ndimage import label
+    lab, nlab = label(valid)
+    if nlab <= 1:
+        return valid.copy()
+    sizes = np.bincount(lab.ravel()); sizes[0] = 0
+    return lab == int(np.argmax(sizes))
+
+
+def roi_trace_2d_unwrap(C, mask, r0, r1, roi_cols):
+    """Per-frame ROI phase means from a 2D spatial unwrap of each frame.
+
+    ``C`` is the (n, H, W) unit field relative to the first steady state. Each
+    frame's wrapped phase is unwrapped in 2D over ``mask`` (no single column or
+    gap decides the 2pi choice, so a column where the band-averaged phasor
+    vanishes, or a masked gap with more than pi of change across it, cannot slip
+    the trace) and the pixel mean over rows ``r0:r1`` x each ROI's columns is
+    returned. Values carry an arbitrary per-frame offset (piston + 2pi k); only
+    within-frame differences between ROIs are meaningful.
+    Returns {roi: float array (n,)}."""
+    n = C.shape[0]
+    vals = {k: np.full(n, np.nan) for k in roi_cols}
+    for t in range(n):
+        u = _unwrap2d(np.angle(C[t]), mask)
+        for k, (a, c) in roi_cols.items():
+            blk = u[r0:r1, a:c]
+            if np.isfinite(blk).any():
+                vals[k][t] = float(np.nanmean(blk))
+    return vals
+
+
+def band_profile_trace(C, valid, r0, r1, roi_cols):
+    """DIAGNOSTIC ONLY (the reported trace is ``roi_trace_2d_unwrap``): the
+    band-mean phasor per column, unwrapped in 1D along x per frame. It slips by
+    2pi where a column's band phasor nearly vanishes or where a gated gap spans
+    more than pi of phase change; it is kept so its disagreement with the 2D
+    trace stays visible in the cross-checks. Returns (P (n, W) band phasors,
+    {roi: (n,)}, column-coherence threshold used)."""
+    n, _, Wd = C.shape
+    bandvalid = valid[r0:r1]
+    P = np.array([np.where(bandvalid, C[t][r0:r1], 0).sum(axis=0) / np.maximum(bandvalid.sum(axis=0), 1)
+                  for t in range(n)])
+    colvalid = None; thr_used = None
+    for thr in (0.3, 0.15, 0.05, 0.0):
+        colvalid = (bandvalid.mean(axis=0) > 0.8) & (np.abs(P).mean(axis=0) > thr)
+        thr_used = thr
+        if colvalid.sum() > 0.6 * valid.any(axis=0).sum():
+            break
+    prof = np.full((n, Wd), np.nan)
+    if colvalid.any():
+        for t in range(n):
+            prof[t][colvalid] = np.unwrap(np.angle(P[t][colvalid]))
+    vals = {}
+    for k, (a, c) in roi_cols.items():
+        blk = prof[:, a:c]
+        vals[k] = np.array([float(np.nanmean(row)) if np.isfinite(row).any() else np.nan for row in blk])
+    return P, vals, thr_used
+
+
+def trace_consistency_checks(trace, template_amplitude, template_coherence, map_step, trace_step,
+                             slip_tolerance_rad=1.0, slip_min_template_coherence=0.5,
+                             step_rel_tol=0.15, step_abs_floor_rad=1.0, frame_labels=None):
+    """Deterministic trace-vs-map QC for ONE ROI pair.
+
+    (a) Per-frame consistency: a frame whose trace value differs from
+    ``template_amplitude * map_step`` by a non-zero multiple of 2pi (within
+    ``slip_tolerance_rad``) while the template fit is coherent
+    (>= ``slip_min_template_coherence``) is a 2pi slip of the trace.
+    (b) Step agreement: |trace_step - map_step| <= max(step_rel_tol x the larger
+    magnitude, step_abs_floor_rad); the floor keeps near-zero control steps from
+    failing on a ratio. Returns a JSON-ready dict with pass flags, the offending
+    frames and values, and ``passed`` = (a) and (b)."""
+    trace = np.asarray(trace, dtype=float); amp = np.asarray(template_amplitude, dtype=float)
+    coh = np.asarray(template_coherence, dtype=float)
+    labels = list(frame_labels) if frame_labels is not None else list(range(len(trace)))
+    resid = trace - amp * float(map_step)
+    cyc = np.round(resid / (2 * np.pi))
+    ok = np.isfinite(resid) & np.isfinite(coh)
+    checked = ok & (coh >= float(slip_min_template_coherence))
+    slip = checked & (cyc != 0) & (np.abs(resid - 2 * np.pi * cyc) <= float(slip_tolerance_rad))
+    slipped = [{"frame": int(labels[i]), "trace_rad": round(float(trace[i]), 4),
+                "expected_rad": round(float(amp[i] * map_step), 4),
+                "residual_rad": round(float(resid[i]), 4), "cycles": int(cyc[i]),
+                "template_coherence": round(float(coh[i]), 4)} for i in np.flatnonzero(slip)]
+    diff = abs(float(trace_step) - float(map_step))
+    allowed = max(float(step_rel_tol) * max(abs(float(trace_step)), abs(float(map_step))), float(step_abs_floor_rad))
+    step_ok = bool(np.isfinite(diff) and diff <= allowed)
+    return {"frame_consistency": {"passed": not slipped, "n_slipped_frames": len(slipped),
+                                  "slipped_frames": slipped, "n_frames_checked": int(checked.sum())},
+            "step_agreement": {"passed": step_ok, "trace_step_rad": float(trace_step), "map_step_rad": float(map_step),
+                               "abs_difference_rad": float(diff), "allowed_rad": float(allowed)},
+            "passed": bool(not slipped and step_ok)}
 
 
 def find_dense_fringe_edges(Z: np.ndarray, valid: np.ndarray, max_gradient: float = 1.05,
@@ -109,6 +206,10 @@ def derive_phase_products(
     stem: Optional[str] = None,
     label: Optional[str] = None,
     state_codes: Optional[dict] = None,
+    trace_slip_tolerance_rad: float = 1.0,
+    trace_slip_min_template_coherence: float = 0.5,
+    step_agreement_rel_tol: float = 0.15,
+    step_agreement_abs_floor_rad: float = 1.0,
 ) -> dict:
     """See ``TOOL_SPEC``. Returns a dict of product paths and summary scalars."""
     t0 = time.time()
@@ -135,7 +236,6 @@ def derive_phase_products(
         auto = find_dense_fringe_edges(Z, valid, max_gradient=dense_fringe_max_gradient_rad_per_px)
         for x0, x1 in auto:
             valid[:, x0:x1] = False; excluded.append([x0 * b, x1 * b])
-    base_valid = np.abs(Z).mean(axis=0) >= coherence_min if False else None  # noqa: F841 (kept for clarity)
     kept_cols = valid.any(axis=0).sum()
     if kept_cols < 0.5 * Wd:
         raise ValueError(
@@ -167,7 +267,7 @@ def derive_phase_products(
     np.save(map_path, np.nan_to_num(dmap, nan=0.0).astype(np.float32), allow_pickle=False)
     np.save(out / f"{stem}_diffmap_{lab}_nan_outside_valid.npy", dmap.astype(np.float32), allow_pickle=False)
     np.save(out / f"{stem}_valid_mask_x{b}.npy", valid, allow_pickle=False)
-    # ---- band-profile traces ----
+    # ---- ROI traces: per-frame 2D unwrap ----
     band = band_rows or [int(H0 * 0.33), int(H0 * 0.66)]
     r0, r1 = int(band[0]) // b, int(band[1]) // b
     rois = roi_x_ranges or {"left": [int(W0 * 0.25), int(W0 * 0.35)],
@@ -175,18 +275,10 @@ def derive_phase_products(
                             "right": [int(W0 * 0.65), int(W0 * 0.75)]}
     roi_cols = {k: (int(v[0]) // b, int(v[1]) // b) for k, v in rois.items()}
     ref = reference_roi or list(rois)[-1]
-    bandvalid = valid[r0:r1]
     C = Z * np.conj(FA)[None]
-    P = np.array([np.where(bandvalid, C[t][r0:r1], 0).sum(axis=0) / np.maximum(bandvalid.sum(axis=0), 1) for t in range(n)])
-    colvalid = None; thr_used = None
-    for thr in (0.3, 0.15, 0.05, 0.0):
-        colvalid = (bandvalid.mean(axis=0) > 0.8) & (np.abs(P).mean(axis=0) > thr)
-        thr_used = thr
-        if colvalid.sum() > 0.6 * valid.any(axis=0).sum():
-            break
-    prof = np.full((n, Wd), np.nan)
-    for t in range(n):
-        prof[t][colvalid] = np.unwrap(np.angle(P[t][colvalid]))
+    roi_t = roi_trace_2d_unwrap(C, _largest_component(valid), r0, r1, roi_cols)
+    # diagnostic only: the 1D column-profile trace (not written to the CSV)
+    P, roi_diag, thr_used = band_profile_trace(C, valid, r0, r1, roi_cols)
     # ---- template amplitude ----
     grid = np.asarray(template_amplitude_grid or np.arange(-0.5, 1.5001, 0.01), dtype=float)
     sub = (slice(None, None, 2), slice(None, None, 2)); vs = valid[sub]
@@ -197,11 +289,9 @@ def derive_phase_products(
         cohs = np.abs(np.exp(1j * (ph[None, :] - grid[:, None] * T[None, :])).mean(axis=1))
         i = int(np.argmax(cohs)); amp[t] = grid[i]; amp_coh[t] = cohs[i]
     # ---- rows ----
-    def roi_val(t, k):
-        a, c = roi_cols[k]; return float(np.nanmean(prof[t][a:c]))
     rows = []
     for t in range(n):
-        r = {k: roi_val(t, k) for k in roi_cols}
+        r = {k: float(roi_t[k][t]) for k in roi_cols}
         row = {"elapsed_s": float(elapsed[t])}
         for k in roi_cols:
             if k != ref:
@@ -236,11 +326,32 @@ def derive_phase_products(
     stepA = {k: float(np.mean([r[f"phase_{k}_minus_{ref}_rad"] for r in rows[winA[0]:winA[1]]])) for k in keys}
     stepB = {k: float(np.mean([r[f"phase_{k}_minus_{ref}_rad"] for r in rows[winB[0]:winB[1]]])) for k in keys}
     steps = {k: stepB[k] - stepA[k] for k in keys}
+    map_steps = {k: map_rois[k] - map_rois[ref] for k in keys}
+    qc_kw = dict(slip_tolerance_rad=trace_slip_tolerance_rad,
+                 slip_min_template_coherence=trace_slip_min_template_coherence,
+                 step_rel_tol=step_agreement_rel_tol, step_abs_floor_rad=step_agreement_abs_floor_rad,
+                 frame_labels=[int(frame_index_map[t]) if frame_index_map else t for t in range(n)])
+    trace_qc = {k: trace_consistency_checks([rw[f"phase_{k}_minus_{ref}_rad"] for rw in rows], amp, amp_coh,
+                                            map_steps[k], steps[k], **qc_kw) for k in keys}
+    trace_qc_passed = bool(all(v["passed"] for v in trace_qc.values()))
+    diag_tr = {k: roi_diag[k] - roi_diag[ref] for k in keys}
+    diag_steps = {k: float(np.nanmean(diag_tr[k][winB[0]:winB[1]]) - np.nanmean(diag_tr[k][winA[0]:winA[1]]))
+                  for k in keys}
+    diag_qc = {k: trace_consistency_checks(diag_tr[k], amp, amp_coh, map_steps[k], diag_steps[k], **qc_kw)
+               for k in keys}
     xcheck = {"steady_map_discontinuity_fraction": map_disc,
               "split_half_circular_rms_rad": float(np.sqrt(np.mean(hres ** 2))),
-              "band_column_coherence_threshold_used": thr_used,
+              "trace_method": "per-frame 2D spatial unwrap over the largest connected valid region, ROI pixel means",
               "band_trace_steps_rad": steps,
-              "steady_map_roi_differences_rad": {k: map_rois[k] - map_rois[ref] for k in keys}}
+              "steady_map_roi_differences_rad": map_steps,
+              "trace_qc": trace_qc,
+              "trace_qc_passed": trace_qc_passed,
+              "diagnostic_column_profile_trace": {
+                  "note": "1D per-frame unwrap of the band-mean phasor along x; NOT the reported trace",
+                  "column_coherence_threshold_used": thr_used, "steps_rad": diag_steps,
+                  "qc_passed": bool(all(v["passed"] for v in diag_qc.values())),
+                  "n_slipped_frames": {k: v["frame_consistency"]["n_slipped_frames"] for k, v in diag_qc.items()},
+                  "step_agreement_passed": {k: v["step_agreement"]["passed"] for k, v in diag_qc.items()}}}
     # ---- quicklook ----
     try:
         import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
@@ -248,7 +359,7 @@ def derive_phase_products(
         for k in keys: ax[0, 0].plot(tt, [r[f"phase_{k}_minus_{ref}_rad"] for r in rows], label=f"{k} - {ref}")
         for i in range(1, n):
             if states[i] != states[i - 1]: ax[0, 0].axvline(tt[i], color="k", ls="--", lw=0.8)
-        ax[0, 0].set_title(f"{stem}: band-profile ROI differences ({first_state} -> {last_state})"); ax[0, 0].legend(fontsize=7); ax[0, 0].set_ylabel("rad")
+        ax[0, 0].set_title(f"{stem}: ROI phase differences ({first_state} -> {last_state})"); ax[0, 0].legend(fontsize=7); ax[0, 0].set_ylabel("rad")
         ax[0, 1].plot(tt, amp, label="template amplitude"); ax[0, 1].plot(tt, amp_coh, label="template fit coherence"); ax[0, 1].legend(fontsize=7)
         im = ax[1, 0].imshow(dmap, cmap="RdBu_r"); plt.colorbar(im, ax=ax[1, 0]); ax[1, 0].set_title(f"steady map {lab} [rad]")
         for k, (a, c) in roi_cols.items():
@@ -284,7 +395,7 @@ def derive_phase_products(
         format="CSV, one header row, ALL NUMERIC (state labels are encoded in state_code; see state_code_map)",
         state_code_map={str(v): k for k, v in code.items()} | ({"0.5": "transition (" + ", ".join(sorted(trans)) + ")"} if trans else {}),
         columns={"elapsed_s": "time axis (x)",
-                 **{f"phase_{k}_minus_{ref}_rad": f"PRIMARY: band-profile phase (rows {band[0]}:{band[1]}) averaged over x {rois[k][0]}:{rois[k][1]} minus over the reference ROI '{ref}' (x {rois[ref][0]}:{rois[ref][1]}), relative to the first steady state; piston-immune" for k in keys},
+                 **{f"phase_{k}_minus_{ref}_rad": f"PRIMARY: per-frame 2D-unwrapped phase averaged over rows {band[0]}:{band[1]} x columns {rois[k][0]}:{rois[k][1]} minus the same over the reference ROI '{ref}' (x {rois[ref][0]}:{rois[ref][1]}), relative to the first steady state; piston-immune" for k in keys},
                  "template_amplitude_fraction": "PRIMARY (shape-matched): fraction of the run's final steady-state map present in the frame (0 = first state, 1 = final state)",
                  "template_fit_coherence": "goodness of the template fit (1 = frame is exactly a scaled steady map + piston)",
                  "state_code": "numeric condition code (0, 1, ... in order of appearance; 0.5 during transitions)",
@@ -306,7 +417,7 @@ def derive_phase_products(
             "valid_mask": str(out / f"{stem}_valid_mask_x{b}.npy"), "quicklook": quicklook,
             "conditions": uniq, "steady_windows_frames": common["steady_windows_frames"],
             "steady_state_steps_rad": steps, "steady_map_roi_means_rad": map_rois,
-            "cross_checks": xcheck, "seconds": round(time.time() - t0, 1)}
+            "cross_checks": xcheck, "trace_qc_passed": trace_qc_passed, "seconds": round(time.time() - t0, 1)}
 
 
 TOOL_SPEC = ToolSpec(
@@ -315,7 +426,7 @@ TOOL_SPEC = ToolSpec(
         "From a wrapped relative-phase stack (n_frames, y, x) produce piston-immune, "
         "analysis-ready products: a steady-state phase DIFFERENCE MAP (last condition minus "
         "first, spatially unwrapped, global piston removed) for image analysis, and a "
-        "TIME-SERIES CSV of band-profile ROI differences plus a template-amplitude trace for "
+        "TIME-SERIES CSV of ROI phase differences (per-frame 2D unwrap) plus a template-amplitude trace for "
         "curve analysis, each with a same-stem JSON sidecar. Joins the frames with a "
         "per-frame condition timeline (e.g. magnet state) when given."
     ),
@@ -327,7 +438,9 @@ TOOL_SPEC = ToolSpec(
                "smoothing_sigma: float = 1.0, coherence_min: float = 0.6, exclude_columns: list[[x0, x1]] | None = None, "
                "band_rows: [y0, y1] | None = None, roi_x_ranges: dict[str, [x0, x1]] | None = None, "
                "reference_roi: str | None = None, template_amplitude_grid: list[float] | None = None, "
-               "frame_index_map: list[int] | None = None, stem: str | None = None, label: str | None = None, state_codes: dict | None = None) -> dict"),
+               "frame_index_map: list[int] | None = None, stem: str | None = None, label: str | None = None, state_codes: dict | None = None, "
+               "trace_slip_tolerance_rad: float = 1.0, trace_slip_min_template_coherence: float = 0.5, "
+               "step_agreement_rel_tol: float = 0.15, step_agreement_abs_floor_rad: float = 1.0) -> dict"),
     parameters={
         "wrapped_phase_npy": {"type": "str", "description": "Output of reconstruct_offaxis_hologram_stack (float32 (n, y, x) wrapped phase, radians)."},
         "output_dir": {"type": "str", "description": "Directory for the products (outside the source bundle)."},
@@ -342,7 +455,7 @@ TOOL_SPEC = ToolSpec(
         "exclude_columns": {"type": "list", "description": "Full-resolution x ranges [[x0, x1], ...] to drop from every product (a MEASURED zone, e.g. from a previous run's auto exclusion). An exclusion leaving fewer than half the columns raises."},
         "auto_exclude_dense_fringes": {"type": "bool", "description": "Measure and exclude edge zones where the steady-state fringes are denser than the sampling limit (median |dphi/dx| > dense_fringe_max_gradient_rad_per_px per binned px, contiguous from an edge). Default False; set True for any run with a strong localized perturbation. Excluded ranges are reported in the sidecar."},
         "dense_fringe_max_gradient_rad_per_px": {"type": "float", "description": "Gradient threshold for the auto exclusion (default 1.05 rad/px = fringe spacing ~6 binned px). LOWER to exclude more aggressively, RAISE to keep steeper gradients."},
-        "band_rows": {"type": "list", "description": "Full-resolution [y0, y1] row band for the profile traces (default the middle third)."},
+        "band_rows": {"type": "list", "description": "Full-resolution [y0, y1] row band for the ROI traces (default the middle third)."},
         "roi_x_ranges": {"type": "dict", "description": "Named full-resolution x ranges for the traces, e.g. {'near_wall': [350, 500], 'mid': [650, 800], 'far': [950, 1100]} (default thirds). Choose them from the steady map so at least one ROI is far from the perturbation."},
         "reference_roi": {"type": "str", "description": "ROI subtracted from the others (default: the last named ROI). Pick the ROI least affected by the perturbation."},
         "template_amplitude_grid": {"type": "list[float]", "description": "Scale grid for the template fit (default -0.5..1.5 step 0.01)."},
@@ -350,12 +463,18 @@ TOOL_SPEC = ToolSpec(
         "stem": {"type": "str", "description": "Output file stem (default derived from the input name)."},
         "label": {"type": "str", "description": "Label in the difference-map file name (default '<last>_minus_<first>')."},
         "state_codes": {"type": "dict", "description": "Numeric code per state label, e.g. {'retracted': 0, 'at_cuvette': 1}. Build it ONCE from the states of ALL runs of a series and pass it to every call so first/last_state_code mean the same thing in every sidecar (default: codes by sorted name within the run, which differ when runs have different state sets)."},
+        "trace_slip_tolerance_rad": {"type": "float", "description": "Trace QC (per frame): a frame whose ROI difference sits within this many rad of template_amplitude x map step + 2pi k (k != 0) is flagged as a 2pi slip (default 1.0). LOWER if genuine non-template excursions near 2pi get flagged; RAISE (up to ~1.5) if slips on noisy frames are being missed."},
+        "trace_slip_min_template_coherence": {"type": "float", "description": "Trace QC (per frame): only frames whose template fit coherence is at least this are judged for slips (default 0.5), because a frame that is not a scaled steady map has no reliable expected value. LOWER to judge more transition frames; RAISE if fast transitions are flagged though their shape departs from the steady map."},
+        "step_agreement_rel_tol": {"type": "float", "description": "Trace QC (per run): the trace step and the steady-map ROI difference must agree within this fraction of the larger magnitude (default 0.15), or within step_agreement_abs_floor_rad. LOWER for a stricter gate; RAISE only when the ROI straddles a steep gradient the map and the band means sample differently."},
+        "step_agreement_abs_floor_rad": {"type": "float", "description": "Trace QC (per run): absolute agreement floor in rad (default 1.0), so near-zero control steps are not failed on a ratio. RAISE for noisy runs whose steps are small; LOWER to catch sub-radian disagreements on clean data."},
     },
     required=["wrapped_phase_npy", "output_dir"],
     returns=("dict: diff_map (.npy) + diff_map_sidecar, roi_curve (.csv) + roi_curve_sidecar, valid_mask, "
              "quicklook (.png), conditions, steady_windows_frames, steady_state_steps_rad (per ROI minus "
              "reference), steady_map_roi_means_rad, cross_checks (unwrap discontinuity fraction, split-half "
-             "rms, band-trace vs map agreement)."),
+             "rms, trace_qc per ROI pair: frame_consistency (2pi-slipped frames) and step_agreement (trace step "
+             "vs map ROI difference), each with passed flags and offending values), trace_qc_passed (bool: "
+             "AND it into qc.passed)."),
     when_to_use=("Right after reconstruct_offaxis_hologram_stack, to turn the phase stack into "
                  "a map for image analysis and a CSV for curve analysis. Inspect the quicklook and "
                  "the cross_checks; if the steady map shows sharp-edged plateaus (unwrap residues), "
