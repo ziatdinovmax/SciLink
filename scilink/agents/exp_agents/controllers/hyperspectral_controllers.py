@@ -2746,6 +2746,12 @@ class BuildHolisticSynthesisPromptController:
                     if isinstance(scalar, (int, float)):
                         # Global scalar deliverable — a single number, not a map.
                         prompt_parts.append(f"   - Value: {scalar:.6g}")
+                        if meta.get("gated") is False:
+                            # #722: no map review or replay gate looked at it
+                            prompt_parts.append(
+                                "   - Checked: NO gate checked this number (it may be a failed fit — "
+                                "at a bound, at a window edge, ~0 amplitude); a claim resting on it "
+                                "says so")
                     # Crash Fix: Use .get(key, 0.0) to handle missing stats gracefully
                     elif stats:
                         s_min = stats.get('min', 0.0)

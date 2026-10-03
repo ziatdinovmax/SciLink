@@ -111,7 +111,7 @@ def test_variant_keys_merge_into_majority_name():
         rows = _read_csv(path)
         header = list(rows[0].keys())
         assert "metric" not in header and "metric_value" in header
-        assert header == ["unit", "metric_value", "width", "fit_r_squared"]
+        assert header == ["unit", "metric_value", "width", "fit_r_squared", "verified", "flag_reason"]
         by_unit = {r["unit"]: r for r in rows}
         assert by_unit["u8"]["metric_value"] == "0.99"
         assert all(r["metric_value"] != "" for r in rows)
@@ -124,7 +124,7 @@ def test_variant_keys_tie_keeps_first_seen_name():
         out = _series_run(tmp, {"u0": {"Peak_Area_val": 1.0},
                                 "u1": {"peak_area": 2.0}})
         rows = _read_csv(write_feature_table(out))
-        assert list(rows[0].keys()) == ["unit", "Peak_Area_val", "fit_r_squared"]
+        assert list(rows[0].keys()) == ["unit", "Peak_Area_val", "fit_r_squared", "verified", "flag_reason"]
         assert [r["Peak_Area_val"] for r in rows] == ["1.0", "2.0"]
 
 
@@ -133,7 +133,7 @@ def test_both_populated_in_a_unit_is_not_merged():
         out = _series_run(tmp, {"u0": {"x": 1.0, "x_value": 10.0},
                                 "u1": {"x": 2.0}})
         rows = _read_csv(write_feature_table(out))
-        assert set(rows[0].keys()) == {"unit", "x", "x_value", "fit_r_squared"}
+        assert set(rows[0].keys()) == {"unit", "x", "x_value", "fit_r_squared", "verified", "flag_reason"}
         assert rows[0]["x"] == "1.0" and rows[0]["x_value"] == "10.0"
 
 
@@ -142,7 +142,7 @@ def test_statistics_suffixes_are_not_variants():
         out = _series_run(tmp, {"u0": {"fwhm_mean": 1.0},
                                 "u1": {"fwhm": 2.0}})
         rows = _read_csv(write_feature_table(out))
-        assert set(rows[0].keys()) == {"unit", "fwhm_mean", "fwhm", "fit_r_squared"}
+        assert set(rows[0].keys()) == {"unit", "fwhm_mean", "fwhm", "fit_r_squared", "verified", "flag_reason"}
 
 
 def test_merge_notes_report_moved_units():

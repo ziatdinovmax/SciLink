@@ -13,8 +13,8 @@ import inspect
 import json
 from scilink.utils.text_io import atomic_write_json
 import logging
-from ._verification_record import (analysis_verdict, replay_escalation, series_anchor_unit, series_recipes,
-                                   ungated_outputs_of)
+from ._verification_record import (analysis_verdict, replay_escalation, series_anchor_unit, series_coverage,
+                                   series_recipes, ungated_outputs_of)
 import os
 import time
 from pathlib import Path
@@ -1658,6 +1658,18 @@ class AnalysisOrchestratorAgent:
 
         warnings: List[str] = []
         for rec in new_analyses:
+            cov = series_coverage(rec.get("full_result"))
+            if cov and (cov["with_features"] < cov["units"] or cov["n_unverified"] or cov["n_failed"]):
+                warnings.append(
+                    f"Analysis {rec.get('analysis_id')} (series): {cov['with_features']} of "
+                    f"{cov['units']} units produced features"
+                    + (f"; unverified: {', '.join(cov['unverified'])}"
+                       + (" …" if cov["n_unverified"] > len(cov["unverified"]) else "")
+                       if cov["n_unverified"] else "")
+                    + (f"; failed: {', '.join(cov['failed'])}"
+                       + (" …" if cov["n_failed"] > len(cov["failed"]) else "")
+                       if cov["n_failed"] else "")
+                    + ". Only verified units are data.")
             if rec.get("status") != "success":
                 warnings.append(
                     f"Analysis {rec.get('analysis_id')} did not complete "
@@ -1740,6 +1752,9 @@ class AnalysisOrchestratorAgent:
                     # hyperspectral task's scalars, #722): the verdict does not
                     # cover them, so the board keeps the run's claims provisional
                     "ungated_outputs": ungated_outputs_of(rec.get("full_result")),
+                    # a series: units, how many produced features, which are
+                    # unverified or failed (#723) — None for a single run
+                    "series_coverage": series_coverage(rec.get("full_result")),
                 } for rec in new_analyses
             ],
             "warnings": warnings,

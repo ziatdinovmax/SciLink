@@ -612,9 +612,16 @@ def _analysis_records(entry: Dict[str, Any], result: Dict[str, Any]) -> List[Dic
         verified, why = _claim_verified(rec)
         if not claim:
             continue
+        cov = (rec or {}).get("series_coverage")
+        partial = isinstance(cov, dict) and (cov.get("with_features", 0) < cov.get("units", 0)
+                                             or cov.get("n_unverified") or cov.get("n_failed"))
         out.append({"kind": "claim", "payload": {"text": claim[:1500]},
                     "status": "verified" if verified else "provisional",
-                    "evidence": {"analysis_ids": [aid] if aid else [], "gate": why}})
+                    "evidence": {"analysis_ids": [aid] if aid else [], "gate": why,
+                                 # a series the claim rests on only part of (#723)
+                                 **({"coverage": {k: cov[k] for k in ("units", "with_features",
+                                                                      "n_unverified", "n_failed")}}
+                                    if partial else {})}})
     for aid, rec in status_by_id.items():
         out += _recipe_specs(aid, rec)
         out += _escalation_records(aid, rec)

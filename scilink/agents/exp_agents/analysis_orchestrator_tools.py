@@ -633,6 +633,21 @@ def _structure_metadata_for_save(metadata: dict) -> dict:
     return result
 
 
+def _load_sidecars(sidecar_map: dict, logger: logging.Logger) -> dict:
+    """Every paired sidecar's contents, keyed by data filename (unreadable
+    or non-object sidecars skipped with a warning)."""
+    per_file_meta: dict = {}
+    for fname, jpath in sidecar_map.items():
+        try:
+            with open(jpath, "r") as f:
+                content = json.load(f)
+            if isinstance(content, dict):
+                per_file_meta[fname] = content
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Failed to load sidecar %s: %s", jpath.name, exc)
+    return per_file_meta
+
+
 def _extract_series_from_sidecars(
     sidecar_map: dict[str, Path],
     data_files: list[Path],
@@ -668,19 +683,9 @@ def _extract_series_from_sidecars(
         Full sidecar contents keyed by data filename (always returned,
         even when ``series_meta`` is ``None``).
     """
-    per_file_meta: dict[str, dict] = {}
-    sidecar_data: dict[str, dict] = {}
-
     # 1. Load all sidecars
-    for fname, jpath in sidecar_map.items():
-        try:
-            with open(jpath, "r") as f:
-                content = json.load(f)
-            if isinstance(content, dict):
-                sidecar_data[fname] = content
-                per_file_meta[fname] = content
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("Failed to load sidecar %s: %s", jpath.name, exc)
+    per_file_meta: dict[str, dict] = _load_sidecars(sidecar_map, logger)
+    sidecar_data: dict[str, dict] = dict(per_file_meta)
 
     if not sidecar_data:
         return None, per_file_meta
@@ -2884,6 +2889,18 @@ class AnalysisOrchestratorTools:
                         has_series_meta = True
                     except (json.JSONDecodeError, TypeError) as e:
                         self.logger.warning(f"Failed to parse series_metadata: {e}")
+
+                # === Per-unit sidecar fields when the control variable is given ===
+                # An explicit series_metadata names the control variable, which
+                # is all it replaces: each unit's own sidecar fields (an exposure
+                # that differs 17x between units, observed live) still reach that
+                # unit's prompts (#723). Only the inference below is skipped.
+                if is_series and has_series_meta and (path.is_dir() or is_glob_input):
+                    _sc_map, _ = _detect_sidecar_jsons(data_files, all_files)
+                    _pfm = _load_sidecars(_sc_map, self.logger) if _sc_map else {}
+                    if _pfm:
+                        self.orch.current_metadata["per_file_metadata"] = _pfm
+                        print(f"    Loaded {len(_pfm)} per-file sidecar(s) for the units' own fields")
 
                 # === Try to extract series metadata from sidecar JSON files ===
                 if is_series and not has_series_meta and (path.is_dir() or is_glob_input):
