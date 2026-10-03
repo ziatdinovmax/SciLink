@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 import json
 import os
+import time as _time_mod
 import re
 import inspect
 from datetime import datetime
@@ -1034,6 +1035,17 @@ def _map_valid_coverage(result_map) -> tuple[float, int]:
     _real = _finite & (np.abs(result_map) > 0)
     n_valid = int(_real.sum())
     return 100.0 * n_valid / max(result_map.size, 1), n_valid
+
+
+def _sandbox_timeout(exc: BaseException) -> bool:
+    """The sandbox's own limit (``ExecutionTimeout`` → ``SandboxTimeout``, on
+    the main thread AND injected into a worker thread), not a
+    ``TimeoutError`` a script raised itself (a socket, a future): only the
+    former means "merely slow". The TYPE, never the message: the injected
+    instance has none, and nearly every interactive surface runs off the
+    main thread."""
+    from ....executors import SandboxTimeout
+    return isinstance(exc, SandboxTimeout)
 
 
 # The per-map replay gate lives with the shared replay policies (#712); the
@@ -2354,6 +2366,8 @@ class SelectRefinementTargetController:
                                 else "replay of a prior approved analysis script"),
                 "required_outputs": list(rec.get("required_outputs") or []),
                 "supplied_script": rec["script"],
+                **({"timeout_used_s": int(rec["timeout_used_s"])}
+                   if isinstance(rec.get("timeout_used_s"), (int, float)) else {}),
                 # #518: the donor's fit-scoping travels with the script — a
                 # replay must reproduce the donor's SCOPING, not only its
                 # arithmetic (the mask is re-derived on this cube downstream).
@@ -3361,6 +3375,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             if target.get("supplied_script"):
                 ctx.supplied_script = target["supplied_script"]
                 ctx.locked_script = target["supplied_script"]
+                ctx.locked_timeout_s = target.get("timeout_used_s")
                 self.logger.info(
                     "    🔒 Locked-script replay for this target: executing "
                     "the prior approved script (generation skipped; per-map "
@@ -3823,6 +3838,9 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 "script": ctx.last_code or None,
                 **({"identity_checked": bool(getattr(ctx, "identity_checked", False))}
                    if getattr(ctx, "locked_script", None) else {}),
+                # the execution limit this script needed (#699): a locked
+                # replay of it starts from here instead of the base
+                **({"timeout_used_s": int(ctx.timeout_used_s)} if getattr(ctx, "timeout_used_s", None) else {}),
                 # Locked-replay provenance: replay_verbatim=False means a
                 # mechanical execution repair modified the frozen script, so
                 # this run is NOT byte-comparable to the donor.
@@ -3898,10 +3916,11 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             # Curve/image parity: execution-level failures (unparsable
             # response, syntax/runtime error, non-dict return) are repaired
             # in place with the traceback — no ladder budget spent, no
-            # annealing movement. Timeouts are EXCLUDED: rerunning
-            # near-identical too-slow code burns the full cap again, so they
-            # go to the ladder, whose critique feedback can restructure the
-            # method. QC rejections remain ladder currency as before.
+            # annealing movement. A timeout is first given more time (the
+            # shared escalation below: the same script under a doubled
+            # limit, within the run's deadline); a script still too slow
+            # then goes to the ladder, whose critique feedback can
+            # restructure the method. QC rejections remain ladder currency.
             code_str, result_dict, _mech_tb = "", None, ""
             # A strict replay (a live frame) never calls a model: a locked
             # script that raises FAILS the frame, which is what tells a live
@@ -3962,18 +3981,86 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                             "(the parser compile-checks scripts, so a syntax "
                             "error also lands here). Raw response head:\n"
                             + str(response)[:2000])
-                    with ExecutionTimeout(seconds=self.executor_timeout):
-                        exec(code_str, global_scope, local_scope)
+                    # The timeout policy the curve and image agents run under
+                    # (#699, _locked_exec.escalate_timeouts): a script that is
+                    # merely slow gets more time — the same code, a doubled
+                    # limit, up to the cap — before it is treated as broken.
+                    # A locked replay starts from the limit its donor needed.
+                    from .._locked_exec import escalate_timeouts
+                    _base_timeout = max(int(self.executor_timeout),
+                                        int(getattr(ctx, "locked_timeout_s", 0) or 0))
+                    ctx.timeout_used_s = None            # per attempt: a swallowed or failed run leaves none
+                    _run_deadline = state.get("_run_deadline")
+                    _loop_t0 = getattr(ctx, "loop_started", None)
+                    _loop_budget = getattr(self, "qc_time_budget_s", None)
 
-                        if "analyze_feature" not in local_scope:
-                            raise ValueError("Function 'analyze_feature' was not found in generated code.")
+                    def _remaining_s():
+                        # what is left for a RETRY: the run's deadline and the
+                        # verification loop's own wall-clock budget, whichever
+                        # is nearer (a 1800 s budget must not hold a 3600 s cap)
+                        left = []
+                        if _run_deadline is not None:
+                            left.append(_run_deadline - _time_mod.monotonic())
+                        if _loop_budget and _loop_t0 is not None:
+                            left.append(float(_loop_budget) - (_time_mod.monotonic() - _loop_t0))
+                        return min(left) if left else None
 
-                        self.logger.info(f"    Executing generated code (timeout: {self.executor_timeout}s)...")
-                        func = local_scope["analyze_feature"]
-                        result_dict = _invoke_analyze_feature(
-                            func, optimal_data, state["energy_axis"], reconstruction,
-                            auxiliary=auxiliary_operands, fit_mask=fit_mask,
-                        )
+                    def _attempt(_timeout_s: int):
+                        _scope_g, _scope_l = dict(global_scope), {}
+                        try:
+                            with ExecutionTimeout(seconds=_timeout_s):
+                                exec(code_str, _scope_g, _scope_l)
+                                if "analyze_feature" not in _scope_l:
+                                    raise ValueError("Function 'analyze_feature' was not found in generated code.")
+                                self.logger.info(f"    Executing generated code (timeout: {_timeout_s}s)...")
+                                return _invoke_analyze_feature(
+                                    _scope_l["analyze_feature"], optimal_data, state["energy_axis"], reconstruction,
+                                    auxiliary=auxiliary_operands, fit_mask=fit_mask,
+                                )
+                        except Exception as _exc:    # noqa: BLE001 - the sandbox's TimeoutError is the policy's
+                            # the attempt's scopes hold the script's arrays: let
+                            # them go whatever the error, before the same script
+                            # runs again (a timeout) or a repaired one does (any
+                            # other error, through the repair call); a timeout's
+                            # traceback is dropped too, an error's is the
+                            # correction prompt's and is dropped at the re-raise
+                            _scope_g.clear(); _scope_l.clear()
+                            if _sandbox_timeout(_exc):   # outcome; anything else is re-raised below
+                                _exc.__traceback__ = None
+                            else:
+                                # the traceback's frames hold the script's locals, and
+                                # the chain reaches the policy's own frame, whose "out"
+                                # IS this exception — a cycle only the GC would break,
+                                # while the repaired run already allocates. Drop the
+                                # locals; file, line and code stay for the prompt.
+                                # An error raised while handling another keeps that
+                                # one's frames on __cause__ / __context__: those too.
+                                _seen, _e = set(), _exc
+                                while _e is not None and id(_e) not in _seen:
+                                    _seen.add(id(_e))
+                                    traceback.clear_frames(_e.__traceback__)
+                                    _e = _e.__cause__ or _e.__context__
+                            return _exc
+                    result_dict, _timeout_used = escalate_timeouts(
+                        _attempt, base_timeout=_base_timeout,
+                        timed_out=lambda out: isinstance(out, TimeoutError) and _sandbox_timeout(out),
+                        logger=self.logger, remaining_s=_remaining_s,
+                        # a live frame must fail fast: no escalation on the fast clock
+                        escalations=0 if state.get("_strict_replay") else None)
+                    if isinstance(result_dict, Exception):
+                        # Raised here, without this wrapper's frame, so the
+                        # traceback the correction prompt shows is the script's
+                        # (a sandbox timeout is ladder currency, as before, once
+                        # the budget is spent). This frame's own references go
+                        # at the re-raise, or they would live on in the
+                        # traceback through the repair call and double the peak.
+                        _exc_out, _tb = result_dict, result_dict.__traceback__
+                        del result_dict
+                        try:
+                            raise _exc_out.with_traceback(_tb.tb_next if _tb is not None and _tb.tb_next else _tb)
+                        finally:
+                            del _exc_out, _tb
+                    ctx.timeout_used_s = _timeout_used
                     if not isinstance(result_dict, dict):
                         raise ValueError("Function return must be a dict.")
                     # A not_measurable declaration that CONTRADICTS the

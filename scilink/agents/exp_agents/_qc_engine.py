@@ -550,6 +550,8 @@ class CodegenQCEngine:
         self.spec = spec
 
     def run_item(self, ctx: QCItemContext) -> dict:
+        import time as _time
+        ctx.loop_started = _time.monotonic()   # the item's clock: a host's retry clamp reads what is left of the budget
         host = self.host
         ctx.n_levels = len(host._CONSTRAINT_ANNEALING_SCHEDULE)
         host.qc_setup(ctx)
