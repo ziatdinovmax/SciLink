@@ -579,38 +579,59 @@ def _data_facts(data, axis, axis_units: str, max_peaks: int = 4) -> dict:
         baseline = float(np.nanpercentile(smooth, 10))
         dx = float(abs(axis[-1] - axis[0])) / max(e - 1, 1)
         min_prom = max(5.0 * sigma_mean, 0.02 * rng)
-        # Prominence within a LOCAL window (a quarter of the axis), so a slow
-        # ripple of the field mean is not scored against the global minimum,
-        # and a "peak" wider than half the axis is not a spectral feature.
-        peaks, props = find_peaks(smooth, prominence=min_prom, wlen=max(9, e // 4))
-        if peaks.size:
-            w_all = peak_widths(smooth, peaks, rel_height=0.5)[0] * dx
-            keep = w_all < 0.5 * abs(axis[-1] - axis[0])
-            peaks = peaks[keep]
-            props = {k: v[keep] for k, v in props.items()}
+        # Which way the features point is read from the data, not the
+        # metadata: a field mean that sits near its TOP with excursions
+        # downward (transmission, reflectance) has its bands as dips, and
+        # its "peaks" are only the shoulders between them. Live, a
+        # transmission series centred its windows on those shoulders (#722).
+        med = float(np.nanmedian(smooth))
+        dips_first = (med - float(np.nanmin(smooth))) > (float(np.nanmax(smooth)) - med)
+        signal = -smooth if dips_first else smooth
+
+        def _features(sig):
+            # Prominence within a LOCAL window (a quarter of the axis), so a
+            # slow ripple of the field mean is not scored against the global
+            # minimum, and a feature wider than half the axis is not one.
+            pk, pr = find_peaks(sig, prominence=min_prom, wlen=max(9, e // 4))
+            if pk.size:
+                w_all = peak_widths(sig, pk, rel_height=0.5)[0] * dx
+                keep = w_all < 0.5 * abs(axis[-1] - axis[0])
+                pk = pk[keep]
+                pr = {k: v[keep] for k, v in pr.items()}
+            return pk, pr
+
+        peaks, props = _features(signal)
+        sig_base = float(np.nanpercentile(signal, 10))
         lines = ["### DATA FACTS (deterministic — computed from THIS dataset)",
                  f"- axis: {axis[0]:.6g} to {axis[-1]:.6g} {axis_units}, {e} channels ({dx:.4g} {axis_units}/channel); {n_pix} spectra",
-                 f"- field-mean level: baseline (10th percentile) {baseline:.4g}, max {float(np.nanmax(smooth)):.4g} at {axis[int(np.nanargmax(smooth))]:.6g} {axis_units}",
+                 f"- field-mean level: baseline (10th percentile) {baseline:.4g}, max {float(np.nanmax(smooth)):.4g} at {axis[int(np.nanargmax(smooth))]:.6g} {axis_units}"
+                 + (f", min {float(np.nanmin(smooth)):.4g} at {axis[int(np.nanargmin(smooth))]:.6g} {axis_units}" if dips_first else ""),
                  f"- noise: sigma_pixel ≈ {sigma_pix:.4g} per channel; sigma of the field mean ≈ {sigma_mean:.3g} (sigma_pixel/sqrt(N))"]
+        if dips_first:
+            lines.append("- polarity: the field mean sits near its top level and its features point DOWN "
+                         "(absorption-like dips); the maxima between them are shoulders, not features")
+
         def _fwhm(i: int) -> float:
-            # Walk outward from the peak to the half-height crossing, stopping
-            # at a saddle (a neighbouring peak) — an upper bound there, never
-            # a width that spans two features.
-            half = baseline + 0.5 * (smooth[i] - baseline)
+            # Walk outward from the extremum to the half-height crossing,
+            # stopping at a saddle (a neighbouring feature) — an upper bound
+            # there, never a width that spans two features.
+            half = sig_base + 0.5 * (signal[i] - sig_base)
             lo, hi = i, i
-            while lo > 0 and smooth[lo] > half and smooth[lo - 1] <= smooth[lo]:
+            while lo > 0 and signal[lo] > half and signal[lo - 1] <= signal[lo]:
                 lo -= 1
-            while hi < e - 1 and smooth[hi] > half and smooth[hi + 1] <= smooth[hi]:
+            while hi < e - 1 and signal[hi] > half and signal[hi + 1] <= signal[hi]:
                 hi += 1
             return max(hi - lo, 1) * dx
 
+        what = "dips" if dips_first else "peaks"
         if peaks.size:
             order = np.argsort(props["prominences"])[::-1][:max_peaks]
             widths = [_fwhm(int(peaks[j])) for j in order]
-            lines.append("- field-mean peaks (by prominence): "
+            lines.append(f"- field-mean {what} (by {'depth' if dips_first else 'prominence'}): "
                          + "; ".join(
-                             f"{axis[peaks[j]]:.6g} {axis_units} (height {smooth[peaks[j]]:.4g}, "
-                             f"prominence {props['prominences'][j]:.4g} = "
+                             f"{axis[peaks[j]]:.6g} {axis_units} ({'level' if dips_first else 'height'} "
+                             f"{smooth[peaks[j]]:.4g}, {'depth' if dips_first else 'prominence'} "
+                             f"{props['prominences'][j]:.4g} = "
                              f"{props['prominences'][j] / max(sigma_mean, 1e-12):.0f} sigma of the mean, "
                              f"width ≲ {widths[i]:.3g} {axis_units} (FWHM upper bound))"
                              for i, j in enumerate(order)))
@@ -618,20 +639,26 @@ def _data_facts(data, axis, axis_units: str, max_peaks: int = 4) -> dict:
                          f"({props['prominences'][order[0]] / max(sigma_mean, 1e-12):.0f} sigma); "
                          "per-pixel measurability still depends on sigma_pixel at the feature.")
         else:
-            lines.append(f"- field-mean peaks: none exceeds {min_prom:.3g} prominence "
+            lines.append(f"- field-mean {what}: none exceeds {min_prom:.3g} prominence "
                          f"(5 sigma of the mean / 2% of range) — the field mean looks featureless.")
         lines.append(
             "Centre fit windows, seeds and bounds on the MEASURED positions and widths "
             "above — not on literature values — and make each window wide enough to "
-            "contain its peak with margin. After any background subtraction, confirm the "
-            "peak amplitudes at these positions survive before fitting. A not_measurable "
+            f"contain its {'dip' if dips_first else 'peak'} with margin. After any background "
+            f"subtraction, confirm the {'dip depths' if dips_first else 'peak amplitudes'} at these "
+            "positions survive before fitting. A not_measurable "
             "declaration that contradicts these numbers is rejected.")
         strongest = (float(props["prominences"][order[0]] / max(sigma_mean, 1e-12))
                      if peaks.size else 0.0)
         return {"text": "\n".join(lines),
                 "measurable": bool(peaks.size) and strongest >= 5.0,
                 "strongest_sigma": strongest,
-                "peaks": [float(axis[peaks[j]]) for j in order] if peaks.size else []}
+                "polarity": "dips" if dips_first else "peaks",
+                "sigma_mean": sigma_mean,
+                # the features (peaks, or dips when the polarity says so), by
+                # prominence, with their FWHM upper bounds
+                "peaks": [float(axis[peaks[j]]) for j in order] if peaks.size else [],
+                "widths": [float(w) for w in widths] if peaks.size else []}
     except Exception:  # noqa: BLE001 - advisory block, never break the run
         return {}
 
