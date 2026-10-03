@@ -1340,6 +1340,22 @@ def replay_worker(spec: Dict[str, Any]) -> Dict[str, Any]:
     return {"index": idx, "result": _serializable(res)}
 
 
+def set_aside_lost_attempt(unit_dir: Path) -> None:
+    """Move what a lost replay's worker left in ``unit_dir`` (its log,
+    scripts, dashboards) into ``unit_dir/lost_attempt/`` before the replay is
+    re-run there, so the folder holds one answer — the re-run's."""
+    import shutil
+    if not unit_dir.is_dir():
+        return
+    leftovers = [p for p in unit_dir.iterdir() if p.name != "lost_attempt"]
+    if not leftovers:
+        return
+    dest = unit_dir / "lost_attempt"
+    dest.mkdir(exist_ok=True)
+    for p in leftovers:
+        shutil.move(str(p), str(dest / p.name))
+
+
 _REPLAY_TARGET = f"{__name__}:replay_worker"
 
 
@@ -1354,9 +1370,10 @@ class ReplayPool:
     script in every worker, and a script without a ``__main__`` guard ran a
     copy of itself per worker on the same session (#721). A replay that
     returns no result at all — its process killed or unable to start it —
-    is left out of ``collect``'s results and named in ``lost`` with the
-    reason: that is the pool failing, not the recipe, and the driver re-runs
-    it in its own process rather than refitting it."""
+    is left out of ``collect``'s results and named in ``lost`` with a
+    one-line reason (the full traceback, when there is one, is logged):
+    that is the pool failing, not the recipe, and the driver re-runs it in
+    its own process rather than refitting it."""
 
     def __init__(self, workers: int, logger: logging.Logger):
         import os
@@ -1391,9 +1408,9 @@ class ReplayPool:
                 try:
                     results[idx] = fut.result()["result"]
                 except Exception as e:  # noqa: BLE001
-                    self.lost[idx] = getattr(e, "detail", None) or f"{type(e).__name__}: {e}"
+                    self.lost[idx] = getattr(e, "reason", None) or f"{type(e).__name__}: {e}"
                     self.logger.warning(f"   ⚠️ replay dataset {idx} returned no result: "
-                                        f"{self.lost[idx].splitlines()[0]}")
+                                        f"{getattr(e, 'detail', None) or self.lost[idx]}")
                     continue
                 st = results[idx].get("status")
                 self.logger.info(f"   {'✅' if st in ('success', 'partial') else '❌'} replay "

@@ -646,8 +646,8 @@ class PlanningOrchestratorAgent:
         local_model: Optional[str] = None,
         file_roots: Optional[List[str]] = None,
     ):
-        # Handle deprecated parameters
         refuse_in_spawn_bootstrap(type(self).__name__)
+        # Handle deprecated parameters
         api_key, base_url = normalize_params(
             api_key=api_key,
             google_api_key=google_api_key,

@@ -22,6 +22,7 @@ later. Two rules follow:
 from __future__ import annotations
 
 import importlib
+import json
 import multiprocessing
 import os
 import pickle
@@ -56,12 +57,14 @@ def refuse_in_spawn_bootstrap(what: str = "SciLink") -> None:
 class ChildLost(RuntimeError):
     """The child process ended without returning a result (killed, crashed,
     or it could not start the target) — a failure of the process, not of
-    the work it was given."""
+    the work it was given. ``reason`` is one line (the exit, or the
+    exception the target raised); ``detail`` adds the child's traceback."""
 
-    def __init__(self, target: str, detail: str):
-        super().__init__(f"{target}: {detail}")
+    def __init__(self, target: str, reason: str, detail: str = ""):
+        super().__init__(f"{target}: {reason}")
         self.target = target
-        self.detail = detail
+        self.reason = reason
+        self.detail = detail or reason
 
 
 def _exit_reason(returncode: int) -> str:
@@ -79,15 +82,23 @@ def _exit_reason(returncode: int) -> str:
 def run_in_child(target: str, payload: Any) -> Any:
     """Call ``target`` (``"package.module:function"``) with ``payload`` in a
     fresh interpreter and return what it returns. The child sees the
-    parent's ``sys.path`` and environment and inherits its working directory
-    and console. Raises ``ChildLost`` when no result comes back — including
-    when the target itself raised, whose traceback is in the detail."""
+    parent's ``sys.path`` — exactly, as spawn passes it: ``-P`` keeps
+    ``-m`` from putting the working directory first, where a folder holding
+    a ``scilink/`` (another checkout) or a ``signal.py`` would shadow the
+    parent's — and its environment, working directory and console. The
+    path travels as ``PYTHONPATH`` for the child's start only: the target
+    runs with the caller's own ``PYTHONPATH``, so the scripts it executes
+    see what a serial run's do. Raises ``ChildLost`` when no result comes
+    back — including when the target itself raised (the exception is the
+    reason, the traceback the detail)."""
     fd, result_path = tempfile.mkstemp(prefix="scilink_child_", suffix=".pkl")
     os.close(fd)
     env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(os.path.abspath(p) for p in sys.path if p)
+    env["PYTHONPATH"] = os.pathsep.join(os.path.abspath(p or os.curdir) for p in sys.path)
+    caller_pythonpath = json.dumps(os.environ.get("PYTHONPATH"))
     try:
-        proc = subprocess.Popen([sys.executable, "-m", _MODULE, target, result_path],
+        proc = subprocess.Popen([sys.executable, "-P", "-m", _MODULE, target, result_path,
+                                 caller_pythonpath],
                                 stdin=subprocess.PIPE, env=env)
         try:
             proc.stdin.write(pickle.dumps(payload))
@@ -101,7 +112,10 @@ def run_in_child(target: str, payload: Any) -> Any:
         except Exception:  # noqa: BLE001 - empty or torn: nothing came back
             raise ChildLost(target, _exit_reason(returncode)) from None
         if outcome != "returned":
-            raise ChildLost(target, f"the call raised in the child:\n{value}")
+            last = next((ln.strip() for ln in reversed(value.splitlines()) if ln.strip()),
+                        "an exception")
+            raise ChildLost(target, f"raised in the child: {last}",
+                            f"raised in the child:\n{value}")
         return value
     finally:
         try:
@@ -110,7 +124,12 @@ def run_in_child(target: str, payload: Any) -> Any:
             pass
 
 
-def _child_main(target: str, result_path: str) -> int:
+def _child_main(target: str, result_path: str, caller_pythonpath: str) -> int:
+    pythonpath = json.loads(caller_pythonpath)
+    if pythonpath is None:
+        os.environ.pop("PYTHONPATH", None)
+    else:
+        os.environ["PYTHONPATH"] = pythonpath
     try:
         payload = pickle.load(sys.stdin.buffer)
         module, _, name = target.partition(":")
@@ -124,4 +143,4 @@ def _child_main(target: str, result_path: str) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(_child_main(sys.argv[1], sys.argv[2]))
+    sys.exit(_child_main(*sys.argv[1:4]))

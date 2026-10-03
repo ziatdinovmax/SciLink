@@ -89,8 +89,8 @@ class OpenAIAsGenerativeModel:
 
     def __init__(self, model: str, api_key: str | None = None, base_url: str | None = None,
                  timeout: int | None = None):
-        # Store attributes for access by orchestrator
         refuse_in_spawn_bootstrap(type(self).__name__)
+        # Store attributes for access by orchestrator
         self.model = model
         self.api_key = api_key
         self.base_url = base_url

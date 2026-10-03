@@ -140,7 +140,8 @@ def _run_driver(tmp_path, name, workers, kill=None):
     record = {r["index"]: (r["success"], r["status"], r["role"], r.get("verified"),
                            r["extracted_features"]) for r in rows}
     return dict(runs=Path(files["mark"]).read_text().split(), calls=calls, record=record,
-                summary=json.loads(Path(files["summary"]).read_text()), stderr=proc.stderr)
+                summary=json.loads(Path(files["summary"]).read_text()), stderr=proc.stderr,
+                out=Path(files["out"]))
 
 
 @pytest.fixture(scope="module")
@@ -171,6 +172,10 @@ def test_a_killed_replay_worker_is_rerun_in_process_not_refit(tmp_path, serial):
     assert not [c for c in run["calls"] if c.get("role") == "refit"]
     assert "SIGKILL" in run["summary"]["replays_rerun_in_process"]["2"]
     assert run["record"] == serial["record"]
+    # the killed attempt's leftovers are set aside; the folder holds the re-run
+    unit = run["out"] / "dataset_0002"
+    assert (unit / "lost_attempt" / "replay.log").is_file()
+    assert (unit / "dynamic_analysis_records.json").is_file() and not (unit / "replay.log").exists()
 
 
 SPAWN_SCRIPT = '''
@@ -267,7 +272,48 @@ def test_every_entry_point_refuses_in_a_spawn_bootstrap_and_runs_in_a_task(tmp_p
 
 def test_run_in_child_returns_and_reports_what_went_wrong():
     assert run_in_child("os.path:basename", "/a/b/c.txt") == "c.txt"
-    with pytest.raises(ChildLost, match="raised in the child"):
+    with pytest.raises(ChildLost) as raised:
         run_in_child("json:loads", "{not json")
+    # one line names the exception; the traceback stays in the detail
+    assert raised.value.reason.startswith("raised in the child: json.decoder.JSONDecodeError")
+    assert "\n" not in raised.value.reason and "Traceback" in raised.value.detail
     with pytest.raises(ChildLost, match="SIGKILL"):
         run_in_child("signal:raise_signal", 9)      # the child kills itself
+
+
+def test_the_target_runs_with_the_callers_pythonpath(monkeypatch):
+    """The parent's sys.path reaches the child's START only; what the target
+    runs (a replay's generated script, through the sandbox's env allow-list)
+    sees the caller's own PYTHONPATH, as a serial run does."""
+    monkeypatch.setenv("PYTHONPATH", "/nowhere/a")
+    assert run_in_child("os:getenv", "PYTHONPATH") == "/nowhere/a"
+    monkeypatch.delenv("PYTHONPATH")
+    assert run_in_child("os:getenv", "PYTHONPATH") is None
+
+
+SHADOWED_DRIVER = """
+import sys
+sys.path.insert(1, {repo!r})
+from scilink.utils.child_process import run_in_child
+import scilink
+print("PARENT", scilink.__file__)
+print("CHILD", run_in_child("os.path:basename", "/a/b/c.txt"))
+"""
+
+
+def test_a_package_in_the_working_directory_does_not_shadow_the_parents(tmp_path):
+    """``python -m`` puts the working directory first; spawn never did. A
+    driver run from a folder holding another ``scilink/`` (a second checkout)
+    must still have its workers import the parent's SciLink."""
+    work = tmp_path / "work"
+    (work / "scilink").mkdir(parents=True)
+    (work / "scilink" / "__init__.py").write_text("raise ImportError('the shadow scilink was imported')\n")
+    drv = tmp_path / "drv"
+    drv.mkdir()
+    (drv / "driver.py").write_text(SHADOWED_DRIVER.format(repo=str(REPO)))
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    proc = subprocess.run([sys.executable, str(drv / "driver.py")], cwd=work, env=env,
+                          capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    assert f"PARENT {REPO / 'scilink' / '__init__.py'}" in proc.stdout
+    assert "CHILD c.txt" in proc.stdout, (proc.stdout, proc.stderr[-3000:])

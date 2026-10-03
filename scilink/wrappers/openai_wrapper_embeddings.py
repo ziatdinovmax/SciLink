@@ -11,9 +11,9 @@ class OpenAIAsEmbeddingModel:
     Mimics Google's genai.embed_content function using an OpenAI-compatible API.
     """
     def __init__(self, model: str, api_key: str = None, base_url: str = None):
+        refuse_in_spawn_bootstrap(type(self).__name__)
         # Retries are SciLink's (call_with_retries): the SDK's would sleep
         # inside the in-flight slot.
-        refuse_in_spawn_bootstrap(type(self).__name__)
         self.client = openai.OpenAI(api_key=api_key, base_url=base_url, max_retries=0)
         self.model = model
 

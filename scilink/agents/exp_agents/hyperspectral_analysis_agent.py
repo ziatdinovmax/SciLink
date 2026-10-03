@@ -1217,10 +1217,11 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     # The worker returned nothing — the pool failed, not the
                     # recipe: re-run the replay here, exactly as the serial
                     # path does, instead of handing it to a refit.
-                    why = pool.lost[idx].splitlines()[0]
+                    why = pool.lost[idx]
                     self.logger.warning(f"   Replay of dataset {idx} re-run in this process: "
                                         f"its worker returned no result ({why}).")
                     rerun_in_process[str(idx)] = why
+                    _series.set_aside_lost_attempt(Path(sp["unit_dir"]))
                     res = self._analyze_unit(
                         self._make_unit_agent(Path(sp["unit_dir"]), "replay", human_feedback=False),
                         idx, sp["data_path"], sp["analyze_kwargs"])

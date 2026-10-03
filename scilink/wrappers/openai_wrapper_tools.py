@@ -28,8 +28,8 @@ class OpenAIAsGenerativeModel:
     """
 
     def __init__(self, model: str, api_key: str | None = None, base_url: str | None = None):
-        # Works with OpenAI and any OpenAI-compatible endpoint 
         refuse_in_spawn_bootstrap(type(self).__name__)
+        # Works with OpenAI and any OpenAI-compatible endpoint 
         self.client = portable_openai_client(openai.OpenAI(api_key=api_key, base_url=base_url), model)
         self.model = model
 
