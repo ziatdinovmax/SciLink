@@ -41,6 +41,7 @@ from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .simulation_orchestrator_tools import SimulationOrchestratorTools
 from ._deprecation import normalize_params
 from scilink.utils.announce import announce_litellm
+from ...utils.child_process import refuse_in_spawn_bootstrap
 
 
 class SimulationMode(Enum):
@@ -313,6 +314,7 @@ class SimulationOrchestratorAgent:
         local_model: Optional[str] = None,
         file_roots: Optional[List[str]] = None,
     ):
+        refuse_in_spawn_bootstrap(type(self).__name__)
         self.logger = logging.getLogger(self.__class__.__name__)
 
         # Handle deprecated parameters

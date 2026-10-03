@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from PIL import Image
 import openai
 import json
+from ..utils.child_process import refuse_in_spawn_bootstrap
 
 
 # OpenAI reasoning-class models (gpt-5*, o1*, o3*, o4*) only accept the default
@@ -28,6 +29,7 @@ class OpenAIAsGenerativeModel:
 
     def __init__(self, model: str, api_key: str | None = None, base_url: str | None = None):
         # Works with OpenAI and any OpenAI-compatible endpoint 
+        refuse_in_spawn_bootstrap(type(self).__name__)
         self.client = portable_openai_client(openai.OpenAI(api_key=api_key, base_url=base_url), model)
         self.model = model
 

@@ -4,6 +4,7 @@ from typing import List
 from openai._utils import maybe_transform
 from openai.types import embedding_create_params
 from openai.types.create_embedding_response import CreateEmbeddingResponse
+from ..utils.child_process import refuse_in_spawn_bootstrap
 
 class OpenAIAsEmbeddingModel:
     """
@@ -12,6 +13,7 @@ class OpenAIAsEmbeddingModel:
     def __init__(self, model: str, api_key: str = None, base_url: str = None):
         # Retries are SciLink's (call_with_retries): the SDK's would sleep
         # inside the in-flight slot.
+        refuse_in_spawn_bootstrap(type(self).__name__)
         self.client = openai.OpenAI(api_key=api_key, base_url=base_url, max_retries=0)
         self.model = model
 

@@ -6,6 +6,7 @@ import base64
 from types import SimpleNamespace
 from PIL import Image
 import openai
+from ..utils.child_process import refuse_in_spawn_bootstrap
 
 
 # OpenAI reasoning-class models (gpt-5*, o1*, o3*, o4*) only accept the default
@@ -89,6 +90,7 @@ class OpenAIAsGenerativeModel:
     def __init__(self, model: str, api_key: str | None = None, base_url: str | None = None,
                  timeout: int | None = None):
         # Store attributes for access by orchestrator
+        refuse_in_spawn_bootstrap(type(self).__name__)
         self.model = model
         self.api_key = api_key
         self.base_url = base_url

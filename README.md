@@ -132,18 +132,21 @@ See [MCP Integration](#mcp-integration) for details.
 from scilink.agents.planning_agents import PlanningAgent
 from scilink.agents.exp_agents import AnalysisOrchestratorAgent, AnalysisMode
 
-# Generate an experimental plan
-planner = PlanningAgent(model_name="claude-opus-4-6")
-plan = planner.propose_experiments(
-    objective="Optimize lithium extraction yield",
-    knowledge_paths=["./literature/"],
-    primary_data_set={"file_path": "./composition_data.xlsx"}
-)
+if __name__ == "__main__":
+    # Generate an experimental plan
+    planner = PlanningAgent(model_name="claude-opus-4-6")
+    plan = planner.propose_experiments(
+        objective="Optimize lithium extraction yield",
+        knowledge_paths=["./literature/"],
+        primary_data_set={"file_path": "./composition_data.xlsx"}
+    )
 
-# Analyze image data
-analyzer = AnalysisOrchestratorAgent(analysis_mode=AnalysisMode.AUTOPILOT)
-result = analyzer.chat("Analyze ./stem_image.tif and generate scientific claims")
+    # Analyze image data
+    analyzer = AnalysisOrchestratorAgent(analysis_mode=AnalysisMode.AUTOPILOT)
+    result = analyzer.chat("Analyze ./stem_image.tif and generate scientific claims")
 ```
+
+In a script, keep the code that runs SciLink under `if __name__ == "__main__":`. A process pool using the `spawn` start method (the default on macOS and Windows) re-imports your script in every worker. SciLink refuses to start inside such a worker, rather than run a second copy of your session there.
 
 ---
 

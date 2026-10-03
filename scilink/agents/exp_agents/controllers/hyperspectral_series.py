@@ -1303,10 +1303,11 @@ def resolve_series_workers(value: Optional[int]) -> int:
 
 
 def replay_worker(spec: Dict[str, Any]) -> Dict[str, Any]:
-    """Run ONE locked replay in a child agent. Executed in a spawned process
-    (default) or a thread (``SCILINK_HS_SERIES_POOL=thread``, used by the
-    offline tests so monkeypatches apply). Everything in ``spec`` is plain
-    data; the agent is built here from ``agent_kwargs``. Never raises."""
+    """Run ONE locked replay in a child agent. Executed in a fresh
+    interpreter (``utils.child_process``, the default) or a thread
+    (``SCILINK_HS_SERIES_POOL=thread``, used by the offline tests so
+    monkeypatches apply). Everything in ``spec`` is plain data; the agent is
+    built here from ``agent_kwargs``. Never raises."""
     import logging
     import os
     idx = spec["index"]
@@ -1320,7 +1321,7 @@ def replay_worker(spec: Dict[str, Any]) -> Dict[str, Any]:
         root.addHandler(handler)
         root.setLevel(logging.INFO)
     try:
-        # The parent process already holds the sandbox approval; a spawned
+        # The parent process already holds the sandbox approval; a worker
         # child cannot answer an interactive prompt, so the approval travels.
         if spec.get("sandbox_approved"):
             os.environ.setdefault("UNSAFE_EXECUTION_OK", "true")
@@ -1339,32 +1340,45 @@ def replay_worker(spec: Dict[str, Any]) -> Dict[str, Any]:
     return {"index": idx, "result": _serializable(res)}
 
 
+_REPLAY_TARGET = f"{__name__}:replay_worker"
+
+
 class ReplayPool:
-    """Runs locked replays on ``workers`` processes (or threads under
-    ``SCILINK_HS_SERIES_POOL=thread``) as they are queued, so replays overlap
-    with the anchors still running in the parent. ``submit`` per spec,
-    ``collect`` once at the end (``{index: result}``; a worker failure
-    becomes an error result)."""
+    """Runs locked replays on ``workers`` at a time, each in a fresh
+    interpreter (or a thread under ``SCILINK_HS_SERIES_POOL=thread``), as
+    they are queued, so replays overlap with the anchors still running in
+    the parent. ``submit`` per spec, ``collect`` once at the end
+    (``{index: result}``).
+
+    Never a ``multiprocessing`` spawn pool: that re-imports the caller's
+    script in every worker, and a script without a ``__main__`` guard ran a
+    copy of itself per worker on the same session (#721). A replay that
+    returns no result at all — its process killed or unable to start it —
+    is left out of ``collect``'s results and named in ``lost`` with the
+    reason: that is the pool failing, not the recipe, and the driver re-runs
+    it in its own process rather than refitting it."""
 
     def __init__(self, workers: int, logger: logging.Logger):
         import os
+        from concurrent.futures import ThreadPoolExecutor
         self.workers = max(int(workers), 1)
         self.logger = logger
         self.kind = os.environ.get("SCILINK_HS_SERIES_POOL", "process").lower()
-        if self.kind == "thread":
-            from concurrent.futures import ThreadPoolExecutor
-            self._pool = ThreadPoolExecutor(max_workers=self.workers)
-        else:
-            import multiprocessing
-            from concurrent.futures import ProcessPoolExecutor
-            self._pool = ProcessPoolExecutor(
-                max_workers=self.workers,
-                mp_context=multiprocessing.get_context("spawn"))
+        if self.kind != "thread":
+            self.kind = "process"
+        # Threads either way: a process-kind thread only waits on its child.
+        self._pool = ThreadPoolExecutor(max_workers=self.workers)
         self._futures: Dict[int, Any] = {}
+        self.lost: Dict[int, str] = {}
         self.logger.info(f"⚡ Replay pool: {self.workers} {self.kind} worker(s)")
 
     def submit(self, spec: Dict[str, Any]) -> None:
-        self._futures[spec["index"]] = self._pool.submit(replay_worker, spec)
+        if self.kind == "thread":
+            fut = self._pool.submit(replay_worker, spec)
+        else:
+            from scilink.utils.child_process import run_in_child
+            fut = self._pool.submit(run_in_child, _REPLAY_TARGET, spec)
+        self._futures[spec["index"]] = fut
         self.logger.info(f"   ⚡ replay dataset {spec['index']} submitted to the pool")
 
     def collect(self) -> Dict[int, Dict[str, Any]]:
@@ -1377,24 +1391,13 @@ class ReplayPool:
                 try:
                     results[idx] = fut.result()["result"]
                 except Exception as e:  # noqa: BLE001
-                    self.logger.exception(f"Replay worker for dataset {idx} failed: {e}")
-                    results[idx] = {"status": "error",
-                                    "error": {"error": type(e).__name__, "details": str(e)}}
+                    self.lost[idx] = getattr(e, "detail", None) or f"{type(e).__name__}: {e}"
+                    self.logger.warning(f"   ⚠️ replay dataset {idx} returned no result: "
+                                        f"{self.lost[idx].splitlines()[0]}")
+                    continue
                 st = results[idx].get("status")
                 self.logger.info(f"   {'✅' if st in ('success', 'partial') else '❌'} replay "
                                  f"dataset {idx} finished: {st}")
         finally:
             self._pool.shutdown(wait=True)
         return results
-
-
-def run_replays(specs: List[Dict[str, Any]], workers: int,
-                logger: logging.Logger) -> Dict[int, Dict[str, Any]]:
-    """Convenience: submit all ``specs`` and collect (kept for callers that
-    have the full queue up front)."""
-    if not specs:
-        return {}
-    pool = ReplayPool(workers, logger)
-    for sp in specs:
-        pool.submit(sp)
-    return pool.collect()
