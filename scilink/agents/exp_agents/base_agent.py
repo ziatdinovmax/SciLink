@@ -15,6 +15,7 @@ from ...auth import get_internal_proxy_key
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from ._deprecation import normalize_params
+from ...utils.child_process import refuse_in_spawn_bootstrap
 
 HIGH_NOVELTY_THRESHOLD = 4   # Score 4-5: Highly novel, needs validation
 MEDIUM_NOVELTY_THRESHOLD = 3  # Score 3: Somewhat novel, needs differentiation
@@ -462,6 +463,7 @@ class BaseUtilityAgent(LLMAgentMixin):
         local_model: str | None = None,
         **kwargs
     ):
+        refuse_in_spawn_bootstrap(type(self).__name__)
         self.logger = logging.getLogger(self.__class__.__name__)
         
         # Output directory setup
@@ -551,6 +553,7 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
         local_model: str | None = None,
         **kwargs
     ):
+        refuse_in_spawn_bootstrap(type(self).__name__)
         self.logger = logging.getLogger(self.__class__.__name__)
 
         # State management

@@ -35,6 +35,7 @@ import time
 from .tool_schema import normalize_tools, openai_tools_need_no_reasoning as _openai_tools_need_no_reasoning
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Union
+from ..utils.child_process import refuse_in_spawn_bootstrap
 
 
 # OpenAI reasoning-class models (gpt-5*, o1*, o3*, o4*) only accept the default
@@ -642,6 +643,7 @@ class LiteLLMGenerativeModel:
             timeout: Request timeout in seconds (default: ``llm_timeout_s()``,
                 1200 unless ``SCILINK_LLM_TIMEOUT_S`` says otherwise)
         """
+        refuse_in_spawn_bootstrap(type(self).__name__)
         _check_litellm()
 
         self.model = _normalize_model_name(model)
@@ -1135,6 +1137,7 @@ class LiteLLMEmbeddingModel:
             api_key: API key for the provider
             base_url: Optional custom API base URL
         """
+        refuse_in_spawn_bootstrap(type(self).__name__)
         _check_litellm()
         
         self.model = _normalize_model_name(model) if model else None

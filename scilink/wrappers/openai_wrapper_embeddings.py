@@ -4,12 +4,14 @@ from typing import List
 from openai._utils import maybe_transform
 from openai.types import embedding_create_params
 from openai.types.create_embedding_response import CreateEmbeddingResponse
+from ..utils.child_process import refuse_in_spawn_bootstrap
 
 class OpenAIAsEmbeddingModel:
     """
     Mimics Google's genai.embed_content function using an OpenAI-compatible API.
     """
     def __init__(self, model: str, api_key: str = None, base_url: str = None):
+        refuse_in_spawn_bootstrap(type(self).__name__)
         # Retries are SciLink's (call_with_retries): the SDK's would sleep
         # inside the in-flight slot.
         self.client = openai.OpenAI(api_key=api_key, base_url=base_url, max_retries=0)

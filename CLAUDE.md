@@ -227,14 +227,30 @@ Under AUTOPILOT delegation the regime-plan gate reaches the user through the
 normal feedback channel, like the specialists' other plan gates.
 
 **Replays fan out.** `series_workers` (or `SCILINK_HS_SERIES_WORKERS`) runs
-the locked replays on a spawned-process pool, each submitted the moment its
+the locked replays in worker processes, each submitted the moment its
 regime locks so replays overlap with the anchors still running in the
 parent — replays are independent, and processes rather than threads keep
 matplotlib and the sandbox executor out of each other's way
 (`SCILINK_HS_SERIES_POOL=thread` exists for the offline tests). Each replay logs to its own
 `dataset_NNNN/replay.log`; the parent's sandbox approval travels with the
 spec. Anchors and refits stay serial: they are the LLM-heavy, human-gated
-part.
+part. **A worker is a fresh interpreter, never a `multiprocessing` spawn
+pool** (`utils.child_process.run_in_child`): spawn re-imports the caller's
+script in every worker, and a driver script without a `__main__` guard ran a
+copy of itself per worker on the same session — a new meta agent, model
+calls, an overwritten checkpoint (#721). The child starts on the parent's
+`sys.path` exactly (`-P`: a `scilink/` or `signal.py` in the working
+directory never shadows it), and the target runs with the caller's own
+`PYTHONPATH`, so a replay's generated script sees what a serial one does. Every orchestrator, agent and model
+wrapper also refuses to start inside a spawn bootstrap
+(`refuse_in_spawn_bootstrap`), which covers pools SciLink does not own. A
+replay whose worker returns NO result (killed, or unable to start) is re-run
+in the parent the serial way (the lost attempt's files set aside under
+`lost_attempt/`) and named in `summary.replays_rerun_in_process`:
+a pool failure is not a recipe failure, so it never becomes a refit. A
+replay that returns a failure is the method's, and is refit as before. A
+new worker pool (the swarm's process workers included) launches through
+`run_in_child`.
 
 **The replay gate, the verdict and the regime choice are shared policies.**
 The three analysis agents each judged a replay of a locked recipe, said what

@@ -38,6 +38,7 @@ from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .meta_orchestrator_tools import MetaOrchestratorTools
 from .workers import build_child
 from scilink.utils.announce import announce_litellm
+from ...utils.child_process import refuse_in_spawn_bootstrap
 
 
 class MetaMode(Enum):
@@ -483,6 +484,7 @@ class MetaOrchestratorAgent:
         launch_dir: Optional[str] = None,
         file_roots: Optional[List[str]] = None,
     ):
+        refuse_in_spawn_bootstrap(type(self).__name__)
         self.logger = logging.getLogger(self.__class__.__name__)
         # The directory the user launched from — where a bare filename is
         # looked for and where a standalone plan session's ./kb_storage

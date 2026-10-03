@@ -3,12 +3,14 @@ from PIL import Image
 import base64
 from types import SimpleNamespace
 from llama_cpp import Llama
+from ..utils.child_process import refuse_in_spawn_bootstrap
 
 class LocalLlamaModel():
     """
     This class pretends to be a GenerativeModel.
     """
     def __init__(self, model_path = "../gemma3_27B_QAT_local/gemma-3-27b-it-q4_0.gguf", n_ctx = 3000):
+        refuse_in_spawn_bootstrap(type(self).__name__)
         self.model = Llama(model_path = model_path, n_gpu_layers = -1, n_ctx=8096, verbose= False)
         
     def generate_content(self, contents, generation_config = None, safety_settings = None):

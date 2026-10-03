@@ -875,6 +875,16 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         child._light_synthesis = (role == "replay")
         return child
 
+    def _analyze_unit(self, child: "HyperspectralAnalysisAgent", idx: int,
+                      path: str, kwargs: dict) -> dict:
+        """One dataset's analysis in this process; a raise becomes an error
+        result, because one dataset must not kill the series."""
+        try:
+            return child.analyze(path, **kwargs)
+        except Exception as e:  # noqa: BLE001
+            self.logger.exception(f"Dataset {idx} raised: {e}")
+            return {"status": "error", "error": {"error": type(e).__name__, "details": str(e)}}
+
     def _unit_agent_kwargs(self, unit_dir: Path, human_feedback: bool) -> dict:
         """Plain-data constructor kwargs for a per-dataset child agent (also
         shipped to replay worker processes, so nothing here may be live)."""
@@ -1140,14 +1150,9 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 self.logger.info(
                     f"\n──── [{idx + 1}/{n}] REPLAY ({rname}): {Path(path).name} "
                     f"(locked recipe from dataset {lock['anchor_index']}) ────")
-            try:
-                res = child.analyze(path, system_info=unit_si,
-                                    **{**common, "hints": _join_hints(hints, regime_hint)},
-                                    **extra)
-            except Exception as e:  # noqa: BLE001 - one dataset must not kill the series
-                self.logger.exception(f"Dataset {idx} raised: {e}")
-                res = {"status": "error", "error": {"error": type(e).__name__,
-                                                    "details": str(e)}}
+            res = self._analyze_unit(child, idx, path, dict(
+                system_info=unit_si, **{**common, "hints": _join_hints(hints, regime_hint)},
+                **extra))
             row = _series.build_series_row(idx, path, res, role, unit_dir)
             row["regime"] = rname
             if lock is None:
@@ -1201,13 +1206,25 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 f"{row['status']}, {len(row['extracted_features'])} feature(s)")
 
         # ---- Deferred replays on the worker pool ----------------------------
+        rerun_in_process: Dict[str, str] = {}
         if deferred:
             self.logger.info(f"⚡ Collecting {len(deferred)} pooled replay(s)…")
             results = pool.collect()
             for sp in deferred:
                 idx = sp["index"]
-                res = results.get(idx) or {"status": "error",
-                                           "error": {"error": "no result", "details": "worker returned nothing"}}
+                res = results.get(idx)
+                if idx in pool.lost:
+                    # The worker returned nothing — the pool failed, not the
+                    # recipe: re-run the replay here, exactly as the serial
+                    # path does, instead of handing it to a refit.
+                    why = pool.lost[idx]
+                    self.logger.warning(f"   Replay of dataset {idx} re-run in this process: "
+                                        f"its worker returned no result ({why}).")
+                    rerun_in_process[str(idx)] = why
+                    _series.set_aside_lost_attempt(Path(sp["unit_dir"]))
+                    res = self._analyze_unit(
+                        self._make_unit_agent(Path(sp["unit_dir"]), "replay", human_feedback=False),
+                        idx, sp["data_path"], sp["analyze_kwargs"])
                 row = _series.build_series_row(idx, sp["data_path"], res, "replay", sp["unit_dir"])
                 row["regime"] = sp["regime"]
                 if schema is not None and row["success"]:
@@ -1318,6 +1335,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "locked_config": locked,
             "outlier_sigma": outlier_sigma,
             "series_workers": workers,
+            **({"replays_rerun_in_process": rerun_in_process} if rerun_in_process else {}),
             "num_images": n,
             "is_single_image": False,
             "analysis_objective": objective,
@@ -1523,6 +1541,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "refitted_count": sum(1 for r in rows if r.get("adaptively_refitted")),
                 "unverified_count": sum(1 for r in rows if r.get("success") and r.get("verified") is False),
                 "series_workers": state.get("series_workers"),
+                **({"replays_rerun_in_process": state["replays_rerun_in_process"]}
+                   if state.get("replays_rerun_in_process") else {}),
                 "anchor_index": (locked or {}).get("anchor_index"),
                 "locked_targets": [t.get("target") for t in (locked or {}).get("targets", [])],
                 "regimes": len((state.get("series_analysis_plan") or {}).get("regimes") or []) or 1,

@@ -26,6 +26,7 @@ from .bo_agent import BOAgent
 from .orchestrator_tools import OrchestratorTools
 from ._deprecation import normalize_params
 from scilink.utils.announce import announce_litellm
+from ...utils.child_process import refuse_in_spawn_bootstrap
 
 
 class AutonomyLevel(Enum):
@@ -645,6 +646,7 @@ class PlanningOrchestratorAgent:
         local_model: Optional[str] = None,
         file_roots: Optional[List[str]] = None,
     ):
+        refuse_in_spawn_bootstrap(type(self).__name__)
         # Handle deprecated parameters
         api_key, base_url = normalize_params(
             api_key=api_key,
