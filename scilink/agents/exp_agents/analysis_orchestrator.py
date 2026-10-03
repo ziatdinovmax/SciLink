@@ -13,7 +13,8 @@ import inspect
 import json
 from scilink.utils.text_io import atomic_write_json
 import logging
-from ._verification_record import analysis_verdict, replay_escalation, series_anchor_unit, series_recipes
+from ._verification_record import (analysis_verdict, replay_escalation, series_anchor_unit, series_recipes,
+                                   ungated_outputs_of)
 import os
 import time
 from pathlib import Path
@@ -1612,9 +1613,14 @@ class AnalysisOrchestratorAgent:
 
         # files_produced: every file written under each new analysis's
         # output directory (visualizations, reports, results JSON, ...).
+        # A run that FAILED is left out (a derivation that failed its own
+        # checks still leaves products on disk, #722): its files are not
+        # results, and the warning below names where they are.
         files_produced: List[str] = []
         for rec in new_analyses:
             out_dir = rec.get("output_directory")
+            if rec.get("status") not in ("success", "partial"):
+                continue
             if out_dir and Path(out_dir).is_dir():
                 for p in sorted(Path(out_dir).rglob("*")):
                     if p.is_file():
@@ -1656,6 +1662,9 @@ class AnalysisOrchestratorAgent:
                 warnings.append(
                     f"Analysis {rec.get('analysis_id')} did not complete "
                     f"successfully (status={rec.get('status')})."
+                    + (f" Files under {rec.get('output_directory')} are not results and "
+                       "are not in files_produced."
+                       if rec.get("status") != "partial" and rec.get("output_directory") else "")
                 )
 
         # feature_tables: per-analysis flat CSVs (conditions + extracted scalar
@@ -1727,6 +1736,10 @@ class AnalysisOrchestratorAgent:
                     # the judge (#712 escalation): an opinion beside the
                     # verdict, which the board posts as a provisional claim
                     "escalation": replay_escalation(rec.get("full_result")),
+                    # outputs the run reported that no gate checked (a
+                    # hyperspectral task's scalars, #722): the verdict does not
+                    # cover them, so the board keeps the run's claims provisional
+                    "ungated_outputs": ungated_outputs_of(rec.get("full_result")),
                 } for rec in new_analyses
             ],
             "warnings": warnings,

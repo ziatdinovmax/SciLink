@@ -883,7 +883,11 @@ Settled rules, each learned from a live run or a review:
   rewritten, so an agent's folder is never read again for it and the
   agents' own layout and reuse are untouched by the swarm; a verifier's
   physics approval inside the gate's soft band counts, a bypassed verification
-  below threshold does not), a human-approved plan (an unattended one stays
+  below threshold does not; a CLAIM of a run that also reported outputs no gate
+  checked — a hyperspectral task's `scalars`, marked `gated: False` where they
+  are produced and carried as `ungated_outputs` on the `analyses` row — stays
+  provisional, its recipe verified, because the gate approved the maps and a
+  claim may rest on the numbers beside them, #722), a human-approved plan (an unattended one stays
   provisional; only the delegation that wrote or settled the plan posts it),
   the structure validator. Engine output and advice that passed no gate — a BO
   point, a steering reduction, a TEA summary, a critic's blocking finding — is
