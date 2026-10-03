@@ -262,6 +262,28 @@ def test_trace_qc_passes_clean_transition(tmp_path):
     assert res2["cross_checks"]["trace_qc"]["left"]["frame_consistency"]["n_frames_checked"] == 0
 
 
+def test_steady_map_is_immune_to_a_wandering_piston(tmp_path):
+    """With per-frame piston spread over the full circle and per-pixel noise, a
+    plain circular mean of a steady window loses its coherence and the map's ROI
+    difference drifts off the truth; the de-pistoned window mean keeps the map
+    on the truth and in agreement with the trace."""
+    n, h, w = 30, 60, 120
+    rng = np.random.default_rng(2)
+    y, x = np.mgrid[:h, :w].astype(float)
+    shape = -1.5 * np.exp(-((x - 30) ** 2) / (2 * 12 ** 2))
+    piston = rng.uniform(-np.pi, np.pi, n)
+    stack = np.stack([np.angle(np.exp(1j * (piston[t] + (t >= 15) * shape + 0.8 * rng.standard_normal((h, w)))))
+                      for t in range(n)]).astype(np.float32)
+    np.save(tmp_path / "ctl_wrapped_phase.npy", stack)
+    res = derive_phase_products(str(tmp_path / "ctl_wrapped_phase.npy"), str(tmp_path / "o"), steady_window_frames=15,
+                                bin_factor=2, smoothing_sigma=1.0,
+                                roi_x_ranges={"left": [20, 40], "right": [90, 110]}, reference_roi="right")
+    x_ = res["cross_checks"]
+    truth = shape[0, 20:40].mean() - shape[0, 90:110].mean()
+    assert abs(x_["steady_map_roi_differences_rad"]["left"] - truth) < 0.15, x_["steady_map_roi_differences_rad"]
+    assert x_["trace_qc"]["left"]["step_agreement"]["passed"] and res["trace_qc_passed"] is True
+
+
 def test_trace_consistency_checks_flags_slips_and_step_disagreement():
     n = 30
     amp = np.r_[np.zeros(10), np.ones(20)]

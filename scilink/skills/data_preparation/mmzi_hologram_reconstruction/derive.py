@@ -37,6 +37,21 @@ def _unwrap2d(d, valid):
     return u
 
 
+def _steady_mean(Zw, valid, iterations=2):
+    """Circular-mean field of a steady window with each frame's global piston
+    removed first. A plain mean of unit fields whose piston wanders by ~pi
+    between frames shrinks toward zero and its phase becomes noise-dominated;
+    aligning every frame to the running mean (over ``valid``) before averaging
+    keeps the spatial shape at full coherence. Piston-immune by construction."""
+    if not valid.any():
+        return Zw.mean(axis=0)
+    ref = Zw[0]
+    for _ in range(int(iterations)):
+        p = np.angle((Zw[:, valid] * np.conj(ref[valid])[None]).sum(axis=1))
+        ref = (Zw * np.exp(-1j * p).astype(Zw.dtype)[:, None, None]).mean(axis=0)
+    return ref
+
+
 def _largest_component(valid):
     """The largest 4-connected region of ``valid``: a 2D unwrap fixes the 2pi
     offset of each disconnected island independently, so only one connected
@@ -142,7 +157,7 @@ def find_dense_fringe_edges(Z: np.ndarray, valid: np.ndarray, max_gradient: floa
     of the last quarter vs the first quarter of the run. Returns [[x0, x1], ...]
     in binned columns, only contiguous zones touching an edge."""
     n = Z.shape[0]; q = max(n // 4, 1)
-    FA = Z[:q].mean(axis=0); FB = Z[-q:].mean(axis=0)
+    FA = _steady_mean(Z[:q], valid); FB = _steady_mean(Z[-q:], valid)
     D = np.angle(FB * np.conj(FA))
     dx = np.abs(np.angle(np.exp(1j * (D[:, 1:] - D[:, :-1]))))
     v = valid[:, 1:] & valid[:, :-1]
@@ -254,12 +269,12 @@ def derive_phase_products(
         last_start = min(i for i in range(n) if all(s == last_state for s in states[i:]))
     winA = (max(0, first_end - N + 1), first_end + 1)
     winB = (max(last_start, n - N), n)
-    FA = Z[winA[0]:winA[1]].mean(axis=0); FB = Z[winB[0]:winB[1]].mean(axis=0)
+    FA = _steady_mean(Z[winA[0]:winA[1]], valid); FB = _steady_mean(Z[winB[0]:winB[1]], valid)
     # ---- steady-state map ----
     dmap = _unwrap2d(np.angle(FB * np.conj(FA)), valid)
     dmap -= np.nanmedian(dmap[valid])
     map_disc = _disc_frac(dmap, valid)
-    h1 = Z[winB[0]:(winB[0] + winB[1]) // 2].mean(axis=0); h2 = Z[(winB[0] + winB[1]) // 2:winB[1]].mean(axis=0)
+    h1 = _steady_mean(Z[winB[0]:(winB[0] + winB[1]) // 2], valid); h2 = _steady_mean(Z[(winB[0] + winB[1]) // 2:winB[1]], valid)
     m1 = _unwrap2d(np.angle(h1 * np.conj(FA)), valid); m2 = _unwrap2d(np.angle(h2 * np.conj(FA)), valid)
     hres = np.angle(np.exp(1j * (m1[valid] - m2[valid] - np.nanmedian(m1[valid] - m2[valid]))))
     lab = label or (f"{last_state}_minus_{first_state}" if not single else f"end_minus_start_{first_state}")
