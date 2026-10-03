@@ -24,13 +24,20 @@ os.environ.setdefault("UNSAFE_EXECUTION_OK", "true")
 
 from scilink.agents.exp_agents.controllers.hyperspectral_controllers import RunDynamicAnalysisController
 
-NULL_WITH_MASK = (
-    "def analyze_feature(data, energy_axis):\n"
-    "    import numpy as np\n"
-    "    d = np.asarray(data)\n"
-    "    return {'maps': {'Edge_Position': np.full(d.shape[:2], np.nan), 'Fit_Mask': np.ones(d.shape[:2])},\n"
-    "            'not_measurable': {'feature': 'edge position', 'evidence': 'prominence 0.4 sigma of the mean',\n"
-    "                               'description': 'no edge above the noise'}}\n")
+def _null_with_mask(window=None):
+    """All-NaN required map + a diagnostic mask + a declaration examining
+    ``window`` (no window key when None)."""
+    win = f"'window': {list(window)}, " if window is not None else ""
+    return (
+        "def analyze_feature(data, energy_axis):\n"
+        "    import numpy as np\n"
+        "    d = np.asarray(data)\n"
+        "    return {'maps': {'Edge_Position': np.full(d.shape[:2], np.nan), 'Fit_Mask': np.ones(d.shape[:2])},\n"
+        f"            'not_measurable': {{'feature': 'edge position', {win}'evidence': 'prominence 0.4 sigma of the mean',\n"
+        "                               'description': 'no edge above the noise'}}\n")
+
+
+NULL_WITH_MASK = _null_with_mask((540, 565))
 VALUED_WITH_DECLARATION = (
     "def analyze_feature(data, energy_axis):\n"
     "    import numpy as np\n"
@@ -101,17 +108,37 @@ def test_a_declaration_beside_a_diagnostic_mask_is_judged_and_accepted(tmp_path)
     assert len(prompts) == 1                                  # no retry
 
 
-def test_the_contradiction_repair_still_applies_beside_a_mask(tmp_path):
-    """On a cube whose data facts show a strong feature, the same return is a
-    wrong gate: repaired in place (GATE ERROR), the judge never asked."""
+def test_a_strong_feature_inside_the_declared_window_is_repaired_in_place(tmp_path):
+    """The facts show a >= 5 sigma peak at 510 eV INSIDE the window the
+    declaration examined: a wrong gate, repaired in place (GATE ERROR) with the
+    feature and the window named, the judge never asked."""
     cube, E = _peaked_cube()
     good = ("def analyze_feature(data, energy_axis):\n"
             "    import numpy as np\n"
             "    return {'maps': {'Edge_Position': np.asarray(data).mean(axis=2)}, 'units': 'eV', 'description': 'd'}\n")
-    state, prompts, judged = _run(tmp_path, cube, E, [NULL_WITH_MASK, good],
+    state, prompts, judged = _run(tmp_path, cube, E, [_null_with_mask((500, 520)), good],
                                   judge=(AssertionError("judge must not be called"), ""))
     assert judged == [] and len(prompts) == 2 and "GATE ERROR" in prompts[1]
+    assert "INSIDE that window" in prompts[1] and "[500, 520]" in prompts[1]
     assert state["dynamic_analysis_records"][0]["task_success"] is True
+
+
+def test_a_strong_feature_outside_the_declared_window_is_judged_not_repaired(tmp_path):
+    """The #735 live case: a band elsewhere in the cube (510 eV) does not
+    contradict "the feature I looked for at 540-565 is absent". The judge
+    decides; the repair, which once steered the model onto the other band,
+    is not issued."""
+    cube, E = _peaked_cube()
+    state, prompts, judged = _run(tmp_path, cube, E, [_null_with_mask((540, 565))], judge=(True, ""))
+    assert len(judged) == 1 and len(prompts) == 1 and not any("GATE ERROR" in p for p in prompts)
+    assert state["dynamic_analysis_records"][0]["task_success"] is True
+
+
+def test_a_declaration_without_a_window_goes_to_the_judge(tmp_path):
+    """Nothing to hold it to: no repair, the judge decides."""
+    cube, E = _peaked_cube()
+    state, prompts, judged = _run(tmp_path, cube, E, [_null_with_mask(None)], judge=(True, ""))
+    assert len(judged) == 1 and not any("GATE ERROR" in p for p in prompts)
 
 
 def test_a_declaration_beside_a_valued_required_output_is_critiqued_as_such(tmp_path):

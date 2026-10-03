@@ -359,7 +359,10 @@ rather than fabricate a result).
   `warnings`) flag a column that is empty for some units or one quantity split
   across two sibling columns: a BO keyed on such a column silently drops those
   units, so tell the user which units are affected instead of calling the
-  table BO-ready.
+  table BO-ready. A series table carries its control variable and the units'
+  sidecar fields side by side, so one condition may appear under two names
+  (a sidecar's `temperature_K` beside the series' `temperature` in C): name
+  ONE of them as an input. `verified` / `flag_reason` say which rows are data.
 - Do NOT re-summarize the numbers as prose for the planning specialist to
   retype — that loses precision and risks transcription errors. The planning
   specialist ingests the file directly with its `analyze_file` tool.

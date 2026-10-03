@@ -614,8 +614,10 @@ def build_series_synthesis_prompt(state: Dict[str, Any]) -> list:
     # fit failures was once posted as a verified finding.
     from .._verification_record import ungated_outputs
     ok_units = [r for r in results if r.get("success")]
+    # a salvaged unit's maps carry stats too, but its gate did not pass them
+    verified_units = [r for r in ok_units if (r.get("unit_verdict") or {}).get("verified")]
     ungated = sorted({n for r in ok_units for n in ungated_outputs(r.get("feature_records"))})
-    gated = sorted({str(m.get("name")) for r in ok_units for m in (r.get("feature_records") or [])
+    gated = sorted({str(m.get("name")) for r in verified_units for m in (r.get("feature_records") or [])
                     if isinstance(m, dict) and isinstance(m.get("stats"), dict) and m.get("name")})
     gate_coverage = (
         f"Maps that passed a review or the replay gate: {', '.join(gated) or 'none'}.\n"
