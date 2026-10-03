@@ -12,7 +12,8 @@ pytest.importorskip("skimage")
 
 from scilink.skills.data_preparation.mmzi_hologram_reconstruction.reconstruct import (  # noqa: E402
     reconstruct_offaxis_hologram_stack, auto_pick_carrier, OffAxisReconstructor, producer_qc)
-from scilink.skills.data_preparation.mmzi_hologram_reconstruction.derive import derive_phase_products  # noqa: E402
+from scilink.skills.data_preparation.mmzi_hologram_reconstruction.derive import (  # noqa: E402
+    derive_phase_products, trace_consistency_checks)
 
 H, W = 400, 600
 FX, FY = 0.08, -0.05          # carrier: +48 columns, -20 rows in the FFT
@@ -195,3 +196,125 @@ def test_state_codes_override_is_shared_across_runs(tmp_path):
                                 steady_window_frames=10, bin_factor=1, smoothing_sigma=0, state_codes={"retracted": 0, "at_cuvette": 1})
     side = json.loads(Path(res["roi_curve_sidecar"]).read_text())
     assert side["first_state_code"] == 0.0 and side["state_code_map"]["1.0"] == "at_cuvette"
+
+
+def _transition_stack(kind, seed, n=40, h=120, w=200, noise=0.25):
+    """Piston-randomised wrapped stack: a +8 rad rise across x = 100 switched on
+    halfway. ``null``: a y-gradient localized at that rise spans 3pi across the
+    trace band, so the band-mean phasor of those columns passes through zero;
+    ``gap``: a decorrelated blob covers the band rows at the rise (columns gated
+    out of the band, valid above and below), with > pi of change across it."""
+    rng = np.random.default_rng(seed)
+    y, x = np.mgrid[:h, :w].astype(float)
+    shape = 8.0 / (1 + np.exp(-(x - 100) / 6.0))
+    if kind == "null":
+        shape = shape + (3 * np.pi / 40) * np.exp(-((x - 100) ** 2) / (2 * 8 ** 2)) * (y - 60)
+    piston = rng.uniform(-np.pi, np.pi, n)
+    frames = []
+    for t in range(n):
+        ph = piston[t] + (t >= n // 2) * shape + noise * rng.standard_normal((h, w))
+        if kind == "gap":
+            blob = (np.abs(x - 100) <= 12) & (np.abs(y - 60) <= 25)
+            ph = np.where(blob, rng.uniform(-np.pi, np.pi, (h, w)), ph)
+        frames.append(np.angle(np.exp(1j * ph)))
+    return np.stack(frames).astype(np.float32)
+
+
+def _derive_transition(tmp_path, kind, seed, **kw):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    np.save(tmp_path / f"{kind}{seed}_wrapped_phase.npy", _transition_stack(kind, seed))
+    return derive_phase_products(str(tmp_path / f"{kind}{seed}_wrapped_phase.npy"), str(tmp_path / f"{kind}{seed}"),
+                                 steady_window_frames=15, bin_factor=1, smoothing_sigma=1.0, band_rows=[40, 80],
+                                 roi_x_ranges={"left": [30, 50], "mid": [60, 75], "right": [150, 170]},
+                                 reference_roi="right", **kw)
+
+
+@pytest.mark.parametrize("kind,seed", [("null", 0), ("null", 1), ("gap", 0)])
+def test_trace_survives_column_null_and_gated_gap(tmp_path, kind, seed):
+    """The 1D column-profile unwrap slips by 2pi through a vanishing column or
+    across a gated gap with > pi of change (on every frame, or only on some);
+    the reported per-frame 2D-unwrap trace matches the map, and the QC flags
+    fire on the column-profile trace only."""
+    res = _derive_transition(tmp_path, kind, seed)
+    x = res["cross_checks"]
+    map_step = x["steady_map_roi_differences_rad"]["left"]
+    assert abs(map_step + 8.0) < 0.3
+    assert abs(res["steady_state_steps_rad"]["left"] - map_step) < 0.3
+    rows = list(csv.DictReader(open(res["roi_curve"])))
+    late = np.array([float(r["phase_left_minus_right_rad"]) for r in rows[20:]])
+    assert np.all(np.abs(late + 8.0) < 1.0), late                      # no frame slipped
+    assert res["trace_qc_passed"] is True and x["trace_qc_passed"] is True
+    assert all(v["frame_consistency"]["passed"] and v["step_agreement"]["passed"] for v in x["trace_qc"].values())
+    diag = x["diagnostic_column_profile_trace"]
+    assert diag["qc_passed"] is False and diag["n_slipped_frames"]["left"] >= 1
+    side = json.loads(Path(res["roi_curve_sidecar"]).read_text())
+    assert side["cross_checks"]["trace_qc_passed"] is True
+
+
+def test_trace_qc_passes_clean_transition(tmp_path):
+    res = _derive_transition(tmp_path, "clean", 0)
+    x = res["cross_checks"]
+    assert res["trace_qc_passed"] is True
+    assert x["diagnostic_column_profile_trace"]["qc_passed"] is True
+    assert x["trace_qc"]["left"]["frame_consistency"]["n_frames_checked"] >= 35
+    # the coherence bar reaches the per-frame check: an unreachable bar judges no frame
+    res2 = _derive_transition(tmp_path / "bar", "clean", 0, trace_slip_min_template_coherence=1.01)
+    assert res2["cross_checks"]["trace_qc"]["left"]["frame_consistency"]["n_frames_checked"] == 0
+
+
+def test_steady_map_is_immune_to_a_wandering_piston(tmp_path):
+    """With per-frame piston spread over the full circle and per-pixel noise, a
+    plain circular mean of a steady window loses its coherence and the map's ROI
+    difference drifts off the truth; the de-pistoned window mean keeps the map
+    on the truth and in agreement with the trace."""
+    n, h, w = 30, 60, 120
+    rng = np.random.default_rng(2)
+    y, x = np.mgrid[:h, :w].astype(float)
+    shape = -1.5 * np.exp(-((x - 30) ** 2) / (2 * 12 ** 2))
+    piston = rng.uniform(-np.pi, np.pi, n)
+    stack = np.stack([np.angle(np.exp(1j * (piston[t] + (t >= 15) * shape + 0.8 * rng.standard_normal((h, w)))))
+                      for t in range(n)]).astype(np.float32)
+    np.save(tmp_path / "ctl_wrapped_phase.npy", stack)
+    res = derive_phase_products(str(tmp_path / "ctl_wrapped_phase.npy"), str(tmp_path / "o"), steady_window_frames=15,
+                                bin_factor=2, smoothing_sigma=1.0,
+                                roi_x_ranges={"left": [20, 40], "right": [90, 110]}, reference_roi="right")
+    x_ = res["cross_checks"]
+    truth = shape[0, 20:40].mean() - shape[0, 90:110].mean()
+    assert abs(x_["steady_map_roi_differences_rad"]["left"] - truth) < 0.15, x_["steady_map_roi_differences_rad"]
+    assert x_["trace_qc"]["left"]["step_agreement"]["passed"] and res["trace_qc_passed"] is True
+
+
+def test_trace_consistency_checks_flags_slips_and_step_disagreement():
+    n = 30
+    amp = np.r_[np.zeros(10), np.ones(20)]
+    coh = np.full(n, 0.95)
+    map_step = -21.0
+    trace = amp * map_step + 0.1 * np.cos(np.arange(n))
+    clean = trace_consistency_checks(trace, amp, coh, map_step, trace[10:].mean() - trace[:10].mean())
+    assert clean["passed"] and clean["frame_consistency"]["n_slipped_frames"] == 0
+    slipped = trace.copy(); slipped[[14, 22]] += 2 * np.pi
+    q = trace_consistency_checks(slipped, amp, coh, map_step, -21.0, frame_labels=list(range(100, 100 + n)))
+    assert not q["passed"] and not q["frame_consistency"]["passed"] and q["step_agreement"]["passed"]
+    assert [s["frame"] for s in q["frame_consistency"]["slipped_frames"]] == [114, 122]
+    assert all(s["cycles"] == 1 for s in q["frame_consistency"]["slipped_frames"])
+    # a slip on an incoherent template frame is not judged
+    coh2 = coh.copy(); coh2[14] = 0.2
+    q2 = trace_consistency_checks(slipped, amp, coh2, map_step, -21.0)
+    assert [s["frame"] for s in q2["frame_consistency"]["slipped_frames"]] == [22]
+    # step agreement: -14 vs -21 fails (15 % of 21 = 3.15 rad); near-zero control steps pass on the floor
+    s = trace_consistency_checks(trace, amp, coh, map_step, -14.0)
+    assert not s["step_agreement"]["passed"] and abs(s["step_agreement"]["allowed_rad"] - 3.15) < 1e-9
+    assert trace_consistency_checks(np.zeros(n), np.zeros(n), coh, 0.4, -0.5)["step_agreement"]["passed"]
+
+
+def test_trace_qc_tolerance_knobs_change_the_verdict():
+    n = 20
+    amp = np.ones(n); coh = np.full(n, 0.95); map_step = 10.0
+    trace = np.full(n, map_step); trace[5] += 2 * np.pi - 1.3                  # 1.3 rad short of a full cycle
+    loose = trace_consistency_checks(trace, amp, coh, map_step, map_step, slip_tolerance_rad=1.5)
+    strict = trace_consistency_checks(trace, amp, coh, map_step, map_step, slip_tolerance_rad=1.0)
+    assert loose["frame_consistency"]["n_slipped_frames"] == 1 and strict["frame_consistency"]["n_slipped_frames"] == 0
+    a = trace_consistency_checks(trace, amp, coh, -21.0, -18.5)                # diff 2.5 <= 0.15 x 21
+    b = trace_consistency_checks(trace, amp, coh, -21.0, -18.5, step_rel_tol=0.1)
+    c = trace_consistency_checks(trace, amp, coh, -21.0, -18.5, step_rel_tol=0.1, step_abs_floor_rad=3.0)
+    assert a["step_agreement"]["passed"] and not b["step_agreement"]["passed"] and c["step_agreement"]["passed"]

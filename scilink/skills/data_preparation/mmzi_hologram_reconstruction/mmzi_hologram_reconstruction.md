@@ -114,6 +114,15 @@ for rec in manifest.get("records", []):
     # the tool measures and reports any excluded edge zone (sidecar interpretation_limits);
     # rerun with bin_factor=1 if the discontinuity fraction still trips the gate
     metrics[f"{wf}_map_discontinuity_fraction"] = d["cross_checks"]["steady_map_discontinuity_fraction"]
+    # trace-vs-map QC is evaluated by the tool; copy its verdict, never re-derive it
+    for k, q in d["cross_checks"]["trace_qc"].items():
+        metrics[f"{wf}_{k}_trace_step_rad"] = q["step_agreement"]["trace_step_rad"]
+        metrics[f"{wf}_{k}_map_step_rad"] = q["step_agreement"]["map_step_rad"]
+        if not q["step_agreement"]["passed"]:
+            notes.append(f"{wf} {k}: trace step disagrees with the map ROI difference ({q['step_agreement']})")
+        if not q["frame_consistency"]["passed"]:
+            notes.append(f"{wf} {k}: 2pi-slipped frames {[s['frame'] for s in q['frame_consistency']['slipped_frames']]}")
+    all_ok = all_ok and d["trace_qc_passed"]
     products += [
         {"path": d["diff_map"], "kind": "image", "sidecar": d["diff_map_sidecar"],
          "description": f"{wf} steady-state phase difference map (rad)", "group": "phase_maps"},
@@ -189,7 +198,10 @@ reference at cycle start) — do not "fix" it.
   difference| must be within 15 % of the larger magnitude OR within an absolute
   floor of 1 rad (whichever is larger). A ratio is meaningless when both values
   are near zero (control runs), so never fail a run on a percentage of a
-  near-zero number; the sidecar's `cross_checks` carries both values.
+  near-zero number. The derive tool evaluates this, and a per-frame check for
+  2π-slipped trace frames, in code (`cross_checks.trace_qc`, overall
+  `trace_qc_passed`); the script ANDs `trace_qc_passed` into `qc.passed` and copies
+  each failed check into `qc.notes`.
 - Products must live outside the input bundle and each `.npy`/`.csv` must have
   its same-stem JSON sidecar stating units (radians), semantics and limits.
 - The script must not fit models, classify, or interpret; preparation ends at
