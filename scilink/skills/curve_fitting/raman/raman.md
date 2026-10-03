@@ -38,7 +38,14 @@ between excitations are fluorescence or artifacts.
    dominant band region unless the user asked for it; weak low-wavenumber
    and high-wavenumber bands (lattice modes, OH stretches, overtones) carry
    identification-critical information. If any region is excluded, say so
-   explicitly and why.
+   explicitly and why. The one region to exclude is instrumental: the
+   laser-rejection (edge or notch) filter's cut-on at the low-wavenumber
+   end — a flat floor followed by a steep rise — is the filter's response,
+   not a band. Start the fit above it and report the cut.
+   **Aqueous samples.** Water itself contributes broad bands (see the
+   solvent entry in Interpretation); model them as broad components or
+   background terms, never as bands of the solute, and never let a
+   solute-band component drift to absorb them.
 3. **Plan one component per resolved band, plus shoulders.** Count
    candidate bands by prominence above the noise floor on the
    baseline-corrected signal. A visible shoulder or asymmetry on a strong
@@ -188,7 +195,17 @@ strongest band in bold):
   **1332**.
 - **Molecular anions in salts/solutions**: TFSI⁻ **740–745** (S–N–S
   expansion, sharp, solvation-sensitive), 280–350 cluster, 1240s;
-  uranyl UO₂²⁺ ν1 **830–870** single symmetric band.
+  uranyl UO₂²⁺ ν1 **830–870** single symmetric band; nitrate ν1
+  **1045–1050**, ν4 ~715–725, ν3 a split pair ~1340–1360 / ~1400–1420
+  (ν2 ~830, Raman-weak); sulfate (aq) ν1 **~981**, ν2 ~450, ν4 ~615, ν3
+  broad ~1100; perchlorate ν1 **~934**, ν2 ~460, ν4 ~630, ν3 broad ~1110.
+  Speciation shows in these anion modes: binding to a cation (contact ion
+  pair, coordination) adds a component a few to ~20 cm⁻¹ from the free-ion
+  ν1 and, for nitrate, widens the ν3 splitting — so fit ν1 and ν3 with
+  room for such components when speciation is the question.
+- **Solvent — water**: broad bend **~1640**, broad librations ~400–800,
+  intermolecular bands ~60 and ~180, OH stretch envelope 3000–3700. These
+  are background to a solute, not bands to assign.
 - Sulfur (α-S₈) **153/219/473**.
 
 **Trap disambiguation — single strong band near 820–880.** Olivine, uranyl,
@@ -229,7 +246,11 @@ identification is pattern-only and rank candidates accordingly.
 - Completeness check: every band visible above ~5× noise in the
   baseline-corrected data must correspond to a fitted component; every
   fitted component must correspond to visible intensity (no components
-  parked on noise or reproducing background curvature).
+  parked on noise or reproducing background curvature). Completeness
+  outranks a planned component count: when a visible band is unmodelled,
+  add a component for it and say the plan changed — do not re-tune
+  existing components to absorb it. A component pinned at a bound is the
+  usual sign that it is standing in for something it is not.
 - If fluorescence was subtracted, report both the corrected fit and the
   baseline fraction so the user can judge the correction.
 - A subtracted baseline must not decide the answer: band heights, areas and
