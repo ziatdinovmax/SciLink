@@ -95,7 +95,6 @@ EXPECTED_TOOLS = {
     "run_complete_dft_workflow",
     "run_simulation",
     "run_mlip_simulation",
-    "run_exafs_workflow",
     "refine_structure",
     "view_structure",
     "validate_inputs",
