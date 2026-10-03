@@ -1168,3 +1168,24 @@ def test_wrong_shape_required_map_gets_a_diagnosis(tmp_path):
         "error_dict": None, "max_verification_iterations": 1})
     assert state["dynamic_analysis_records"][0]["task_success"] is False
     assert any("wrong shape" in p and "(3, 2)" in p and "(6, 5)" in p and "upsampled" in p for p in prompts[1:])
+
+
+def test_data_facts_read_the_features_direction_from_the_data():
+    """#722 B2: a field mean that sits near its top has its bands as DIPS
+    (transmission); its maxima are shoulders. An emission doublet stays as
+    peaks, the valley between them never reported; a featureless decay is
+    called neither — "the features point down" is said only of dips found."""
+    from scilink.agents.exp_agents.controllers.hyperspectral_controllers import _data_facts
+    rng = np.random.default_rng(0)
+    wl = np.linspace(400, 900, 160)
+    T = 0.92 - 0.25 * np.exp(-0.5 * ((wl - 523) / 18) ** 2) - 0.15 * np.exp(-0.5 * ((wl - 700) / 25) ** 2)
+    f = _data_facts(T[None, None, :] + rng.normal(0, 0.004, (20, 20, wl.size)), wl, "nm")
+    assert f["polarity"] == "dips" and sorted(round(x) for x in f["peaks"]) == [523, 702]
+    assert "features point DOWN" in f["text"] and "field-mean dips" in f["text"]
+    E = np.linspace(450, 570, 120)
+    S = 5 + 100 * np.exp(-0.5 * ((E - 500) / 3) ** 2) + 60 * np.exp(-0.5 * ((E - 520) / 3) ** 2)
+    f = _data_facts(S[None, None, :] + rng.normal(0, 2, (20, 20, E.size)), E, "eV")
+    assert f["polarity"] == "peaks" and sorted(round(x) for x in f["peaks"]) == [500, 520]
+    D = np.exp(-np.arange(12) / 10.0)
+    f = _data_facts(D[None, None, :] + rng.normal(0, 0.001, (6, 5, 12)), np.arange(12.0), "channels")
+    assert f["polarity"] == "peaks" and f["peaks"] == [] and "point DOWN" not in f["text"]

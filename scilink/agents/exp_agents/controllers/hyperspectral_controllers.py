@@ -630,7 +630,6 @@ def _data_facts(data, axis, axis_units: str, max_peaks: int = 4) -> dict:
         # transmission series centred its windows on those shoulders (#722).
         med = float(np.nanmedian(smooth))
         dips_first = (med - float(np.nanmin(smooth))) > (float(np.nanmax(smooth)) - med)
-        signal = -smooth if dips_first else smooth
 
         def _features(sig):
             # Prominence within a LOCAL window (a quarter of the axis), so a
@@ -644,7 +643,16 @@ def _data_facts(data, axis, axis_units: str, max_peaks: int = 4) -> dict:
                 pr = {k: v[keep] for k, v in pr.items()}
             return pk, pr
 
-        peaks, props = _features(signal)
+        # Dips only when there ARE dips: a featureless ramp or decay also has
+        # its median above the midpoint, and "the features point down" would
+        # then be said of no feature at all.
+        if dips_first:
+            peaks, props = _features(-smooth)
+            if not peaks.size:
+                dips_first = False
+        if not dips_first:
+            peaks, props = _features(smooth)
+        signal = -smooth if dips_first else smooth
         sig_base = float(np.nanpercentile(signal, 10))
         lines = ["### DATA FACTS (deterministic — computed from THIS dataset)",
                  f"- axis: {axis[0]:.6g} to {axis[-1]:.6g} {axis_units}, {e} channels ({dx:.4g} {axis_units}/channel); {n_pix} spectra",
