@@ -246,11 +246,7 @@ identification is pattern-only and rank candidates accordingly.
 - Completeness check: every band visible above ~5× noise in the
   baseline-corrected data must correspond to a fitted component; every
   fitted component must correspond to visible intensity (no components
-  parked on noise or reproducing background curvature). Completeness
-  outranks a planned component count: when a visible band is unmodelled,
-  add a component for it and say the plan changed — do not re-tune
-  existing components to absorb it. A component pinned at a bound is the
-  usual sign that it is standing in for something it is not.
+  parked on noise or reproducing background curvature).
 - If fluorescence was subtracted, report both the corrected fit and the
   baseline fraction so the user can judge the correction.
 - A subtracted baseline must not decide the answer: band heights, areas and
