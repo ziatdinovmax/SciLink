@@ -271,4 +271,8 @@ def test_secondary_pin_caveats_never_make_a_series_read_as_a_mismatch():
         [flag(0, "below_threshold"), flag(1, "secondary_pin"), flag(2, "secondary_pin")], rows, {})
     assert "Series-Wide Mismatch" not in caveats
     failing = rep._generate_flagged_spectra_section([flag(i, "below_threshold") for i in range(3)], rows, {})
-    assert "Series-Wide Mismatch" in failing
+    assert "Series-Wide Mismatch" in failing and "3 of 3 frames are below" in failing
+    # a mismatch with a caveat beside it counts only the failing frames
+    mixed = rep._generate_flagged_spectra_section(
+        [flag(0, "below_threshold"), flag(1, "below_threshold"), flag(2, "secondary_pin")], rows, {})
+    assert "Series-Wide Mismatch" in mixed and "2 of 3 frames are below" in mixed

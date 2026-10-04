@@ -9981,7 +9981,7 @@ class UnifiedCurveReportController:
         # Reframe the section so the report conveys that, not "N problems".
         if majority:
             heading = "⚠️ Series-Wide Mismatch"
-            summary_line = (f"<strong>{n_flagged} of {n_total} frames are below the "
+            summary_line = (f"<strong>{n_failing} of {n_total} frames are below the "
                             f"acceptance threshold.</strong> This indicates the model / "
                             f"reference set does not describe the series as a whole, "
                             f"rather than isolated anomalous frames.")
