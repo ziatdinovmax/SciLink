@@ -52,6 +52,7 @@
       "score": 0.995,
       "source": "prior",
       "state_distance": 0.0,
+      "state_reference_curves": 1,
       "threshold": 0.95,
       "verdict": "good"
     },
@@ -86,6 +87,7 @@
     "score": 0.995,
     "source": "prior",
     "state_distance": 0.0,
+    "state_reference_curves": 1,
     "threshold": 0.95,
     "verdict": "good"
   }

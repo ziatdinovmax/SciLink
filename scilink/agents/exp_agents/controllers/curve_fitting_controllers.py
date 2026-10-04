@@ -5600,6 +5600,12 @@ Return JSON with:
                     # little of the regime's axis): said, never silent
                     out["state_check"] = "skipped: the new curve covers too little of the regime's axis"
                     out["caveat"] = "STATE: not checked — " + out["state_check"][9:]
+            mon = ref.get("monitor")
+            if mon is not None and hasattr(mon, "n_seeded"):
+                out["state_reference_curves"] = int(mon.n_seeded)
+                if isinstance(distance, (int, float)) and distance > CERTIFY_STATE_BAR and xy is not None:
+                    # where the difference is: the judge is shown it (#725)
+                    out["state_regions"] = mon.locate_frame(xy[0], xy[1])
             if isinstance(distance, (int, float)) and distance > SAME_STATE_BAR:
                 out["state_flag"] = True
                 out["caveat"] = (f"STATE: {distance:.0%} of this measurement is structure the regime's own data does "
@@ -5672,7 +5678,7 @@ Return JSON with:
         rv["identity"] = chk["identity"]
         if chk["distance"] is not None:
             rv["state_distance"] = chk["distance"]
-        for k in ("state_flag", "state_check", "curves_not_seeded"):
+        for k in ("state_flag", "state_check", "curves_not_seeded", "state_reference_curves", "state_regions"):
             if chk.get(k):
                 rv[k] = chk[k]
         if chk.get("caveat"):
@@ -5737,13 +5743,15 @@ Return JSON with:
             rv["escalation"] = record
             return result
         rv["escalation"] = record
-        line = (f"JUDGE (no gate): belongs to {record['belongs_to']!r}"
+        from .._replay import REFERENCE_ANSWER
+        line = (("JUDGE (no gate): the same as the reference" if record["belongs_to"] == REFERENCE_ANSWER
+                 else f"JUDGE (no gate): belongs to {record['belongs_to']!r}")
                 + (f", same interpretation: {record['same_interpretation']}" if record["same_interpretation"] is not None else "")
                 + (f" — {record['what_changed']}" if record["what_changed"] else "")
                 + f" [{record['confidence']} confidence]")
         rv["message"] = (rv.get("message") or "") + " " + line
         rc = rv.get("regime_choice")
-        if (isinstance(rc, dict) and rc.get("ambiguous") and record["belongs_to"] not in ("none", "cannot_tell")
+        if (isinstance(rc, dict) and rc.get("ambiguous") and record["belongs_to"] not in ("none", "cannot_tell", REFERENCE_ANSWER)
                 and record["belongs_to"] != rc.get("chosen_regime")):
             # the attribution the judge reads, listed beside the one the data gave; a decision for the caller
             rc["suggested"] = record["belongs_to"]

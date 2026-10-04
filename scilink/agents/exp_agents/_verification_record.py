@@ -264,6 +264,19 @@ def _unit_verdict(item: dict, *, where: str) -> Optional[Dict[str, Any]]:
     if qh.get("unverified"):
         return {"verified": False, "reason": f"verification did not finish{where}"
                 + (f": {qh.get('stopped_by')}" if qh.get("stopped_by") else "")}
+    pins = item.get("pinned_at_bound") or (item.get("fit_quality") or {}).get("pinned_at_bound")
+    if pins and qh.get("approved"):
+        # #726: the pinned-at-bound rule (#592) also writes a quality_warning
+        # on a fit the gate APPROVED. Withholding stays the safe side — a
+        # parameter at its bound is not a measured value, and nothing says
+        # which parameters a claim rests on — but it is a degenerate fit,
+        # not a salvaged one, and a follower that replayed it says so.
+        from ...skills._shared.curve_fitting_tools import describe_pinned
+        try:
+            what = describe_pinned(pins)
+        except Exception:  # noqa: BLE001 - a malformed pin list still withholds
+            what = "a parameter"
+        return {"verified": False, "reason": f"degenerate fit: {what} (pinned at bound){where}"}
     if item.get("quality_warning"):
         return {"verified": False, "reason": f"salvaged best-available result{where}"}
     if item.get("judge_warning"):

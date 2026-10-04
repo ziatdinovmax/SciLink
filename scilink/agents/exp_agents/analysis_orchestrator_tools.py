@@ -3523,10 +3523,11 @@ class AnalysisOrchestratorTools:
                         # own, not folded into "proceed normally"
                         esc = reuse_validity.get("escalation") if isinstance(reuse_validity, dict) else None
                         if isinstance(esc, dict) and esc.get("what_changed"):
+                            from ._replay import belongs_to_text
                             response["reuse_caveat"] = (
                                 f"JUDGE (an opinion, no gate; the verdict stays the gate's): this replay's "
                                 f"certificate was withheld ({esc.get('trigger')}); the judge reads the measurement as "
-                                f"belonging to {esc.get('belongs_to')!r}"
+                                f"{belongs_to_text(esc.get('belongs_to'))}"
                                 + (f", same interpretation: {esc.get('same_interpretation')}"
                                    if esc.get("same_interpretation") is not None else "")
                                 + f" — {esc.get('what_changed')} [{esc.get('confidence')} confidence]")

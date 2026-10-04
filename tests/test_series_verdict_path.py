@@ -56,7 +56,7 @@ class FakeExecutor:
 
 
 def _canned_anchor(name, idx, *, r2, approved, script, warning=None, judge_warning=None, unverified=False,
-                   failed=False, reused=None):
+                   failed=False, reused=None, pinned=None):
     if reused:                                   # a locked-script reuse: no QC record, a replay-gate verdict
         return {"index": idx, "name": name, "data_path": f"stack_index_{idx}", "success": True, "error": None,
                 "model_type": f"model of {script}", "parameters": {"peak_1": {"center": 144.0}},
@@ -84,6 +84,14 @@ def _canned_anchor(name, idx, *, r2, approved, script, warning=None, judge_warni
         res["quality_warning"] = warning
     if judge_warning:
         res["judge_warning"] = judge_warning
+    if pinned:
+        # what the controller writes for a fit with a parameter at its bound
+        # (#592), approved or not: the pins and a "Degenerate fit" warning
+        from scilink.skills._shared.curve_fitting_tools import describe_pinned
+        res["pinned_at_bound"] = pinned
+        res["fit_quality"] = {**res["fit_quality"], "pinned_at_bound": pinned}
+        res["quality_warning"] = ("Degenerate fit: " + describe_pinned(pinned)
+                                  + " — the extracted value is not trustworthy")
     return res
 
 
@@ -746,3 +754,30 @@ def test_the_loop_refuses_a_multi_regime_series_anchor(tmp_path):
     (run / "analysis_results.json").write_text(json.dumps({"locked_recipes": {
         "low": {"unit": "spectrum_0000", "index": 0, "regime": "low", "script": "LOW", "verdict": {"verified": True}}}}))
     assert CurveModality().anchor_script(str(run)) == ("LOW", run)
+
+
+PINNED = [{"component": "peak_2", "parameter": "fwhm", "value": 40.0, "bound": 40.0, "side": "upper"}]
+
+
+def test_an_approved_anchor_with_a_pinned_parameter_is_degenerate_not_salvaged(tmp_path, monkeypatch):
+    """#726: the pinned-at-bound rule writes a quality_warning on a fit the
+    gate APPROVED. The series stays unverified (a parameter at its bound is
+    not a measured value) but says why: a degenerate fit, not a salvaged one,
+    and the followers that replayed it say the same through their recipe."""
+    state, _ = run_series(tmp_path, monkeypatch, names=NAMES,
+                          anchors={"spectrum_0000": {**OK, "pinned": PINNED}},
+                          follower_r2={"spectrum_0001": 0.97, "spectrum_0002": 0.96})
+    results = compile_results(tmp_path, state)
+    v = analysis_verdict(results)
+    assert not v["verified"]
+    assert v["reason"].startswith("degenerate fit: peak_2.fwhm = 40 at its upper bound 40"), v
+    assert "salvaged" not in v["reason"]
+    by_name = {u["name"]: u for u in results["individual_results"]}
+    follower = by_name["spectrum_0001"]["unit_verdict"]
+    assert not follower["verified"] and "degenerate fit" in follower["reason"] and "salvaged" not in follower["reason"]
+    # a salvaged anchor (not approved) that is also pinned keeps the salvage reason
+    state, _ = run_series(tmp_path / "salv", monkeypatch, names=NAMES,
+                          anchors={"spectrum_0000": {**SALVAGED, "pinned": PINNED}},
+                          follower_r2={"spectrum_0001": 0.97, "spectrum_0002": 0.96}, max_series_refits=0)
+    v = analysis_verdict(compile_results(tmp_path / "salv", state))
+    assert not v["verified"] and v["reason"].startswith("salvaged best-available result"), v
