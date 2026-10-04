@@ -993,7 +993,7 @@ def test_data_facts_block_reports_measured_peaks_and_noise():
     assert "measurable in aggregate" in txt and "not on literature values" in txt
     # featureless cube: no peaks, honest wording
     flat = 0.1 + rng.normal(0, 0.03, (10, 10, 120))
-    assert "featureless" in _render_data_facts(flat, E, "eV")
+    assert "no peak or dip stands out of the field mean" in _render_data_facts(flat, E, "eV")
     # the block lands in the codegen prompt ahead of the measurability gate
     prompt = build_code_generation_prompt(target_desc="t", h=12, w=12, e=120, axis_units="eV",
                                           axis_start=450, axis_end=570, processing_note="raw",
@@ -1203,4 +1203,4 @@ def test_data_facts_list_peaks_and_dips_and_lose_no_peak():
     # a featureless decay: neither, and the text reads as it always did
     D = np.exp(-np.arange(12) / 10.0)
     f = _data_facts(D[None, None, :] + rng.normal(0, 0.001, (6, 5, 12)), np.arange(12.0), "channels")
-    assert f["peaks"] == [] and f["dips"] == [] and "featureless" in f["text"]
+    assert f["peaks"] == [] and f["dips"] == [] and "no peak or dip stands out" in f["text"]

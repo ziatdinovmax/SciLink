@@ -31,7 +31,7 @@ def test_the_guidance_states_the_lists_scope():
     facts = hc._data_facts(cube, E, "nm")
     assert len(facts["peaks"]) == 4 and not any(abs(p - 820) < 5 for p in facts["peaks"])   # the fifth is unlisted
     text = facts["text"]
-    assert "holds only the 4 strongest field-mean features per direction" in text
+    assert "holds only the field mean's peaks and dips, at most 4 per direction" in text
     assert "can be real and unlisted" in text
     assert "If no feature is listed where the requested one should be, test it there and declare" not in text
 
@@ -46,3 +46,17 @@ def test_a_declaration_for_an_unlisted_real_band_is_judged_not_repaired():
     listed = {**unlisted, "window": [600, 620]}                   # the 610 nm band is listed
     hit = hc._contradicting_feature(listed, facts)
     assert hit is not None and abs(hit["position"] - 610) < 5
+
+
+def test_an_edge_is_never_called_featureless():
+    """An absorption edge (a step) is never a peak or a dip, so the facts list
+    nothing for it however strong it is. The no-feature line once said "the
+    field mean looks featureless" right before the guidance that a step can be
+    real and unlisted; it now says what was tested and what was not."""
+    E = np.linspace(400.0, 900.0, 300)
+    y = 0.5 + np.arctan((E - 650.0) / 5.0) / np.pi                      # a jump of ~1, ~2000 sigma of the mean
+    cube = y[None, None, :] * np.ones((20, 20, 1)) + np.random.default_rng(0).normal(0, 0.01, (20, 20, E.size))
+    facts = hc._data_facts(cube, E, "nm")
+    assert facts["features"] == [] and facts["measurable"] is False
+    assert "featureless" not in facts["text"]
+    assert "a step such as an edge" in facts["text"] and "is not tested here" in facts["text"]

@@ -229,8 +229,9 @@ sits was tried and dropped — it lost those peaks (#735 review); choosing
 automatically waits for a corpus measurement (#722). The list is the few
 STRONGEST field-mean features, not every one: a weaker band, one local to
 part of the field, or a step (an absorption edge) can be real and unlisted,
-and the guidance says so, so a missing entry is never read as an absence
-(#739). A
+and the guidance says so, so a missing entry is never read as an absence;
+with nothing listed, the facts say no peak or dip stands out — never that the
+mean is featureless (#739). A
 declaration stands when every REQUIRED output is absent or entirely NaN — a
 diagnostic map beside it (a mask, an SNR map) is recorded with the
 determination and never committed, since no review looked at it; a
