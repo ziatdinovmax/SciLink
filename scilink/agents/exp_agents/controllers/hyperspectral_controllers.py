@@ -715,11 +715,13 @@ def _data_facts(data, axis, axis_units: str, max_peaks: int = 4) -> dict:
             lines.append(f"- field-mean peaks: none exceeds {min_prom:.3g} prominence "
                          f"(5 sigma of the mean / 2% of range) — the field mean looks featureless.")
         lines.append(
-            "Centre fit windows, seeds and bounds on the MEASURED positions and widths "
-            "above — not on literature values — and make each window wide enough to "
-            "contain its feature with margin. After any background subtraction, confirm the "
-            "feature amplitudes at these positions survive before fitting. A not_measurable "
-            "declaration whose window holds one of these features is rejected.")
+            "Centre fit windows, seeds and bounds for the REQUESTED feature on its MEASURED "
+            "position and width above — not on literature values — with margin; a feature "
+            "listed elsewhere is a different feature, never a substitute for it. After any "
+            "background subtraction, confirm the amplitude survives before fitting. If no "
+            "feature is listed where the requested one should be, test it there and declare "
+            "not_measurable if it fails; a declaration whose window holds one of these "
+            "features is rejected.")
         strongest = feats[0]["sigma"] if feats else 0.0
         return {"text": "\n".join(lines),
                 "measurable": strongest >= 5.0,
