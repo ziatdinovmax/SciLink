@@ -387,6 +387,12 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     },
                     "output_directory": str(self.output_dir),
                 }
+            if replay_reference is None:
+                # A recipe the board copied carries the map gate it was locked
+                # under in its sidecar (#734): a replay of the copy is held to
+                # the anchor's plausible ranges like the series' own replays,
+                # not to coverage alone. An explicit reference still wins.
+                replay_reference = self._recipe_sidecar_reference(prior_analysis_paths)
             # Verbatim replay is a single-attempt contract: a failure must be
             # reported (or salvaged), never regenerated into a different
             # method — that would silently break cross-dataset comparability.
@@ -1724,6 +1730,26 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 f"`scilink memory staged`."
             )
         return staged
+
+    def _recipe_sidecar_reference(self, prior_analysis_paths: list) -> dict | None:
+        """The ``reference_maps`` of a board recipe copy's map gate: the
+        ``dynamic_analysis_records.recipe.json`` sidecar beside the records
+        file (a path to the file or to its folder). None when there is none,
+        or its gate is not a map gate (a single cube's copy carries none)."""
+        for raw in prior_analysis_paths or []:
+            p = Path(str(raw))
+            side = (p.with_name("dynamic_analysis_records.recipe.json") if p.is_file()
+                    else p / "dynamic_analysis_records.recipe.json")
+            try:
+                gate = (json.loads(side.read_text(encoding="utf-8")) or {}).get("quality_gate") or {}
+            except (OSError, ValueError, AttributeError):
+                continue
+            ref = gate.get("reference_maps") if gate.get("kind") == "map_health" else None
+            if isinstance(ref, dict) and ref:
+                self.logger.info(f"   🔒 Replay held to the recipe's recorded map gate "
+                                 f"({len(ref)} reference map(s), from {side.name})")
+                return ref
+        return None
 
     def _load_prior_dynamic_records(self, prior_analysis_paths: list) -> list:
         """Collect the APPROVED dynamic-analysis records of prior runs.
