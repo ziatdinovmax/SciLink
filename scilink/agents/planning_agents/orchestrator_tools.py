@@ -584,8 +584,9 @@ class OrchestratorTools:
     def _verified_rows_only(self, file_path: str, include_unverified: bool):
         """(path for extraction, units skipped, units kept as unverified) for a
         table with a ``verified`` column (#737): the rows marked False are left
-        out of a copy that keeps the file's name and sidecar, so the scalarizer
-        sees what it would have, minus them. ``None`` as the path when every
+        out of a copy (``<stem>.verified_only.csv``, its sidecar copied beside it
+        under the same stem), so the scalarizer sees what it would have, minus
+        them, and nobody takes the copy for the analysis's own table. ``None`` as the path when every
         row is unverified. Any other file, or a table without the column, is
         passed through untouched."""
         if Path(file_path).suffix.lower() != ".csv":
@@ -611,7 +612,7 @@ class OrchestratorTools:
             return None, rows, []
         dest_dir = Path(self.orch.bo_data_path).parent / "ingest" / Path(file_path).parent.name
         dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / Path(file_path).name
+        dest = dest_dir / f"{Path(file_path).stem}.verified_only{Path(file_path).suffix}"
         df[~bad].to_csv(dest, index=False)
         sidecar = Path(file_path).with_suffix(".json")
         if sidecar.is_file():
@@ -4656,8 +4657,9 @@ class OrchestratorTools:
                     _resp["included_unverified_units"] = kept_unverified
                     _resp["unverified_warning"] = (
                         f"{len(kept_unverified)} UNVERIFIED row(s) ingested on request "
-                        "(include_unverified): their analyses passed no gate; the campaign "
-                        "records them as low-confidence.")
+                        "(include_unverified): their analyses passed no gate. The campaign "
+                        "record lists them as unverified; the optimizer weights them like any "
+                        "other point.")
                 if rows_skipped_missing:
                     _resp["rows_skipped_missing"] = rows_skipped_missing
                     if _skipped_units:

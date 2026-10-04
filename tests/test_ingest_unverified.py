@@ -83,6 +83,9 @@ def test_unverified_units_are_skipped_named_and_recorded(tmp_path):
     rec = o.analyzed_files[str(table.resolve())]
     assert [u["unit"] for u in rec["skipped_unverified"]] == ["d2", "d5"]
     assert json.loads(Path(o.analyzed_files_path).read_text())[str(table.resolve())]["skipped_unverified"]
+    # the copy extraction read is named as derived, never as the analysis's own table
+    copies = list(Path(o.bo_data_path).parent.glob("ingest/**/*.csv"))
+    assert [c.name for c in copies] == ["features.verified_only.csv"]
 
 
 def test_include_unverified_keeps_the_salvaged_unit_and_says_so(tmp_path):
@@ -92,7 +95,7 @@ def test_include_unverified_keeps_the_salvaged_unit_and_says_so(tmp_path):
     assert out["status"] == "success" and out["rows_added"] == 4, out           # d5 has no value: still skipped
     assert out["rows_skipped_units"] == ["d5"]
     assert out["included_unverified_units"] == [{"unit": "d2", "reason": "unverified"}]
-    assert "UNVERIFIED" in out["unverified_warning"]
+    assert "UNVERIFIED" in out["unverified_warning"] and "weights them like any other point" in out["unverified_warning"]
     assert [u["unit"] for u in o.analyzed_files[str(table.resolve())]["included_unverified"]] == ["d2"]
 
 
