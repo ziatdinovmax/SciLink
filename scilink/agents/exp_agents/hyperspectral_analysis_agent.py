@@ -387,6 +387,12 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     },
                     "output_directory": str(self.output_dir),
                 }
+            if replay_reference is None:
+                # A recipe the board copied carries the map gate it was locked
+                # under in its sidecar (#734): a replay of the copy is held to
+                # the anchor's plausible ranges like the series' own replays,
+                # not to coverage alone. An explicit reference still wins.
+                replay_reference = self._recipe_sidecar_reference(prior_analysis_paths)
             # Verbatim replay is a single-attempt contract: a failure must be
             # reported (or salvaged), never regenerated into a different
             # method — that would silently break cross-dataset comparability.
@@ -1104,6 +1110,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # source's columns, so feature names align across regimes and refits.
         rows: list = [None] * n
         locks: dict = {}            # regime name -> lock
+        locked_recipes: dict = {}   # regime name -> the recipe the board posts (#734)
         schema: dict | None = None  # {"anchor_index", "targets", "columns"}
         deferred: list = []         # replay specs handed to the pool (parallel mode)
         pool = None                 # created on the first queued replay
@@ -1184,6 +1191,25 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                                 "source": ("prior_run" if extra.get("reuse_locked_script")
                                            else "anchor")}
                         locks[rname] = lock
+                        # The recipe as the board posts it (#734), recorded where the
+                        # regime locks, in the curve/image drivers' shape: the anchor
+                        # unit, its verdict then, and the recipe file its replays ran
+                        # (a cube's recipe is its dynamic_analysis_records.json).
+                        try:
+                            _rec_text = (Path(unit_dir) / "dynamic_analysis_records.json").read_text(
+                                encoding="utf-8")
+                        except OSError:
+                            _rec_text = None
+                        if _rec_text:
+                            locked_recipes[rname] = {
+                                "unit": row.get("name") or Path(path).stem, "index": idx, "regime": rname,
+                                "file": "dynamic_analysis_records.json", "script": _rec_text,
+                                "verdict": dict(row.get("unit_verdict") or {}),
+                                "model": "; ".join(str(t.get("target") or t.get("description") or "")[:120]
+                                                   for t in targets if isinstance(t, dict)) or None,
+                                # what a replay of the recipe is held to (the map gate's
+                                # plausible ranges), as the series' own replays are
+                                "gate": {"kind": "map_health", "reference_maps": lock["reference_maps"]}}
                         self.logger.info(
                             f"🔒 Recipe locked for regime '{rname}' on dataset {idx}: "
                             f"{len(targets)} approved script(s).")
@@ -1346,6 +1372,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "refit_summary": refit_summary,
             "refit_skipped_by_budget": refit_skipped,
             "locked_config": locked,
+            "locked_recipes": locked_recipes,
             "outlier_sigma": outlier_sigma,
             "series_workers": workers,
             **({"replays_rerun_in_process": rerun_in_process} if rerun_in_process else {}),
@@ -1578,6 +1605,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "series_features": _series.series_feature_matrix(rows),
             "series_metadata": state.get("series_metadata"),
             "locked_config": locked,
+            **({"locked_recipes": state["locked_recipes"]} if state.get("locked_recipes") else {}),
             "caveats": synth.get("caveats") or [],
             "series_results_path": state.get("series_results_path"),
             "report_path": state.get("report_path"),
@@ -1702,6 +1730,26 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 f"`scilink memory staged`."
             )
         return staged
+
+    def _recipe_sidecar_reference(self, prior_analysis_paths: list) -> dict | None:
+        """The ``reference_maps`` of a board recipe copy's map gate: the
+        ``dynamic_analysis_records.recipe.json`` sidecar beside the records
+        file (a path to the file or to its folder). None when there is none,
+        or its gate is not a map gate (a single cube's copy carries none)."""
+        for raw in prior_analysis_paths or []:
+            p = Path(str(raw))
+            side = (p.with_name("dynamic_analysis_records.recipe.json") if p.is_file()
+                    else p / "dynamic_analysis_records.recipe.json")
+            try:
+                gate = (json.loads(side.read_text(encoding="utf-8")) or {}).get("quality_gate") or {}
+            except (OSError, ValueError, AttributeError):
+                continue
+            ref = gate.get("reference_maps") if gate.get("kind") == "map_health" else None
+            if isinstance(ref, dict) and ref:
+                self.logger.info(f"   🔒 Replay held to the recipe's recorded map gate "
+                                 f"({len(ref)} reference map(s), from {side.name})")
+                return ref
+        return None
 
     def _load_prior_dynamic_records(self, prior_analysis_paths: list) -> list:
         """Collect the APPROVED dynamic-analysis records of prior runs.
