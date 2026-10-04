@@ -581,6 +581,47 @@ class OrchestratorTools:
         else:
             self.orch.fidelity_spec = None
 
+    def _verified_rows_only(self, file_path: str, include_unverified: bool):
+        """(path for extraction, units skipped, units kept as unverified) for a
+        table with a ``verified`` column (#737): the rows marked False are left
+        out of a copy (``<stem>.verified_only.csv``, its sidecar copied beside it
+        under the same stem), so the scalarizer sees what it would have, minus
+        them, and nobody takes the copy for the analysis's own table. ``None`` as the path when every
+        row is unverified. Any other file, or a table without the column, is
+        passed through untouched."""
+        if Path(file_path).suffix.lower() != ".csv":
+            return file_path, [], []
+        try:
+            import pandas as pd
+            df = pd.read_csv(file_path)
+        except Exception:  # noqa: BLE001 - not a readable table: extraction decides
+            return file_path, [], []
+        if "verified" not in df.columns:
+            return file_path, [], []
+        bad = df["verified"].astype(str).str.strip().str.lower().isin(("false", "0", "no"))
+        if not bad.any():
+            return file_path, [], []
+        units = (df["unit"].astype(str) if "unit" in df.columns
+                 else pd.Series([f"row {i + 1}" for i in range(len(df))], index=df.index))
+        reasons = (df["flag_reason"].fillna("").astype(str) if "flag_reason" in df.columns
+                   else pd.Series([""] * len(df), index=df.index))
+        rows = [{"unit": units[i], "reason": reasons[i] or "unverified"} for i in df.index[bad]]
+        if include_unverified:
+            return file_path, [], rows
+        if bad.all():
+            return None, rows, []
+        dest_dir = Path(self.orch.bo_data_path).parent / "ingest" / Path(file_path).parent.name
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"{Path(file_path).stem}.verified_only{Path(file_path).suffix}"
+        df[~bad].to_csv(dest, index=False)
+        sidecar = Path(file_path).with_suffix(".json")
+        if sidecar.is_file():
+            import shutil
+            shutil.copyfile(sidecar, dest.with_suffix(".json"))
+        print(f"    🚫 Skipping {len(rows)} unverified row(s): "
+              + ", ".join(f"{r['unit']} ({r['reason']})" for r in rows[:8]))
+        return str(dest), rows, []
+
     @staticmethod
     def _sidecar_scalar_keys(file_path: str) -> set:
         """Scalar keys of the data file's sidecar JSON (``x.csv`` -> ``x.json``)
@@ -3908,7 +3949,8 @@ class OrchestratorTools:
                 inputs: list[str] = None,
                 targets: list[str] = None,
                 directions: dict = None,
-                input_types: dict = None):
+                input_types: dict = None,
+                include_unverified: bool = False):
             """
             Analyzes a raw data file (CSV/XLSX) to extract metrics.
             
@@ -3928,6 +3970,24 @@ class OrchestratorTools:
 
             # Resolve absolute path for tracking
             file_path_abs = str(Path(file_path).resolve())
+
+            # #737: a series feature table says which rows passed their gate
+            # (`verified`); a salvaged unit's numbers are not a measurement,
+            # and the surrogate must not train on them. They are left out of
+            # what extraction reads (pass-through and codegen alike), named,
+            # and recorded on the campaign; `include_unverified` keeps them.
+            extract_path, skipped_unverified, kept_unverified = self._verified_rows_only(
+                file_path, include_unverified)
+            if extract_path is None:
+                return json.dumps({
+                    "status": "error",
+                    "message": (f"Every row of {Path(file_path).name} is unverified "
+                                f"({', '.join(u['unit'] + ' (' + u['reason'] + ')' for u in skipped_unverified[:8])}"
+                                + (" …" if len(skipped_unverified) > 8 else "") + "); nothing to ingest."),
+                    "hint": ("These units' analyses passed no gate. Re-run them, or pass "
+                             "include_unverified=True to ingest them as low-confidence data."),
+                    "rows_skipped_unverified": len(skipped_unverified),
+                })
             
             #  Build schema-aware extraction goal
             enhanced_objective = extraction_goal or ""
@@ -4026,7 +4086,7 @@ class OrchestratorTools:
             # belongs at the campaign schema, not per extraction.
             try:
                 res = self.orch.scalarizer.scalarize(
-                    data_path=file_path,
+                    data_path=extract_path,
                     objective_query=enhanced_objective,
                     reuse_script_path=script_to_use,
                     experiment_context=exp_context,
@@ -4073,7 +4133,7 @@ class OrchestratorTools:
                                     print(f"       {m}")
                                 print(f"    🔄 Auto-regenerating script...")
                                 res = self.orch.scalarizer.scalarize(
-                                    data_path=file_path,
+                                    data_path=extract_path,
                                     objective_query=enhanced_objective,
                                     reuse_script_path=None,
                                     experiment_context=exp_context,
@@ -4526,6 +4586,11 @@ class OrchestratorTools:
                                      "name — pass that name as the target."),
                         })
 
+                # include_unverified: record only what was actually ingested (a
+                # failed unit has no values and was skipped as missing above)
+                if kept_unverified and _skipped_units:
+                    kept_unverified = [u for u in kept_unverified if u["unit"] not in _skipped_units]
+
                 # SCHEMA ENFORCEMENT ON SAVE
                 if df_existing is not None:
                     if set(df_to_append.columns) != set(df_existing.columns):
@@ -4546,7 +4611,11 @@ class OrchestratorTools:
                 self.orch.analyzed_files[file_path_abs] = {
                     'row_count': current_row_count,
                     'hash': current_hash,
-                    'timestamp': datetime.now().isoformat()
+                    'timestamp': datetime.now().isoformat(),
+                    # which measured conditions were NOT used, and which
+                    # low-confidence ones were (#737)
+                    **({'skipped_unverified': skipped_unverified} if skipped_unverified else {}),
+                    **({'included_unverified': kept_unverified} if kept_unverified else {}),
                 }
                 with open(self.orch.analyzed_files_path, 'w', encoding="utf-8") as f:
                     json.dump(self.orch.analyzed_files, f, indent=2)
@@ -4574,6 +4643,23 @@ class OrchestratorTools:
                         f"run_optimization).")
                 if locals().get("_dir_warn"):
                     _resp["direction_warnings"] = _dir_warn
+                if skipped_unverified:
+                    _resp["rows_skipped_unverified"] = len(skipped_unverified)
+                    _resp["rows_skipped_unverified_units"] = skipped_unverified
+                    _resp["unverified_warning"] = (
+                        f"{len(skipped_unverified)} unverified row(s) skipped: "
+                        + ", ".join(f"{u['unit']} ({u['reason']})" for u in skipped_unverified[:8])
+                        + (" …" if len(skipped_unverified) > 8 else "")
+                        + ". Their analyses passed no gate, so the optimizer does not train on "
+                          "them. Re-run them, or re-ingest with include_unverified=True to use "
+                          "them as low-confidence data.")
+                if kept_unverified:
+                    _resp["included_unverified_units"] = kept_unverified
+                    _resp["unverified_warning"] = (
+                        f"{len(kept_unverified)} UNVERIFIED row(s) ingested on request "
+                        "(include_unverified): their analyses passed no gate. The campaign "
+                        "record lists them as unverified; the optimizer weights them like any "
+                        "other point.")
                 if rows_skipped_missing:
                     _resp["rows_skipped_missing"] = rows_skipped_missing
                     if _skipped_units:
@@ -4640,6 +4726,15 @@ class OrchestratorTools:
                         "level-encoded for the surrogate and decoded in the "
                         "recommendations. Sticky for the campaign; can also be set on "
                         "run_optimization."
+                    )
+                },
+                "include_unverified": {
+                    "type": "boolean",
+                    "description": (
+                        "A series feature table marks each row `verified`; rows whose analysis "
+                        "passed no gate (salvaged, failed) are SKIPPED by default and named in "
+                        "the result. Pass true only when the user deliberately wants them as "
+                        "low-confidence data points. Default: false."
                     )
                 },
                 "directions": {
