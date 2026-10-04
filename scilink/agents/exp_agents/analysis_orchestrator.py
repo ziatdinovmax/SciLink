@@ -14,7 +14,7 @@ import json
 from scilink.utils.text_io import atomic_write_json
 import logging
 from ._verification_record import (analysis_verdict, replay_escalation, series_anchor_unit, series_coverage,
-                                   series_recipes, ungated_outputs_of)
+                                   series_recipes, ungated_outputs_of, failed_outputs_of)
 import os
 import time
 from pathlib import Path
@@ -1752,6 +1752,9 @@ class AnalysisOrchestratorAgent:
                     # hyperspectral task's scalars, #722): the verdict does not
                     # cover them, so the board keeps the run's claims provisional
                     "ungated_outputs": ungated_outputs_of(rec.get("full_result")),
+                    # of those, the numbers whose fit-health check FAILED (at a
+                    # bound, at zero): failed fits, reported as no value (#722 B1)
+                    "failed_outputs": failed_outputs_of(rec.get("full_result")),
                     # a series: units, how many produced features, which are
                     # unverified or failed (#723) — None for a single run
                     "series_coverage": series_coverage(rec.get("full_result")),

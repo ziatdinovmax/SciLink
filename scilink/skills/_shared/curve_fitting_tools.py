@@ -147,6 +147,29 @@ def describe_pinned(pins) -> str:
                      f"{p['side']} bound {p['bound']:.6g}" for p in pins)
 
 
+def split_pins_by_targets(pins, targets, parameters=None):
+    """``(target_pins, secondary_pins)`` (#742).
+
+    ``targets`` is the fit's declared list of TARGET components — the ones
+    whose parameters answer the plan's ``parameters_to_extract``; the others
+    describe a background, a baseline or an overlap. A pin on a target
+    component (any of its parameters: a centre railed out of its window
+    makes its area wrong too) is a degenerate fit, as always; a pin on a
+    secondary component is a caveat — its pinned value is not a measurement,
+    but the fit of the targets stands.
+
+    Undeclared, empty, or naming no fitted component (a typo must not switch
+    the check off): every component is a target, today's rule."""
+    pins = list(pins or [])
+    names = ({str(t) for t in targets if isinstance(t, str)}
+             if isinstance(targets, (list, tuple)) else set())
+    fitted = set(parameters) if isinstance(parameters, dict) else {p.get("component") for p in pins}
+    if not names or not (names & fitted):
+        return pins, []
+    return ([p for p in pins if p.get("component") in names],
+            [p for p in pins if p.get("component") not in names])
+
+
 def validate_absent_component_contract(parameters) -> list:
     """Deterministic check of the absence-as-value results contract.
 

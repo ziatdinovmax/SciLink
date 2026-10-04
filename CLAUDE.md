@@ -130,7 +130,16 @@ unit reuses it verbatim, failures are re-analysed within `max_series_refits`,
 feature outliers are flagged (never re-analysed — the anomaly may be the
 physics; a curve follower whose replay pins a parameter at its bound likewise
 keeps the recipe verbatim, is flagged `pinned_at_bound` and is withheld as a
-degenerate fit, never relaxed into bounds of its own, #726), then trend codegen and a series synthesis run over the per-unit
+degenerate fit, never relaxed into bounds of its own, #726 — a pin that
+withholds is one on a TARGET component: the fitting script declares
+`targets`, the components whose parameters answer the plan's
+`parameters_to_extract`, and a pin on any other — a background, a baseline,
+an overlap — is a caveat (`secondary_pins`, its value reported as no value)
+that withholds neither the unit nor, through its anchor, the regime, and is
+named by a non-refit `secondary_pin` flag; a fit that declares none is judged
+as before. The declaration is FROZEN within a fit — the first stands, a later
+attempt can only add to it, a follower starts from its regime anchor's — so a
+correction cannot shrink `targets` to clear a target pin, #742), then trend codegen and a series synthesis run over the per-unit
 feature table. The per-unit rows are written to `series_analysis_results.json`
 in one shape, so `feature_table.write_feature_table` and every downstream
 consumer read all three the same way. Every unit is a row of `features.csv`,
@@ -239,7 +248,24 @@ declaration beside a VALUED required output is critiqued as not honoured,
 not with the all-NaN text, which pushed live runs away from an honest null
 (#723). The series synthesis is told whether a recipe locked and which
 outputs a gate checked; a number no gate checked (a task's `scalars`) is
-named as such there and in the single-cube synthesis (#722).
+named as such there and in the single-cube synthesis (#722). A scalar that
+comes from a fit is returned as `{"value", "role", "bounds"}` and CHECKED
+(`_check_scalar`, #722 B1): at its declared bound (the curve agent's
+`validate_bound_pinning`), or an amplitude at zero (below `AMPLITUDE_ZERO_SIGMA`
+of the field mean's noise — never judged against a declared range — measured on 1,227
+scalars of 156 real runs: failed fits at <= 2e-5 sigma, healthy from 0.65), it
+is a failed fit: no value in the feature table, `failed_outputs` on the row,
+named as FAILED on the board and in both syntheses. One that passes is
+`gated: True` — passed against the bounds the SCRIPT DECLARED, nothing ties
+them to the bounds the fit used; an amplitude is certified only from
+`AMPLITUDE_CERTIFY_SIGMA` (0.5 sigma) up, stays unchecked between the two
+bars (a fit to noise lands there) and with no noise estimate at all (empty
+facts). A value outside its own declared bounds is unchecked, never passed:
+those bounds are another parameterisation's (seen on real data: a Gaussian's
+sigma bounds declared for its FWHM hid a width pinned in sigma). A failed
+column is never aliased by the locked-schema completion, and a live frame
+names a failed tracked number in `withheld`. Nothing reads a name: what is checked is what the script
+declared it fitted; a plain number stays unchecked, as before.
 
 **Through the meta agent, a series is ONE delegation.** The meta's routing
 guidance and `delegate_to_analysis` say so for spectra, images and cubes
@@ -874,8 +900,12 @@ Settled rules, each learned from a live run or a review:
   its task and context carry everything. The persistent specialists stay for
   conversation, where accumulating context is the point — and two concurrent
   `run_task` calls on one specialist would each report the other's output.
-- **The coordinator is rules, not a model.** Admission by free memory, a
-  capacity plan that refuses an item larger than the machine, a memory guard
+- **The coordinator is rules, not a model.** Admission by free memory (an
+  item is estimated by its LARGEST unit, nested data included — a series runs
+  its units one at a time, times the replay workers the agent itself resolves
+  plus the parent — and a raw-instrument file, by its own embedded contract or
+  its folder's, by its preparation, #724), a capacity plan that refuses an item larger than the
+  machine, a memory guard
   that cancels the heaviest running item (never one running alone) and reruns
   it alone once, a wall-clock budget per item, no item starting another. The
   model decides between swarm runs and inside each item, never within a run.
@@ -915,14 +945,20 @@ Settled rules, each learned from a live run or a review:
   DEGENERATE fit, named, never called salvaged (#726); a decision about a unit is made where the information is, never reconstructed
   afterwards from markers; the board keeps its own copy of a recipe under
   `swarm/recipes/<NN>_<label>/<analysis_id>/`, written once and never
-  rewritten, so an agent's folder is never read again for it and the
+  rewritten — a series' recipes from the `locked_recipes` its driver records
+  where each regime locks (the curve, image and hyperspectral drivers alike;
+  a cube's recipe is a records FILE, copied under its unit's own folder by the
+  name `prior_analysis_paths` reads, with its map gate in the sidecar, which a
+  replay of the copy is held to when its caller passes no reference, #734) — so an agent's folder is never read again for it and the
   agents' own layout and reuse are untouched by the swarm; a verifier's
   physics approval inside the gate's soft band counts, a bypassed verification
   below threshold does not; a CLAIM of a run that also reported outputs no gate
   checked — a hyperspectral task's `scalars`, marked `gated: False` where they
   are produced and carried as `ungated_outputs` on the `analyses` row — stays
   provisional, its recipe verified, because the gate approved the maps and a
-  claim may rest on the numbers beside them, #722), a human-approved plan (an unattended one stays
+  claim may rest on the numbers beside them, #722 — unless every such number
+  was declared and passed its fit-health check, B1; one that FAILED it is
+  named as a failed fit, `failed_outputs`), a human-approved plan (an unattended one stays
   provisional; only the delegation that wrote or settled the plan posts it),
   the structure validator. Engine output and advice that passed no gate — a BO
   point, a steering reduction, a TEA summary, a critic's blocking finding — is

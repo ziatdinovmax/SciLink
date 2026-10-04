@@ -1082,7 +1082,8 @@ rejected and retried.
         "Feature_Name_2": "a.u."
     }},
     "scalars": {{
-        "Metric_Name": 0.0
+        "Metric_Name": 0.0,
+        "Fitted_Number": {{"value": 0.0, "role": "position", "bounds": [lo, hi]}}
     }},
     "description": "Brief physics explanation"
 }}
@@ -1092,7 +1093,13 @@ NOT per-pixel maps — a spatial correlation coefficient, a region-integrated
 quantity, a global fit parameter. Each value must be a single finite number;
 put its unit in "units" under the same name. Scalars are recorded in the run's
 feature table and reported alongside the maps — return a requested global
-number here, never as a constant-valued map.
+number here, never as a constant-valued map. A number that comes from a FIT or a
+windowed search is checked only when you return it as {{"value", "role", "bounds"}}
+— role one of position | width | amplitude | count | ratio | quality | other,
+bounds the [lo, hi] the fit or search was constrained to, in the value's own units
+and parameterisation (a FWHM's bounds, not its sigma's; an amplitude in the data's
+own units) — and one at its bound,
+or an amplitude at zero, is then reported as a failed fit, not a measurement.
 
 Also OPTIONAL — and strongly encouraged whenever you FIT a model per pixel:
     "fit_examples": [
@@ -1222,6 +1229,87 @@ def _log_qc_rejection(logger, feature_name: str, critique: str, kind: str):
 _MAX_SCALARS_PER_TASK = 40
 _MAX_FIT_EXAMPLES = 9
 
+#: Roles a `scalars` entry may declare (#722 B1). Only a fitted number with its
+#: bounds, or an amplitude, has a deterministic check; the other roles are
+#: reported as unchecked.
+SCALAR_ROLES = ("position", "width", "amplitude", "count", "ratio", "quality", "other")
+#: An amplitude this far below the noise of the field mean was not fitted: it
+#: sits on a zero floor the pinned-at-bound rule deliberately does not report.
+#: Measured on 1,227 scalars of 156 real hyperspectral runs (#722): the failed
+#: fits were at 1e-13 .. 2e-5 sigma, healthy values from 0.65 sigma up; the bar
+#: sits five times above the largest failure.
+AMPLITUDE_ZERO_SIGMA = 1e-4
+#: An amplitude is CERTIFIED only from this many sigma of the field mean's
+#: noise; between the two bars it stays unchecked (a fit to noise lands there,
+#: and so may an amplitude given in other units than the cube's). No healthy
+#: value of the 1,227-scalar corpus sat below 0.65 sigma.
+AMPLITUDE_CERTIFY_SIGMA = 0.5
+
+
+def _check_scalar(value: float, role: str | None, bounds, facts: dict | None):
+    """Deterministic fit-health checks on one fitted scalar (#722 B1):
+    ``("passed" | "failed" | None, reason)``. None means no check applies (no
+    bounds, not an amplitude), and the number stays unchecked. Never raises.
+
+    - a value at a bound it was fitted within is not a measurement (the curve
+      agent's rule, ``validate_bound_pinning``, with its tolerance and its
+      exemptions: a lower bound of zero is a physical floor);
+    - an amplitude at zero is not one either: below ``AMPLITUDE_ZERO_SIGMA``
+      of the field mean's noise the fit found no feature (judged against the
+      noise, never against the declared range).
+    Nothing reads a name or a value pattern: what is checked is what the
+    script declared it fitted."""
+    from ....skills._shared.curve_fitting_tools import validate_bound_pinning
+    passed = []
+    lo = hi = None
+    if isinstance(bounds, (list, tuple)) and len(bounds) == 2:
+        try:
+            lo, hi = sorted(float(b) for b in bounds)
+        except (TypeError, ValueError):
+            lo = hi = None
+    unchecked_bounds = None
+    if lo is not None and np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+        tol = 0.01 * (hi - lo)
+        if not (lo - tol <= value <= hi + tol):
+            # a fitted value cannot leave the bounds it was fitted within: these
+            # are another parameterisation's (seen on real data: a Gaussian's
+            # sigma bounds declared for its FWHM, 2.355 sigma, so a width pinned
+            # at its sigma bound read as "inside"). Not checkable, never passed.
+            unchecked_bounds = (f"value outside its declared bounds [{lo:.6g}, {hi:.6g}] — the bounds "
+                                "are not in the value's units or parameterisation")
+            lo = hi = None
+    # a ratio or fraction legitimately rests on its bounds (a mixing fraction
+    # of 1 is a pure component): exempt, as the curve rule exempts fraction keys
+    if lo is not None and np.isfinite(lo) and np.isfinite(hi) and hi > lo and role != "ratio":
+        pins = validate_bound_pinning({"scalar": {"value": value}},
+                                      {"scalar": {"value": [lo, hi]}})
+        if pins:
+            return "failed", f"at its {pins[0]['side']} bound {pins[0]['bound']:.6g}"
+        passed.append(f"inside its bounds [{lo:.6g}, {hi:.6g}]")
+    if role == "amplitude":
+        # judged against the NOISE, never against the declared range: a huge
+        # upper bound (seen on real data, [0, ~1e6]) made 0.6 read as "zero"
+        sm = (facts or {}).get("sigma_mean")
+        if not (isinstance(sm, (int, float)) and np.isfinite(sm) and sm > 0):
+            # no noise estimate (the facts can be empty: a NaN channel, a short
+            # axis) — bounds alone never certify an amplitude: a zero lower
+            # bound is exempt from the pin rule, so 1e-12 would "pass"
+            return None, "no noise estimate for the zero check"
+        if abs(value) < AMPLITUDE_ZERO_SIGMA * sm:
+            return "failed", (f"{abs(value) / sm:.1e} sigma of the field mean's noise: "
+                              "no feature was fitted")
+        if abs(value) < AMPLITUDE_CERTIFY_SIGMA * sm:
+            return None, (f"{abs(value) / sm:.2g} sigma of the field mean's noise: between the "
+                          "failed and the certified bars")
+        passed.append(f"{abs(value) / sm:.2g} sigma above zero")
+    if unchecked_bounds:
+        # the bounds could not be held to the value: whatever else passed, the
+        # number is not certified (it may be pinned in its own parameterisation)
+        return None, unchecked_bounds
+    if passed:
+        return "passed", "; ".join(passed)
+    return None, "no check applies (no bounds declared)"
+
 
 def _validate_fit_examples(result_dict: dict, h: int, w: int, e: int) -> list:
     """Validate the optional ``fit_examples`` return channel.
@@ -1278,25 +1366,33 @@ def _validate_fit_examples(result_dict: dict, h: int, w: int, e: int) -> list:
     return out
 
 
-def _extract_scalar_records(result_dict: dict, raw_units) -> list:
+def _extract_scalar_records(result_dict: dict, raw_units, facts: dict | None = None) -> list:
     """Validate the optional ``scalars`` return channel into meta records.
 
-    Returns ``[{name, units, description, scalar}, ...]`` for every entry that
-    is a single finite number (numpy scalars coerced); anything else — arrays,
-    strings, NaN/inf — is dropped silently rather than failing the attempt,
-    since scalars are a reporting channel, not a QC-gated deliverable. Capped
-    at ``_MAX_SCALARS_PER_TASK`` to keep the feature table a table. Each
-    record says so (``gated: False``): no map review and no replay gate
-    looked at it, so a claim resting on the run cannot be called verified on
-    its account (#722; ``_verification_record.ungated_outputs``).
+    Returns ``[{name, units, description, scalar, gated, check, ...}, ...]``
+    for every entry that is a single finite number (numpy scalars coerced),
+    given plainly or as ``{"value", "role", "bounds"}``; anything else —
+    arrays, strings, NaN/inf — is dropped silently rather than failing the
+    attempt. Capped at ``_MAX_SCALARS_PER_TASK`` to keep the feature table a
+    table.
+
+    A number with a declared role and bounds is checked (``_check_scalar``,
+    #722 B1): one that passes is ``gated: True``; one that fails is reported
+    as a failed fit — ``scalar: None``, its value kept as ``raw_value`` — so
+    it never reaches the feature table or the optimizer as a measurement;
+    one no check applies to is ``gated: False``, as every scalar was before
+    (#733): no gate looked at it, so a claim resting on the run cannot be
+    called verified on its account (``_verification_record.ungated_outputs``).
     """
     scalars = result_dict.get("scalars")
     if not isinstance(scalars, dict):
         return []
     records = []
-    for name, value in scalars.items():
+    for name, entry in scalars.items():
         if len(records) >= _MAX_SCALARS_PER_TASK:
             break
+        declared = entry if isinstance(entry, dict) else {}
+        value = declared.get("value") if declared else entry
         try:
             v = float(np.asarray(value).item())
         except Exception:  # noqa: BLE001 - non-scalar entry, skip
@@ -1306,14 +1402,31 @@ def _extract_scalar_records(result_dict: dict, raw_units) -> list:
         unit = "a.u."
         if isinstance(raw_units, dict):
             unit = raw_units.get(name, "a.u.")
-        records.append({
+        role = str(declared.get("role") or "").strip().lower() or None
+        if role is not None and role not in SCALAR_ROLES:
+            role = "other"
+        bounds = declared.get("bounds")
+        verdict, reason = _check_scalar(v, role, bounds, facts) if declared else (None, "no role or bounds declared")
+        rec = {
             "name": str(name),
             "units": unit,
             "description": ("Global (non-map) numeric deliverable returned "
                             "via the task's `scalars` channel."),
             "scalar": v,
-            "gated": False,
-        })
+            "gated": verdict == "passed",
+            "check": f"{verdict or 'unchecked'}: {reason}",
+        }
+        if role:
+            rec["role"] = role
+        if isinstance(bounds, (list, tuple)) and len(bounds) == 2:
+            rec["bounds"] = [b if isinstance(b, (int, float)) else None for b in bounds]
+        if verdict == "failed":
+            # a value at its bound or at zero is not a measurement: kept for
+            # the record, never reported as a number
+            rec["raw_value"], rec["scalar"] = v, None
+            rec["description"] = (f"FAILED FIT ({reason}) — not a measurement. "
+                                  + rec["description"])
+        records.append(rec)
     return records
     
 def _sanitize_filename(text: str) -> str:
@@ -2777,10 +2890,17 @@ class BuildHolisticSynthesisPromptController:
                     prompt_parts.append(f"   - Physical Interpretation: {desc}")
                     prompt_parts.append(f"   - Units: {units}")
 
-                    if isinstance(scalar, (int, float)):
+                    if str(meta.get("check", "")).startswith("failed"):
+                        # #722 B1: at its bound or at zero — a failed fit
+                        prompt_parts.append(
+                            f"   - Value: NONE — FAILED its fit-health check ({meta['check'][8:]}); "
+                            "a failed fit, not a measurement: never read it as a value or as an absence")
+                    elif isinstance(scalar, (int, float)):
                         # Global scalar deliverable — a single number, not a map.
                         prompt_parts.append(f"   - Value: {scalar:.6g}")
-                        if meta.get("gated") is False:
+                        if meta.get("gated") is True:
+                            prompt_parts.append(f"   - Checked: {meta.get('check')}")
+                        elif meta.get("gated") is False:
                             # #722: no map review or replay gate looked at it
                             prompt_parts.append(
                                 "   - Checked: NO gate checked this number (it may be a failed fit — "
@@ -4294,7 +4414,13 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             # count toward the map success rate, and must never satisfy a
             # required_outputs (map) name. They commit only when the attempt
             # itself commits (success or salvage).
-            current_run_scalar_meta = _extract_scalar_records(result_dict, raw_units)
+            current_run_scalar_meta = _extract_scalar_records(
+                result_dict, raw_units, ctx.session.get("facts"))
+            for _sm in current_run_scalar_meta:
+                if str(_sm.get("check", "")).startswith("failed"):
+                    self.logger.warning(
+                        f"    ⚠️ Scalar {_sm['name']} = {_sm.get('raw_value'):.6g} failed its check "
+                        f"({_sm['check'][8:]}) — reported as a failed fit, not a measurement")
 
             # Optional per-pixel fit examples: raw spectrum + model curve at
             # representative pixels. Rendered once per attempt; shown to the

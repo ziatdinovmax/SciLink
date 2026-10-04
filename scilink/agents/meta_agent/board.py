@@ -678,7 +678,12 @@ def _recipe_specs(aid: str, rec: Dict[str, Any]) -> List[Dict[str, Any]]:
                         "evidence": {"analysis_ids": [aid],
                                      "gate": ("the anchor's gate: " + str(r.get("reason") or "")) if ok
                                      else ("the anchor's gate did not pass: " + str(r.get("reason") or ""))},
-                        "_text": r["script"], "_name": f"{_safe(r['unit'])}.py"})
+                        "_text": r["script"],
+                        # a script is <unit>.py; a recipe FILE keeps the name its agent
+                        # reads it by (a cube's dynamic_analysis_records.json), in its
+                        # unit's own folder so two regimes' files never collide (#734)
+                        **({"_name": _safe(r["file"]), "_subdir": _safe(r["unit"])} if r.get("file")
+                           else {"_name": f"{_safe(r['unit'])}.py"})})
         return out
     if rec.get("series"):
         return out                     # a series from before the record: no recipe
@@ -728,13 +733,19 @@ def _claim_verified(row: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
         held.append("a locked-script replay passed the replay gate (the numbers), but its interpretation "
                     "is not certified — the state and identity checks against the regime's units did not "
                     "both agree, or could not run")
-    ungated = row.get("ungated_outputs") or []
-    if ungated:
+    def _shown(names):
+        return ", ".join(map(str, names[:6])) + (f" (+{len(names) - 6} more)" if len(names) > 6 else "")
+    failed = list(row.get("failed_outputs") or [])
+    unchecked = [n for n in (row.get("ungated_outputs") or []) if n not in failed]
+    if unchecked:
         # #722: the gate approved what it checked (a cube's maps); the run
         # also reported outputs nothing checked, and a claim may rest on them.
-        shown = ", ".join(map(str, ungated[:6])) + (f" (+{len(ungated) - 6} more)" if len(ungated) > 6 else "")
         held.append(f"its gate approved the outputs it checks, but the run also reported outputs no gate "
-                    f"checked ({shown}), which a claim may rest on")
+                    f"checked ({_shown(unchecked)}), which a claim may rest on")
+    if failed:
+        # #722 B1: numbers that FAILED their fit-health check are failed fits
+        held.append(f"numbers it reported FAILED their fit-health check ({_shown(failed)}): failed fits, "
+                    "not measurements, which a claim may rest on")
     if held:
         return False, f"analysis {row.get('analysis_id')}: " + "; and ".join(held)
     return verified, why
@@ -911,11 +922,14 @@ def _materialize_recipe(board: Board, entry: Dict[str, Any], spec: Dict[str, Any
     keep their own script."""
     text, source = spec.pop("_text", None), spec.pop("_source", None)
     name = spec.pop("_name", None)
+    subdir = spec.pop("_subdir", None)
     if spec.get("kind") != "recipe" or not name or (text is None and source is None):
         return spec
     folder = (board.path.parent / "recipes"
               / f"{int(entry.get('index') or 0):02d}_{_safe(entry.get('label') or 'delegation')[:RECIPE_DIRNAME_MAX]}"
               / _safe(spec["payload"].get("analysis_id") or "analysis")[:RECIPE_DIRNAME_MAX])
+    if subdir:
+        folder = folder / _safe(subdir)[:RECIPE_DIRNAME_MAX]
     folder.mkdir(parents=True, exist_ok=True)
     if text is None:
         text = Path(source).read_text(encoding="utf-8", errors="replace")
