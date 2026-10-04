@@ -908,15 +908,26 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                           series_metadata: dict | None) -> dict:
         """Per-dataset metadata: the shared metadata plus this dataset's
         sidecar fields (when the orchestrator collected them) and its position
-        on the series axis, so every prompt knows which point it is looking at."""
+        on the series axis, so every prompt knows which point it is looking at.
+        A field that VARIES across the units' sidecars is the unit's own and
+        wins over a shared field of the same name (shared metadata built from
+        one file once carried that file's exposure into every unit, #723); a
+        field every sidecar repeats does not, so a correction the person made
+        to the shared metadata (an energy range) is not undone by the
+        sidecars still carrying the old value."""
         si = {k: v for k, v in (base_si or {}).items() if k != "per_file_metadata"}
         pfm = (base_si or {}).get("per_file_metadata")
         if isinstance(pfm, dict):
             name = os.path.basename(str(data_path))
             own = pfm.get(name) or pfm.get(Path(name).stem) or pfm.get(str(data_path))
             if isinstance(own, dict):
+                sidecars = [d for d in pfm.values() if isinstance(d, dict)]
                 for k, v in own.items():
-                    si.setdefault(k, v)
+                    varies = any(d.get(k, None) != v for d in sidecars)
+                    if varies:
+                        si[k] = v
+                    else:
+                        si.setdefault(k, v)
         ctx = {"index": idx, "n_datasets": n}
         if isinstance(series_metadata, dict):
             ctx["variable"] = series_metadata.get("variable")
@@ -1252,7 +1263,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     for nm in (t.get("required_outputs") or [])]
         _groups = self._outlier_groups(series_plan, scout)
         flagged = _series.detect_outliers(rows, outlier_sigma, control_values=_ctrl,
-                                          feature_prefixes=_primary, groups=_groups)
+                                          feature_prefixes=_primary, groups=_groups,
+                                          refit_possible=bool(locks))
         refit_summary: list = []
         refit_skipped: list = []
         if locks:
@@ -1308,7 +1320,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     rows[idx] = new_row
             if cands:
                 flagged = _series.detect_outliers(rows, outlier_sigma, control_values=_ctrl,
-                                                  feature_prefixes=_primary, groups=_groups)
+                                                  feature_prefixes=_primary, groups=_groups,
+                                                  refit_possible=bool(locks))
         for r in rows:
             r.pop("flagged", None); r.pop("flag_reason", None); r.pop("flag_details", None)
         for f in flagged:

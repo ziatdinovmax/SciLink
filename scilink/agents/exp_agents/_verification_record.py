@@ -585,6 +585,34 @@ def interpretation_checked_by(rv: Optional[Dict[str, Any]]) -> bool:
                 and isinstance(dist, (int, float)) and dist <= CERTIFY_STATE_BAR)
 
 
+def series_coverage(full_result: Optional[Dict[str, Any]], max_names: int = 8) -> Optional[Dict[str, Any]]:
+    """How much of a series the result covers: units, how many produced
+    features, which succeeded unverified and which failed (names clipped),
+    or None for a single run. A partial series said only "status=partial"
+    downstream; the k of n, and which units are not data, were nowhere (#723)."""
+    items = (full_result or {}).get("individual_results")
+    if not (isinstance(items, list) and items):
+        return None
+    units = [u for u in items if isinstance(u, dict)]
+
+    def _name(u):
+        return str(u.get("name") or u.get("index"))
+
+    def _has_features(u):
+        n = u.get("n_features")
+        return bool(u.get("success")) and (n is None or n > 0)
+
+    def _unverified(u):
+        uv = u.get("unit_verdict") if isinstance(u.get("unit_verdict"), dict) else {}
+        v = uv.get("verified") if isinstance(uv.get("verified"), bool) else u.get("verified")
+        return bool(u.get("success")) and v is False
+    unverified = [_name(u) for u in units if _unverified(u)]
+    failed = [_name(u) for u in units if not u.get("success")]
+    return {"units": len(units), "with_features": sum(_has_features(u) for u in units),
+            "unverified": unverified[:max_names], "n_unverified": len(unverified),
+            "failed": failed[:max_names], "n_failed": len(failed)}
+
+
 def ungated_outputs(features: Any) -> List[str]:
     """The names of the outputs a run reported that NO gate checked — the
     records their producer marked ``gated: False`` (a hyperspectral task's

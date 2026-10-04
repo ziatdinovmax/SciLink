@@ -195,7 +195,8 @@ def build_series_row(index: int, data_path: str, result: Dict[str, Any],
 def detect_outliers(series_results: List[dict], outlier_sigma: float = 2.0,
                     control_values: Optional[list] = None,
                     feature_prefixes: Optional[List[str]] = None,
-                    groups: Optional[Dict[str, List[int]]] = None) -> List[dict]:
+                    groups: Optional[Dict[str, List[int]]] = None,
+                    refit_possible: bool = True) -> List[dict]:
     """Flag failed datasets and statistical outliers among the successes.
 
     ``groups`` (regime name -> dataset indices) scores each group as its own
@@ -251,7 +252,9 @@ def detect_outliers(series_results: List[dict], outlier_sigma: float = 2.0,
                 "recommendation": (
                     "The locked series pipeline did not produce a verified "
                     "result on this dataset. It is re-analysed independently "
-                    "when the refit budget allows."),
+                    "when the refit budget allows." if refit_possible else
+                    "No recipe was locked in this series, so there is nothing "
+                    "to re-analyse it with: it is not re-analysed."),
             })
     for r in series_results:
         if r.get("success") and r.get("verified") is False:
@@ -264,7 +267,10 @@ def detect_outliers(series_results: List[dict], outlier_sigma: float = 2.0,
                             f"{(r.get('quality_metrics') or {}).get('n_targets', 0)} targets approved)"),
                 "recommendation": (
                     "Not comparable to the verified datasets. It is re-analysed "
-                    "with the series' locked targets when the refit budget allows."),
+                    "with the series' locked targets when the refit budget allows."
+                    if refit_possible else
+                    "Not comparable to verified datasets. No recipe was locked in "
+                    "this series, so it is not re-analysed."),
             })
     if groups:
         by_idx = {r["index"]: r for r in series_results}
@@ -496,9 +502,11 @@ class HyperspectralSeriesTrendController(ConditionalImageTrendController):
 # ---------------------------------------------------------------------------
 
 SERIES_SYNTHESIS_INSTRUCTIONS = """You are an expert in hyperspectral / spectroscopic materials characterization. \
-A SERIES of {num_datasets} datacubes was measured along a control variable and analysed with ONE locked \
-analysis pipeline (the same verified script applied to every dataset), so the per-dataset feature values \
-are directly comparable. {successful} dataset(s) succeeded, {flagged_count} were flagged.
+A SERIES of {num_datasets} datacubes was measured along a control variable; {pipeline} \
+{successful} dataset(s) succeeded, {flagged_count} were flagged.
+
+**WHAT A GATE CHECKED:**
+{gate_coverage}
 
 **LOCKED PIPELINE (analysis targets):**
 {locked_targets}
@@ -601,7 +609,30 @@ def build_series_synthesis_prompt(state: Dict[str, Any]) -> list:
     refits = state.get("refit_summary") or []
     locked = state.get("locked_config") or {}
     targets = locked.get("targets") or []
+    # What the gates looked at (#722): a map passed a review or the replay
+    # gate; a number reported beside it passed none, and "no change" read off
+    # fit failures was once posted as a verified finding.
+    from .._verification_record import ungated_outputs
+    ok_units = [r for r in results if r.get("success")]
+    # a salvaged unit's maps carry stats too, but its gate did not pass them
+    verified_units = [r for r in ok_units if (r.get("unit_verdict") or {}).get("verified")]
+    ungated = sorted({n for r in ok_units for n in ungated_outputs(r.get("feature_records"))})
+    gated = sorted({str(m.get("name")) for r in verified_units for m in (r.get("feature_records") or [])
+                    if isinstance(m, dict) and isinstance(m.get("stats"), dict) and m.get("name")})
+    gate_coverage = (
+        f"Maps that passed a review or the replay gate: {', '.join(gated) or 'none'}.\n"
+        + (f"Numbers reported beside them that NO gate checked: {', '.join(ungated)}. A value of these "
+           "at a fit bound, at a window edge or with ~0 amplitude is a failed fit, not a measurement: "
+           "ground a claim of change — or of no change — in the checked maps, or say it rests on "
+           "unchecked numbers."
+           if ungated else "Every reported number is a statistic of a checked map."))
     prompt: list = [SERIES_SYNTHESIS_INSTRUCTIONS.format(
+        pipeline=("analysed with ONE locked analysis pipeline (the same script applied to every dataset), "
+                  "so the per-dataset feature values are directly comparable."
+                  if targets else
+                  "NO recipe was locked, so every dataset was analysed independently and the "
+                  "per-dataset values come from different scripts."),
+        gate_coverage=gate_coverage,
         num_datasets=len(results),
         successful=sum(1 for r in results if r.get("success")),
         flagged_count=len(flagged),

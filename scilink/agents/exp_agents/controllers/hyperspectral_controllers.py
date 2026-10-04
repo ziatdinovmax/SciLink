@@ -535,6 +535,69 @@ def _render_data_facts(data, axis, axis_units: str, max_peaks: int = 4) -> str:
     return _data_facts(data, axis, axis_units, max_peaks).get("text", "")
 
 
+def _declares_unmeasured(result_dict: dict, required_outputs) -> bool:
+    """A ``not_measurable`` declaration stands when every REQUIRED output is
+    absent or entirely NaN — diagnostic maps beside it (a mask, an SNR map)
+    do not cancel it. Observed live (#723): scripts returned their required
+    maps all-NaN, a declaration with numeric evidence AND one diagnostic
+    mask; the old rule (no maps at all) ignored the declaration, and the
+    all-NaN critique pushed the model away from the honest null for five
+    rounds per unit. With no required outputs named, no maps at all."""
+    if not isinstance(result_dict.get("not_measurable"), dict):
+        return False
+    maps = result_dict.get("maps") or {}
+    if not isinstance(maps, dict):
+        return False
+    required = [r for r in (required_outputs or []) if r]
+    if not required:
+        return not maps
+
+    def _unmeasured(name):
+        if name not in maps:
+            return True
+        try:
+            return not np.isfinite(np.asarray(maps[name], dtype=float)).any()
+        except Exception:  # noqa: BLE001 - a non-numeric map is not a measurement
+            return True
+    return all(_unmeasured(r) for r in required)
+
+
+def _contradicting_feature(declaration: dict, facts: dict):
+    """The data-facts feature (>= 5 sigma of the field mean, either
+    direction) that lies INSIDE the window the declaration says it examined,
+    or None. A contradiction is about the declared feature, not the cube:
+    "the band at 800 nm is absent" is not contradicted by a band at 523 nm —
+    the common honest null, which an any-feature rule turned into a loop
+    between the repair (fit the 523 band) and the map review (that is not the
+    requested band) (#735 review). With no window there is nothing to hold
+    it to, and the judge decides."""
+    win = declaration.get("window") if isinstance(declaration, dict) else None
+    try:
+        lo, hi = sorted(float(v) for v in win)
+    except (TypeError, ValueError):
+        return None
+    inside = [f for f in (facts or {}).get("features") or []
+              if f.get("sigma", 0) >= 5.0 and lo <= f.get("position", float("nan")) <= hi]
+    return max(inside, key=lambda f: f["sigma"]) if inside else None
+
+
+def _diagnostic_maps(result_dict: dict, required_outputs) -> list:
+    """What an honest null returned beside its declaration: names and simple
+    statistics, recorded with the determination — never committed as
+    features, since no map review looked at them."""
+    out = []
+    for name, arr in (result_dict.get("maps") or {}).items():
+        try:
+            a = np.asarray(arr, dtype=float)
+            fin = a[np.isfinite(a)]
+            out.append({"name": str(name), "required": name in (required_outputs or []),
+                        "finite_fraction": round(float(fin.size / max(a.size, 1)), 4),
+                        **({"mean": float(fin.mean())} if fin.size else {})})
+        except Exception:  # noqa: BLE001
+            out.append({"name": str(name), "required": name in (required_outputs or [])})
+    return out
+
+
 class _NotMeasurableContradiction(Exception):
     """A not_measurable declaration that contradicts the deterministic data
     facts — handled as a mechanical correction, not a ladder failure."""
@@ -579,59 +642,96 @@ def _data_facts(data, axis, axis_units: str, max_peaks: int = 4) -> dict:
         baseline = float(np.nanpercentile(smooth, 10))
         dx = float(abs(axis[-1] - axis[0])) / max(e - 1, 1)
         min_prom = max(5.0 * sigma_mean, 0.02 * rng)
-        # Prominence within a LOCAL window (a quarter of the axis), so a slow
-        # ripple of the field mean is not scored against the global minimum,
-        # and a "peak" wider than half the axis is not a spectral feature.
-        peaks, props = find_peaks(smooth, prominence=min_prom, wlen=max(9, e // 4))
-        if peaks.size:
-            w_all = peak_widths(smooth, peaks, rel_height=0.5)[0] * dx
-            keep = w_all < 0.5 * abs(axis[-1] - axis[0])
-            peaks = peaks[keep]
-            props = {k: v[keep] for k, v in props.items()}
-        lines = ["### DATA FACTS (deterministic — computed from THIS dataset)",
-                 f"- axis: {axis[0]:.6g} to {axis[-1]:.6g} {axis_units}, {e} channels ({dx:.4g} {axis_units}/channel); {n_pix} spectra",
-                 f"- field-mean level: baseline (10th percentile) {baseline:.4g}, max {float(np.nanmax(smooth)):.4g} at {axis[int(np.nanargmax(smooth))]:.6g} {axis_units}",
-                 f"- noise: sigma_pixel ≈ {sigma_pix:.4g} per channel; sigma of the field mean ≈ {sigma_mean:.3g} (sigma_pixel/sqrt(N))"]
-        def _fwhm(i: int) -> float:
-            # Walk outward from the peak to the half-height crossing, stopping
-            # at a saddle (a neighbouring peak) — an upper bound there, never
-            # a width that spans two features.
-            half = baseline + 0.5 * (smooth[i] - baseline)
+
+        def _features(sig):
+            # Prominence within a LOCAL window (a quarter of the axis), so a
+            # slow ripple of the field mean is not scored against the global
+            # minimum, and a feature wider than half the axis is not one.
+            pk, pr = find_peaks(sig, prominence=min_prom, wlen=max(9, e // 4))
+            if pk.size:
+                w_all = peak_widths(sig, pk, rel_height=0.5)[0] * dx
+                keep = w_all < 0.5 * abs(axis[-1] - axis[0])
+                pk = pk[keep]
+                pr = {k: v[keep] for k, v in pr.items()}
+            return pk, pr
+
+        def _fwhm(sig, i: int) -> float:
+            # Walk outward from the extremum to the half-height crossing,
+            # stopping at a saddle (a neighbouring feature) — an upper bound
+            # there, never a width that spans two features.
+            base = float(np.nanpercentile(sig, 10))
+            half = base + 0.5 * (sig[i] - base)
             lo, hi = i, i
-            while lo > 0 and smooth[lo] > half and smooth[lo - 1] <= smooth[lo]:
+            while lo > 0 and sig[lo] > half and sig[lo - 1] <= sig[lo]:
                 lo -= 1
-            while hi < e - 1 and smooth[hi] > half and smooth[hi + 1] <= smooth[hi]:
+            while hi < e - 1 and sig[hi] > half and sig[hi + 1] <= sig[hi]:
                 hi += 1
             return max(hi - lo, 1) * dx
 
-        if peaks.size:
+        def _listed(kind, sig):
+            idx, props = _features(sig)
+            if not idx.size:
+                return []
             order = np.argsort(props["prominences"])[::-1][:max_peaks]
-            widths = [_fwhm(int(peaks[j])) for j in order]
-            lines.append("- field-mean peaks (by prominence): "
-                         + "; ".join(
-                             f"{axis[peaks[j]]:.6g} {axis_units} (height {smooth[peaks[j]]:.4g}, "
-                             f"prominence {props['prominences'][j]:.4g} = "
-                             f"{props['prominences'][j] / max(sigma_mean, 1e-12):.0f} sigma of the mean, "
-                             f"width ≲ {widths[i]:.3g} {axis_units} (FWHM upper bound))"
-                             for i, j in enumerate(order)))
+            return [{"kind": kind, "position": float(axis[idx[j]]), "level": float(smooth[idx[j]]),
+                     "prominence": float(props["prominences"][j]),
+                     "sigma": float(props["prominences"][j] / max(sigma_mean, 1e-12)),
+                     "width": float(_fwhm(sig, int(idx[j])))} for j in order]
+
+        # Both directions, labelled — never one instead of the other. A
+        # transmission band is a DIP (its maxima are shoulders), a Raman line
+        # on a fluorescence background or an X-ray white line is a PEAK even
+        # where the median sits high; which direction carries the physics is
+        # not decided here (#722 B2: choosing one by where the median sits
+        # lost the Raman lines and the white line).
+        peak_list = _listed("peak", smooth)
+        dip_list = _listed("dip", -smooth)
+        lines = ["### DATA FACTS (deterministic — computed from THIS dataset)",
+                 f"- axis: {axis[0]:.6g} to {axis[-1]:.6g} {axis_units}, {e} channels ({dx:.4g} {axis_units}/channel); {n_pix} spectra",
+                 f"- field-mean level: baseline (10th percentile) {baseline:.4g}, max {float(np.nanmax(smooth)):.4g} at {axis[int(np.nanargmax(smooth))]:.6g} {axis_units}"
+                 + (f", min {float(np.nanmin(smooth)):.4g} at {axis[int(np.nanargmin(smooth))]:.6g} {axis_units}" if dip_list else ""),
+                 f"- noise: sigma_pixel ≈ {sigma_pix:.4g} per channel; sigma of the field mean ≈ {sigma_mean:.3g} (sigma_pixel/sqrt(N))"]
+
+        def _render(feats, word, amount):
+            return "; ".join(
+                f"{f['position']:.6g} {axis_units} ({'level' if word == 'dips' else 'height'} {f['level']:.4g}, "
+                f"{amount} {f['prominence']:.4g} = {f['sigma']:.0f} sigma of the mean, "
+                f"width ≲ {f['width']:.3g} {axis_units} (FWHM upper bound))" for f in feats)
+        if peak_list:
+            lines.append("- field-mean peaks (by prominence): " + _render(peak_list, "peaks", "prominence"))
+        if dip_list:
+            lines.append("- field-mean dips (by depth): " + _render(dip_list, "dips", "depth"))
+        if peak_list and dip_list:
+            lines.append("- both directions are listed: a dip between two peaks may be only the gap between "
+                         "them, and a peak between two dips only the shoulder between them; which are the "
+                         "features is the spectrum's physics to say (absorption bands are dips, emission "
+                         "and scattering lines are peaks)")
+        feats = sorted(peak_list + dip_list, key=lambda f: -f["sigma"])
+        if feats:
             lines.append("- verdict: the strongest feature is measurable in aggregate "
-                         f"({props['prominences'][order[0]] / max(sigma_mean, 1e-12):.0f} sigma); "
+                         f"({feats[0]['sigma']:.0f} sigma); "
                          "per-pixel measurability still depends on sigma_pixel at the feature.")
         else:
             lines.append(f"- field-mean peaks: none exceeds {min_prom:.3g} prominence "
                          f"(5 sigma of the mean / 2% of range) — the field mean looks featureless.")
         lines.append(
-            "Centre fit windows, seeds and bounds on the MEASURED positions and widths "
-            "above — not on literature values — and make each window wide enough to "
-            "contain its peak with margin. After any background subtraction, confirm the "
-            "peak amplitudes at these positions survive before fitting. A not_measurable "
-            "declaration that contradicts these numbers is rejected.")
-        strongest = (float(props["prominences"][order[0]] / max(sigma_mean, 1e-12))
-                     if peaks.size else 0.0)
+            "Centre fit windows, seeds and bounds for the REQUESTED feature on its MEASURED "
+            "position and width above — not on literature values — with margin; a feature "
+            "listed elsewhere is a different feature, never a substitute for it. After any "
+            "background subtraction, confirm the amplitude survives before fitting. If no "
+            "feature is listed where the requested one should be, test it there and declare "
+            "not_measurable if it fails; a declaration whose window holds one of these "
+            "features is rejected.")
+        strongest = feats[0]["sigma"] if feats else 0.0
         return {"text": "\n".join(lines),
-                "measurable": bool(peaks.size) and strongest >= 5.0,
+                "measurable": strongest >= 5.0,
                 "strongest_sigma": strongest,
-                "peaks": [float(axis[peaks[j]]) for j in order] if peaks.size else []}
+                "sigma_mean": sigma_mean,
+                # every feature found, either direction, strongest first
+                "features": feats,
+                "peaks": [f["position"] for f in peak_list],
+                "dips": [f["position"] for f in dip_list],
+                "widths": [f["width"] for f in peak_list]}
     except Exception:  # noqa: BLE001 - advisory block, never break the run
         return {}
 
@@ -956,9 +1056,12 @@ statistics correctly:
   return bound-railing artifact maps from such data.
 If it is genuinely NOT measurable, return
 {{"maps": {{}}, "not_measurable": {{"feature": "<what was requested>",
+"window": [<axis start>, <axis end> of the region you examined for it],
 "evidence": "<the NUMBERS: prominence vs noise sigma, and where you looked>",
 "description": "<one-line determination>"}}}}
-instead of estimator outputs — centroid/moment values computed on flat noise
+(every REQUIRED output omitted or entirely NaN; a diagnostic map such as a
+mask or an SNR map may accompany the declaration — it is recorded with the
+determination, not reported as a result) instead of estimator outputs — centroid/moment values computed on flat noise
 look plausible and are worse than an honest null. A judge reviews every
 not_measurable declaration against the deterministic band-flux evidence:
 declaring it without numeric evidence, or to dodge a hard but real fit, is
@@ -2673,6 +2776,12 @@ class BuildHolisticSynthesisPromptController:
                     if isinstance(scalar, (int, float)):
                         # Global scalar deliverable — a single number, not a map.
                         prompt_parts.append(f"   - Value: {scalar:.6g}")
+                        if meta.get("gated") is False:
+                            # #722: no map review or replay gate looked at it
+                            prompt_parts.append(
+                                "   - Checked: NO gate checked this number (it may be a failed fit — "
+                                "at a bound, at a window edge, ~0 amplitude); a claim resting on it "
+                                "says so")
                     # Crash Fix: Use .get(key, 0.0) to handle missing stats gracefully
                     elif stats:
                         s_min = stats.get('min', 0.0)
@@ -4073,16 +4182,18 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     # place like an execution error — no ladder budget, no
                     # judge call — so the model re-issues the fit at once.
                     _f = ctx.session.get("facts") or {}
-                    if (isinstance(result_dict.get("not_measurable"), dict)
-                            and not result_dict.get("maps") and _f.get("measurable")):
+                    _hit = (_contradicting_feature(result_dict.get("not_measurable"), _f)
+                            if _declares_unmeasured(result_dict, required_outputs) else None)
+                    if _hit is not None:
+                        _w = result_dict["not_measurable"]["window"]
                         raise _NotMeasurableContradiction(
-                            f"not_measurable declared, but the DATA FACTS show the "
-                            f"strongest field-mean feature at {_f.get('strongest_sigma', 0):.0f} "
-                            f"sigma of the mean (peaks at {_f.get('peaks')}) — the target IS "
-                            "measurable in aggregate. Your measurability test used a "
-                            "wrong-scale sigma or looked in the wrong window. Do not "
-                            "declare not_measurable: fit the feature, centring windows "
-                            "and seeds on the measured positions above.")
+                            f"not_measurable declared for the window {list(_w)}, but the DATA FACTS "
+                            f"show a field-mean {_hit['kind']} at {_hit['position']:.6g} "
+                            f"({_hit['sigma']:.0f} sigma of the mean) INSIDE that window — a feature "
+                            "is measurable in aggregate where you looked. Your measurability test "
+                            "used a wrong-scale sigma, or the window is wider than the region of the "
+                            "requested feature. If that feature IS the one requested, measure it; if "
+                            "it is not, state the window you actually examined for the requested one.")
                     break  # executed cleanly — proceed to QC
                 except TimeoutError:
                     raise  # ladder currency, never mechanically retried
@@ -4091,9 +4202,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     if _exec_try >= self.MAX_EXEC_ATTEMPTS - 1:
                         raise ValueError(str(_nmc))  # corrections exhausted → ladder
                     self.logger.warning(
-                        f"    ⚙️ not_measurable contradicts the data facts "
-                        f"({(ctx.session.get('facts') or {}).get('strongest_sigma', 0):.0f} sigma) "
-                        f"— re-issuing the fit in place.")
+                        f"    ⚙️ not_measurable contradicts the data facts inside its own "
+                        f"window — re-issuing the fit in place.")
                 except Exception:
                     _mech_tb = traceback.format_exc()
                     if _exec_try >= self.MAX_EXEC_ATTEMPTS - 1:
@@ -4111,7 +4221,10 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             # exactly the churn the wall-clock budget otherwise has to kill).
             # A rejected declaration raises -> the normal retry feedback path.
             _nm = result_dict.get("not_measurable")
-            if isinstance(_nm, dict) and not result_dict.get("maps"):
+            if _declares_unmeasured(result_dict, required_outputs):
+                _diag = _diagnostic_maps(result_dict, required_outputs)
+                if _diag:
+                    _nm = {**_nm, "diagnostic_maps": _diag}
                 # Strict replay: the approved script's own declaration stands
                 # (it carries its numeric evidence); a live loop reads a missing
                 # named output as a change, which is what it is.
@@ -4137,6 +4250,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                                          "(judged honest null)",
                         "evidence": str(_nm.get("evidence"))[:400],
                         "description": str(_nm.get("description"))[:300],
+                        **({"diagnostic_maps": [d["name"] for d in _nm["diagnostic_maps"]]}
+                           if _nm.get("diagnostic_maps") else {}),
                     })
                     ctx.retries = retries + 1
                     return {"success": True, "task_success": True,
@@ -4428,7 +4543,19 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         "np.repeat along both axes, then crop) before returning; state "
                         "the effective resolution in the description.")
                 _nan_req = [n for n in missing_required if n in nan_only_maps]
-                if _nan_req:
+                if isinstance(result_dict.get("not_measurable"), dict):
+                    # The declaration was not honoured because a required
+                    # output came back WITH values: say that, not the
+                    # all-NaN text, which reads as "fix your fitter" and
+                    # pushed live runs away from an honest null (#723).
+                    _valued = [n for n in required_outputs if n in maps_dict and n not in nan_only_maps]
+                    detail_parts.append(
+                        "a not_measurable declaration was returned but NOT honoured: it stands only "
+                        "when every required output is absent or entirely NaN, and "
+                        f"{_valued or 'some required output'} came back with values. Either measure "
+                        "every required output, or return them all-NaN (or omit them) with the "
+                        "declaration; diagnostic maps may accompany it.")
+                elif _nan_req:
                     # Observed live: a script whose try/except returned NaN
                     # maps failed three attempts with no diagnosis — the
                     # retry feedback said nothing because no map reached QC.

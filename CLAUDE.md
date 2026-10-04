@@ -131,7 +131,11 @@ feature outliers are flagged (never re-analysed — the anomaly may be the
 physics), then trend codegen and a series synthesis run over the per-unit
 feature table. The per-unit rows are written to `series_analysis_results.json`
 in one shape, so `feature_table.write_feature_table` and every downstream
-consumer read all three the same way. **A later reuse of a series run replays
+consumer read all three the same way. Every unit is a row of `features.csv`,
+a failed one too, with `verified` / `flag_reason` status columns (annotations,
+never counted as missing values; a consumer that skips rows with a missing
+value names them), and the series' control variable is a column unless a
+sidecar column already carries it under the name older tables had (#723). **A later reuse of a series run replays
 its locked recipe** — the first regime's, recorded in `locked_recipes` when the
 anchor's script was locked, the script the feature table rests on — never a
 later refit of the anchor (the refit's script stays as that unit's
@@ -207,10 +211,26 @@ gates sees the numbers the reviewer will use. Prompt-side, one principle:
 centre windows and seeds on the measured positions and confirm the peaks
 survive background subtraction. Two rules give that structural teeth: a
 `not_measurable` declaration that contradicts the facts (a >= 5-sigma
-field-mean feature) is repaired IN PLACE like an execution error — no judge
+field-mean feature INSIDE the `window` the declaration says it examined — a
+band elsewhere in the cube is no contradiction, and "the 800 nm band is
+absent beside a 523 nm one" is the common honest null; with no window the
+judge decides) is repaired IN PLACE like an execution error — no judge
 call, no ladder budget — and a required map that comes back entirely NaN
 or with the wrong shape (a binned estimate not upsampled to the frame) is
-diagnosed in the retry critique instead of "no further detail".
+diagnosed in the retry critique instead of "no further detail". The facts
+list field-mean features in BOTH directions, labelled: a transmission band
+is a dip, a Raman line on fluorescence or an X-ray white line a peak even
+where the median sits high. Choosing one direction from where the median
+sits was tried and dropped — it lost those peaks (#735 review); choosing
+automatically waits for a corpus measurement (#722). A
+declaration stands when every REQUIRED output is absent or entirely NaN — a
+diagnostic map beside it (a mask, an SNR map) is recorded with the
+determination and never committed, since no review looked at it; a
+declaration beside a VALUED required output is critiqued as not honoured,
+not with the all-NaN text, which pushed live runs away from an honest null
+(#723). The series synthesis is told whether a recipe locked and which
+outputs a gate checked; a number no gate checked (a task's `scalars`) is
+named as such there and in the single-cube synthesis (#722).
 
 **Through the meta agent, a series is ONE delegation.** The meta's routing
 guidance and `delegate_to_analysis` say so for spectra, images and cubes

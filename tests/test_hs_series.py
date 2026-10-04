@@ -987,8 +987,9 @@ def test_data_facts_block_reports_measured_peaks_and_noise():
     assert "DATA FACTS" in txt and "144 spectra" in txt
     assert "462." in txt and "468" in txt and "sigma of the mean" in txt
     import re
-    fwhm = [float(x) for x in re.findall(r"width ≲ ([0-9.]+) eV", txt)]
-    assert fwhm and all(1.5 < f < 9.0 for f in fwhm), fwhm     # bounded, not spanning both peaks
+    peaks_line = next(ln for ln in txt.splitlines() if ln.startswith("- field-mean peaks"))
+    fwhm = [float(x) for x in re.findall(r"width ≲ ([0-9.]+) eV", peaks_line)]
+    assert len(fwhm) == 2 and all(1.5 < f < 9.0 for f in fwhm), fwhm     # bounded, not spanning both peaks
     assert "measurable in aggregate" in txt and "not on literature values" in txt
     # featureless cube: no peaks, honest wording
     flat = 0.1 + rng.normal(0, 0.03, (10, 10, 120))
@@ -1067,14 +1068,15 @@ def test_data_facts_structured_verdict():
 
 
 def test_not_measurable_contradicting_facts_is_repaired_in_place(tmp_path):
-    """A declaration of not_measurable on a cube whose data facts show a
-    strong feature is corrected as a mechanical error (second codegen call
+    """A declaration of not_measurable for a window in which the data facts
+    show a strong feature is corrected as a mechanical error (second codegen call
     within the SAME attempt, no judge call), and the fit then proceeds."""
     from scilink.agents.exp_agents.controllers.hyperspectral_controllers import RunDynamicAnalysisController
     import logging
     calls = []
     NM_CODE = ("def analyze_feature(data, energy_axis):\n"
-               "    return {'maps': {}, 'not_measurable': {'feature': 'peak', 'evidence': 'snr 0.1', 'description': 'flat'}}\n")
+               "    return {'maps': {}, 'not_measurable': {'feature': 'peak', 'window': [455, 470],\n"
+               "            'evidence': 'snr 0.1', 'description': 'flat'}}\n")
     GOOD = ("def analyze_feature(data, energy_axis):\n"
             "    import numpy as np\n"
             "    return {'maps': {'Mean_Map': np.asarray(data).mean(axis=2)}, 'units': 'a.u.', 'description': 'd'}\n")
@@ -1168,3 +1170,37 @@ def test_wrong_shape_required_map_gets_a_diagnosis(tmp_path):
         "error_dict": None, "max_verification_iterations": 1})
     assert state["dynamic_analysis_records"][0]["task_success"] is False
     assert any("wrong shape" in p and "(3, 2)" in p and "(6, 5)" in p and "upsampled" in p for p in prompts[1:])
+
+
+def test_data_facts_list_peaks_and_dips_and_lose_no_peak():
+    """#722 B2, as the #735 review measured it: both directions are listed,
+    labelled — a transmission band is found as a dip, and every peak the
+    peaks-only facts found is still there (Raman lines on a fluorescence
+    background, an X-ray white line on an early edge), where choosing one
+    direction by where the median sits had lost them."""
+    from scilink.agents.exp_agents.controllers.hyperspectral_controllers import _data_facts
+    rng = np.random.default_rng(1)
+
+    def cube(y, noise=0.005):
+        return y[None, None, :] * np.ones((12, 12, 1)) + rng.normal(0, noise, (12, 12, y.size))
+    G = lambda x, c, w: np.exp(-0.5 * ((x - c) / w) ** 2)
+    near = lambda found, want, tol: any(abs(f - want) <= tol for f in found)
+    x = np.linspace(400, 900, 400)
+    f = _data_facts(cube(1 - 0.3 * G(x, 523, 15) - 0.25 * G(x, 702, 20)), x, "nm")
+    assert near(f["dips"], 523, 3) and near(f["dips"], 702, 3) and "field-mean dips" in f["text"]
+    x = np.linspace(400, 700, 300)
+    f = _data_facts(cube(0.05 + G(x, 500, 6) + 0.8 * G(x, 520, 6)), x, "nm")
+    assert near(f["peaks"], 500, 2) and near(f["peaks"], 520, 2)
+    assert "both directions are listed" in f["text"]          # the gap between them is labelled as such
+    x = np.linspace(100, 1800, 600)
+    f = _data_facts(cube(3 * G(x, 950, 500) + 0.4 * G(x, 520, 8) + 0.3 * G(x, 1000, 8) + 0.35 * G(x, 1350, 10)), x, "cm-1")
+    assert near(f["peaks"], 520, 5) and near(f["peaks"], 1350, 5)
+    x = np.linspace(8950, 9300, 500)
+    edge = 1 / (1 + np.exp(-(x - 8980) / 2))
+    xas = edge * (1 + 0.6 * G(x, 8995, 6) + 0.08 * np.sin((x - 8980) / 12) * np.exp(-(x - 8980) / 150) * (x > 8980))
+    f = _data_facts(cube(xas), x, "eV")
+    assert near(f["peaks"], 8995, 3)
+    # a featureless decay: neither, and the text reads as it always did
+    D = np.exp(-np.arange(12) / 10.0)
+    f = _data_facts(D[None, None, :] + rng.normal(0, 0.001, (6, 5, 12)), np.arange(12.0), "channels")
+    assert f["peaks"] == [] and f["dips"] == [] and "featureless" in f["text"]

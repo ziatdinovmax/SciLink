@@ -132,7 +132,7 @@ def _series_conditions(series_meta: Any, index: Any,
     to the spectrum ``index`` or a ``{filename-or-stem: value}`` map; the primary
     block is joined together with any ``secondary_variables`` (grid designs).
     Returns ``{}`` on anything unexpected — a malformed block must not break the
-    run, and sidecar conditions (read separately) take precedence over these."""
+    run. A unit's sidecar fields are layered over these (``_unit_conditions``)."""
     if not isinstance(series_meta, dict):
         return {}
     blocks = [series_meta]
@@ -159,6 +159,57 @@ def _series_conditions(series_meta: Any, index: Any,
     return out
 
 
+def _unit_conditions(series_meta: Any, r: Dict[str, Any]) -> Dict[str, Any]:
+    """A unit's conditions: the series' declared control variable(s), then
+    its sidecar's fields (a sidecar field of the same name wins — it is the
+    unit's own record). The series variable is always kept: a strict
+    fallback dropped it whenever a sidecar existed, and fusion then read a
+    bundle-wide condition index instead (#723). Where a sidecar column already
+    holds the series variable under another name, the sidecar's column is the
+    one kept (``_drop_repeated_conditions``)."""
+    return {**_series_conditions(series_meta, r.get("index"), r.get("data_path")),
+            **_sidecar_conditions(r.get("data_path"))}
+
+
+#: Per-unit annotations, not measurements: never counted as missing values or
+#: as a column a BO keyed on it would lose units by.
+STATUS_COLUMNS = ("verified", "flag_reason")
+
+
+def _unit_status(r: Dict[str, Any]) -> Dict[str, Any]:
+    """Whether the unit's numbers passed its gate, and why it is flagged —
+    so a salvaged, unverified or failed unit does not read as data (#723)."""
+    uv = r.get("unit_verdict") if isinstance(r.get("unit_verdict"), dict) else {}
+    verified = uv.get("verified") if isinstance(uv.get("verified"), bool) else r.get("verified")
+    if not r.get("success"):
+        verified = False
+    reason = r.get("flag_reason") or ("analysis_failed" if not r.get("success") else "")
+    return {"verified": verified if isinstance(verified, bool) else "",
+            "flag_reason": reason or ""}
+
+
+def _drop_repeated_conditions(rows: List[Dict[str, Any]], series_meta: Any) -> List[Dict[str, Any]]:
+    """Remove the series variable's column where a sidecar column already
+    carries the same value in EVERY row: one quantity under two names
+    (sidecar ``temperature_C`` beside the series' ``temperature``) would be
+    counted twice by a consumer, and the sidecar's name is the one tables
+    had before the series variable was always added — a planning campaign
+    keyed on it must keep finding it. The series variable stays where no
+    sidecar column holds it (#723)."""
+    if not isinstance(series_meta, dict) or not rows:
+        return rows
+    blocks = [series_meta] + [b for b in (series_meta.get("secondary_variables") or []) if isinstance(b, dict)]
+    series_vars = [b.get("variable") for b in blocks if isinstance(b.get("variable"), str)]
+    drop = set()
+    for var in series_vars:
+        if not all(var in row for row in rows):
+            continue
+        others = [k for k in rows[0] if k not in series_vars and k not in ("unit",) + STATUS_COLUMNS]
+        if any(all(k in row and row[k] == row[var] for row in rows) for k in others):
+            drop.add(var)
+    return [{k: v for k, v in row.items() if k not in drop} for row in rows] if drop else rows
+
+
 def _curve_fit_rows(output_dir: Path) -> List[Dict[str, Any]]:
     """One row per spectrum from a curve-fitting run's series_fit_results.json."""
     sfr = output_dir / "series_fit_results.json"
@@ -171,20 +222,18 @@ def _curve_fit_rows(output_dir: Path) -> List[Dict[str, Any]]:
     series_meta = data.get("series_metadata")
     rows: List[Dict[str, Any]] = []
     for r in data.get("results", []):
-        if not isinstance(r, dict) or not r.get("success"):
+        if not isinstance(r, dict):
             continue
+        # A failed unit is listed too (conditions, verified=False, its flag):
+        # the table says k of n, rather than silently holding fewer rows.
         row: Dict[str, Any] = {"unit": r.get("name") or f"index_{r.get('index')}"}
-        # A per-file sidecar is the authoritative, complete per-unit condition
-        # record; fall back to the coarser series_metadata ONLY for units without
-        # one. Using it as a strict fallback (not an additive layer) avoids
-        # double-counting the same control variable under different names — e.g.
-        # sidecar 'temperature_C' alongside a series 'temperature' column.
-        row.update(_sidecar_conditions(r.get("data_path"))
-                   or _series_conditions(series_meta, r.get("index"), r.get("data_path")))
-        row.update(_flatten_scalars(r.get("parameters")))
-        row.update(_flatten_scalars(r.get("fit_quality"), "fit_"))
+        row.update(_unit_conditions(series_meta, r))
+        if r.get("success"):
+            row.update(_flatten_scalars(r.get("parameters")))
+            row.update(_flatten_scalars(r.get("fit_quality"), "fit_"))
+        row.update(_unit_status(r))
         rows.append(row)
-    return rows
+    return _drop_repeated_conditions(rows, series_meta)
 
 
 def _image_series_rows(output_dir: Path) -> List[Dict[str, Any]]:
@@ -201,17 +250,16 @@ def _image_series_rows(output_dir: Path) -> List[Dict[str, Any]]:
     series_meta = data.get("series_metadata")
     rows: List[Dict[str, Any]] = []
     for r in data.get("results", []):
-        if not isinstance(r, dict) or not r.get("success"):
+        if not isinstance(r, dict):
             continue
         row: Dict[str, Any] = {"unit": r.get("name") or f"index_{r.get('index')}"}
-        # Sidecar is authoritative per unit; series_metadata is a strict fallback
-        # for units lacking one (see _curve_fit_rows for the rationale).
-        row.update(_sidecar_conditions(r.get("data_path"))
-                   or _series_conditions(series_meta, r.get("index"), r.get("data_path")))
-        row.update(_flatten_scalars(r.get("extracted_features")))
-        row.update(_flatten_scalars(r.get("quality_metrics"), "quality_"))
+        row.update(_unit_conditions(series_meta, r))
+        if r.get("success"):
+            row.update(_flatten_scalars(r.get("extracted_features")))
+            row.update(_flatten_scalars(r.get("quality_metrics"), "quality_"))
+        row.update(_unit_status(r))
         rows.append(row)
-    return rows
+    return _drop_repeated_conditions(rows, series_meta)
 
 
 def _extracted_feature_rows(output_dir: Path) -> List[Dict[str, Any]]:
@@ -261,6 +309,9 @@ def _feature_table_warnings(header: List[str], rows: List[List[str]]
 
     populated: Dict[int, set] = {}
     for i in range(len(header)):
+        if header[i] in STATUS_COLUMNS:
+            populated[i] = set(range(n))
+            continue
         populated[i] = {r_i for r_i, r in enumerate(rows)
                         if i < len(r) and r[i] != "" and r[i].lower() != "nan"}
     partial = [i for i in range(len(header)) if 0 < len(populated[i]) < n]
@@ -302,7 +353,7 @@ def describe_feature_table(path) -> Optional[Dict[str, Any]]:
             for row in reader:
                 rows.append(row)
                 for i, v in enumerate(row[:len(header)]):
-                    if v == "" or v.lower() == "nan":
+                    if (v == "" or v.lower() == "nan") and header[i] not in STATUS_COLUMNS:
                         missing[i] += 1
                 if len(row) < len(header):
                     for i in range(len(row), len(header)):

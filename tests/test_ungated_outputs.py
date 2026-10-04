@@ -200,9 +200,14 @@ def test_a_series_carries_its_units_ungated_outputs(tmp_path, monkeypatch):
     from test_hs_series import _Calls, _FakeModel
     agent = hsa.HyperspectralAnalysisAgent(api_key="sk-dummy", output_dir=str(tmp_path / "series"),
                                            enable_human_feedback=False, executor_timeout=120)
-    agent.model = _FakeModel(_Calls())
+    calls = _Calls()
+    agent.model = _FakeModel(calls)
     res = agent.analyze(paths, system_info=dict(AXIS),
                         series_metadata={"variable": "dose", "values": [1, 2, 3], "unit": "mC"})
+    # the series synthesis is told which outputs a gate checked (#722 B)
+    synth = next(p for p in calls.llm if "WHAT A GATE CHECKED" in p)
+    assert "passed a review or the replay gate: Depth_Map." in synth
+    assert "NO gate checked: Band1_Depth, Band1_Position_nm" in synth
     units = [r for r in res["individual_results"] if r.get("success")]
     assert units and all(r["unit_verdict"]["ungated"] == ["Band1_Depth", "Band1_Position_nm"] for r in units)
     assert res["verdict"]["verified"] is True
