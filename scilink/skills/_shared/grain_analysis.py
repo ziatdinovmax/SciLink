@@ -55,9 +55,11 @@ def straight_boundary_fraction(boundary_bool, min_len_px=25, line_gap=2,
     total = float(boundary_bool.sum())
     if total < 1:
         return float("nan"), 0.0, 0.0, []
+    # seeded: the probabilistic Hough samples points at random, and an
+    # unseeded call gave a different straight fraction on the same image (#743)
     lines = transform.probabilistic_hough_line(
         boundary_bool, threshold=threshold, line_length=min_len_px,
-        line_gap=line_gap)
+        line_gap=line_gap, rng=0)
     straight = sum(np.hypot(p1[0] - p0[0], p1[1] - p0[1]) for p0, p1 in lines)
     return min(straight / total, 1.0), total, float(straight), lines
 

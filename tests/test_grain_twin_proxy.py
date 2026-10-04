@@ -66,3 +66,13 @@ if __name__ == "__main__":
             print(f"FAIL {fn.__name__}")
             traceback.print_exc()
     print(f"\n{passed}/{len(fns)} passed")
+
+
+def test_the_analysis_is_repeatable():
+    """#743: the probabilistic Hough transform is seeded, so the same image
+    gives the same fractions every call (unseeded, curved_boundary_fraction
+    came back 0.0 or 0.0018 on identical input)."""
+    img, _ = make_grain_map(shape=(400, 600), n_seeds=40, kind="ipf", seed=0)
+    runs = [grain_analysis(img, mode="ipf") for _ in range(6)]
+    for key in ("curved_boundary_fraction", "straight_boundary_fraction", "twin_proxy_reliable"):
+        assert len({r[key] for r in runs}) == 1, (key, [r[key] for r in runs])
