@@ -358,6 +358,28 @@ class DriftMonitor:
                                  "share": round(float(b - a + 1) / common.size, 6)})
         return self._locate_in(grids, xs_all[common], self._known()[common], max_regions) + lost
 
+    @property
+    def n_seeded(self) -> int:
+        """How many reference curves the monitor was seeded with: with one, it
+        knows no variation of its own, and any jitter of a sharp feature reads
+        as structure the reference cannot describe."""
+        return len(self._seed)
+
+    def locate_frame(self, x: Any, y: Any, max_regions: int = 3) -> List[Dict[str, Any]]:
+        """WHERE one curve differs from what the monitor knows — the replay
+        check's question (one new measurement against a regime's curves,
+        judged, never held), where ``locate()`` reads frames the stream held.
+        Same kinds and units as ``locate()``; located where the curve overlaps
+        the monitor's axis. Empty when the curve cannot be read."""
+        xs_all = self._bin_x()
+        known = self._known()
+        g, covered = self._to_grid(x, y, partial=True)
+        if g is None or covered is None or xs_all is None or known is None or xs_all.size != g.size:
+            return []
+        if int(covered.sum()) < 16:
+            return []
+        return self._locate_in([g[covered]], xs_all[covered], known[covered], max_regions)
+
     def locate_from_reference(self, n_recent: int = 3, max_regions: int = 3) -> List[Dict[str, Any]]:
         """WHERE the stream now differs from its REFERENCE frames — for a change
         that arrived too slowly to be suspected on any one frame. Every frame of

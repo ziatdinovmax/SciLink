@@ -309,3 +309,76 @@ def test_a_flag_against_one_unit_is_escalated_only_when_nobody_attends(tmp_path,
     assert rv["verdict"] == "good" and rv["identity"].get("flagged") is True
     assert rv["escalation"]["trigger"] == "flag" and rv["escalation"]["belongs_to"] == "none" and len(judge.prompts) == 1
     assert unit_verdict_for({**res, "success": True})["verified"] and unit_verdict_for({**res, "success": True})["interpretation_checked"] is False
+
+
+# --------------------------------------------------- one reference curve (#725)
+STEP_X = np.linspace(0, 100, 128)
+STEP_DX = STEP_X[1] - STEP_X[0]
+
+
+def _step(shift_samples, seed):
+    """A step-shaped time trace (an on/off transition), sharp to one sample."""
+    rng = np.random.default_rng(seed)
+    t0 = 40.0 + STEP_DX / 2 + shift_samples * STEP_DX
+    return np.c_[STEP_X, 1 / (1 + np.exp(-(STEP_X - t0) / 0.05)) + 0.01 * rng.standard_normal(STEP_X.size)]
+
+
+def _single_run_prior(tmp_path):
+    """A prior SINGLE run: one unit, its data, its approved script, no regimes."""
+    run = tmp_path / "prior_single"
+    (run / "scripts").mkdir(parents=True)
+    (run / "spectrum_0000").mkdir()
+    np.save(run / "spectrum_0000" / "data.npy", _step(0, 0))
+    (run / "scripts" / "fitting_script.py").write_text("STEP")
+    (run / "series_fit_results.json").write_text(json.dumps({"results": [
+        {"index": 0, "name": "spectrum_0000", "success": True,
+         "parameters": {"step_1": {"position": 40.4, "height": 1.0}}, "fit_quality": {"r_squared": 0.99}}]}))
+    (run / "analysis_results.json").write_text(json.dumps({"status": "success"}))
+    return run
+
+
+def test_a_state_flag_against_one_reference_curve_escalates_only_unattended_and_says_so(tmp_path, monkeypatch):
+    """#725: a same-kind replay shifted by ONE sample reads past the state bar
+    against a single reference curve (0.33 against 0.25 — a two-curve
+    reference reads 0.04). Attended, it is not escalated (it stays flagged on
+    the record); unattended it is escalated as a flag, the evidence says
+    "one reference curve" and WHERE the difference is, and the judge may
+    answer that it is the same as the reference."""
+    prior = _single_run_prior(tmp_path)
+    params = {"STEP": {"step_1": {"position": 40.4, "height": 1.0}}}
+    # attended: flagged, not escalated
+    judge = ScriptedJudge({"belongs_to": "cannot_tell"})
+    res, *_ = curve._replay(tmp_path / "att", monkeypatch, {"STEP": 0.99}, prior=prior / "scripts" / "fitting_script.py",
+                            data=_step(1, 7), extra_params=params, controller=_judged(tmp_path, judge, feedback=True))
+    rv = res["reuse_validity"]
+    assert rv["state_flag"] is True and rv["state_reference_curves"] == 1 and rv["state_distance"] > _replay.SAME_STATE_BAR
+    assert "escalation" not in rv and judge.prompts == []
+    # unattended: escalated as a flag, with the count and the location; the affirmative answer is accepted
+    judge = ScriptedJudge({"belongs_to": "same_as_reference", "same_interpretation": True,
+                           "what_changed": "The step sits one sample later; same transition, timing jitter.",
+                           "confidence": "high"})
+    res, *_ = curve._replay(tmp_path / "un", monkeypatch, {"STEP": 0.99}, prior=prior / "scripts" / "fitting_script.py",
+                            data=_step(1, 7), extra_params=params, controller=_judged(tmp_path, judge))
+    rv = res["reuse_validity"]
+    esc = rv["escalation"]
+    assert esc["trigger"] == "flag" and esc["belongs_to"] == "same_as_reference"
+    assert "JUDGE (no gate): the same as the reference" in rv["message"]
+    text = _text_of(judge.prompts[0])
+    shown = json.loads(text[text.index(_replay.ESCALATION_MARK_OPEN) + len(_replay.ESCALATION_MARK_OPEN):
+                            text.index(_replay.ESCALATION_MARK_CLOSE)])
+    assert shown["state"]["reference_curves"] == 1 and "ONE reference curve" in shown["state"]["note"]
+    where = shown["state"]["where"]
+    assert where and where[0]["x_from"] <= 42.5 and where[0]["x_to"] >= 40.0       # at the step, not the plateau
+    assert "same_as_reference" in text and "SINGLE reference curve" in text
+    # the board and the orchestrator say it in words
+    rec = board_mod._escalation_records("r1", {"escalation": replay_escalation(res)})
+    assert "the judge reads it as the same as the reference" in rec[0]["payload"]["text"]
+
+
+def test_same_as_reference_is_offered_and_read_only_without_named_regimes():
+    regimes = [{"regime": "anatase"}, {"regime": "rutile"}]
+    ev = {"gate": {}, "state": {}, "identity": {}, "regimes": {}}
+    assert "same_as_reference" not in _replay.escalation_question(ev, regimes, trigger="state")
+    assert "'same_as_reference', 'none', 'cannot_tell'" in _replay.escalation_question(ev, [], trigger="flag")
+    assert _replay.read_escalation_answer({"belongs_to": "same_as_reference"}, [])["belongs_to"] == "same_as_reference"
+    assert _replay.read_escalation_answer({"belongs_to": "same_as_reference"}, regimes)["belongs_to"] == "cannot_tell"

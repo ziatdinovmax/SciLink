@@ -638,8 +638,9 @@ def _escalation_records(aid: str, rec: Dict[str, Any]) -> List[Dict[str, Any]]:
     esc = rec.get("escalation")
     if not isinstance(esc, dict) or not esc.get("what_changed"):
         return []
-    text = (f"Replay of analysis {aid} escalated ({esc.get('trigger')}): the judge reads it as belonging to "
-            f"{esc.get('belongs_to')!r}"
+    from ..exp_agents._replay import belongs_to_text
+    text = (f"Replay of analysis {aid} escalated ({esc.get('trigger')}): the judge reads it as "
+            f"{belongs_to_text(esc.get('belongs_to'))}"
             + (f", same interpretation: {esc.get('same_interpretation')}" if esc.get("same_interpretation") is not None else "")
             + f" — {esc.get('what_changed')}")
     return [{"kind": "claim", "payload": {"text": text[:1500]}, "status": "provisional",
