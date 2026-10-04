@@ -910,7 +910,10 @@ Settled rules, each learned from a live run or a review:
   DEGENERATE fit, named, never called salvaged (#726); a decision about a unit is made where the information is, never reconstructed
   afterwards from markers; the board keeps its own copy of a recipe under
   `swarm/recipes/<NN>_<label>/<analysis_id>/`, written once and never
-  rewritten, so an agent's folder is never read again for it and the
+  rewritten — a series' recipes from the `locked_recipes` its driver records
+  where each regime locks (the curve, image and hyperspectral drivers alike;
+  a cube's recipe is a records FILE, copied under its unit's own folder by the
+  name `prior_analysis_paths` reads, #734) — so an agent's folder is never read again for it and the
   agents' own layout and reuse are untouched by the swarm; a verifier's
   physics approval inside the gate's soft band counts, a bypassed verification
   below threshold does not; a CLAIM of a run that also reported outputs no gate

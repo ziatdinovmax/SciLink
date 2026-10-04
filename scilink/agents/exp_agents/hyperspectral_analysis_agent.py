@@ -1104,6 +1104,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # source's columns, so feature names align across regimes and refits.
         rows: list = [None] * n
         locks: dict = {}            # regime name -> lock
+        locked_recipes: dict = {}   # regime name -> the recipe the board posts (#734)
         schema: dict | None = None  # {"anchor_index", "targets", "columns"}
         deferred: list = []         # replay specs handed to the pool (parallel mode)
         pool = None                 # created on the first queued replay
@@ -1184,6 +1185,25 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                                 "source": ("prior_run" if extra.get("reuse_locked_script")
                                            else "anchor")}
                         locks[rname] = lock
+                        # The recipe as the board posts it (#734), recorded where the
+                        # regime locks, in the curve/image drivers' shape: the anchor
+                        # unit, its verdict then, and the recipe file its replays ran
+                        # (a cube's recipe is its dynamic_analysis_records.json).
+                        try:
+                            _rec_text = (Path(unit_dir) / "dynamic_analysis_records.json").read_text(
+                                encoding="utf-8")
+                        except OSError:
+                            _rec_text = None
+                        if _rec_text:
+                            locked_recipes[rname] = {
+                                "unit": row.get("name") or Path(path).stem, "index": idx, "regime": rname,
+                                "file": "dynamic_analysis_records.json", "script": _rec_text,
+                                "verdict": dict(row.get("unit_verdict") or {}),
+                                "model": "; ".join(str(t.get("target") or t.get("description") or "")[:120]
+                                                   for t in targets if isinstance(t, dict)) or None,
+                                # what a replay of the recipe is held to (the map gate's
+                                # plausible ranges), as the series' own replays are
+                                "gate": {"kind": "map_health", "reference_maps": lock["reference_maps"]}}
                         self.logger.info(
                             f"🔒 Recipe locked for regime '{rname}' on dataset {idx}: "
                             f"{len(targets)} approved script(s).")
@@ -1346,6 +1366,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "refit_summary": refit_summary,
             "refit_skipped_by_budget": refit_skipped,
             "locked_config": locked,
+            "locked_recipes": locked_recipes,
             "outlier_sigma": outlier_sigma,
             "series_workers": workers,
             **({"replays_rerun_in_process": rerun_in_process} if rerun_in_process else {}),
@@ -1578,6 +1599,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "series_features": _series.series_feature_matrix(rows),
             "series_metadata": state.get("series_metadata"),
             "locked_config": locked,
+            **({"locked_recipes": state["locked_recipes"]} if state.get("locked_recipes") else {}),
             "caveats": synth.get("caveats") or [],
             "series_results_path": state.get("series_results_path"),
             "report_path": state.get("report_path"),

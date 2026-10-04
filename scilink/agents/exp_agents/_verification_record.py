@@ -768,7 +768,9 @@ def series_recipes(full_result: Optional[dict]) -> List[Dict[str, Any]]:
                         "drift_state": r.get("drift_state") if isinstance(r.get("drift_state"), dict) else None,
                         "x_range": r.get("x_range") if isinstance(r.get("x_range"), (int, float)) else None,
                         "model": r.get("model") if isinstance(r.get("model"), str) else None,
-                        "gate": r.get("gate") if isinstance(r.get("gate"), dict) else None})
+                        "gate": r.get("gate") if isinstance(r.get("gate"), dict) else None,
+                        # a cube's recipe is a records FILE with a fixed name (#734)
+                        "file": r.get("file") if isinstance(r.get("file"), str) else None})
     out.sort(key=lambda r: (r.get("index") if isinstance(r.get("index"), int) else 1 << 30))
     return out
 

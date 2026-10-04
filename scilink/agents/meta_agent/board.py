@@ -678,7 +678,12 @@ def _recipe_specs(aid: str, rec: Dict[str, Any]) -> List[Dict[str, Any]]:
                         "evidence": {"analysis_ids": [aid],
                                      "gate": ("the anchor's gate: " + str(r.get("reason") or "")) if ok
                                      else ("the anchor's gate did not pass: " + str(r.get("reason") or ""))},
-                        "_text": r["script"], "_name": f"{_safe(r['unit'])}.py"})
+                        "_text": r["script"],
+                        # a script is <unit>.py; a recipe FILE keeps the name its agent
+                        # reads it by (a cube's dynamic_analysis_records.json), in its
+                        # unit's own folder so two regimes' files never collide (#734)
+                        **({"_name": _safe(r["file"]), "_subdir": _safe(r["unit"])} if r.get("file")
+                           else {"_name": f"{_safe(r['unit'])}.py"})})
         return out
     if rec.get("series"):
         return out                     # a series from before the record: no recipe
@@ -911,11 +916,14 @@ def _materialize_recipe(board: Board, entry: Dict[str, Any], spec: Dict[str, Any
     keep their own script."""
     text, source = spec.pop("_text", None), spec.pop("_source", None)
     name = spec.pop("_name", None)
+    subdir = spec.pop("_subdir", None)
     if spec.get("kind") != "recipe" or not name or (text is None and source is None):
         return spec
     folder = (board.path.parent / "recipes"
               / f"{int(entry.get('index') or 0):02d}_{_safe(entry.get('label') or 'delegation')[:RECIPE_DIRNAME_MAX]}"
               / _safe(spec["payload"].get("analysis_id") or "analysis")[:RECIPE_DIRNAME_MAX])
+    if subdir:
+        folder = folder / _safe(subdir)[:RECIPE_DIRNAME_MAX]
     folder.mkdir(parents=True, exist_ok=True)
     if text is None:
         text = Path(source).read_text(encoding="utf-8", errors="replace")
