@@ -412,8 +412,13 @@ the `analyses` row and on the board as a PROVISIONAL claim; the verdict and
 judge names against an ambiguous choice is `regime_choice.suggested` — listed
 for the caller, never taken. Never on a certified or clean pass, on the fast clock, when
 the caller asked for no review, on a replay that did not execute, on the
-gate alone failing, and at most once per item; a flag against one reference
-unit is escalated only when nobody attends (`enable_human_feedback` off).
+gate alone failing, and at most once per item; a flag against ONE reference —
+one unit for identity, one curve for the state, where no spread is known and
+a one-sample shift of a sharp step reads past the bar — is escalated only when
+nobody attends (`enable_human_feedback` off), and the evidence says "one
+reference curve" (#725). The evidence carries WHERE the state differs
+(`DriftMonitor.locate_frame`, model-free): without it the judge guessed. With
+no named regimes the judge may answer `same_as_reference`.
 Do not make the judge a gate: the per-map reviewer that re-judged replays is
 why replays are gated on evidence.
 
@@ -896,8 +901,9 @@ Settled rules, each learned from a live run or a review:
   salvaged, unverified or unapproved result is "success" too and stays
   provisional; a series unit carries the verdict its driver stamped at fit
   time — an anchor or refit by its own gate, a follower by the recipe it
-  replayed — and a failed unit the agent already excluded does not block; a
-  decision about a unit is made where the information is, never reconstructed
+  replayed — and a failed unit the agent already excluded does not block; an
+  approved fit with a parameter pinned at its bound is withheld as a
+  DEGENERATE fit, named, never called salvaged (#726); a decision about a unit is made where the information is, never reconstructed
   afterwards from markers; the board keeps its own copy of a recipe under
   `swarm/recipes/<NN>_<label>/<analysis_id>/`, written once and never
   rewritten, so an agent's folder is never read again for it and the
