@@ -8647,7 +8647,10 @@ Return JSON: {{"script": "<the complete modified script>"}}
         # Summarize series context: what worked, what failed, neighbors
         series_results = state.get("series_results", [])
         series_context_parts = []
-        successful = [r for r in series_results if r.get("success") and not r.get("flagged")]
+        # a unit flagged only with a secondary-pin caveat (#742) fitted fine
+        def _failing(r):
+            return (not r.get("success")) or (r.get("flagged") and r.get("flag_reason") != "secondary_pin")
+        successful = [r for r in series_results if not _failing(r)]
         if successful:
             r2_vals = [r.get("fit_quality", {}).get("r_squared") or 0 for r in successful]
             series_context_parts.append(
@@ -8655,7 +8658,7 @@ Return JSON: {{"script": "<the complete modified script>"}}
                 f"R² range {min(r2_vals):.4f}–{max(r2_vals):.4f}, "
                 f"model: {successful[0].get('model_type', 'N/A')}"
             )
-        flagged = [r for r in series_results if r.get("flagged") or not r.get("success")]
+        flagged = [r for r in series_results if _failing(r)]
         if flagged:
             flagged_indices = [str(r["index"]) for r in flagged]
             series_context_parts.append(f"Failed spectra indices: [{', '.join(flagged_indices)}]")
@@ -8664,7 +8667,7 @@ Return JSON: {{"script": "<the complete modified script>"}}
             neighbor_idx = idx + offset
             if 0 <= neighbor_idx < len(series_results):
                 nr = series_results[neighbor_idx]
-                if nr.get("success") and not nr.get("flagged"):
+                if not _failing(nr):
                     nr2 = nr.get("fit_quality", {}).get("r_squared") or 0
                     series_context_parts.append(
                         f"Neighbor spectrum [{neighbor_idx}] fitted successfully: "
@@ -9969,7 +9972,10 @@ class UnifiedCurveReportController:
         flagged_analysis = synthesis.get("flagged_spectra_analysis", {})
         n_flagged = len(flagged_spectra)
         n_total = len(series_results) or n_flagged
-        majority = n_flagged >= max(2, 0.5 * n_total)
+        # a secondary-pin caveat (#742) is not a failing frame: it never makes
+        # a verified series read as a series-wide mismatch
+        n_failing = sum(1 for f in flagged_spectra if f.get("reason") != "secondary_pin")
+        majority = n_failing >= max(2, 0.5 * n_total)
         # When flagged frames are the MAJORITY, they are not isolated
         # anomalies — the model/reference set does not describe the series.
         # Reframe the section so the report conveys that, not "N problems".

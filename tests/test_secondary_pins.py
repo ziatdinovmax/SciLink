@@ -176,6 +176,8 @@ class _ScriptedExecutor:
     def execute_script(self, script, working_dir=None, timeout=None, **kw):
         from pathlib import Path
         self.calls.append(script)
+        if self.outputs.get(script) is None:                  # this script fails to run
+            return {"status": "error", "stdout": "", "stderr": "Traceback: boom", "message": "script failed: boom"}
         (Path(working_dir) / "visualization.png").write_bytes(b"png")
         return {"status": "success", "stdout": "FIT_RESULTS_JSON:" + json.dumps(self.outputs[script]),
                 "stderr": "", "message": ""}
@@ -191,7 +193,7 @@ def _fit_out(targets, pin_peak):
     return out
 
 
-def _fresh_fit(tmp_path, monkeypatch, outputs, corrected=S2):
+def _fresh_fit(tmp_path, monkeypatch, outputs, corrected=S2, **fit_kwargs):
     """The NON-held path (an anchor, a refit, fresh code): the real
     _fit_single_spectrum, the model writing S1 and correcting to ``corrected``."""
     import numpy as np
@@ -203,7 +205,7 @@ def _fresh_fit(tmp_path, monkeypatch, outputs, corrected=S2):
     state = {"locked_fitting_config": {"physical_model": "two peaks",
                                        "parameters_to_extract": ["peak_1 fwhm"]}, "system_info": {}}
     res = ctrl._fit_single_spectrum(state=state, curve_data=sv._spectrum(0), data_path=str(tmp_path / "d.npy"),
-                                    spectrum_name="spectrum_0000", spectrum_idx=0)
+                                    spectrum_name="spectrum_0000", spectrum_idx=0, **fit_kwargs)
     return res, ex
 
 
@@ -232,3 +234,41 @@ def test_a_secondary_pin_on_the_non_held_path_skips_the_relax_retry(tmp_path, mo
     assert res["secondary_pins"][0]["component"] == "background"
     assert res["parameters"]["background"]["center"] is None and res["parameters"]["background"]["center_err"] is None
     assert "pinned_at_bound" not in res
+
+
+
+S0 = "x = np.load('data.npy')  # the locked script, which fails here"
+
+
+def test_a_follower_starts_from_its_anchors_targets(tmp_path, monkeypatch):
+    """A held follower whose locked script fails to RUN on attempt 1 declares
+    nothing then; its repair declares ["background"] with the target peak_1
+    pinned. Seeded with its regime anchor's targets, the pin stays a target pin
+    and the value is kept; unseeded, the repair's narrow declaration would make
+    it "secondary" and null the plan's quantity — the hole the seed closes."""
+    outputs = {S0: None, S2: _fit_out(["background"], True)}
+    seeded, ex = _fresh_fit(tmp_path / "seeded", monkeypatch, outputs,
+                            base_script=S0, hold_recipe=True, seed_targets=["peak_1"])
+    assert ex.calls[:2] == [S0, S2]                                       # failed to run, then repaired
+    assert seeded["pinned_at_bound"][0]["component"] == "peak_1" and seeded["parameters"]["peak_1"]["fwhm"] == 40.0
+    unseeded, _ = _fresh_fit(tmp_path / "unseeded", monkeypatch, outputs, base_script=S0, hold_recipe=True)
+    assert unseeded["secondary_pins"][0]["component"] == "peak_1" and unseeded["parameters"]["peak_1"]["fwhm"] is None
+
+
+def test_secondary_pin_caveats_never_make_a_series_read_as_a_mismatch():
+    """The report calls a MAJORITY of flagged frames a series-wide mismatch
+    ("below the acceptance threshold"). A secondary-pin caveat is not a failing
+    frame: a verified series with pinned backgrounds reads as flagged for
+    review, while failing flags still make the mismatch."""
+    from scilink.agents.exp_agents.controllers.curve_fitting_controllers import UnifiedCurveReportController
+    rep = UnifiedCurveReportController.__new__(UnifiedCurveReportController)
+    rows = [{"index": i, "name": f"s{i}", "success": True, "fit_quality": {"r_squared": 0.99}} for i in range(3)]
+
+    def flag(i, reason):
+        return {"index": i, "name": f"s{i}", "reason": reason, "r_squared": None, "series_mean": None,
+                "series_std": None, "deviation_sigma": None, "recommendation": "x"}
+    caveats = rep._generate_flagged_spectra_section(
+        [flag(0, "below_threshold"), flag(1, "secondary_pin"), flag(2, "secondary_pin")], rows, {})
+    assert "Series-Wide Mismatch" not in caveats
+    failing = rep._generate_flagged_spectra_section([flag(i, "below_threshold") for i in range(3)], rows, {})
+    assert "Series-Wide Mismatch" in failing
