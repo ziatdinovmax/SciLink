@@ -60,3 +60,14 @@ def test_an_edge_is_never_called_featureless():
     assert facts["features"] == [] and facts["measurable"] is False
     assert "featureless" not in facts["text"]
     assert "a step such as an edge" in facts["text"] and "is not tested here" in facts["text"]
+
+
+def test_only_a_listed_feature_rejects_a_declaration():
+    """The guidance names weak, local and step features as possibly real and
+    unlisted, then says which declarations are rejected: those whose window
+    holds a LISTED feature (what `_contradicting_feature` enforces) — never an
+    honest null over an unlisted one after the test the sentence asks for."""
+    cube, E = _five_band_cube()
+    text = hc._data_facts(cube, E, "nm")["text"]
+    assert "a declaration whose window holds a LISTED feature is rejected" in text
+    assert "holds one of these features is rejected" not in text

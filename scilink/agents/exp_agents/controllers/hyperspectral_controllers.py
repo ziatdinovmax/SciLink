@@ -725,7 +725,7 @@ def _data_facts(data, axis, axis_units: str, max_peaks: int = 4) -> dict:
             "weaker feature, one local to part of the field, or a step such as an absorption edge "
             "can be real and unlisted: if none is listed where the requested one should be, test it "
             "there, and declare not_measurable only if that test fails; a declaration whose "
-            "window holds one of these features is rejected.")
+            "window holds a LISTED feature is rejected.")
         strongest = feats[0]["sigma"] if feats else 0.0
         return {"text": "\n".join(lines),
                 "measurable": strongest >= 5.0,

@@ -226,8 +226,8 @@ list field-mean features in BOTH directions, labelled: a transmission band
 is a dip, a Raman line on fluorescence or an X-ray white line a peak even
 where the median sits high. Choosing one direction from where the median
 sits was tried and dropped — it lost those peaks (#735 review); choosing
-automatically waits for a corpus measurement (#722). The list is the few
-STRONGEST field-mean features, not every one: a weaker band, one local to
+automatically waits for a corpus measurement (#722). The list is the field
+mean's peaks and dips only, at most four per direction, not every feature: a weaker band, one local to
 part of the field, or a step (an absorption edge) can be real and unlisted,
 and the guidance says so, so a missing entry is never read as an absence;
 with nothing listed, the facts say no peak or dip stands out — never that the

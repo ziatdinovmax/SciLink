@@ -1200,7 +1200,7 @@ def test_data_facts_list_peaks_and_dips_and_lose_no_peak():
     xas = edge * (1 + 0.6 * G(x, 8995, 6) + 0.08 * np.sin((x - 8980) / 12) * np.exp(-(x - 8980) / 150) * (x > 8980))
     f = _data_facts(cube(xas), x, "eV")
     assert near(f["peaks"], 8995, 3)
-    # a featureless decay: neither, and the text reads as it always did
+    # a featureless decay: neither peaks nor dips listed, and the text says only that
     D = np.exp(-np.arange(12) / 10.0)
     f = _data_facts(D[None, None, :] + rng.normal(0, 0.001, (6, 5, 12)), np.arange(12.0), "channels")
     assert f["peaks"] == [] and f["dips"] == [] and "no peak or dip stands out" in f["text"]
