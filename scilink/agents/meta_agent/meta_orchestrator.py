@@ -362,7 +362,9 @@ rather than fabricate a result).
   table BO-ready. A series table carries its control variable and the units'
   sidecar fields side by side, so one condition may appear under two names
   (a sidecar's `temperature_K` beside the series' `temperature` in C): name
-  ONE of them as an input. `verified` / `flag_reason` say which rows are data.
+  ONE of them as an input. `verified` / `flag_reason` say which rows are data;
+  the planning ingestion skips unverified rows and names them (pass
+  `include_unverified` only when the user wants them as low-confidence data).
 - Do NOT re-summarize the numbers as prose for the planning specialist to
   retype — that loses precision and risks transcription errors. The planning
   specialist ingests the file directly with its `analyze_file` tool.

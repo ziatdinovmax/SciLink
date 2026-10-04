@@ -134,7 +134,9 @@ in one shape, so `feature_table.write_feature_table` and every downstream
 consumer read all three the same way. Every unit is a row of `features.csv`,
 a failed one too, with `verified` / `flag_reason` status columns (annotations,
 never counted as missing values; a consumer that skips rows with a missing
-value names them), and the series' control variable is a column unless a
+value names them; the planning ingestion also skips a row whose `verified` is
+False and names it with its `flag_reason`, `include_unverified` opting in, #737),
+and the series' control variable is a column unless a
 sidecar column already carries it under the name older tables had (#723). **A later reuse of a series run replays
 its locked recipe** — the first regime's, recorded in `locked_recipes` when the
 anchor's script was locked, the script the feature table rests on — never a
