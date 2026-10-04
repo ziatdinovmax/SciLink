@@ -713,15 +713,19 @@ def _data_facts(data, axis, axis_units: str, max_peaks: int = 4) -> dict:
                          "per-pixel measurability still depends on sigma_pixel at the feature.")
         else:
             lines.append(f"- field-mean peaks: none exceeds {min_prom:.3g} prominence "
-                         f"(5 sigma of the mean / 2% of range) — the field mean looks featureless.")
+                         f"(5 sigma of the mean / 2% of range) — no peak or dip stands out of the field mean "
+                         "(a step such as an edge, or a feature local to part of the field, is not "
+                         "tested here).")
         lines.append(
             "Centre fit windows, seeds and bounds for the REQUESTED feature on its MEASURED "
             "position and width above — not on literature values — with margin; a feature "
             "listed elsewhere is a different feature, never a substitute for it. After any "
-            "background subtraction, confirm the amplitude survives before fitting. If no "
-            "feature is listed where the requested one should be, test it there and declare "
-            "not_measurable if it fails; a declaration whose window holds one of these "
-            "features is rejected.")
+            "background subtraction, confirm the amplitude survives before fitting. The list "
+            f"holds only the field mean's peaks and dips, at most {max_peaks} per direction, so a "
+            "weaker feature, one local to part of the field, or a step such as an absorption edge "
+            "can be real and unlisted: if none is listed where the requested one should be, test it "
+            "there, and declare not_measurable only if that test fails; a declaration whose "
+            "window holds a LISTED feature is rejected.")
         strongest = feats[0]["sigma"] if feats else 0.0
         return {"text": "\n".join(lines),
                 "measurable": strongest >= 5.0,
