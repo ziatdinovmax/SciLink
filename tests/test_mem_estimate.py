@@ -20,6 +20,14 @@ from scilink.agents.meta_agent import fanout as fo
 from scilink.agents.meta_agent import swarm
 
 
+@pytest.fixture(autouse=True)
+def _no_worker_env(monkeypatch):
+    """The worker count comes from the agent's own resolver, which reads the
+    environment: a test sets what it needs, nothing leaks in from the shell."""
+    for k in ("SCILINK_HS_SERIES_WORKERS", "SCILINK_MAX_WORKERS"):
+        monkeypatch.delenv(k, raising=False)
+
+
 def _cubes(d, n, shape=(64, 64, 128)):
     d.mkdir(parents=True, exist_ok=True)
     for i in range(n):
@@ -35,9 +43,28 @@ def test_a_series_folder_is_estimated_by_its_largest_unit(tmp_path):
     single = tmp_path / "one"
     _cubes(single, 1, shape=(256, 256, 400))
     assert fo._branch_mem_estimate({"data_path": str(single)}) == pytest.approx(est)   # one cube or six: the same
-    # replays fanned out to two workers hold two units at once
+    # replays fanned out to two workers hold two units, beside the parent's anchor or refit
     est2 = fo._branch_mem_estimate({"data_path": str(tmp_path / "six"), "series_workers": 2})
-    assert est2 == pytest.approx(2 * one * fo._BRANCH_MEM_FACTOR + fo._BRANCH_POOL_OVERHEAD)
+    assert est2 == pytest.approx(3 * one * fo._BRANCH_MEM_FACTOR + fo._BRANCH_POOL_OVERHEAD)
+
+
+def test_the_worker_count_is_the_agents_own(tmp_path, monkeypatch):
+    """The count the agent resolves (SCILINK_HS_SERIES_WORKERS, else
+    SCILINK_MAX_WORKERS, capped by it), never more than the units to replay."""
+    one = _cubes(tmp_path / "four", 4, shape=(256, 256, 400))
+    unit = one * fo._BRANCH_MEM_FACTOR
+    monkeypatch.setenv("SCILINK_MAX_WORKERS", "2")
+    monkeypatch.setenv("SCILINK_HS_SERIES_WORKERS", "8")                 # capped at 2 by the ceiling
+    assert fo._branch_mem_estimate({"data_path": str(tmp_path / "four")}) == pytest.approx(
+        3 * unit + fo._BRANCH_POOL_OVERHEAD)
+    monkeypatch.delenv("SCILINK_MAX_WORKERS")
+    monkeypatch.setenv("SCILINK_HS_SERIES_WORKERS", "16")                # never more than 3 replays of 4 units
+    assert fo._branch_mem_estimate({"data_path": str(tmp_path / "four")}) == pytest.approx(
+        4 * unit + fo._BRANCH_POOL_OVERHEAD)
+    single = tmp_path / "one"
+    _cubes(single, 1, shape=(256, 256, 400))
+    assert fo._branch_mem_estimate({"data_path": str(single)}) == pytest.approx(    # a single file: never multiplied
+        unit + fo._BRANCH_POOL_OVERHEAD)
 
 
 def test_nested_data_is_counted_and_a_pattern_still_restricts(tmp_path):
@@ -109,3 +136,18 @@ def test_a_bundle_with_a_nested_raw_folder_is_estimated_by_unit_kind(tmp_path):
                                     stack * fo._BRANCH_PREP_FACTOR))
     # the stack is not an analysis unit: the old root-only rule estimated it as one
     assert est < stack * fo._BRANCH_MEM_FACTOR + fo._BRANCH_POOL_OVERHEAD
+
+
+
+def test_an_hdf5_carrying_its_contract_inside_is_estimated_by_preparation(tmp_path):
+    """The folder check reads manifests and JSON sidecars but never opens an
+    HDF5; a raw container whose contract is embedded in the file (one of the
+    three kinds of evidence routing uses) is asked about as a file first."""
+    h5py = pytest.importorskip("h5py")
+    root = tmp_path / "embedded"
+    root.mkdir()
+    with h5py.File(root / "holograms.h5", "w") as h:
+        h.attrs["measurement_type"] = "off_axis_hologram"
+        h.create_dataset("frames", shape=(1000, 512, 512), dtype=np.uint16, compression="gzip")
+    stack = 1000 * 512 * 512 * 2
+    assert fo._branch_mem_estimate({"data_path": str(root)}) == pytest.approx(stack * fo._BRANCH_PREP_FACTOR)

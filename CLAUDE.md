@@ -871,8 +871,9 @@ Settled rules, each learned from a live run or a review:
   `run_task` calls on one specialist would each report the other's output.
 - **The coordinator is rules, not a model.** Admission by free memory (an
   item is estimated by its LARGEST unit, nested data included — a series runs
-  its units one at a time — and a file inside a raw-instrument folder by its
-  preparation, #724), a capacity plan that refuses an item larger than the
+  its units one at a time, times the replay workers the agent itself resolves
+  plus the parent — and a raw-instrument file, by its own embedded contract or
+  its folder's, by its preparation, #724), a capacity plan that refuses an item larger than the
   machine, a memory guard
   that cancels the heaviest running item (never one running alone) and reruns
   it alone once, a wall-clock budget per item, no item starting another. The

@@ -144,7 +144,9 @@ def _branch_mem_estimate(branch: dict) -> float:
     raw container's stacks sit in a subfolder). A file inside a raw-instrument
     folder — the branch's own folder or one nested in it, as a study bundle
     holds one — is estimated by its preparation, which reconstructs one stack
-    at a time; everything else by analysis. The admission guard only DELAYS
+    at a time; everything else by analysis. At most ``_BRANCH_MAX_FILES`` data
+    files are walked, in walk order: past that, a larger unit can be missed.
+    The admission guard only DELAYS
     work, so a bad estimate costs time, not results; it must also never
     refuse what the machine can run."""
     try:
@@ -157,9 +159,16 @@ def _branch_mem_estimate(branch: dict) -> float:
         raw_dirs: dict = {}
 
         def _is_raw(f: Path) -> bool:
-            # any folder from the file's own up to the branch root
+            # the file itself first (an HDF5 can carry its contract inside,
+            # which the folder check never opens), then any folder from the
+            # file's own up to the branch root
             if detect_raw_instrument is None:
                 return False
+            try:
+                if detect_raw_instrument(f):
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
             stop = p if p.is_dir() else p.parent
             for d in [f.parent, *f.parent.parents]:
                 if d not in raw_dirs:
@@ -174,18 +183,23 @@ def _branch_mem_estimate(branch: dict) -> float:
             return False
 
         largest_analysis = largest_raw = 0.0
+        n_analysis = 0
         for f in files:
             b = _in_memory_bytes(f)
             if _is_raw(f):
                 largest_raw = max(largest_raw, b)
             else:
                 largest_analysis = max(largest_analysis, b)
-        try:
-            workers = max(int(branch.get("series_workers")
-                              or os.environ.get("SCILINK_HS_SERIES_WORKERS") or 1), 1)
-        except (TypeError, ValueError):
-            workers = 1
-        analysis = largest_analysis * _BRANCH_MEM_FACTOR * workers
+                n_analysis += 1
+        # The replay workers the agent will actually run (its own resolver:
+        # SCILINK_HS_SERIES_WORKERS, else SCILINK_MAX_WORKERS, capped), never
+        # more than the units there are to replay; with workers, the parent
+        # still holds its anchor or refit beside them (replays are submitted
+        # the moment a regime locks).
+        workers = min(_resolve_workers(branch.get("series_workers"), "SCILINK_HS_SERIES_WORKERS", 1),
+                      max(n_analysis - 1, 1))
+        units = workers + 1 if workers > 1 else 1
+        analysis = largest_analysis * _BRANCH_MEM_FACTOR * units
         if largest_analysis > 1e8:   # big enough to invite a parallel per-pixel fit
             analysis += _BRANCH_POOL_OVERHEAD
         return max(analysis, largest_raw * _BRANCH_PREP_FACTOR, _BRANCH_MEM_FLOOR)
