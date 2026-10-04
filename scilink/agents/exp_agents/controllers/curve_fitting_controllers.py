@@ -1196,6 +1196,14 @@ def _regime_model(state: dict, regime_name: Any) -> Optional[str]:
     return None
 
 
+#: What a series follower whose replay pinned a parameter is told, everywhere
+#: the pin is reported (log, quality_warning, script_errors, the flag): the
+#: recipe was HELD, nothing was relaxed or refit (#726, #740).
+PINNED_HELD_NOTE = ("the locked recipe was kept for comparability, so the value at its bound is not "
+                    "a measurement of this unit; a separate analysis (or a new series anchored on "
+                    "this regime) is needed for it.")
+
+
 def _regime_references(state: dict, candidates: list) -> list:
     """For each regime candidate of a reuse: a drift monitor seeded with the
     regime's units' data from the prior run (``spectrum_NNNN/data.npy``),
@@ -4098,7 +4106,14 @@ Your guidance: '''
         refine_from_script: Optional[str] = None,
         refine_from_r2: float = 0.0,
         refine_from_issues: Optional[list] = None,
+        hold_recipe: bool = False,
     ) -> dict:
+        # ``hold_recipe``: a series FOLLOWER replaying its regime's locked
+        # recipe. A parameter pinned at a bound is then flagged on the unit,
+        # never "relaxed" by rewriting the recipe's bounds: the locked recipe
+        # exists for comparability, and a relaxed refit gave that one unit's
+        # secondary features different bounds from every other unit in the
+        # same table (#726). An execution error is still repaired.
         # Realtime pre-flight gate (#346): fail a glitch frame instantly —
         # this single choke point covers reuse, non-anchor locked-script
         # execution, AND the fallback codegen, so a degenerate frame costs
@@ -4253,7 +4268,11 @@ Your guidance: '''
                             validate_bound_pinning, describe_pinned, PINNED_BOUND_FIX)
                         _fr = _parse_script_markers(run["stdout"])
                         _pins = validate_bound_pinning(_fr.get("parameters"), _fr.get("bounds"))
-                        if (_pins and attempt < self.MAX_ATTEMPTS
+                        if _pins and hold_recipe:
+                            self.logger.warning(
+                                f"    ⚠️ Pinned at bound — {describe_pinned(_pins)}; the locked "
+                                f"recipe is kept verbatim and the unit flagged (not relaxed)")
+                        elif (_pins and attempt < self.MAX_ATTEMPTS
                                 and pinned_retries < self.MAX_PINNED_RETRIES):
                             pinned_retries += 1
                             last_error = (
@@ -4354,13 +4373,16 @@ Your guidance: '''
         pinned = validate_bound_pinning(
             fit_results.get("parameters"), fit_results.get("bounds"))
         if pinned:
+            held = bool(hold_recipe)
             script_errors.append({
                 "error": "degenerate fit — parameter(s) pinned at a bound: "
                          + describe_pinned(pinned),
-                "diagnosis": PINNED_BOUND_FIX,
+                "diagnosis": (PINNED_HELD_NOTE if held else PINNED_BOUND_FIX),
                 "kind": "pinned_bound",
             })
             self.logger.warning(
+                ("    ⚠️ Pinned at bound — the locked recipe was kept for comparability, the unit "
+                 "flagged: %s") if held else
                 "    ⚠️ Pinned at bound after relaxation — kept and flagged: %s",
                 describe_pinned(pinned))
 
@@ -4464,10 +4486,15 @@ Your guidance: '''
             result["bounds"] = fit_results["bounds"]
         if pinned:
             result["pinned_at_bound"] = pinned
-            result["quality_warning"] = (
-                "Degenerate fit: " + describe_pinned(pinned)
-                + " — the extracted value is not trustworthy; the bound must "
-                  "be made data-relative and the spectrum refitted.")
+            if hold_recipe:
+                # nothing was relaxed or refit: say what happened (#740 review)
+                result["pin_held"] = True
+                result["quality_warning"] = "Degenerate fit: " + describe_pinned(pinned) + " — " + PINNED_HELD_NOTE
+            else:
+                result["quality_warning"] = (
+                    "Degenerate fit: " + describe_pinned(pinned)
+                    + " — the extracted value is not trustworthy; the bound must "
+                      "be made data-relative and the spectrum refitted.")
         if used_timeout_escalation:
             # Provenance: this fit came from the last-resort model
             # restructure after persistent timeouts — the executed script,
@@ -7517,8 +7544,10 @@ Return JSON with:
                     "deviation_sigma": None,
                     "recommendation": ("Degenerate fit: " + describe_pinned(pins)
                                        + ". R² is not evidence here — another parameter absorbed "
-                                         "the misfit. Refit with that bound made data-relative "
-                                         "(e.g. 2 × max(y)) before trusting the extracted values."),
+                                         "the misfit. "
+                                       + (PINNED_HELD_NOTE[0].upper() + PINNED_HELD_NOTE[1:] if r.get("pin_held") else
+                                          "Refit with that bound made data-relative (relative to the "
+                                          "feature the data shows) before trusting the extracted values.")),
                 })
                 continue
             if r2 is None:
@@ -7957,7 +7986,7 @@ Return JSON with:
                 result = self._fit_single_spectrum(
                     state=state, curve_data=curve_data, data_path=data_path,
                     spectrum_name=spectrum_name, spectrum_idx=idx,
-                    base_script=base_script,
+                    base_script=base_script, hold_recipe=base_script is not None,
                 )
                 self._check_follower(result, recipe_by_regime.get(regime_name),
                                      anchor_params_by_regime.get(regime_name), curve_data)
@@ -8002,6 +8031,7 @@ Return JSON with:
                     spectrum_name=job["spectrum_name"],
                     spectrum_idx=job["idx"],
                     base_script=job["base_script"],
+                    hold_recipe=job["base_script"] is not None,
                 )
 
             with ThreadPoolExecutor(max_workers=workers) as pool:

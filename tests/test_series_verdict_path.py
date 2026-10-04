@@ -781,3 +781,60 @@ def test_an_approved_anchor_with_a_pinned_parameter_is_degenerate_not_salvaged(t
                           follower_r2={"spectrum_0001": 0.97, "spectrum_0002": 0.96}, max_series_refits=0)
     v = analysis_verdict(compile_results(tmp_path / "salv", state))
     assert not v["verified"] and v["reason"].startswith("salvaged best-available result"), v
+
+
+class PinningExecutor(FakeExecutor):
+    """As FakeExecutor, but the named units' fits report a width AT its upper
+    bound (with the bounds, as a real script prints them)."""
+
+    def __init__(self, r2_by_name, pinned_names):
+        super().__init__(r2_by_name)
+        self.pinned_names = set(pinned_names)
+
+    def execute_script(self, script, working_dir=None, timeout=None, **kw):
+        res = super().execute_script(script, working_dir=working_dir, timeout=timeout, **kw)
+        name = self.calls[-1][0] if self.calls else None
+        if name in self.pinned_names and res.get("status") == "success":
+            out = json.loads(res["stdout"].split("FIT_RESULTS_JSON:", 1)[1])
+            out["parameters"]["peak_1"]["fwhm"] = 12.0
+            out["bounds"] = {"peak_1": {"fwhm": [1.0, 12.0]}}
+            res["stdout"] = "FIT_RESULTS_JSON:" + json.dumps(out)
+        return res
+
+
+def test_a_follower_whose_replay_pins_keeps_the_recipe_and_is_named_degenerate(tmp_path, monkeypatch):
+    """#726, the reviewer's call on its side effect: a follower whose replay
+    pins a parameter is NOT sent through the bound-relaxing ladder (that gave
+    its secondary features different bounds from every other unit's). It
+    keeps the locked recipe verbatim, is flagged pinned_at_bound (not
+    refit), and is withheld as a degenerate fit by its own pin; the other
+    followers verify as before."""
+    follower_r2 = {"spectrum_0001": 0.97, "spectrum_0002": 0.96}
+    ex = PinningExecutor(follower_r2, {"spectrum_0001"})
+    state, _ = run_series(tmp_path, monkeypatch, names=NAMES, anchors={"spectrum_0000": OK},
+                          follower_r2=follower_r2, executor=ex)
+    results = compile_results(tmp_path, state)
+    assert [n for n, _ in ex.calls].count("spectrum_0001") == 1           # replayed once, never relaxed
+    raw = {u["name"]: u for u in state["series_results"]}                 # the driver's own rows
+    assert raw["spectrum_0001"]["fitted_from"] == "locked_script" and raw["spectrum_0001"]["replay_verbatim"] is True
+    assert raw["spectrum_0001"]["pinned_at_bound"][0]["parameter"] == "fwhm"
+    flag_list = state.get("flagged_spectra") or state.get("flagged_images") or []
+    flags = {f["name"]: f["reason"] for f in flag_list}
+    assert flags.get("spectrum_0001") == "pinned_at_bound"
+    # every text on the held path says what happened: kept, not relaxed or refit (#740 review)
+    row = raw["spectrum_0001"]
+    rec = next(f["recommendation"] for f in flag_list if f["name"] == "spectrum_0001")
+    texts = [row["quality_warning"], rec] + [e.get("diagnosis") or "" for e in row.get("script_errors") or []
+                                            if e.get("kind") == "pinned_bound"]
+    assert row.get("pin_held") is True and len(texts) == 3
+    for t in texts:
+        assert "kept for comparability" in t and "refit" not in t.lower() and "relax" not in t.lower(), t
+    by_name = {u["name"]: u for u in results["individual_results"]}
+    pinned = by_name["spectrum_0001"]
+    assert not pinned.get("adaptively_refitted")                          # flagged, never re-derived
+    uv = pinned["unit_verdict"]
+    assert not uv["verified"] and uv["decided_by"] == "recipe"
+    assert "this unit's fit is degenerate: peak_1.fwhm = 12 at its upper bound 12" in uv["reason"]
+    assert by_name["spectrum_0002"]["unit_verdict"]["verified"] is True
+    v = analysis_verdict(results)
+    assert not v["verified"] and "degenerate" in v["reason"] and "spectrum_0001" in v["reason"]
