@@ -135,8 +135,11 @@ withholds is one on a TARGET component: the fitting script declares
 `targets`, the components whose parameters answer the plan's
 `parameters_to_extract`, and a pin on any other — a background, a baseline,
 an overlap — is a caveat (`secondary_pins`, its value reported as no value)
-that withholds neither the unit nor, through its anchor, the regime; a fit
-that declares none is judged as before, #742), then trend codegen and a series synthesis run over the per-unit
+that withholds neither the unit nor, through its anchor, the regime, and is
+named by a non-refit `secondary_pin` flag; a fit that declares none is judged
+as before. The declaration is FROZEN within a fit — the first stands, a later
+attempt can only add to it, a follower starts from its regime anchor's — so a
+correction cannot shrink `targets` to clear a target pin, #742), then trend codegen and a series synthesis run over the per-unit
 feature table. The per-unit rows are written to `series_analysis_results.json`
 in one shape, so `feature_table.write_feature_table` and every downstream
 consumer read all three the same way. Every unit is a row of `features.csv`,

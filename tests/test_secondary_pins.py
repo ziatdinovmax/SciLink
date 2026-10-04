@@ -85,7 +85,7 @@ def test_a_follower_pinned_on_a_secondary_component_verifies_with_a_caveat(tmp_p
     assert row["parameters"]["background"]["center"] is None                # a bound is not a measurement
     assert row["parameters"]["peak_1"]["center"] == 144.0                   # the target's values stand
     assert any("Secondary component pinned at bound" in c for c in row["caveats"])
-    assert "spectrum_0001" not in flags and "quality_warning" not in row
+    assert flags.get("spectrum_0001") == "secondary_pin" and "quality_warning" not in row   # a non-refit caveat flag
     assert by_name["spectrum_0001"]["unit_verdict"]["verified"] is True
     assert analysis_verdict(results)["verified"] is True
 
@@ -142,7 +142,7 @@ def test_the_targets_contract_is_in_the_generation_and_the_correction_prompt(tmp
     class _Model:
         def generate_content(self, contents, **kw):
             prompts.append(contents if isinstance(contents, str) else json.dumps(contents, default=str))
-            return SimpleNamespace(text=json.dumps({"script": "print(1)", "diagnosis": "fixed"}))
+            return SimpleNamespace(text=json.dumps({"script": S1, "diagnosis": "fixed"}))
     ctrl = UnifiedSeriesProcessingController(
         model=_Model(), logger=logging.getLogger("t"), generation_config=None, safety_settings=None,
         parse_fn=lambda r: (json.loads(r.text), None), executor=sv.FakeExecutor({}),
@@ -158,3 +158,77 @@ def test_the_targets_contract_is_in_the_generation_and_the_correction_prompt(tmp
     assert len(prompts) == 2
     assert '"targets": ["peak_1", ...]' in prompts[0] and "parameters_to_extract" in prompts[0]
     assert "its `targets` list unchanged" in prompts[1]
+
+
+
+S1 = "x = np.load('data.npy')  # first script"
+S2 = "x = np.load('data.npy')  # corrected script"
+
+
+class _ScriptedExecutor:
+    """The fitting script's output keyed by the script text: lets a correction
+    change what the fit declares, as a real corrected script would."""
+    timeout = 30
+
+    def __init__(self, outputs):
+        self.outputs, self.calls = outputs, []
+
+    def execute_script(self, script, working_dir=None, timeout=None, **kw):
+        from pathlib import Path
+        self.calls.append(script)
+        (Path(working_dir) / "visualization.png").write_bytes(b"png")
+        return {"status": "success", "stdout": "FIT_RESULTS_JSON:" + json.dumps(self.outputs[script]),
+                "stderr": "", "message": ""}
+
+
+def _fit_out(targets, pin_peak):
+    out = {"model_type": "two peaks", "fit_quality": {"r_squared": 0.99, "rmse": 0.01},
+           "parameters": {"peak_1": {"center": 144.0, "amplitude": 1.0, "fwhm": 40.0 if pin_peak else 12.0},
+                          "background": {"center": 700.0, "amplitude": 0.3, "fwhm": 300.0}},
+           "bounds": {"peak_1": {"fwhm": [1.0, 40.0]}, "background": {"center": [500.0, 700.0]}}}
+    if targets is not None:
+        out["targets"] = targets
+    return out
+
+
+def _fresh_fit(tmp_path, monkeypatch, outputs, corrected=S2):
+    """The NON-held path (an anchor, a refit, fresh code): the real
+    _fit_single_spectrum, the model writing S1 and correcting to ``corrected``."""
+    import numpy as np
+    ex = _ScriptedExecutor(outputs)
+    ctrl = sv._controller(tmp_path, ex)
+    monkeypatch.setattr(ctrl, "_generate_fitting_script", lambda *a, **k: S1)
+    monkeypatch.setattr(ctrl, "_correct_script", lambda state, script, err: (corrected, "fixed"))
+    monkeypatch.setattr(ctrl, "_check_plan_conformance", lambda state, script: None)
+    state = {"locked_fitting_config": {"physical_model": "two peaks",
+                                       "parameters_to_extract": ["peak_1 fwhm"]}, "system_info": {}}
+    res = ctrl._fit_single_spectrum(state=state, curve_data=sv._spectrum(0), data_path=str(tmp_path / "d.npy"),
+                                    spectrum_name="spectrum_0000", spectrum_idx=0)
+    return res, ex
+
+
+def test_a_correction_cannot_shrink_targets_to_clear_a_target_pin(tmp_path, monkeypatch):
+    """The pin retry sends "DEGENERATE FIT — peak_1.fwhm pinned" to the
+    corrector; a corrected script that keeps the pin but drops peak_1 from its
+    targets would turn the target pin "secondary" and the unit verified. The
+    first declaration is frozen: the fit stays degenerate, peak_1.fwhm keeps its
+    value (it is the plan's quantity), and nothing is nulled."""
+    res, ex = _fresh_fit(tmp_path, monkeypatch, {S1: _fit_out(["peak_1"], True),
+                                                  S2: _fit_out(["background"], True)})
+    assert ex.calls[:2] == [S1, S2]                                   # the pin retry ran
+    assert res["pinned_at_bound"][0]["component"] == "peak_1"
+    assert res["parameters"]["peak_1"]["fwhm"] == 40.0 and "secondary_pins" not in res
+    assert res["targets"] == ["peak_1", "background"]                     # frozen, only ever added to
+    assert res["quality_warning"].startswith("Degenerate fit")
+
+
+def test_a_secondary_pin_on_the_non_held_path_skips_the_relax_retry(tmp_path, monkeypatch):
+    """On an anchor or refit (not a held follower), a pin only on a component
+    the fit does not target is not sent through the relax-and-refit retry."""
+    res, ex = _fresh_fit(tmp_path, monkeypatch, {S1: {**_fit_out(["peak_1"], False),
+                                                        "parameters": {**_fit_out(["peak_1"], False)["parameters"],
+                                                                       "background": {"center": 700.0, "center_err": 3.0}}}})
+    assert ex.calls == [S1]                                             # one run: no retry
+    assert res["secondary_pins"][0]["component"] == "background"
+    assert res["parameters"]["background"]["center"] is None and res["parameters"]["background"]["center_err"] is None
+    assert "pinned_at_bound" not in res

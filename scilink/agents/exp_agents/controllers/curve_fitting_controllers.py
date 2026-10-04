@@ -4107,7 +4107,23 @@ Your guidance: '''
         refine_from_r2: float = 0.0,
         refine_from_issues: Optional[list] = None,
         hold_recipe: bool = False,
+        seed_targets: Optional[list] = None,
     ) -> dict:
+        # ``seed_targets``: the TARGET components a fit is held to from its
+        # first attempt (a follower: its regime anchor's). Within a fit the
+        # declaration is FROZEN — the first one stands and a later attempt can
+        # only add to it — so a correction cannot shrink ``targets`` to turn a
+        # pinned target into a "secondary" pin and a verified unit (#747 review).
+        frozen_targets = [str(t) for t in seed_targets] if isinstance(seed_targets, (list, tuple)) and seed_targets else None
+
+        def _freeze(declared):
+            nonlocal frozen_targets
+            if isinstance(declared, (list, tuple)) and declared:
+                if frozen_targets is None:
+                    frozen_targets = [str(t) for t in declared]
+                else:
+                    frozen_targets += [str(t) for t in declared if str(t) not in frozen_targets]
+            return frozen_targets
         # ``hold_recipe``: a series FOLLOWER replaying its regime's locked
         # recipe. A parameter pinned at a bound is then flagged on the unit,
         # never "relaxed" by rewriting the recipe's bounds: the locked recipe
@@ -4272,7 +4288,7 @@ Your guidance: '''
                         # is a caveat, not a reason to relax and refit (#742)
                         _pins, _ = split_pins_by_targets(
                             validate_bound_pinning(_fr.get("parameters"), _fr.get("bounds")),
-                            _fr.get("targets"), _fr.get("parameters"))
+                            _freeze(_fr.get("targets")), _fr.get("parameters"))
                         if _pins and hold_recipe:
                             self.logger.warning(
                                 f"    ⚠️ Pinned at bound — {describe_pinned(_pins)}; the locked "
@@ -4378,7 +4394,7 @@ Your guidance: '''
         from ...skills._shared.curve_fitting_tools import split_pins_by_targets
         pinned, secondary_pins = split_pins_by_targets(
             validate_bound_pinning(fit_results.get("parameters"), fit_results.get("bounds")),
-            fit_results.get("targets"), fit_results.get("parameters"))
+            _freeze(fit_results.get("targets")), fit_results.get("parameters"))
         if secondary_pins:
             # #742: a pin on a component the fit declared NOT a target (a
             # background, a baseline, an overlap) is a caveat: the targets'
@@ -4388,6 +4404,8 @@ Your guidance: '''
                 comp = _params.get(p["component"])
                 if isinstance(comp, dict) and p["parameter"] in comp:
                     comp[p["parameter"]] = None
+                    if f"{p['parameter']}_err" in comp:      # its uncertainty is no measurement either
+                        comp[f"{p['parameter']}_err"] = None
             self.logger.warning(
                 "    ⚠️ Secondary component pinned at bound — a caveat, not a degenerate fit "
                 "(the declared targets are unaffected): %s", describe_pinned(secondary_pins))
@@ -4503,8 +4521,8 @@ Your guidance: '''
         }
         if fit_results.get("bounds"):
             result["bounds"] = fit_results["bounds"]
-        if isinstance(fit_results.get("targets"), list):
-            result["targets"] = [str(t) for t in fit_results["targets"]]
+        if frozen_targets:
+            result["targets"] = list(frozen_targets)
         if secondary_pins:
             result["secondary_pins"] = secondary_pins
             result["caveats"] = list(result.get("caveats") or []) + [
@@ -7609,7 +7627,23 @@ Return JSON with:
                     "deviation_sigma": float(deviation_sigma) if deviation_sigma else None,
                     "recommendation": recommendation
                 })
-        
+
+        # A secondary component pinned at its bound (#742) is a caveat, not a
+        # failure: a non-refit flag, so a reader of the table or the report
+        # learns why that cell is empty. Never over another flag.
+        from ...skills._shared.curve_fitting_tools import describe_pinned
+        already = {f["index"] for f in flagged}
+        for r in series_results:
+            sec = (r.get("fit_quality") or {}).get("secondary_pins") if r.get("success") else None
+            if sec and r["index"] not in already:
+                flagged.append({
+                    "index": r["index"], "name": r["name"], "reason": "secondary_pin",
+                    # no R² line: the caveat is not a fit-quality finding (the
+                    # report formatters skip it when r_squared is None)
+                    "r_squared": None, "series_mean": None, "series_std": None, "deviation_sigma": None,
+                    "recommendation": ("Caveat, not a failure: a secondary component is pinned at its bound — "
+                                       + describe_pinned(sec) + ". Those values are not measurements (no value); "
+                                       "the declared targets' fit is unaffected.")})
         return flagged
 
     def _generate_outlier_report(self, flagged: List[dict], series_results: List[dict]) -> str:
@@ -7832,6 +7866,7 @@ Return JSON with:
         # anchor changes nothing here.
         recipe_by_regime: Dict[str, dict] = {}
         anchor_params_by_regime: Dict[str, Any] = {}      # what each regime's anchor found, for the followers' checks
+        anchor_targets_by_regime: Dict[str, Any] = {}     # the targets each regime's anchor declared: its followers' seed (#747)
         base_scripts: Dict[str, str] = {}  # keyed by regime name
         locked_preprocessing_strategy = None
         original_locked_config = state.get("locked_fitting_config", {})
@@ -7949,6 +7984,7 @@ Return JSON with:
                 if result["success"] and result.get("script"):
                     base_scripts[regime_name] = result["script"]
                     anchor_params_by_regime[regime_name] = result.get("parameters")
+                    anchor_targets_by_regime[regime_name] = result.get("targets")
                     # THE predicate every reader of the gate keys on: this
                     # regime's anchor REPLAYED the recipe (verbatim, or repaired
                     # by the ladder — the same lineage). A reuse that failed
@@ -8014,6 +8050,7 @@ Return JSON with:
                     state=state, curve_data=curve_data, data_path=data_path,
                     spectrum_name=spectrum_name, spectrum_idx=idx,
                     base_script=base_script, hold_recipe=base_script is not None,
+                    seed_targets=anchor_targets_by_regime.get(regime_name),
                 )
                 self._check_follower(result, recipe_by_regime.get(regime_name),
                                      anchor_params_by_regime.get(regime_name), curve_data)
@@ -8059,6 +8096,7 @@ Return JSON with:
                     spectrum_idx=job["idx"],
                     base_script=job["base_script"],
                     hold_recipe=job["base_script"] is not None,
+                    seed_targets=anchor_targets_by_regime.get(job["regime_name"]),
                 )
 
             with ThreadPoolExecutor(max_workers=workers) as pool:
