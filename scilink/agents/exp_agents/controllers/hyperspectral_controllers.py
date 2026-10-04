@@ -718,10 +718,12 @@ def _data_facts(data, axis, axis_units: str, max_peaks: int = 4) -> dict:
             "Centre fit windows, seeds and bounds for the REQUESTED feature on its MEASURED "
             "position and width above — not on literature values — with margin; a feature "
             "listed elsewhere is a different feature, never a substitute for it. After any "
-            "background subtraction, confirm the amplitude survives before fitting. If no "
-            "feature is listed where the requested one should be, test it there and declare "
-            "not_measurable if it fails; a declaration whose window holds one of these "
-            "features is rejected.")
+            "background subtraction, confirm the amplitude survives before fitting. The list "
+            f"holds only the {max_peaks} strongest field-mean features per direction, so a weaker "
+            "feature, one local to part of the field, or a step such as an absorption edge can be "
+            "real and unlisted: if none is listed where the requested one should be, test it "
+            "there, and declare not_measurable only if that test fails; a declaration whose "
+            "window holds one of these features is rejected.")
         strongest = feats[0]["sigma"] if feats else 0.0
         return {"text": "\n".join(lines),
                 "measurable": strongest >= 5.0,
