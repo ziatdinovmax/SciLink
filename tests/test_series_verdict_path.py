@@ -811,8 +811,16 @@ def test_a_follower_whose_replay_pins_keeps_the_recipe_and_is_named_degenerate(t
     followers verify as before."""
     follower_r2 = {"spectrum_0001": 0.97, "spectrum_0002": 0.96}
     ex = PinningExecutor(follower_r2, {"spectrum_0001"})
-    state, _ = run_series(tmp_path, monkeypatch, names=NAMES, anchors={"spectrum_0000": OK},
-                          follower_r2=follower_r2, executor=ex)
+    # another module may leave logging disabled (logging.disable): re-enable it
+    # for this test, so the log assertion below does not depend on test order
+    prev_disable = logging.root.manager.disable
+    logging.disable(logging.NOTSET)
+    caplog.set_level(logging.WARNING, logger="series_path")
+    try:
+        state, _ = run_series(tmp_path, monkeypatch, names=NAMES, anchors={"spectrum_0000": OK},
+                              follower_r2=follower_r2, executor=ex)
+    finally:
+        logging.disable(prev_disable)
     results = compile_results(tmp_path, state)
     assert [n for n, _ in ex.calls].count("spectrum_0001") == 1           # replayed once, never relaxed
     pin_logs = [r.getMessage() for r in caplog.records if "Pinned at bound" in r.getMessage()]
