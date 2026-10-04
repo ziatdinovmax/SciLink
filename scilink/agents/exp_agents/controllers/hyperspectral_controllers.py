@@ -1093,7 +1093,8 @@ number here, never as a constant-valued map. A number that comes from a FIT or a
 windowed search is checked only when you return it as {{"value", "role", "bounds"}}
 — role one of position | width | amplitude | count | ratio | quality | other,
 bounds the [lo, hi] the fit or search was constrained to, in the value's own units
-and parameterisation (a FWHM's bounds, not its sigma's) — and one at its bound,
+and parameterisation (a FWHM's bounds, not its sigma's; an amplitude in the data's
+own units) — and one at its bound,
 or an amplitude at zero, is then reported as a failed fit, not a measurement.
 
 Also OPTIONAL — and strongly encouraged whenever you FIT a model per pixel:
@@ -1234,6 +1235,11 @@ SCALAR_ROLES = ("position", "width", "amplitude", "count", "ratio", "quality", "
 #: fits were at 1e-13 .. 2e-5 sigma, healthy values from 0.65 sigma up; the bar
 #: sits five times above the largest failure.
 AMPLITUDE_ZERO_SIGMA = 1e-4
+#: An amplitude is CERTIFIED only from this many sigma of the field mean's
+#: noise; between the two bars it stays unchecked (a fit to noise lands there,
+#: and so may an amplitude given in other units than the cube's). No healthy
+#: value of the 1,227-scalar corpus sat below 0.65 sigma.
+AMPLITUDE_CERTIFY_SIGMA = 0.5
 
 
 def _check_scalar(value: float, role: str | None, bounds, facts: dict | None):
@@ -1280,11 +1286,18 @@ def _check_scalar(value: float, role: str | None, bounds, facts: dict | None):
         # judged against the NOISE, never against the declared range: a huge
         # upper bound (seen on real data, [0, ~1e6]) made 0.6 read as "zero"
         sm = (facts or {}).get("sigma_mean")
-        if isinstance(sm, (int, float)) and sm > 0:
-            if abs(value) < AMPLITUDE_ZERO_SIGMA * sm:
-                return "failed", (f"{abs(value) / sm:.1e} sigma of the field mean's noise: "
-                                  "no feature was fitted")
-            passed.append("above zero")
+        if not (isinstance(sm, (int, float)) and np.isfinite(sm) and sm > 0):
+            # no noise estimate (the facts can be empty: a NaN channel, a short
+            # axis) — bounds alone never certify an amplitude: a zero lower
+            # bound is exempt from the pin rule, so 1e-12 would "pass"
+            return None, "no noise estimate for the zero check"
+        if abs(value) < AMPLITUDE_ZERO_SIGMA * sm:
+            return "failed", (f"{abs(value) / sm:.1e} sigma of the field mean's noise: "
+                              "no feature was fitted")
+        if abs(value) < AMPLITUDE_CERTIFY_SIGMA * sm:
+            return None, (f"{abs(value) / sm:.2g} sigma of the field mean's noise: between the "
+                          "failed and the certified bars")
+        passed.append(f"{abs(value) / sm:.2g} sigma above zero")
     if unchecked_bounds:
         # the bounds could not be held to the value: whatever else passed, the
         # number is not certified (it may be pinned in its own parameterisation)

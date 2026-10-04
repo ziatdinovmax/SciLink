@@ -67,6 +67,12 @@ def test_check_scalar_rules():
     assert v == "failed" and "sigma" in why
     assert hc._check_scalar(0.3, "amplitude", None, facts)[0] == "passed"
     assert hc._check_scalar(1.0, "ratio", [0, 1], facts)[0] is None                  # a ratio may rest on its bound
+    # no noise estimate (the facts can be empty): bounds alone never certify an amplitude
+    assert hc._check_scalar(1e-12, "amplitude", [0, 2], {}) == (None, "no noise estimate for the zero check")
+    # between the failed and the certified bars: unchecked, not passed (a fit to noise lands here)
+    assert hc._check_scalar(1e-5, "amplitude", None, facts)[0] is None
+    assert hc._check_scalar(1e-5, "amplitude", [0, 2], facts)[0] is None
+    assert hc._check_scalar(6e-4, "amplitude", None, facts)[0] == "passed"           # 0.6 sigma
     assert hc._check_scalar(12.0, "count", None, facts)[0] is None                   # no check applies
     assert hc._check_scalar(5.0, "width", [5.0, 5.0], facts)[0] is None              # degenerate bounds ignored
 
@@ -163,3 +169,65 @@ def test_a_value_outside_its_declared_bounds_is_never_passed():
     v, why = hc._check_scalar(1e-12, "amplitude", [0.3, 17], {"sigma_mean": 0.001})
     assert v == "failed"                                   # the zero-amplitude rule still applies
     assert hc._check_scalar(16.9, "width", [0.3, 17], {"sigma_mean": 0.001})[0] == "failed"   # at the bound
+
+
+def test_a_failed_number_on_a_fresh_code_series_row_is_not_aliased(tmp_path, monkeypatch):
+    """Through the real series driver: the schema source reports Band2_Depth;
+    a later regime's anchor (fresh code, locked targets) reports it as a FAILED
+    fit beside a plain Band2_Depth_uncertainty. The locked-schema completion
+    once aliased the uncertainty into the depth's column; the failed column now
+    stays empty, and the failure is named, not filled."""
+    import test_hs_series as ths
+    from scilink.agents.exp_agents import hyperspectral_analysis_agent as hsa
+    ok = ("def analyze_feature(data, energy_axis):\n    import numpy as np\n"
+          "    return {'maps': {'Depth_Map': np.asarray(data).mean(axis=2)}, 'units': 'a.u.', 'description': 'd',\n"
+          "            'scalars': {'Band2_Depth': {'value': 0.31, 'role': 'amplitude', 'bounds': [0, 2]}}}\n")
+    bad = ("def analyze_feature(data, energy_axis):\n    import numpy as np\n"
+           "    return {'maps': {'Depth_Map': np.asarray(data).mean(axis=2)}, 'units': 'a.u.', 'description': 'd',\n"
+           "            'scalars': {'Band2_Depth': {'value': 1e-12, 'role': 'amplitude', 'bounds': [0, 2]},\n"
+           "                        'Band2_Depth_uncertainty': 0.04}}\n")
+    meta_ok, rec_ok = tu._controller_run(tmp_path / "ok", ok)
+    meta_bad, rec_bad = tu._controller_run(tmp_path / "bad", bad)
+    assert any(str(m.get("check", "")).startswith("failed") for m in meta_bad)
+
+    def pipeline(self, data_path, system_info, instruction_prompt, reuse_records=None, **kw):
+        meta, recs = (meta_bad, rec_bad) if self._series_role == "regime_anchor" else (meta_ok, rec_ok)
+        recs = [{**recs[0], "locked_replay": bool(reuse_records), "replay_verbatim": True}]
+        (self.output_dir / "dynamic_analysis_records.json").write_text(json.dumps(recs, default=str))
+        return {"detailed_analysis": "d", "extracted_features": meta, "dynamic_analysis_records": recs,
+                "scientific_claims": []}, None
+    monkeypatch.setenv("SCILINK_HS_SERIES_POOL", "thread")
+    monkeypatch.setattr(hsa.HyperspectralAnalysisAgent, "_run_analysis_pipeline", pipeline)
+    monkeypatch.setattr(hsa.HyperspectralAnalysisAgent, "_maybe_bank_scripts", lambda *a, **k: [])
+    monkeypatch.setattr(hsa.HyperspectralAnalysisAgent, "_maybe_stage_t2_solutions", lambda *a, **k: [])
+    monkeypatch.setattr(hsa.HyperspectralAnalysisAgent, "_auto_select_skills", lambda *a, **k: [])
+    plan = {"rationale": "x", "regimes": [{"name": "A", "dataset_indices": [0, 1]},
+                                          {"name": "B", "dataset_indices": [2, 3]}]}
+    agent = hsa.HyperspectralAnalysisAgent(api_key="sk-dummy", output_dir=str(tmp_path / "series"),
+                                           enable_human_feedback=False, executor_timeout=120)
+    agent.model = ths._FakeModel(ths._Calls(), plan=plan)
+    paths = ths._cubes(tmp_path)[:4]
+    res = agent.analyze(paths, system_info=dict(ths.AXIS),
+                        series_metadata={"variable": "dose", "values": [1, 2, 3, 4], "unit": "mC"})
+    rows = json.loads(open(res["series_results_path"]).read())["results"]     # the full per-unit rows
+    row = next(r for r in rows if r["index"] == 2)                             # regime B's anchor
+    assert row.get("role") == "regime_anchor"
+    assert "Band2_Depth" not in row["extracted_features"]                       # no value, not the uncertainty
+    assert row["extracted_features"].get("Band2_Depth_uncertainty") == 0.04
+    assert "Band2_Depth" not in (row.get("schema_aliases") or {})
+    assert row["unit_verdict"]["failed_checks"] == ["Band2_Depth"]
+
+
+def test_the_live_frame_names_a_tracked_number_that_failed_its_check():
+    """A hyperspectral live frame whose tracked scalar failed its check: the
+    number drops out of the frame's features (no value), and the frame record
+    names it in ``withheld`` rather than dropping it silently."""
+    from scilink.live.modality import HyperspectralModality
+    records = [{"name": "Peak_Position", "stats": {"min": 1, "max": 2, "mean": 1.5}},
+               {"name": "Band_Depth", "scalar": None, "raw_value": 1e-12, "gated": False,
+                "check": "failed: 1.0e-09 sigma of the field mean's noise: no feature was fitted"}]
+    mod = HyperspectralModality()
+    result = {"status": "success", "feature_records": records}
+    assert "Band_Depth" not in mod.features(result)
+    v = mod.validity(result)
+    assert v["withheld"] == ["Band_Depth"] and v["verdict"] == "good"

@@ -241,10 +241,16 @@ comes from a fit is returned as `{"value", "role", "bounds"}` and CHECKED
 of the field mean's noise — never judged against a declared range — measured on 1,227
 scalars of 156 real runs: failed fits at <= 2e-5 sigma, healthy from 0.65), it
 is a failed fit: no value in the feature table, `failed_outputs` on the row,
-named as FAILED on the board and in both syntheses; one that passes is
-`gated: True`. A value outside its own declared bounds is unchecked, never
-passed: those bounds are another parameterisation's (seen on real data: a
-Gaussian's sigma bounds declared for its FWHM hid a width pinned in sigma). Nothing reads a name: what is checked is what the script
+named as FAILED on the board and in both syntheses. One that passes is
+`gated: True` — passed against the bounds the SCRIPT DECLARED, nothing ties
+them to the bounds the fit used; an amplitude is certified only from
+`AMPLITUDE_CERTIFY_SIGMA` (0.5 sigma) up, stays unchecked between the two
+bars (a fit to noise lands there) and with no noise estimate at all (empty
+facts). A value outside its own declared bounds is unchecked, never passed:
+those bounds are another parameterisation's (seen on real data: a Gaussian's
+sigma bounds declared for its FWHM hid a width pinned in sigma). A failed
+column is never aliased by the locked-schema completion, and a live frame
+names a failed tracked number in `withheld`. Nothing reads a name: what is checked is what the script
 declared it fitted; a plain number stays unchecked, as before.
 
 **Through the meta agent, a series is ONE delegation.** The meta's routing

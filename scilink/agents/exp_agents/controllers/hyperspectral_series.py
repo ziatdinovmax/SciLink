@@ -1313,8 +1313,15 @@ def complete_locked_schema(row: Dict[str, Any], locked_columns: List[str],
     feats = dict(row.get("extracted_features") or {})
     gap: List[str] = []
     aliased: Dict[str, str] = {}
+    # a number that FAILED its check (#722 B1) is absent on purpose: its column
+    # is neither drift to alias a sibling into (an uncertainty landed in the
+    # failed depth's column) nor a gap — it is reported as failed_outputs
+    failed_cols = set(flatten_feature_records(
+        [{**m, "scalar": m["raw_value"]} for m in row.get("feature_records") or []
+         if isinstance(m, dict) and str(m.get("check", "")).startswith("failed")
+         and isinstance(m.get("raw_value"), (int, float))]))
     for col in locked_columns:
-        if col in feats:
+        if col in feats or col in failed_cols:
             continue
         target = _norm_name(col)
         cands = []

@@ -309,6 +309,12 @@ class HyperspectralModality(CurveModality):
         reuse = result.get("script_reuse") or {}
         withheld = [str(n) for d in (result.get("degraded_outputs") or []) if isinstance(d, dict)
                     for n in (d.get("missing_required") or [])]
+        # a number that FAILED its fit-health check (#722 B1) has no value on
+        # this frame: named, so its drop from the tracked features is on record
+        records = result.get("feature_records") or result.get("extracted_features")
+        if isinstance(records, list):
+            from ..agents.exp_agents._verification_record import failed_outputs
+            withheld += [n for n in failed_outputs(records) if n not in withheld]
         degraded = bool(result.get("degraded_outputs"))
         good = (result.get("status") == "success" and reuse.get("verbatim", True)
                 and not reuse.get("scope_degraded") and not degraded)
