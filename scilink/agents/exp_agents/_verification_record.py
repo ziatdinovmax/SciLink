@@ -670,6 +670,33 @@ def _ungated_from_records(full: Dict[str, Any]) -> List[str]:
     return sorted(names)
 
 
+def failed_outputs(features: Any) -> List[str]:
+    """The names of the outputs whose deterministic check FAILED — a fitted
+    number at its bound or at zero (#722 B1, ``check: "failed: …"``). A subset
+    of ``ungated_outputs`` (a failed number is not gated), named apart because
+    it is not "unchecked": it is a failed fit, reported as no value."""
+    return sorted({str(m["name"]) for m in features or []
+                   if isinstance(m, dict) and str(m.get("check", "")).startswith("failed") and m.get("name")})
+
+
+def failed_outputs_of(full_result: Optional[Dict[str, Any]]) -> List[str]:
+    """``failed_outputs`` of a whole result: the stamp's, else its records."""
+    full = full_result or {}
+    stamped = full.get("verdict")
+    if isinstance(stamped, dict) and "verified" in stamped:
+        return list(stamped.get("failed_checks") or [])
+    return _failed_from_records(full)
+
+
+def _failed_from_records(full: Dict[str, Any]) -> List[str]:
+    names = set(failed_outputs(full.get("extracted_features")))
+    for u in full.get("individual_results") or []:
+        if isinstance(u, dict) and u.get("success"):
+            names.update(failed_outputs(u.get("feature_records")))
+            names.update((u.get("unit_verdict") or {}).get("failed_checks") or [])
+    return sorted(names)
+
+
 def final_verdict_record(final: Dict[str, Any]) -> Dict[str, Any]:
     """The verdict an agent stamps on its result when it is final
     (``final["verdict"]``): a single curve or image run, a series (the
@@ -733,6 +760,9 @@ def final_verdict_record(final: Dict[str, Any]) -> Dict[str, Any]:
     ungated = _ungated_from_records(final)
     if ungated:
         rec["ungated"] = ungated           # reported, but no gate checked them (#722)
+    failed = _failed_from_records(final)
+    if failed:
+        rec["failed_checks"] = failed      # checked and failed: failed fits, no value (#722 B1)
     return rec
 
 

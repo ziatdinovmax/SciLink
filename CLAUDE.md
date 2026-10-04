@@ -234,7 +234,24 @@ declaration beside a VALUED required output is critiqued as not honoured,
 not with the all-NaN text, which pushed live runs away from an honest null
 (#723). The series synthesis is told whether a recipe locked and which
 outputs a gate checked; a number no gate checked (a task's `scalars`) is
-named as such there and in the single-cube synthesis (#722).
+named as such there and in the single-cube synthesis (#722). A scalar that
+comes from a fit is returned as `{"value", "role", "bounds"}` and CHECKED
+(`_check_scalar`, #722 B1): at its declared bound (the curve agent's
+`validate_bound_pinning`), or an amplitude at zero (below `AMPLITUDE_ZERO_SIGMA`
+of the field mean's noise — never judged against a declared range — measured on 1,227
+scalars of 156 real runs: failed fits at <= 2e-5 sigma, healthy from 0.65), it
+is a failed fit: no value in the feature table, `failed_outputs` on the row,
+named as FAILED on the board and in both syntheses. One that passes is
+`gated: True` — passed against the bounds the SCRIPT DECLARED, nothing ties
+them to the bounds the fit used; an amplitude is certified only from
+`AMPLITUDE_CERTIFY_SIGMA` (0.5 sigma) up, stays unchecked between the two
+bars (a fit to noise lands there) and with no noise estimate at all (empty
+facts). A value outside its own declared bounds is unchecked, never passed:
+those bounds are another parameterisation's (seen on real data: a Gaussian's
+sigma bounds declared for its FWHM hid a width pinned in sigma). A failed
+column is never aliased by the locked-schema completion, and a live frame
+names a failed tracked number in `withheld`. Nothing reads a name: what is checked is what the script
+declared it fitted; a plain number stays unchecked, as before.
 
 **Through the meta agent, a series is ONE delegation.** The meta's routing
 guidance and `delegate_to_analysis` say so for spectra, images and cubes
@@ -917,7 +934,9 @@ Settled rules, each learned from a live run or a review:
   checked — a hyperspectral task's `scalars`, marked `gated: False` where they
   are produced and carried as `ungated_outputs` on the `analyses` row — stays
   provisional, its recipe verified, because the gate approved the maps and a
-  claim may rest on the numbers beside them, #722), a human-approved plan (an unattended one stays
+  claim may rest on the numbers beside them, #722 — unless every such number
+  was declared and passed its fit-health check, B1; one that FAILED it is
+  named as a failed fit, `failed_outputs`), a human-approved plan (an unattended one stays
   provisional; only the delegation that wrote or settled the plan posts it),
   the structure validator. Engine output and advice that passed no gate — a BO
   point, a steering reduction, a TEA summary, a critic's blocking finding — is
