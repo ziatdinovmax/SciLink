@@ -818,8 +818,17 @@ def test_a_follower_whose_replay_pins_keeps_the_recipe_and_is_named_degenerate(t
     raw = {u["name"]: u for u in state["series_results"]}                 # the driver's own rows
     assert raw["spectrum_0001"]["fitted_from"] == "locked_script" and raw["spectrum_0001"]["replay_verbatim"] is True
     assert raw["spectrum_0001"]["pinned_at_bound"][0]["parameter"] == "fwhm"
-    flags = {f["name"]: f["reason"] for f in state.get("flagged_spectra") or state.get("flagged_images") or []}
+    flag_list = state.get("flagged_spectra") or state.get("flagged_images") or []
+    flags = {f["name"]: f["reason"] for f in flag_list}
     assert flags.get("spectrum_0001") == "pinned_at_bound"
+    # every text on the held path says what happened: kept, not relaxed or refit (#740 review)
+    row = raw["spectrum_0001"]
+    rec = next(f["recommendation"] for f in flag_list if f["name"] == "spectrum_0001")
+    texts = [row["quality_warning"], rec] + [e.get("diagnosis") or "" for e in row.get("script_errors") or []
+                                            if e.get("kind") == "pinned_bound"]
+    assert row.get("pin_held") is True and len(texts) == 3
+    for t in texts:
+        assert "kept for comparability" in t and "refit" not in t.lower() and "relax" not in t.lower(), t
     by_name = {u["name"]: u for u in results["individual_results"]}
     pinned = by_name["spectrum_0001"]
     assert not pinned.get("adaptively_refitted")                          # flagged, never re-derived
