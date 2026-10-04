@@ -311,3 +311,31 @@ def test_tools_expose_the_new_flags(tmp_path):
     assert "force_rerun" in by_name["delegate_to_analyses"]["parameters"]["properties"]
     assert "retry_failed" in by_name["resume_fanout"]["parameters"]["properties"]
     assert "retry_failed=true" in by_name["delegate_to_analyses"]["description"]
+
+
+def test_a_retried_branch_keeps_its_own_depth(tmp_path, paths, monkeypatch):
+    """#718: a branch's own profile / targets / time_budget_s reach its child,
+    and a retried branch runs under them again (from its ledger entry)."""
+    seen = []
+
+    def factory(fail):
+        def fake_child(orch, base_dir, restore=False):
+            class C:
+                def run_task(self, task, context=None, autonomy=None, **kw):
+                    seen.append(kw)
+                    if fail and paths[1] in task:
+                        raise RuntimeError("synthetic branch failure")
+                    return {"status": "success", "summary": "ok",
+                            "key_findings": ["finding"], "files_produced": []}
+            return C()
+        return fake_child
+    meta = _autonomous(tmp_path)
+    monkeypatch.setattr(fo, "_llm_json", _verdict(paths))
+    monkeypatch.setattr(fo, "_make_ephemeral_analysis_child", factory(fail=True))
+    depth = {"profile": "quick", "targets": ["band position"], "time_budget_s": 120}
+    meta._run_fanout([dict(b, **depth) for b in _branches(paths)])
+    assert seen == [depth] * len(paths)
+    seen.clear()
+    monkeypatch.setattr(fo, "_make_ephemeral_analysis_child", factory(fail=False))
+    out = json.loads(meta._resume_fanout(retry_failed=True))
+    assert out["branches_retried"] == 1 and seen == [depth]

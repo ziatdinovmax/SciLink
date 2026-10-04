@@ -355,6 +355,8 @@ FANOUT_RAW_INSTRUMENT_BUDGET_FACTOR = 3.0
 # trend and synthesis — which is a multiple of a single-cube run. Scaled the
 # same way (explicit branch_time_budget_s is never scaled).
 FANOUT_SERIES_BUDGET_FACTOR = 2.0
+#: A branch's typed depth, the single delegation's ``depth`` keys.
+_BRANCH_DEPTH_KEYS = ("profile", "targets", "time_budget_s")
 # In AUTONOMOUS mode there is no human to confirm, so the verdict IS the gate:
 # proceed only on a confident 'complementary' read.
 AUTONOMOUS_CONFIDENCE_THRESHOLD = 0.6
@@ -1208,8 +1210,7 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
                          else _mesh_task(branch, companions))
             # Typed per-branch depth (the single-delegation path's twin): the
             # child applies it to every run_analysis call of the branch.
-            _depth = {k: branch.get(k) for k in ("profile", "targets", "time_budget_s")
-                      if branch.get(k)}
+            _depth = {k: branch.get(k) for k in _BRANCH_DEPTH_KEYS if branch.get(k)}
             # The branch's wall-clock budget is NOT handed to the child as a
             # run deadline: the fan-out's hard cancel already bounds the
             # branch, and a run deadline counts human wait (an AUTOPILOT plan
@@ -1503,6 +1504,7 @@ def resume_fanout(orch, retry_failed: bool = False) -> str:
                 "metadata": e.get("metadata"),
                 "_premeshed": True,
                 "_resume": has_ckpt,
+                **(e.get("depth") or {}),
             }
             stop_ev = _threading.Event()
             fut = pool.submit(_attributed_branch(_run_one_branch), orch,
@@ -1729,6 +1731,9 @@ def run_fanout(orch, branches: List[dict],
             # for the later fusion codegen. None -> branches byte-identical
             # to pre-feature behavior.
             "figure_style": (str(figure_style) if figure_style else None),
+            # The branch's typed depth (#718): read at the launch site and
+            # applied by the child to every run_analysis call of the branch.
+            **{k: b.get(k) for k in _BRANCH_DEPTH_KEYS if b.get(k)},
         })
     # Stash for fuse_delegations (a separate tool call): fusion codegen
     # applies the same presentation preference to fusion_figure.png.
@@ -1930,6 +1935,10 @@ def run_fanout(orch, branches: List[dict],
             # sibling INDICES too: labels can repeat within a group.
             if b.get("_steering"):
                 entry["steered_by"] = [p["label"] for p in b["_steering"]]
+            # As _delegate records it, and what a resumed branch runs under.
+            _depth = {k: b.get(k) for k in _BRANCH_DEPTH_KEYS if b.get(k)}
+            if _depth:
+                entry["depth"] = _depth
             # Carry the input path/metadata so a later fuse_delegations can
             # recognize this set as already gated (or re-gate a mixed set).
             entry["data_path"] = b.get("data_path")

@@ -891,7 +891,10 @@ class MetaOrchestratorTools:
                 "item_time_budget_s": {
                     "type": "number",
                     "description": ("Optional per-item wall-clock budget in seconds "
-                                    "(default 3600; <= 0 disables)."),
+                                    "(default 3600, or as a fan-out branch gets it: 2x for "
+                                    "a datacube-series directory, 3x for a raw-instrument "
+                                    "container; given, it applies to every item as is; "
+                                    "<= 0 disables)."),
                 },
                 "subscriptions": {
                     "type": "array",

@@ -188,8 +188,10 @@ def escalate_timeouts(attempt, *, base_timeout: int, timed_out, logger=None,
     budget = TIMEOUT_ESCALATIONS if escalations is None else max(0, int(escalations))
 
     def left():
+        # the seconds left as they are (the message says them), and as a
+        # limit (never under 1 s: a 0 s limit would be no run at all)
         r = remaining_s() if callable(remaining_s) else remaining_s
-        return None if r is None else max(1, int(r))
+        return (None, None) if r is None else (max(0, int(r)), max(1, int(r)))
     # the FIRST limit is never clamped: the run budget is soft — a script that
     # started finishes (RunBudget's promise) — only the retries are bounded
     current = int(base_timeout)
@@ -199,14 +201,14 @@ def escalate_timeouts(attempt, *, base_timeout: int, timed_out, logger=None,
         if not timed_out(out):
             return out, current
         grown = min(int(current * TIMEOUT_GROWTH), TIMEOUT_HARD_CAP_S)
-        r = left()
+        r_said, r = left()
         next_timeout = grown if r is None else min(grown, r)
         if next_timeout <= current or esc >= budget:
             if esc >= budget:
                 why = (f"escalation budget exhausted ({budget} retr{'y' if budget == 1 else 'ies'})" if budget
                        else "no escalation on this clock")
             elif r is not None and next_timeout >= r:
-                why = f"the time left ({r}s, the run's deadline or the loop's budget) allows no longer retry"
+                why = f"the time left ({r_said}s, the run's deadline or the loop's budget) allows no longer retry"
             else:
                 why = f"the {TIMEOUT_HARD_CAP_S}s cap allows no longer retry"
             log.warning(f"    ⏱  Timed out at {current}s; {why} — handing the timeout to the correction loop.")

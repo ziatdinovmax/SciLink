@@ -508,7 +508,14 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
                 # As _delegate stamps it: a later fuse_delegations re-runs
                 # its complementarity gate from the entries' data paths.
                 entry["data_path"] = str(item["data_path"])
-            entry["_budget_s"] = budget
+            # The fan-out's per-branch rule (#700): a datacube series or a
+            # raw-instrument container gets its multiple of the default, so
+            # the same analysis is not cancelled sooner as a swarm item than
+            # as a fan-out branch. A budget the caller set is taken as is.
+            entry["_budget_s"] = (fo.resolve_branch_budget(
+                {"data_path": str(item["data_path"]), "label": item["label"]}, budget,
+                explicit=item_time_budget_s is not None)
+                if item["mode"] == "analysis" and item.get("data_path") else budget)
             # The item's own inputs, so a re-run (retract_finding's
             # rerun_items) starts from what this one had.
             if item.get("reads_board") is not None:
