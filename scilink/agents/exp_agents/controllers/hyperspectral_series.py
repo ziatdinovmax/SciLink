@@ -168,10 +168,13 @@ def build_series_row(index: int, data_path: str, result: Dict[str, Any],
     else:
         uv = verdict_record(verified=True, reason="every target approved", decided_by=(
             "replay_gate" if (result.get("script_reuse") or {}).get("verbatim") else "qc_gate"))
-    from .._verification_record import ungated_outputs
+    from .._verification_record import ungated_outputs, failed_outputs
     ungated = ungated_outputs(result.get("extracted_features"))
     if ungated:
         uv["ungated"] = ungated            # reported, but no gate checked them (#722)
+    failed = failed_outputs(result.get("extracted_features"))
+    if failed:
+        uv["failed_checks"] = failed       # checked and failed: failed fits, no value (#722 B1)
     row["unit_verdict"] = uv
     reuse = result.get("script_reuse")
     if reuse:
@@ -616,16 +619,31 @@ def build_series_synthesis_prompt(state: Dict[str, Any]) -> list:
     ok_units = [r for r in results if r.get("success")]
     # a salvaged unit's maps carry stats too, but its gate did not pass them
     verified_units = [r for r in ok_units if (r.get("unit_verdict") or {}).get("verified")]
-    ungated = sorted({n for r in ok_units for n in ungated_outputs(r.get("feature_records"))})
+    # a number that FAILED its check (#722 B1) is named per unit: it is a failed
+    # fit there, not a measurement, and reads as no value at all in the table
+    failed: dict = {}
+    for r in ok_units:
+        for m in r.get("feature_records") or []:
+            if isinstance(m, dict) and str(m.get("check", "")).startswith("failed") and m.get("name"):
+                failed.setdefault(str(m["name"]), []).append(str(r.get("name") or r.get("index")))
+    ungated = sorted({n for r in ok_units for n in ungated_outputs(r.get("feature_records"))} - set(failed))
     gated = sorted({str(m.get("name")) for r in verified_units for m in (r.get("feature_records") or [])
                     if isinstance(m, dict) and isinstance(m.get("stats"), dict) and m.get("name")})
+    checked_numbers = sorted({str(m.get("name")) for r in verified_units for m in (r.get("feature_records") or [])
+                              if isinstance(m, dict) and m.get("gated") is True and "scalar" in m
+                              and m.get("name")} - set(failed))
     gate_coverage = (
         f"Maps that passed a review or the replay gate: {', '.join(gated) or 'none'}.\n"
+        + (f"Numbers that passed their fit-health check (inside their bounds, non-zero): "
+           f"{', '.join(checked_numbers)}.\n" if checked_numbers else "")
+        + ("Numbers that FAILED their check — a failed fit, not a measurement, absent from the table: "
+           + "; ".join(f"{n} on {', '.join(u[:6])}" for n, u in sorted(failed.items()))
+           + ". Never read them as a value, a trend or an absence of change.\n" if failed else "")
         + (f"Numbers reported beside them that NO gate checked: {', '.join(ungated)}. A value of these "
            "at a fit bound, at a window edge or with ~0 amplitude is a failed fit, not a measurement: "
            "ground a claim of change — or of no change — in the checked maps, or say it rests on "
            "unchecked numbers."
-           if ungated else "Every reported number is a statistic of a checked map."))
+           if ungated else "Every other reported number is a statistic of a checked map."))
     prompt: list = [SERIES_SYNTHESIS_INSTRUCTIONS.format(
         pipeline=("analysed with ONE locked analysis pipeline (the same script applied to every dataset), "
                   "so the per-dataset feature values are directly comparable."

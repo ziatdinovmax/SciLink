@@ -833,7 +833,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 # stats, coverage — no arrays): what a later locked replay of
                 # this run is gated against (its replay_reference).
                 "feature_records": [
-                    {k: m[k] for k in ("name", "units", "stats", "coverage", "scalar", "gated") if k in m}
+                    {k: m[k] for k in ("name", "units", "stats", "coverage", "scalar", "gated", "check", "role", "raw_value") if k in m}
                     for m in (response.get("extracted_features") or []) if isinstance(m, dict)],
             }
             if response.get("stage_timings"):

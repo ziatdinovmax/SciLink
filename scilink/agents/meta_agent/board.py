@@ -728,13 +728,19 @@ def _claim_verified(row: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
         held.append("a locked-script replay passed the replay gate (the numbers), but its interpretation "
                     "is not certified — the state and identity checks against the regime's units did not "
                     "both agree, or could not run")
-    ungated = row.get("ungated_outputs") or []
-    if ungated:
+    def _shown(names):
+        return ", ".join(map(str, names[:6])) + (f" (+{len(names) - 6} more)" if len(names) > 6 else "")
+    failed = list(row.get("failed_outputs") or [])
+    unchecked = [n for n in (row.get("ungated_outputs") or []) if n not in failed]
+    if unchecked:
         # #722: the gate approved what it checked (a cube's maps); the run
         # also reported outputs nothing checked, and a claim may rest on them.
-        shown = ", ".join(map(str, ungated[:6])) + (f" (+{len(ungated) - 6} more)" if len(ungated) > 6 else "")
         held.append(f"its gate approved the outputs it checks, but the run also reported outputs no gate "
-                    f"checked ({shown}), which a claim may rest on")
+                    f"checked ({_shown(unchecked)}), which a claim may rest on")
+    if failed:
+        # #722 B1: numbers that FAILED their fit-health check are failed fits
+        held.append(f"numbers it reported FAILED their fit-health check ({_shown(failed)}): failed fits, "
+                    "not measurements, which a claim may rest on")
     if held:
         return False, f"analysis {row.get('analysis_id')}: " + "; and ".join(held)
     return verified, why
