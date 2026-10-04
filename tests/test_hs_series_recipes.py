@@ -99,3 +99,4 @@ def test_a_replay_of_the_board_copy_is_held_to_the_recorded_gate(tmp_path, monke
     assert far["status"] != "success" and not (far.get("verdict") or {}).get("verified")
     near = replay(652.0, "near")                                # the regime's own state
     assert near["status"] == "success" and near["verdict"]["verified"] is True
+    assert near["verdict"]["interpretation_checked"] is True              # certified, not only verified
