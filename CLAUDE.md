@@ -130,7 +130,13 @@ unit reuses it verbatim, failures are re-analysed within `max_series_refits`,
 feature outliers are flagged (never re-analysed — the anomaly may be the
 physics; a curve follower whose replay pins a parameter at its bound likewise
 keeps the recipe verbatim, is flagged `pinned_at_bound` and is withheld as a
-degenerate fit, never relaxed into bounds of its own, #726), then trend codegen and a series synthesis run over the per-unit
+degenerate fit, never relaxed into bounds of its own, #726 — a pin that
+withholds is one on a TARGET component: the fitting script declares
+`targets`, the components whose parameters answer the plan's
+`parameters_to_extract`, and a pin on any other — a background, a baseline,
+an overlap — is a caveat (`secondary_pins`, its value reported as no value)
+that withholds neither the unit nor, through its anchor, the regime; a fit
+that declares none is judged as before, #742), then trend codegen and a series synthesis run over the per-unit
 feature table. The per-unit rows are written to `series_analysis_results.json`
 in one shape, so `feature_table.write_feature_table` and every downstream
 consumer read all three the same way. Every unit is a row of `features.csv`,

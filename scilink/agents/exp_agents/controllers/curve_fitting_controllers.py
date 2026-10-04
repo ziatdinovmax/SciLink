@@ -4267,7 +4267,12 @@ Your guidance: '''
                         from ...skills._shared.curve_fitting_tools import (
                             validate_bound_pinning, describe_pinned, PINNED_BOUND_FIX)
                         _fr = _parse_script_markers(run["stdout"])
-                        _pins = validate_bound_pinning(_fr.get("parameters"), _fr.get("bounds"))
+                        from ...skills._shared.curve_fitting_tools import split_pins_by_targets
+                        # a pin on a SECONDARY component (background, overlap)
+                        # is a caveat, not a reason to relax and refit (#742)
+                        _pins, _ = split_pins_by_targets(
+                            validate_bound_pinning(_fr.get("parameters"), _fr.get("bounds")),
+                            _fr.get("targets"), _fr.get("parameters"))
                         if _pins and hold_recipe:
                             self.logger.warning(
                                 f"    ⚠️ Pinned at bound — {describe_pinned(_pins)}; the locked "
@@ -4370,8 +4375,22 @@ Your guidance: '''
         # / synthesis see it, independent of R².
         from ...skills._shared.curve_fitting_tools import (
             validate_bound_pinning, describe_pinned, PINNED_BOUND_FIX)
-        pinned = validate_bound_pinning(
-            fit_results.get("parameters"), fit_results.get("bounds"))
+        from ...skills._shared.curve_fitting_tools import split_pins_by_targets
+        pinned, secondary_pins = split_pins_by_targets(
+            validate_bound_pinning(fit_results.get("parameters"), fit_results.get("bounds")),
+            fit_results.get("targets"), fit_results.get("parameters"))
+        if secondary_pins:
+            # #742: a pin on a component the fit declared NOT a target (a
+            # background, a baseline, an overlap) is a caveat: the targets'
+            # fit stands, the pinned value is not a measurement (no value)
+            _params = fit_results.get("parameters") or {}
+            for p in secondary_pins:
+                comp = _params.get(p["component"])
+                if isinstance(comp, dict) and p["parameter"] in comp:
+                    comp[p["parameter"]] = None
+            self.logger.warning(
+                "    ⚠️ Secondary component pinned at bound — a caveat, not a degenerate fit "
+                "(the declared targets are unaffected): %s", describe_pinned(secondary_pins))
         if pinned:
             held = bool(hold_recipe)
             script_errors.append({
@@ -4391,6 +4410,8 @@ Your guidance: '''
         fit_quality = dict(fit_results.get("fit_quality", {}) or {})
         if pinned:
             fit_quality["pinned_at_bound"] = pinned
+        if secondary_pins:
+            fit_quality["secondary_pins"] = secondary_pins
         residual_diag = None
         residual_zoom_panels = []
         try:
@@ -4482,6 +4503,14 @@ Your guidance: '''
         }
         if fit_results.get("bounds"):
             result["bounds"] = fit_results["bounds"]
+        if isinstance(fit_results.get("targets"), list):
+            result["targets"] = [str(t) for t in fit_results["targets"]]
+        if secondary_pins:
+            result["secondary_pins"] = secondary_pins
+            result["caveats"] = list(result.get("caveats") or []) + [
+                "Secondary component pinned at bound — " + describe_pinned(secondary_pins)
+                + ": those values are not measurements (reported as no value); the declared "
+                  "targets' fit is unaffected."]
         if pinned:
             result["pinned_at_bound"] = pinned
             if hold_recipe:

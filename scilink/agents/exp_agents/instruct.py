@@ -2599,6 +2599,7 @@ results = {{
     "model_type": "description",
     "parameters": {{"peak_1": {{"center": val, "center_err": err, ...}}, ...}},
     "bounds": {{"peak_1": {{"amplitude": [lo, hi], "center": [lo, hi], ...}}, ...}},  # the bounds actually used, mirroring `parameters` (null for an unbounded side); omit a parameter you did not bound
+    "targets": ["peak_1", ...],  # the components whose parameters answer the plan's parameters_to_extract — not the ones that only model a background, a baseline or an overlap
     "fit_quality": {{"r_squared": val, "rmse": val}},
     "deviation_note": ""  # empty if plan was followed; else one line on process-level deviations only
 }}
@@ -2611,7 +2612,7 @@ print(f"FIT_RESULTS_JSON:{{json.dumps(results)}}")
 
 FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed script.
 The corrected script must keep the full results contract of the original
-instructions — including reporting ABSENT planned components as
+instructions — including its `targets` list unchanged, and reporting ABSENT planned components as
 measurements (extensive parameters as windowed residual integrals with
 `_err`, intensive parameters null, plus `"<component>_absent": true`),
 never as missing keys.
