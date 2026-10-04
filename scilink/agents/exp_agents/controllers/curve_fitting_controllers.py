@@ -4380,11 +4380,9 @@ Your guidance: '''
                 "diagnosis": (PINNED_HELD_NOTE if held else PINNED_BOUND_FIX),
                 "kind": "pinned_bound",
             })
-            self.logger.warning(
-                ("    ⚠️ Pinned at bound — the locked recipe was kept for comparability, the unit "
-                 "flagged: %s") if held else
-                "    ⚠️ Pinned at bound after relaxation — kept and flagged: %s",
-                describe_pinned(pinned))
+            if not held:                     # a held pin was logged in the attempt loop
+                self.logger.warning("    ⚠️ Pinned at bound after relaxation — kept and flagged: %s",
+                                    describe_pinned(pinned))
 
         # Best-effort residual diagnostics from the saved fitted curve (vision aid):
         # reliable per-region structure metrics the verifier can reason over instead

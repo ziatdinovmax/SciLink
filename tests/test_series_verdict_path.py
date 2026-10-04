@@ -802,7 +802,7 @@ class PinningExecutor(FakeExecutor):
         return res
 
 
-def test_a_follower_whose_replay_pins_keeps_the_recipe_and_is_named_degenerate(tmp_path, monkeypatch):
+def test_a_follower_whose_replay_pins_keeps_the_recipe_and_is_named_degenerate(tmp_path, monkeypatch, caplog):
     """#726, the reviewer's call on its side effect: a follower whose replay
     pins a parameter is NOT sent through the bound-relaxing ladder (that gave
     its secondary features different bounds from every other unit's). It
@@ -815,6 +815,8 @@ def test_a_follower_whose_replay_pins_keeps_the_recipe_and_is_named_degenerate(t
                           follower_r2=follower_r2, executor=ex)
     results = compile_results(tmp_path, state)
     assert [n for n, _ in ex.calls].count("spectrum_0001") == 1           # replayed once, never relaxed
+    pin_logs = [r.getMessage() for r in caplog.records if "Pinned at bound" in r.getMessage()]
+    assert len(pin_logs) == 1 and "kept verbatim" in pin_logs[0], pin_logs   # logged once, as held
     raw = {u["name"]: u for u in state["series_results"]}                 # the driver's own rows
     assert raw["spectrum_0001"]["fitted_from"] == "locked_script" and raw["spectrum_0001"]["replay_verbatim"] is True
     assert raw["spectrum_0001"]["pinned_at_bound"][0]["parameter"] == "fwhm"
