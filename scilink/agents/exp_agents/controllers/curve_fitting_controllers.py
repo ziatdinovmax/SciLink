@@ -4098,7 +4098,14 @@ Your guidance: '''
         refine_from_script: Optional[str] = None,
         refine_from_r2: float = 0.0,
         refine_from_issues: Optional[list] = None,
+        hold_recipe: bool = False,
     ) -> dict:
+        # ``hold_recipe``: a series FOLLOWER replaying its regime's locked
+        # recipe. A parameter pinned at a bound is then flagged on the unit,
+        # never "relaxed" by rewriting the recipe's bounds: the locked recipe
+        # exists for comparability, and a relaxed refit gave that one unit's
+        # secondary features different bounds from every other unit in the
+        # same table (#726). An execution error is still repaired.
         # Realtime pre-flight gate (#346): fail a glitch frame instantly —
         # this single choke point covers reuse, non-anchor locked-script
         # execution, AND the fallback codegen, so a degenerate frame costs
@@ -4253,7 +4260,11 @@ Your guidance: '''
                             validate_bound_pinning, describe_pinned, PINNED_BOUND_FIX)
                         _fr = _parse_script_markers(run["stdout"])
                         _pins = validate_bound_pinning(_fr.get("parameters"), _fr.get("bounds"))
-                        if (_pins and attempt < self.MAX_ATTEMPTS
+                        if _pins and hold_recipe:
+                            self.logger.warning(
+                                f"    ⚠️ Pinned at bound — {describe_pinned(_pins)}; the locked "
+                                f"recipe is kept verbatim and the unit flagged (not relaxed)")
+                        elif (_pins and attempt < self.MAX_ATTEMPTS
                                 and pinned_retries < self.MAX_PINNED_RETRIES):
                             pinned_retries += 1
                             last_error = (
@@ -7957,7 +7968,7 @@ Return JSON with:
                 result = self._fit_single_spectrum(
                     state=state, curve_data=curve_data, data_path=data_path,
                     spectrum_name=spectrum_name, spectrum_idx=idx,
-                    base_script=base_script,
+                    base_script=base_script, hold_recipe=base_script is not None,
                 )
                 self._check_follower(result, recipe_by_regime.get(regime_name),
                                      anchor_params_by_regime.get(regime_name), curve_data)
@@ -8002,6 +8013,7 @@ Return JSON with:
                     spectrum_name=job["spectrum_name"],
                     spectrum_idx=job["idx"],
                     base_script=job["base_script"],
+                    hold_recipe=job["base_script"] is not None,
                 )
 
             with ThreadPoolExecutor(max_workers=workers) as pool:

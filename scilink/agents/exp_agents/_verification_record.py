@@ -341,6 +341,19 @@ def unit_verdict_for(unit: Dict[str, Any], *, recipe: Optional[Dict[str, Any]] =
         return verdict_record(verified=False, decided_by="none", regime=regime,
                               reason="fitted without a locked recipe (its regime's anchor produced none)")
     rv = recipe.get("verdict") or {}
+    own_pins = unit.get("pinned_at_bound") or (unit.get("fit_quality") or {}).get("pinned_at_bound")
+    if rv.get("verified") and own_pins:
+        # the recipe passed, but on THIS unit a parameter sits at its bound: the
+        # follower keeps the locked recipe (comparability) and is withheld as
+        # a degenerate fit, named (#726)
+        from ..skills._shared.curve_fitting_tools import describe_pinned
+        try:
+            what = describe_pinned(own_pins)
+        except Exception:  # noqa: BLE001
+            what = "a parameter"
+        return verdict_record(verified=False, decided_by="recipe", regime=regime, recipe_of=recipe.get("unit"),
+                              reason=f"replayed the locked recipe of unit {recipe.get('unit')}, but this unit's "
+                                     f"fit is degenerate: {what} (pinned at bound)")
     if rv.get("verified"):
         # a follower is certified by the cheap checks against its regime's
         # anchor (``regime_checks``, the series driver's), when they agree

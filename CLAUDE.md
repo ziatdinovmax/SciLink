@@ -128,7 +128,9 @@ Curve, image and hyperspectral all run a series as **anchor + locked recipe**:
 the first unit is analysed in full, the verified recipe is locked, every later
 unit reuses it verbatim, failures are re-analysed within `max_series_refits`,
 feature outliers are flagged (never re-analysed — the anomaly may be the
-physics), then trend codegen and a series synthesis run over the per-unit
+physics; a curve follower whose replay pins a parameter at its bound likewise
+keeps the recipe verbatim, is flagged `pinned_at_bound` and is withheld as a
+degenerate fit, never relaxed into bounds of its own, #726), then trend codegen and a series synthesis run over the per-unit
 feature table. The per-unit rows are written to `series_analysis_results.json`
 in one shape, so `feature_table.write_feature_table` and every downstream
 consumer read all three the same way. Every unit is a row of `features.csv`,
