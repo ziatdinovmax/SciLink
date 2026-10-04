@@ -869,8 +869,11 @@ Settled rules, each learned from a live run or a review:
   its task and context carry everything. The persistent specialists stay for
   conversation, where accumulating context is the point — and two concurrent
   `run_task` calls on one specialist would each report the other's output.
-- **The coordinator is rules, not a model.** Admission by free memory, a
-  capacity plan that refuses an item larger than the machine, a memory guard
+- **The coordinator is rules, not a model.** Admission by free memory (an
+  item is estimated by its LARGEST unit, nested data included — a series runs
+  its units one at a time — and a file inside a raw-instrument folder by its
+  preparation, #724), a capacity plan that refuses an item larger than the
+  machine, a memory guard
   that cancels the heaviest running item (never one running alone) and reruns
   it alone once, a wall-clock budget per item, no item starting another. The
   model decides between swarm runs and inside each item, never within a run.

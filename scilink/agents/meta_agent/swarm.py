@@ -107,7 +107,8 @@ def _memory() -> Dict[str, Optional[float]]:
 def _estimate(item: dict) -> float:
     if item["mode"] == "analysis" and item.get("data_path"):
         return fo._branch_mem_estimate({"data_path": item["data_path"],
-                                        "pattern": item.get("pattern")})
+                                        "pattern": item.get("pattern"),
+                                        "series_workers": item.get("series_workers")})
     return _MODE_MEM_FLOOR[item["mode"]]
 
 

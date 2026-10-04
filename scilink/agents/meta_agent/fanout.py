@@ -82,20 +82,113 @@ _mem_cv = _threading.Condition()
 _mem_running: dict = {}           # admitted branch key -> estimated bytes
 
 
+_BRANCH_PREP_FACTOR = 1.2        # raw stack (uncompressed) -> preparation peak
+_BRANCH_MAX_FILES = 5000          # walk at most this many data files
+#: What a branch's agents load: measurement files, not sidecars or reports.
+_DATA_SUFFIXES = frozenset({
+    ".npy", ".npz", ".h5", ".hdf5", ".nxs", ".emd", ".mat", ".mrc", ".dm3", ".dm4", ".ser", ".raw",
+    ".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp",
+    ".csv", ".txt", ".tsv", ".dat", ".xy", ".xye", ".spc", ".spe", ".chi", ".xrdml"})
+_HDF5_SUFFIXES = frozenset({".h5", ".hdf5", ".nxs", ".emd"})
+
+
+def _in_memory_bytes(f: Path) -> float:
+    """What one data file occupies once loaded: an ``.npy`` from its header
+    (no data read); an HDF5 file from its LARGEST dataset's shape and dtype —
+    compression makes the file size understate it about twofold; anything
+    else, its size on disk."""
+    suffix = f.suffix.lower()
+    try:
+        if suffix == ".npy":
+            import numpy as _np
+            return float(_np.load(f, mmap_mode="r").nbytes)
+        if suffix in _HDF5_SUFFIXES:
+            import h5py
+            biggest = [0.0]
+
+            def _visit(_name, obj):
+                if isinstance(obj, h5py.Dataset) and obj.shape:
+                    biggest[0] = max(biggest[0], float(obj.size) * obj.dtype.itemsize)
+            with h5py.File(f, "r") as h:
+                h.visititems(_visit)
+            if biggest[0] > 0:
+                return biggest[0]
+    except Exception:  # noqa: BLE001 - unreadable header: fall back to the file size
+        pass
+    return float(f.stat().st_size)
+
+
+def _data_files(p: Path, pattern: Optional[str]) -> List[Path]:
+    """The data files a branch's agents load: ``p`` itself, or every data
+    file under it (recursively — a raw container keeps its stacks in a
+    subfolder), restricted by ``pattern``."""
+    if p.is_file():
+        return [p]
+    if not p.is_dir():
+        return []
+    out = []
+    for f in p.rglob(pattern or "*"):
+        if f.is_file() and f.suffix.lower() in _DATA_SUFFIXES:
+            out.append(f)
+            if len(out) >= _BRANCH_MAX_FILES:
+                break
+    return out
+
+
 def _branch_mem_estimate(branch: dict) -> float:
-    """Coarse peak-working-set estimate for a branch, from its input size."""
+    """Coarse peak-working-set estimate for a branch (#724).
+
+    From its LARGEST unit, not the sum of its files: a series analyses its
+    units one at a time (its replays fan out to ``series_workers``, each
+    holding one unit), so six cubes peak like one. Nested data is counted (a
+    raw container's stacks sit in a subfolder). A file inside a raw-instrument
+    folder — the branch's own folder or one nested in it, as a study bundle
+    holds one — is estimated by its preparation, which reconstructs one stack
+    at a time; everything else by analysis. The admission guard only DELAYS
+    work, so a bad estimate costs time, not results; it must also never
+    refuse what the machine can run."""
     try:
         p = Path(str(branch.get("data_path") or ""))
-        nbytes = 0
-        if p.is_file():
-            nbytes = p.stat().st_size
-        elif p.is_dir():
-            pat = branch.get("pattern") or "*"
-            nbytes = sum(f.stat().st_size for f in p.glob(pat) if f.is_file())
-        est = max(nbytes * _BRANCH_MEM_FACTOR, _BRANCH_MEM_FLOOR)
-        if nbytes > 1e8:   # big enough to invite a parallel per-pixel fit
-            est += _BRANCH_POOL_OVERHEAD
-        return est
+        files = _data_files(p, branch.get("pattern"))
+        try:
+            from ..exp_agents.data_preparation import detect_raw_instrument
+        except Exception:  # noqa: BLE001
+            detect_raw_instrument = None
+        raw_dirs: dict = {}
+
+        def _is_raw(f: Path) -> bool:
+            # any folder from the file's own up to the branch root
+            if detect_raw_instrument is None:
+                return False
+            stop = p if p.is_dir() else p.parent
+            for d in [f.parent, *f.parent.parents]:
+                if d not in raw_dirs:
+                    try:
+                        raw_dirs[d] = bool(detect_raw_instrument(d))
+                    except Exception:  # noqa: BLE001
+                        raw_dirs[d] = False
+                if raw_dirs[d]:
+                    return True
+                if d == stop:
+                    return False
+            return False
+
+        largest_analysis = largest_raw = 0.0
+        for f in files:
+            b = _in_memory_bytes(f)
+            if _is_raw(f):
+                largest_raw = max(largest_raw, b)
+            else:
+                largest_analysis = max(largest_analysis, b)
+        try:
+            workers = max(int(branch.get("series_workers")
+                              or os.environ.get("SCILINK_HS_SERIES_WORKERS") or 1), 1)
+        except (TypeError, ValueError):
+            workers = 1
+        analysis = largest_analysis * _BRANCH_MEM_FACTOR * workers
+        if largest_analysis > 1e8:   # big enough to invite a parallel per-pixel fit
+            analysis += _BRANCH_POOL_OVERHEAD
+        return max(analysis, largest_raw * _BRANCH_PREP_FACTOR, _BRANCH_MEM_FLOOR)
     except Exception:  # noqa: BLE001 - an estimate must never break a branch
         return _BRANCH_MEM_FLOOR
 
