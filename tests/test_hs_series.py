@@ -637,15 +637,19 @@ def test_complete_locked_schema_aliases_and_gaps():
         "Fit_R2_mean": 0.99,                                          # prefix drift
         "Sigma_mean_eV": 1.0, "Width_mean": 2.0, "Width_mean_eV_smoothed": 3.0,  # ambiguous → gap
         "Extra_mean": 7.0}}
-    out = hs.complete_locked_schema(row, locked)
+    # the locked columns' own units, as the driver records them from the schema source's records
+    out = hs.complete_locked_schema(row, locked, locked_units={"L3_Position_mean_eV": "ev",
+                                                               "L3_Position_min_eV": "ev", "Width_mean_eV": "ev"})
     f = out["extracted_features"]
     assert f["L3_Position_mean_eV"] == 462.0 and "L3_Position_mean" not in f
     assert f["L3_Position_min_eV"] == 461.0 and f["R2_mean"] == 0.99 and "Fit_R2_mean" not in f
     assert f["Ratio_mean"] == 1.1 and f["Extra_mean"] == 7.0
-    assert f["Width_mean"] == 2.0 and f["Width_mean_eV_smoothed"] == 3.0     # both kept, unaliased
-    assert out["locked_schema_gap"] == ["Width_mean_eV"]
-    assert out["schema_aliases"] == {"L3_Position_mean_eV": "L3_Position_mean",
-                                     "L3_Position_min_eV": "L3_Position_min", "R2_mean": "Fit_R2_mean"}
+    # "_smoothed" is a different quantity, never drift (#752): Width_mean (units dropped) is the one
+    # match, as L3_Position_mean is; the smoothed sibling keeps its own name
+    assert f["Width_mean_eV"] == 2.0 and f["Width_mean_eV_smoothed"] == 3.0 and "Width_mean" not in f
+    assert out["locked_schema_gap"] == []
+    assert out["schema_aliases"] == {"L3_Position_mean_eV": "L3_Position_mean", "L3_Position_min_eV": "L3_Position_min",
+                                     "R2_mean": "Fit_R2_mean", "Width_mean_eV": "Width_mean"}
     # nothing to do when the row already conforms
     ok = hs.complete_locked_schema({"index": 0, "extracted_features": {"Ratio_mean": 1}}, ["Ratio_mean"])
     assert ok["locked_schema_gap"] == [] and "schema_aliases" not in ok
@@ -1204,3 +1208,24 @@ def test_data_facts_list_peaks_and_dips_and_lose_no_peak():
     D = np.exp(-np.arange(12) / 10.0)
     f = _data_facts(D[None, None, :] + rng.normal(0, 0.001, (6, 5, 12)), np.arange(12.0), "channels")
     assert f["peaks"] == [] and f["dips"] == [] and "no peak or dip stands out" in f["text"]
+
+
+
+def test_completion_never_aliases_a_different_quantity():
+    """#752: the completion aliased the one column whose name contained the
+    locked name, so an uncertainty landed in the measured column. Only drift
+    is aliased: a prefix, or a units suffix read from each side's records."""
+    row = {"index": 1, "extracted_features": {"Depth_Map_mean": 0.3, "Band2_Depth_uncertainty": 0.04}}
+    out = hs.complete_locked_schema(row, ["Depth_Map_mean", "Band2_Depth"])
+    assert out["extracted_features"] == {"Depth_Map_mean": 0.3, "Band2_Depth_uncertainty": 0.04}
+    assert out["locked_schema_gap"] == ["Band2_Depth"] and "schema_aliases" not in out
+    for sib in ("Peak_err", "Peak_snr", "Peak_std", "Err_Peak", "Sigma_Peak", "Peak_mean_fraction"):
+        o = hs.complete_locked_schema({"index": 2, "extracted_features": {sib: 1.0}}, ["Peak"])
+        assert o["locked_schema_gap"] == ["Peak"], sib
+    # units drift read from the row's own record, and an innocent prefix, still alias
+    rec = {"index": 3, "extracted_features": {"Peak_Position_mean_eV": 2.0},
+           "feature_records": [{"name": "Peak_Position", "units": "eV", "stats": {"mean": 2.0}}]}
+    assert hs.complete_locked_schema(rec, ["Peak_Position_mean"])["schema_aliases"] == {
+        "Peak_Position_mean": "Peak_Position_mean_eV"}
+    assert hs.complete_locked_schema({"index": 4, "extracted_features": {"Fit_R2_mean": 0.9}},
+                                     ["R2_mean"])["schema_aliases"] == {"R2_mean": "Fit_R2_mean"}

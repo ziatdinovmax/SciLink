@@ -1257,7 +1257,10 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                             f"{len(targets)} approved script(s).")
                         if schema is None:
                             schema = {"anchor_index": idx, "targets": targets,
-                                      "columns": list(row["extracted_features"].keys())}
+                                      "columns": list(row["extracted_features"].keys()),
+                                      # each locked column's own units, read from its record:
+                                      # what the completion may treat as drift (#752)
+                                      "units": _series._column_units(row)}
                             self.logger.info(
                                 f"🧩 Schema source: dataset {idx}, "
                                 f"{len(schema['columns'])} feature column(s).")
@@ -1278,7 +1281,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # a salvaged replay gets its missing columns REPORTED as a gap.
             if (schema is not None and row["success"]
                     and idx != schema["anchor_index"]):
-                row = _series.complete_locked_schema(row, schema["columns"], self.logger)
+                row = _series.complete_locked_schema(row, schema["columns"], self.logger,
+                                                           locked_units=schema.get("units"))
             rows[idx] = row
             self.logger.info(
                 f"   {'✅' if row['success'] else '❌'} dataset {idx} [{rname}]: "
@@ -1307,7 +1311,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 row = _series.build_series_row(idx, sp["data_path"], res, "replay", sp["unit_dir"])
                 row["regime"] = sp["regime"]
                 if schema is not None and row["success"]:
-                    row = _series.complete_locked_schema(row, schema["columns"], self.logger)
+                    row = _series.complete_locked_schema(row, schema["columns"], self.logger,
+                                                           locked_units=schema.get("units"))
                 rows[idx] = row
                 self.logger.info(
                     f"   {'✅' if row['success'] else '❌'} dataset {idx} [{sp['regime']}]: "
@@ -1321,7 +1326,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 if (r.get("success") and r.get("role") == "independent"
                         and "locked_schema_gap" not in r):
                     rows[r["index"]] = _series.complete_locked_schema(
-                        r, schema["columns"], self.logger)
+                        r, schema["columns"], self.logger, locked_units=schema.get("units"))
 
         # ---- Flagging + budgeted refit of failed datasets --------------------
         _ctrl = series_metadata.get("values") if isinstance(series_metadata.get("values"), list) else None
@@ -1374,7 +1379,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 new_row = _series.build_series_row(idx, path, res, "refit", unit_dir)
                 new_row["regime"] = rname
                 if new_row["success"] and schema:
-                    new_row = _series.complete_locked_schema(new_row, schema["columns"], self.logger)
+                    new_row = _series.complete_locked_schema(new_row, schema["columns"], self.logger,
+                                                               locked_units=schema.get("units"))
                 entry = {"index": idx, "name": new_row["name"], "regime": rname,
                          "original_error": rows[idx].get("error") or "unverified (salvaged attempt)",
                          "new_status": new_row["status"],
