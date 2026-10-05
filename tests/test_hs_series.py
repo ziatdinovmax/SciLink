@@ -1266,3 +1266,7 @@ def test_units_drift_only_on_one_side_and_quantity_words_are_whole_words():
     # quantity words are whole words of the name: Specific/Circular/Coefficient are not "ci"
     assert same("Specific_Area", "Area") and same("Coefficient_Map_mean", "Map_mean")
     assert not same("CI_Area", "Area") and not same("Err_Depth", "Depth") and not same("SNR_Map", "Map")
+    # a listed word with digits or a plural is still the listed word; "cis" is not a plural of "ci"
+    assert not same("CI95_Area", "Area") and not same("Uncertainties_Depth", "Depth")
+    assert not same("Errors_Depth", "Depth") and not same("Sigmas_Depth", "Depth")
+    assert same("Cis_Isomer_Area", "Isomer_Area")

@@ -1345,6 +1345,19 @@ def _column_units(row: Dict[str, Any]) -> Dict[str, str]:
     return out
 
 
+def _is_quantity_word(word: str) -> bool:
+    """A listed quantity word up to its digits and a plural (``CI95``,
+    ``Uncertainties``, ``Errors``); the four-letter floor keeps ``cis`` from
+    reading as a plural of ``ci``."""
+    w = word.strip("0123456789")
+    forms = [w]
+    if len(w) >= 4 and w.endswith("ies"):
+        forms.append(w[:-3] + "y")
+    elif len(w) >= 4 and w.endswith("s"):
+        forms.append(w[:-1])
+    return any(f in _QUANTITY_PREFIX_WORDS for f in forms)
+
+
 def _same_quantity(candidate: str, target: str, units: str = "", target_units: str = "") -> bool:
     """Whether column ``candidate`` is the locked column ``target`` up to
     drift (#752): a units suffix on ONE side (that side's own, from its
@@ -1380,7 +1393,7 @@ def _same_quantity(candidate: str, target: str, units: str = "", target_units: s
                 seen += w
             if seen != longer[:n_prefix]:
                 words = [longer[:n_prefix]]            # boundaries do not align: judge it as one word
-            return not any(w in _QUANTITY_PREFIX_WORDS for w in words)
+            return not any(_is_quantity_word(w) for w in words)
     return False
 
 
