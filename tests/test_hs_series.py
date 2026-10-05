@@ -58,7 +58,8 @@ class _Calls:
         self.llm = []           # one entry per parent-level LLM prompt
 
 
-def _install_fake_pipeline(monkeypatch, calls, fail_on_replay=(), salvage_on_anchor=()):
+def _install_fake_pipeline(monkeypatch, calls, fail_on_replay=(), salvage_on_anchor=(),
+                           anchor_units="a.u.", fresh_units="counts"):
     """Stub the single-cube pipeline: features = the cube's mean; writes the
     dynamic_analysis_records.json the locked-replay loader reads; fails the
     named datasets when they are REPLAYED (so the refit stage has work)."""
@@ -95,11 +96,11 @@ def _install_fake_pipeline(monkeypatch, calls, fail_on_replay=(), salvage_on_anc
         # Fresh code under locked targets keeps the required output NAME but,
         # like a real regenerated script, drifts the units and adds its own
         # diagnostic map under a different prefix.
-        feats = ([{"name": "Mean_Map", "units": "counts",
+        feats = ([{"name": "Mean_Map", "units": fresh_units,
                    "stats": {"min": value - 1, "max": value + 1, "mean": value}},
                   {"name": "Fit_R2", "units": "", "stats": {"mean": 0.99}}]
                  if locked else
-                 [{"name": "Mean_Map", "units": "a.u.",
+                 [{"name": "Mean_Map", "units": anchor_units,
                    "stats": {"min": value - 1, "max": value + 1, "mean": value}},
                   {"name": "R2", "units": "", "stats": {"mean": 0.98}}])
         return {
@@ -1229,3 +1230,39 @@ def test_completion_never_aliases_a_different_quantity():
         "Peak_Position_mean": "Peak_Position_mean_eV"}
     assert hs.complete_locked_schema({"index": 4, "extracted_features": {"Fit_R2_mean": 0.9}},
                                      ["R2_mean"])["schema_aliases"] == {"R2_mean": "Fit_R2_mean"}
+
+
+def test_a_fresh_anchor_in_another_unit_is_a_gap_not_an_alias(tmp_path, monkeypatch):
+    """#759 review: through the real driver. The first regime's anchor reports
+    its map in nm, the second regime's fresh-code anchor in eV. Energies must
+    not land in the wavelength columns: the locked columns are a gap."""
+    calls = _Calls()
+    _install_fake_pipeline(monkeypatch, calls, anchor_units="nm", fresh_units="eV")
+    plan = {"rationale": "edge shifts", "regimes": [
+        {"name": "low_T", "dataset_indices": [0, 1, 2], "description": "a"},
+        {"name": "high_T", "dataset_indices": [3, 4, 5], "description": "b"}]}
+    agent, out = _agent(tmp_path, calls, monkeypatch, plan=plan)
+    res = agent.analyze(_cubes(tmp_path), system_info=dict(AXIS),
+                        series_metadata={"variable": "temperature", "values": [300, 350, 400, 450, 500, 550],
+                                         "unit": "K"})
+    r3 = res["individual_results"][3]
+    assert r3["role"] == "regime_anchor"
+    assert {"Mean_Map_min_nm", "Mean_Map_max_nm", "Mean_Map_mean_nm"} <= set(r3["locked_schema_gap"])
+    assert not any(k.endswith("_nm") for k in (r3.get("schema_aliases") or {}))
+    saved = json.loads((Path(out) / "series_analysis_results.json").read_text())["results"][3]
+    assert "Mean_Map_mean_eV" in saved["extracted_features"]               # kept under its own name
+
+
+def test_units_drift_only_on_one_side_and_quantity_words_are_whole_words():
+    same = hs._same_quantity
+    # two different units are two numbers
+    assert not same("Peak_Position_mean_eV", "Peak_Position_mean_nm", "ev", "nm")
+    assert not same("Width_mean_meV", "Width_mean_eV", "mev", "ev")
+    assert not same("Intensity_mean_countspers", "Intensity_mean_counts", "countspers", "counts")
+    # a units suffix on one side, a case / separator difference: drift
+    assert same("Peak_Position_mean_eV", "Peak_Position_mean", "ev", "")
+    assert same("N_Pixels_Fit", "N_Pixels_Fit_count", "", "count")
+    assert same("FitR2_mean", "Fit_R2_mean")
+    # quantity words are whole words of the name: Specific/Circular/Coefficient are not "ci"
+    assert same("Specific_Area", "Area") and same("Coefficient_Map_mean", "Map_mean")
+    assert not same("CI_Area", "Area") and not same("Err_Depth", "Depth") and not same("SNR_Map", "Map")
