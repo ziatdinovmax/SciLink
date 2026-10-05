@@ -787,3 +787,39 @@ def select_recipe(candidates: Sequence[Tuple[str, Optional[str]]],
         return {**kept, "tried": tried, "order": order, "ambiguous": ambiguous, "margin": margin}
     return {"chosen": None, "result": None, "verdict": None, "source": None, "tried": tried,
             "last_failed": last_failed, "order": order, "ambiguous": ambiguous, "margin": margin}
+
+
+
+# ---------------------------------------------------------------------------
+# The certification reference a recipe carries (#753)
+# ---------------------------------------------------------------------------
+# What a replay of a recipe is certified against travels WITH the recipe:
+# each agent stamps an opaque ``certification_reference`` where it records a
+# recipe (curve: the regime's state and identity; hyperspectral: its reference
+# maps), the board copies it verbatim into a copy's sidecar, and the reader
+# hands it back for a recipe FILE as for a run folder. Shared code never reads
+# inside it; when there is none, the replay says why in one of two words.
+
+#: A recipe that should carry a reference and does not (an older copy, or a
+#: copy separated from its sidecar).
+NO_REFERENCE = "no certification reference: the recipe carries none (an older copy, or one separated from its sidecar)"
+#: A modality with no interpretation check (an image replay): its claims stay
+#: provisional by design (#753).
+NO_INTERPRETATION_CHECK = "this modality has no interpretation check; a replay's claims stay provisional"
+
+
+def curve_certification_reference(drift_state: Optional[Dict[str, Any]], x_range: Optional[float],
+                                  samples: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """A curve regime's reference: the state its units occupy (the drift
+    monitor's stamp), the axis span, and what its units found (the identity
+    reference). None when there is neither a state nor a sample."""
+    identity = identity_reference(samples, x_range=x_range) if samples else None
+    if drift_state is None and identity is None:
+        return None
+    return {"kind": "curve", "drift_state": drift_state, "x_range": x_range, "identity": identity}
+
+
+def no_interpretation_check() -> Dict[str, Any]:
+    """The certification entry of a replay whose modality has no
+    interpretation check (an image): never certified, and saying why."""
+    return {"checked": False, "reason": NO_INTERPRETATION_CHECK}

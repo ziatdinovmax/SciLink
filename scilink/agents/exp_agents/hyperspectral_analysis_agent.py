@@ -856,6 +856,15 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 payload["stage_timings"] = response["stage_timings"]
             if isinstance(response.get("verdict"), dict):
                 payload["verdict"] = response["verdict"]          # the run's stamped verdict (#712)
+            # what a replay of this cube's recipe is certified against (#753): its
+            # required maps' statistics, as a series lock records them; it
+            # travels with the board's copy of the records
+            _maps = {m["name"]: {**{k: m["stats"][k] for k in ("min", "max", "mean") if k in m["stats"]},
+                                 **({"coverage": m["coverage"]} if m.get("coverage") is not None else {})}
+                     for m in payload["feature_records"]
+                     if isinstance(m.get("stats"), dict) and m.get("name")}
+            if _maps:
+                payload["certification_reference"] = {"kind": "maps", "reference_maps": _maps}
             if getattr(self, "_joint_manifest", None):
                 # on the run's record, which every reuse reader consults (#757)
                 payload["analysis_shape"] = "joint"
@@ -1251,7 +1260,10 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                                                    for t in targets if isinstance(t, dict)) or None,
                                 # what a replay of the recipe is held to (the map gate's
                                 # plausible ranges), as the series' own replays are
-                                "gate": {"kind": "map_health", "reference_maps": lock["reference_maps"]}}
+                                "gate": {"kind": "map_health", "reference_maps": lock["reference_maps"]},
+                                # what a replay of it is certified against (#753), the same maps
+                                "certification_reference": {"kind": "maps",
+                                                            "reference_maps": lock["reference_maps"]}}
                         self.logger.info(
                             f"🔒 Recipe locked for regime '{rname}' on dataset {idx}: "
                             f"{len(targets)} approved script(s).")
@@ -1785,10 +1797,15 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             side = (p.with_name("dynamic_analysis_records.recipe.json") if p.is_file()
                     else p / "dynamic_analysis_records.recipe.json")
             try:
-                gate = (json.loads(side.read_text(encoding="utf-8")) or {}).get("quality_gate") or {}
+                data = json.loads(side.read_text(encoding="utf-8")) or {}
             except (OSError, ValueError, AttributeError):
                 continue
-            ref = gate.get("reference_maps") if gate.get("kind") == "map_health" else None
+            gate = data.get("quality_gate") or {}
+            cert = data.get("certification_reference") or {}
+            # the recorded map gate, else the reference the copy carries (#753:
+            # a single cube's copy has no gate, only its reference)
+            ref = (gate.get("reference_maps") if gate.get("kind") == "map_health"
+                   else cert.get("reference_maps") if cert.get("kind") == "maps" else None)
             if isinstance(ref, dict) and ref:
                 self.logger.info(f"   🔒 Replay held to the recipe's recorded map gate "
                                  f"({len(ref)} reference map(s), from {side.name})")
