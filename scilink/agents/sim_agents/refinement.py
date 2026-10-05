@@ -259,6 +259,14 @@ class LocalExecutor(Executor):
                 "returncode": None,
                 "error": f"Could not launch run command: {e}",
             }
+        except BaseException as stop:
+            # a Stop or a cancel ended the run: keep what it wrote, then stop
+            if hasattr(stop, "stdout") or hasattr(stop, "stderr"):
+                (run_path / self.STDOUT_FILE).write_text(getattr(stop, "stdout", None) or "", encoding="utf-8")
+                (run_path / self.STDERR_FILE).write_text(
+                    (getattr(stop, "stderr", None) or "") + "\n[run stopped: " + str(stop) + "]\n", encoding="utf-8")
+                (run_path / self.RETURNCODE_FILE).write_text("stopped", encoding="utf-8")
+            raise
 
         (run_path / self.STDOUT_FILE).write_text(proc.stdout or "", encoding="utf-8")
         (run_path / self.STDERR_FILE).write_text(proc.stderr or "", encoding="utf-8")

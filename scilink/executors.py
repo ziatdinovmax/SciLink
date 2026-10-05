@@ -694,7 +694,16 @@ def _run_tracked(argv, *, timeout=None, input=None, text=True, cwd=None, env=Non
             raise
     finally:
         _unregister_subprocess(proc)
-    raise_if_cancelled()
+    try:
+        raise_if_cancelled()
+    except BaseException as stop:
+        # what the stopped process wrote travels with the stop, so a caller
+        # can keep it beside the run (why was this run cut off?)
+        try:
+            stop.stdout, stop.stderr, stop.returncode = out, err, proc.returncode
+        except Exception:  # noqa: BLE001 - an exception type without attributes
+            pass
+        raise
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 

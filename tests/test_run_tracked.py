@@ -194,3 +194,55 @@ def test_without_a_cancel_nothing_changes(tmp_path):
     from scilink.agents.sim_agents.refinement import LocalExecutor
     LocalExecutor(timeout=30).run({}, "echo ok", str(tmp_path / "a"))
     assert (tmp_path / "a" / LocalExecutor.STDOUT_FILE).read_text().strip() == "ok"
+
+
+@posix
+@pytest.mark.parametrize("kind", ["routed", "output"])
+def test_the_turns_own_stop_ends_the_engine_and_starts_no_next_run(tmp_path, kind):
+    """A Stop from the web UI or the shell (#760 re-review): the capture's
+    stop event is the agent thread's cancel for the turn, so the stopped
+    engine ends the turn and the next engine run never starts. What the
+    stopped run wrote is kept beside it."""
+    from scilink.agents.sim_agents.refinement import LocalExecutor
+    from scilink.server.stdout_router import RoutedCapture
+    from scilink.ui.output_capture import OutputCapture
+    from scilink.utils import log_context
+    cap = RoutedCapture(echo_console=False) if kind == "routed" else OutputCapture()
+    errors, started = [], []
+
+    def turn():
+        try:
+            with cap:
+                for k in (1, 2):
+                    started.append(k)
+                    LocalExecutor(timeout=60).run({}, f"echo partial{k}; touch run{k}.txt; sleep 8",
+                                                  str(tmp_path / f"r{k}"))
+        except BaseException as e:  # noqa: BLE001 - the Stop arrives as AgentStoppedError
+            errors.append(type(e).__name__)
+        finally:
+            errors.append("cancel left registered" if log_context.current_cancel() is not None else "clean")
+
+    t = threading.Thread(target=turn)
+    t0 = time.monotonic()
+    t.start()
+    while not (tmp_path / "r1" / "run1.txt").exists() and time.monotonic() - t0 < 10:
+        time.sleep(0.05)
+    cap.request_stop()                                               # what the Stop button calls
+    t.join(timeout=20)
+    assert not t.is_alive() and errors == ["AgentStoppedError", "clean"] and started == [1]
+    assert time.monotonic() - t0 < 6 and not (tmp_path / "r2").exists()
+    assert (tmp_path / "r1" / LocalExecutor.STDOUT_FILE).read_text().strip() == "partial1"
+    assert (tmp_path / "r1" / LocalExecutor.RETURNCODE_FILE).read_text() == "stopped"
+
+
+def test_a_capture_restores_the_cancel_it_found():
+    from scilink.ui.output_capture import OutputCapture
+    from scilink.utils import log_context
+    outer = threading.Event()
+    log_context.register_cancel(outer)
+    try:
+        with OutputCapture() as cap:
+            assert log_context.current_cancel() is cap._stop_event
+        assert log_context.current_cancel() is outer
+    finally:
+        log_context.unregister_cancel()
