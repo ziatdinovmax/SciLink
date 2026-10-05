@@ -4227,6 +4227,15 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     _base_timeout = max(int(self.executor_timeout),
                                         int(getattr(ctx, "locked_timeout_s", 0) or 0))
                     ctx.timeout_used_s = None            # per attempt: a swallowed or failed run leaves none
+                    # A ladder retry of the SAME script (a locked replay reruns
+                    # it) starts from the limit it already timed out at, with
+                    # no further escalation: the policy has already granted it
+                    # every doubling it may have (#719).
+                    _script_key = hash(code_str)
+                    _reached = getattr(ctx, "timeout_reached_s", None)
+                    if _reached is None:
+                        _reached = ctx.timeout_reached_s = {}
+                    _again = _reached.get(_script_key)
                     _run_deadline = state.get("_run_deadline")
                     _loop_t0 = getattr(ctx, "loop_started", None)
                     _loop_budget = getattr(self, "qc_time_budget_s", None)
@@ -4241,6 +4250,13 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         if _loop_budget and _loop_t0 is not None:
                             left.append(float(_loop_budget) - (_time_mod.monotonic() - _loop_t0))
                         return min(left) if left else None
+
+                    if _again:
+                        # a rerun is a retry: what it adds over the base limit
+                        # is bounded by the time left, as any retry is
+                        _r = _remaining_s()
+                        _grant = int(_again) if _r is None else min(int(_again), max(1, int(_r)))
+                        _base_timeout = max(_base_timeout, _grant)
 
                     def _attempt(_timeout_s: int):
                         _scope_g, _scope_l = dict(global_scope), {}
@@ -4283,7 +4299,9 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         timed_out=lambda out: isinstance(out, TimeoutError) and _sandbox_timeout(out),
                         logger=self.logger, remaining_s=_remaining_s,
                         # a live frame must fail fast: no escalation on the fast clock
-                        escalations=0 if state.get("_strict_replay") else None)
+                        escalations=0 if state.get("_strict_replay") or _again else None)
+                    if isinstance(result_dict, TimeoutError) and _sandbox_timeout(result_dict):
+                        _reached[_script_key] = _timeout_used
                     if isinstance(result_dict, Exception):
                         # Raised here, without this wrapper's frame, so the
                         # traceback the correction prompt shows is the script's

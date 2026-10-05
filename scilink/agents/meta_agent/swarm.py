@@ -499,6 +499,16 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
     def launch(pool, item) -> Any:
         entry = orch._open_delegation(item["mode"], item["task"], item.get("context"), None,
                                       item["label"])
+        # The fan-out's per-branch rule (#700): a datacube series or a
+        # raw-instrument container gets its multiple of the default, so the
+        # same analysis is not cancelled sooner as a swarm item than as a
+        # fan-out branch. A budget the caller set is taken as is. Resolved
+        # before the ledger lock (it reads the data), as the fan-out does.
+        item_budget = (fo.resolve_branch_budget(
+            {"data_path": str(item["data_path"]), "label": item["label"],
+             "pattern": item.get("pattern")}, budget,
+            explicit=item_time_budget_s is not None)
+            if item["mode"] == "analysis" and item.get("data_path") else budget)
         with orch._fanout_lock:          # new keys on a live entry: see _ledger_snapshot
             entry["swarm"] = swarm_id
             entry["parallel_group"] = swarm_id
@@ -508,7 +518,7 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
                 # As _delegate stamps it: a later fuse_delegations re-runs
                 # its complementarity gate from the entries' data paths.
                 entry["data_path"] = str(item["data_path"])
-            entry["_budget_s"] = budget
+            entry["_budget_s"] = item_budget
             # The item's own inputs, so a re-run (retract_finding's
             # rerun_items) starts from what this one had.
             if item.get("reads_board") is not None:

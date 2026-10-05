@@ -278,6 +278,8 @@ kept only for sibling datasets that cannot be staged as one directory. A
 fan-out branch that IS a datacube-series directory gets
 `FANOUT_SERIES_BUDGET_FACTOR` × the default wall-clock budget (the raw-
 instrument rule's shape), because the series mode is a multiple of one run.
+A swarm analysis item with a `data_path` gets the same per-branch budget
+(`resolve_branch_budget`); a caller's `item_time_budget_s` is taken as is.
 Under AUTOPILOT delegation the regime-plan gate reaches the user through the
 normal feedback channel, like the specialists' other plan gates.
 

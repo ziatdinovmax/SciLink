@@ -254,6 +254,33 @@ def test_an_item_over_its_budget_is_cancelled(meta, monkeypatch, capsys):
     assert "swarm item 'slow one' exceeded its wall-clock budget" in capsys.readouterr().out
 
 
+def test_a_datacube_series_item_gets_the_fan_out_branchs_budget(meta, monkeypatch, tmp_path):
+    """#700: a swarm item took a flat budget where the same analysis as a
+    fan-out branch gets its multiple (2x for a datacube series). Real
+    mechanism: the same slow worker on a cube-series directory and on a single
+    file, under a default budget it outruns and a doubled one it does not."""
+    import numpy as np
+    cubes = tmp_path / "cubes"
+    cubes.mkdir()
+    for n in "AB":
+        np.save(cubes / f"{n}.npy", np.zeros((4, 4, 8)))
+    single = tmp_path / "single.npy"
+    np.save(single, np.zeros((4, 4, 8)))
+    monkeypatch.setattr(swarm, "SWARM_ITEM_TIME_BUDGET_S", 0.6)
+    _workers(monkeypatch, lambda task: {"seconds": 0.9})
+    items = [{"mode": "analysis", "task": "series", "label": "cube series", "data_path": str(cubes)},
+             {"mode": "analysis", "task": "single", "label": "one cube", "data_path": str(single)}]
+    res = json.loads(swarm.run_swarm(meta, items))
+    assert {r["label"]: r["status"] for r in res["results"]} == {"cube series": "success", "one cube": "error"}
+    # a budget the caller gives is taken as is, for every item
+    res = json.loads(swarm.run_swarm(meta, items, item_time_budget_s=0.6))
+    assert {r["label"]: r["status"] for r in res["results"]} == {"cube series": "error", "one cube": "error"}
+    # the item's pattern scopes the folder, as it does for the memory estimate:
+    # one matching cube is not a series, so no multiple
+    res = json.loads(swarm.run_swarm(meta, [dict(items[0], pattern="A.npy"), items[1]]))
+    assert {r["label"]: r["status"] for r in res["results"]} == {"cube series": "error", "one cube": "error"}
+
+
 def test_usage_is_charged_to_each_item_under_the_coordinators_session(meta, monkeypatch, tmp_path):
     _workers(monkeypatch, lambda task: {"llm": 100})
     led = UsageLedger(tmp_path / "usage.jsonl")
