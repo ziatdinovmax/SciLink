@@ -1,3 +1,4 @@
+from scilink.executors import run_engine  # stoppable, whole-tree kill (#685)
 import os
 import re
 import logging
@@ -870,7 +871,7 @@ Provide a brief summary of what the results mean and any actions needed.
         output_file = os.path.join(self.working_dir, "cleaned.pdb")
         cmd = ["pdb4amber", "-i", pdb_file, "-o", output_file]
         try:
-            subprocess.run(cmd, capture_output=True, text=True,
+            run_engine(cmd, capture_output=True, text=True,
                            cwd=self.working_dir, timeout=120)
             if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
                 return output_file
@@ -887,7 +888,7 @@ Provide a brief summary of what the results mean and any actions needed.
             "-o", output_mol2, "-fo", "mol2", "-c", method,
             "-s", "2", "-at", gaff, "-nc", str(charge), "-m", "1", "-pf", "y",
         ]
-        proc = subprocess.run(cmd, capture_output=True, text=True,
+        proc = run_engine(cmd, capture_output=True, text=True,
                               cwd=self.working_dir, timeout=600)
         if proc.returncode != 0 or not os.path.exists(output_mol2):
             raise RuntimeError(f"antechamber failed: {proc.stderr[-500:]}")
@@ -898,7 +899,7 @@ Provide a brief summary of what the results mean and any actions needed.
         frcmod = os.path.join(self.working_dir, f"{prefix}.frcmod")
         s = {"gaff": "1", "gaff2": "2"}.get(gaff, "2")
         cmd = ["parmchk2", "-i", mol2_file, "-f", "mol2", "-o", frcmod, "-s", s]
-        proc = subprocess.run(cmd, capture_output=True, text=True,
+        proc = run_engine(cmd, capture_output=True, text=True,
                               cwd=self.working_dir, timeout=60)
         if proc.returncode != 0 or not os.path.exists(frcmod):
             raise RuntimeError(f"parmchk2 failed: {proc.stderr[-300:]}")
@@ -961,7 +962,7 @@ Provide a brief summary of what the results mean and any actions needed.
 
     def _run_tleap_inline(self, script_file):
         cmd = ["tleap", "-f", script_file]
-        subprocess.run(cmd, capture_output=True, text=True,
+        run_engine(cmd, capture_output=True, text=True,
                        cwd=self.working_dir, timeout=300)
         log_path = os.path.join(self.working_dir, "leap.log")
         if os.path.exists(log_path):

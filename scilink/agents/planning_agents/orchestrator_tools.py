@@ -3,6 +3,7 @@ Tool definitions and schemas for the PlanningOrchestratorAgent.
 Supports both Google Gemini (function objects) and OpenAI (JSON schemas).
 """
 
+from ...executors import run_generated_script  # model-written code runs the executor's way (#685)
 from datetime import datetime
 import json
 from scilink.utils import path_fence as _path_fence
@@ -7392,10 +7393,7 @@ class OrchestratorTools:
                 print(f"    - Running: {script_path.name} (attempt {attempt + 1})")
 
                 try:
-                    result = subprocess.run(
-                        ["python", str(script_path)],
-                        capture_output=True, text=True, timeout=120,
-                    )
+                    result = run_generated_script(script_path, timeout=120)
                     if result.returncode != 0:
                         last_error = result.stderr.strip()[-500:]
                         continue
@@ -7449,6 +7447,13 @@ class OrchestratorTools:
             import subprocess
 
             print(f"  ⚡ Tool: Querying knowledge data: '{query}'")
+            # the query runs model-written code: the same consent every other
+            # code-generation path asks for (#685)
+            from ...executors import require_sandbox_approval
+            if not require_sandbox_approval(context="query_knowledge_data (a model-written query script)"):
+                return json.dumps({"status": "error", "message": (
+                    "Sandbox approval declined — the query script was not run. Set UNSAFE_EXECUTION_OK=true "
+                    "or run inside Docker / VM / Colab to enable code execution.")})
 
             # 1. Discover queryable files / directory databases. Informational
             #    only — an explicit `file_name` path is resolved directly below,
@@ -7545,10 +7550,7 @@ class OrchestratorTools:
                 print(f"    - Running: {script_path.name} (attempt {attempt + 1})")
 
                 try:
-                    result = subprocess.run(
-                        ["python", str(script_path)],
-                        capture_output=True, text=True, timeout=60,
-                    )
+                    result = run_generated_script(script_path, timeout=60)
                     if result.returncode != 0:
                         last_error = result.stderr.strip()[-500:]
                         continue
@@ -7804,10 +7806,7 @@ class OrchestratorTools:
                 print(f"    - Running: {script_path.name} (attempt {attempt + 1}/{max_retries})")
 
                 try:
-                    proc = subprocess.run(
-                        ["python", str(script_path)],
-                        capture_output=True, text=True, timeout=120,
-                    )
+                    proc = run_generated_script(script_path, timeout=120)
                     if proc.returncode != 0:
                         last_error = proc.stderr.strip()[-800:]
                         continue

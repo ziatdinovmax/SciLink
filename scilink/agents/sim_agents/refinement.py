@@ -29,6 +29,7 @@ flow through the same code; the quality check fires per phase.
 """
 
 from __future__ import annotations
+from scilink.executors import run_engine  # stoppable, whole-tree kill (#685)
 
 import logging
 import os
@@ -230,7 +231,7 @@ class LocalExecutor(Executor):
 
         logger.info("LocalExecutor: running %r in %s", run_command, run_dir)
         try:
-            proc = subprocess.run(
+            proc = run_engine(
                 run_command,
                 shell=True,
                 cwd=str(run_path),

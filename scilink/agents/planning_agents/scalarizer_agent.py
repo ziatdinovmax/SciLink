@@ -12,7 +12,7 @@ from ...auth import get_internal_proxy_key
 from ...hitl import request_human_feedback
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
-from ...executors import require_sandbox_approval
+from ...executors import require_sandbox_approval, run_generated_script
 from scilink.knowledge import parse_json_from_response
 from .instruct import SCALARIZER_PROMPT, SCALARIZER_REFLECTION_PROMPT
 
@@ -173,14 +173,11 @@ class ScalarizerAgent(BaseAgent):
             }
 
         # Construct command with arguments (if any)
-        cmd = ["python", str(script_path)]
-        if args:
-            cmd.extend(args)
         try:
-            process = subprocess.run(
-                cmd,
-                capture_output=True, text=True, timeout=45
-            )
+            # the analysis executor's way (#685): SciLink's own interpreter,
+            # no provider keys in the script's environment, the sandbox
+            # limits, and a Stop or a timeout ends the whole tree
+            process = run_generated_script(script_path, args=args, timeout=45)
             # Parse STDOUT for JSON
             json_match = re.search(r'\{.*\}', process.stdout.strip(), re.DOTALL)
             if json_match:

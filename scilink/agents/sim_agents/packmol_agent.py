@@ -1,3 +1,4 @@
+from scilink.executors import run_engine  # stoppable, whole-tree kill (#685)
 import os
 import json
 import logging
@@ -456,7 +457,7 @@ class PackmolGeneratorAgent:
                 command = f"packmol < {os.path.basename(script_path)}"
                 self.logger.info(f"Running command: {command}")
                 
-                result = subprocess.run(
+                result = run_engine(
                     command, shell=True, capture_output=True, text=True,
                     cwd=self.working_dir, timeout=300
                 )

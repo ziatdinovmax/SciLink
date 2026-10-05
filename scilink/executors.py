@@ -659,6 +659,65 @@ def _sandbox_preexec():
     return apply
 
 
+def _run_tracked(argv, *, timeout=None, input=None, text=True, cwd=None, env=None,
+                 shell=False, preexec=None, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                 stdin=None):
+    """``subprocess.run``'s shape for a process SciLink must be able to end:
+    its own session and process group (a Job on Windows), registered for the
+    user's Stop, and its whole tree killed on a timeout or an interrupt, so a
+    grandchild (an MPI rank, a solver's helper) never outlives it (#685).
+    Returns a ``CompletedProcess``; raises ``subprocess.TimeoutExpired`` on a
+    timeout, as ``subprocess.run`` does."""
+    proc = subprocess.Popen(argv, stdin=subprocess.PIPE if input is not None else stdin,
+                            stdout=stdout, stderr=stderr, text=text, cwd=cwd, env=env, shell=shell,
+                            preexec_fn=preexec, start_new_session=_NEW_SESSION)
+    _mark_own_group(proc)
+    _register_subprocess(proc)
+    try:
+        try:
+            out, err = proc.communicate(input=input, timeout=timeout)
+            _end_leftover_group(proc)
+        except subprocess.TimeoutExpired:
+            _kill_process_tree(proc, grace=0.5)
+            raise subprocess.TimeoutExpired(argv, timeout)
+        except BaseException:
+            _kill_process_tree(proc, grace=0.5)
+            raise
+    finally:
+        _unregister_subprocess(proc)
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
+def run_generated_script(script_path, *, timeout=None, args=None, cwd=None, extra_env=None):
+    """Run a model-written Python script the way the analysis executor does
+    (#685): ``sys.executable`` (never a ``python`` found on PATH), the
+    sandboxed environment (no provider keys), the sandbox resource limits,
+    Stop registration and a whole-tree kill. The caller has asked for sandbox
+    consent. ``cwd`` defaults to the caller's working directory, so relative
+    paths the script was given still resolve."""
+    argv = [sys.executable, str(script_path), *[str(a) for a in (args or [])]]
+    return _run_tracked(argv, timeout=timeout, cwd=cwd, env=sandbox_env(extra_env),
+                        preexec=_sandbox_preexec())
+
+
+def run_engine(cmd, *, timeout=None, cwd=None, env=None, shell=False, input=None, text=None,
+               capture_output=False, check=False, stdin=None, stdout=None, stderr=None, **_ignored):
+    """Run an external engine (LAMMPS, AMBER tools, packmol, a training run)
+    so the user's Stop reaches it and a timeout ends its whole tree (#685).
+    A drop-in for ``subprocess.run`` at these call sites: the same keywords
+    (``capture_output``, ``check``, ``stdin``, ``stdout``, ``stderr``,
+    ``text``, ``input``), the same ``CompletedProcess`` and the same
+    ``TimeoutExpired`` / ``CalledProcessError``. Engines keep the parent
+    environment (licences, PATH); the sandbox allowlist is for generated code."""
+    if capture_output:
+        stdout = stderr = subprocess.PIPE
+    proc = _run_tracked(cmd, timeout=timeout, cwd=cwd, env=env, shell=shell, input=input, text=bool(text),
+                        stdout=stdout, stderr=stderr, stdin=stdin)
+    if check and proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, proc.stdout, proc.stderr)
+    return proc
+
+
 class ScriptExecutor:
     """
     Executes Python scripts for scientific analysis.
