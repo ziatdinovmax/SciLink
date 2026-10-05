@@ -456,3 +456,9 @@ def run_derivation(*, model, executor, sources: list[str], task: str, out_dir: P
             "message": f"derivation failed after {max_attempts} attempt(s): "
                        f"{last.get('error', '?')}" + (f" — {last['detail']}" if last.get("detail") else ""),
             "attempts": max_attempts, "attempt_log": attempts}
+
+
+# Measured inputs only (#757 review): a derived artifact is computed from the
+# run's saved outputs, never from values the script constructs.
+from ._input_integrity import CODEGEN_PRINCIPLE as _CODEGEN_P, with_principle as _with_principle  # noqa: E402
+DERIVE_PROMPT = _with_principle(DERIVE_PROMPT, _CODEGEN_P)

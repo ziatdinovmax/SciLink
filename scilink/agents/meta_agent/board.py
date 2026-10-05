@@ -690,9 +690,14 @@ def _recipe_specs(aid: str, rec: Dict[str, Any]) -> List[Dict[str, Any]]:
     script = _recipe_script(rec.get("output_directory"), None)
     if script is not None:
         gate = _run_gate(rec.get("output_directory"))
+        from ..exp_agents._joint import replay_refusal
+        joint = bool(replay_refusal(rec.get("output_directory")))
         out.append({"kind": "recipe",
                     "payload": {"analysis_id": aid, "agent": rec.get("agent_name"),
                                 **({"quality_gate": gate} if gate else {}),
+                                # a joint run's script reads its own run's files by path:
+                                # the sidecar says so, and no replay of the copy runs (#757)
+                                **({"analysis_shape": "joint"} if joint else {}),
                                 "note": "the run's approved script; a copy the board owns"},
                     "status": "verified" if run_verified else "provisional",
                     "evidence": {"analysis_ids": [aid],
@@ -938,8 +943,9 @@ def _materialize_recipe(board: Board, entry: Dict[str, Any], spec: Dict[str, Any
     # the copy's sidecar: the gate the recipe was approved under and what it
     # is, which a replay of the copy reads (a script file alone lost them —
     # a figure-of-merit recipe replayed under the R² default, #717)
-    side = {k: spec["payload"][k] for k in ("quality_gate", "model", "regime", "unit", "analysis_id") if spec["payload"].get(k)}
-    if side.get("quality_gate"):
+    side = {k: spec["payload"][k] for k in ("quality_gate", "model", "regime", "unit", "analysis_id", "analysis_shape")
+            if spec["payload"].get(k)}
+    if side.get("quality_gate") or side.get("analysis_shape"):
         try:
             _write_once(folder, f"{dest.stem}.recipe.json", json.dumps(side, indent=1, default=str))
         except Exception:  # noqa: BLE001 - the script copy stands without its sidecar

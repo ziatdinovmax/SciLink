@@ -1101,6 +1101,8 @@ def build_regime_plan_prompt(state: Dict[str, Any], scout: Dict[str, Any]) -> li
     _append_prior_knowledge_context(prompt, state)
     prompt.append(HYPERSPECTRAL_SERIES_REGIME_SUPPLEMENT.format(
         num_datasets=n, num_datasets_minus_1=n - 1))
+    from .._joint import PLANNER_RULE
+    prompt.append(PLANNER_RULE + "\n")
     return prompt
 
 
@@ -1152,8 +1154,12 @@ def extract_series_plan(result: Any, n: int, reduction: Optional[dict],
 
 
 def render_regime_plan(plan: Optional[dict], series_metadata: dict,
-                       scout: Optional[dict] = None, n: int = 0) -> str:
-    """Console rendering of a regime plan for the human gate."""
+                       scout: Optional[dict] = None, n: int = 0, shape: Optional[str] = None) -> str:
+    """Console rendering of a regime plan for the human gate; ``shape`` is
+    the planner's declared analysis shape (#757)."""
+    if shape == "joint":
+        from .._joint import shape_text
+        return "\n".join(["", "=" * 60, "📋 PROPOSED SERIES PLAN", "=" * 60, shape_text(shape, n), ""])
     meta = series_metadata or {}
     values = meta.get("values") if isinstance(meta.get("values"), list) else []
     var, unit = meta.get("variable") or "index", meta.get("unit") or ""
@@ -1186,10 +1192,14 @@ def render_regime_plan(plan: Optional[dict], series_metadata: dict,
 
 
 def regime_plan_subject(plan: Optional[dict], series_metadata: dict,
-                        scout: Optional[dict] = None, n: int = 0) -> dict:
+                        scout: Optional[dict] = None, n: int = 0, shape: Optional[str] = None) -> dict:
     """What the regime-plan gate shows, as subject blocks (scilink.hitl):
-    the sections ``render_regime_plan`` prints, from the same plan."""
+    the sections ``render_regime_plan`` prints, from the same plan. A joint
+    plan has no regimes: the gate shows the shape, not the one-regime default."""
     from ....hitl import make_subject, subject_block as block
+    from .._joint import JOINT, shape_blocks
+    if shape == JOINT:
+        return make_subject("📋 Proposed series plan", shape_blocks(shape, n))
 
     meta = series_metadata or {}
     values = meta.get("values") if isinstance(meta.get("values"), list) else []
@@ -1245,14 +1255,19 @@ def plan_series_regimes(model, generation_config, safety_settings, parse_fn: Cal
     try:
         prompt = build_regime_plan_prompt(state, scout)
         if feedback:
+            from .._joint import JOINT, revision_note
+            _joint_now = state.get("analysis_shape") == JOINT
             prev = (json.dumps({k: previous_plan.get(k) for k in ("rationale", "regimes", "transition_points")},
                                indent=1, default=str)
-                    if previous_plan else "one regime containing every dataset")
+                    if previous_plan else
+                    ("one JOINT analysis over every dataset (no regimes)" if _joint_now
+                     else "one regime containing every dataset"))
             prompt.append(
                 "\n## Analyst feedback on the previous plan\n"
                 f"Previous plan:\n{prev}\n\nThe analyst says: {feedback}\n"
                 "Revise the plan to honour this feedback (it overrides your own reading "
-                "of the evidence where they conflict) and return the full JSON again.")
+                "of the evidence where they conflict) and return the full JSON again."
+                + (revision_note(JOINT) if _joint_now else ""))
         response = model.generate_content(
             contents=prompt, generation_config=generation_config,
             safety_settings=safety_settings)
@@ -1275,6 +1290,11 @@ def plan_series_regimes(model, generation_config, safety_settings, parse_fn: Cal
                 return None
         if result.get("observations"):
             logger.info(f"  Planner observations: {str(result['observations'])[:400]}")
+        # the series' shape (#754), on the planning state the driver reads;
+        # a revision that omits it keeps the first
+        if "analysis_shape" in result or "analysis_shape" in (result.get("series_analysis_plan") or {}):
+            from .._joint import analysis_shape_of
+            state["analysis_shape"] = analysis_shape_of(result)
         plan = extract_series_plan(result, n, scout.get("reduction"), logger)
         if plan:
             for r in plan["regimes"]:

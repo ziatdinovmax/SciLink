@@ -164,6 +164,36 @@ an image strict replay (which need the run's config, fingerprint or reference
 features) refuse it. The pick and its reason are `reuse_validity.source`
 (`_verification_record.prior_recipe_scripts`).
 
+**A series has a second shape: joint** (#754). Whether a set of files is a
+series used to be purely structural (two or more files, one unit each), so a
+method whose result exists only over the set was split into units that could
+not compute it — and a unit script constructed the measurements it lacked,
+measured its own assumption back, and passed every gate. The series planner
+of each agent now declares `analysis_shape`: `per_unit` (the default, the
+series mode above, byte-for-byte) or `joint`, and a joint plan is run as ONE
+analysis whose inputs are every unit, staged with a manifest
+(`exp_agents/_joint.py`: the planner rule, the declaration, staging and the
+prompt text are shared; each agent supplies only how a unit becomes an
+array). A joint run's script reads its own run's measurements by path, so it
+is a record, not a recipe: the run's `analysis_results.json` (and a board
+copy's sidecar) carries `analysis_shape: joint`, every reuse reader refuses it
+with the reason through one check (`_joint.replay_refusal`, consulted by
+`prior_recipe_scripts` and the hyperspectral records loader), and it is never
+banked — until a replay over a new set of measurements is designed. The live
+loop's `setup()` refuses a joint reference outright, and the fan-out's donor
+picker never takes one. A board copy separated from its sidecar carries no
+marker and cannot be recognised as joint: keep the two together. Every plan
+gate shows the shape (a notice when joint), so Enter accepts what was shown.
+**The measured inputs are the only inputs** (`_input_integrity.py`):
+one principle per role — code generation (never construct an input the
+method needs; return null with the reason), plan conformance (constructing
+inputs is never a justified deviation), the verifier that drives retries (a
+true "the data cannot support this" is the correct result, never fixed by
+different input data) and the best-of-N judge (an honest null ranks above a
+number resting on constructed data) — imported by all three agents' prompts.
+A deterministic detector of constructed inputs waits for a measured corpus: a
+word scan cannot tell construction from an axis built from a stated range.
+
 The hyperspectral instantiation differs in mechanics, not shape: the single-
 cube pipeline is bound to one output directory (decomposition, dynamic-analysis
 records, report), so the series driver (`_analyze_series`) runs **one child

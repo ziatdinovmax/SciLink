@@ -647,8 +647,24 @@ def _auxiliary_display_items(state: dict) -> list:
     return [it for it in (state.get("auxiliary_items") or []) if it.get("plot_bytes")]
 
 
+
+def _joint_conformance_note(state: dict) -> str:
+    """A joint run's contract for the conformance check (#754): reading every
+    listed measurement is the plan, not a breach of the data-loading rules."""
+    if not state.get("joint_manifest"):
+        return ""
+    from .._joint import joint_contract_note
+    return joint_contract_note(state["joint_manifest"], control_name=(state.get("joint_control") or None))
+
 def _append_auxiliary_context(prompt: list, state: dict) -> None:
-    """Append auxiliary reference dataset(s) to an LLM prompt if available."""
+    """Append auxiliary reference dataset(s) to an LLM prompt if available,
+    and a joint analysis's note on its inputs (#754)."""
+    if state.get("joint_manifest"):
+        from .._joint import joint_units_planning_text
+        _note = joint_units_planning_text(state["joint_manifest"],
+                                          control_name=(state.get("joint_control") or None))
+        if _note:
+            prompt.append(_note)
     items = _auxiliary_display_items(state)
     if not items:
         return
@@ -2446,6 +2462,10 @@ def fitting_plan_subject(state: dict) -> dict:
     if strategy:
         blocks.append(steps_block("⚙️ Fitting strategy", str(strategy)))
 
+    if not is_single:
+        # the series' shape, before its regimes (#757)
+        from .._joint import shape_blocks
+        blocks += shape_blocks(state.get("analysis_shape"), num)
     series_plan = state.get("series_analysis_plan") or {}
     regimes = series_plan.get("regimes") or []
     if regimes and not is_single:
@@ -2537,6 +2557,9 @@ class CurveFittingPlanningController:
         mode_str = "SINGLE SPECTRUM" if is_single else f"SERIES ({num_spectra} spectra)"
         print(f"📋 PROPOSED FITTING PLAN - {mode_str}")
         print("=" * 60)
+        if not is_single:
+            from .._joint import shape_text
+            print(shape_text(state.get("analysis_shape"), num_spectra))
         
         if state.get("observations"):
             print(f"\n🔍 Observations:\n   {state['observations']}")
@@ -3018,9 +3041,17 @@ class CurveFittingPlanningController:
             num_spectra=num_spectra,
             num_spectra_minus_1=num_spectra - 1,
         ))
+        from .._joint import PLANNER_RULE
+        prompt.append(PLANNER_RULE + "\n")
 
     def _extract_series_plan(self, state: dict, result: dict) -> None:
         """Extract and validate series_analysis_plan from LLM response."""
+        if not state.get("is_single_spectrum", True) and isinstance(result, dict) and (
+                "analysis_shape" in result
+                or "analysis_shape" in (result.get("series_analysis_plan") or {})):
+            # the series' shape (#754): a revision that omits it keeps the first
+            from .._joint import analysis_shape_of
+            state["analysis_shape"] = analysis_shape_of(result)
         series_plan = result.get("series_analysis_plan")
         if not isinstance(series_plan, dict) or state.get("is_single_spectrum", True):
             state["series_analysis_plan"] = None
@@ -3150,6 +3181,7 @@ class CurveFittingPlanningController:
                 f" — {state.get('column_mapping_note', '')}"
             )
 
+        from .._joint import revision_note
         prompt = [
             self.instructions,
             "\n## Data Plot",
@@ -3158,6 +3190,8 @@ class CurveFittingPlanningController:
             "\n## Metadata\n" + json.dumps(state.get("system_info", {}), indent=2),
             f"\n## Current Plan\n{current_plan}",
             f"\n## User Feedback\nAdjust the plan based on this feedback: \"{feedback}\"",
+            # a joint plan is named, so feedback can undo it (#757)
+            *[n for n in (revision_note(state.get("analysis_shape")),) if n],
         ]
 
         _append_column_structure(prompt, state)
@@ -3514,6 +3548,10 @@ Examine each fit carefully. Look at:
 IMPORTANT: If one fit is clearly better than others (better residuals, more physical parameters),
 select it even if it's not perfect. Only return acceptable=false if ALL fits are fundamentally flawed.
 '''
+    # Measured inputs only (#754)
+    from .._input_integrity import JUDGE_PRINCIPLE as _P_JUDGE_PROMPT, with_principle as _wp_JUDGE_PROMPT
+    JUDGE_PROMPT = _wp_JUDGE_PROMPT(JUDGE_PROMPT, _P_JUDGE_PROMPT)
+
 
     BEST_OF_N_JUDGE_PROMPT = '''You are a scientific data fitting expert selecting the best result among {num_candidates} independent fitting runs of the SAME data under the SAME fitting plan.
 
@@ -3548,6 +3586,10 @@ justify via residual structure.
     "reasoning": "Brief comparison: why this run's fit is best and what the others got wrong"
 }}
 '''
+    # Measured inputs only (#754)
+    from .._input_integrity import JUDGE_PRINCIPLE as _P_BEST_OF_N_JUDGE_PROMPT, with_principle as _wp_BEST_OF_N_JUDGE_PROMPT
+    BEST_OF_N_JUDGE_PROMPT = _wp_BEST_OF_N_JUDGE_PROMPT(BEST_OF_N_JUDGE_PROMPT, _P_BEST_OF_N_JUDGE_PROMPT)
+
 
     HUMAN_FEEDBACK_PROMPT = '''## Fit Quality Issue
 
@@ -3768,6 +3810,10 @@ Your guidance: '''
         # Phase 2: extra columns from the same file (e.g. an uncertainty column
         # the planner flagged), staged per-spectrum as canonical operand files.
         auxiliary_block += extra_operand_block
+        if state.get("joint_manifest"):
+            from .._joint import joint_units_block
+            auxiliary_block += joint_units_block(state["joint_manifest"],
+                                                 control_name=(state.get("joint_control") or None))
 
         prompt = self.script_instructions.format(
             analysis_approach=config.get("analysis_approach", "Fit the data"),
@@ -3914,6 +3960,9 @@ Your guidance: '''
                 prompt = prompt.replace(_marker, _guidance + "\n" + _marker, 1)
             else:
                 prompt += _guidance
+        # A joint run's inputs stay the contract through a correction (#754).
+        from .._joint import with_joint_note
+        prompt = with_joint_note(prompt, state)
         # Last-resort timeout escalation (set transiently by
         # _correct_script_with_timeout_escalation; absent otherwise).
         # Injected BEFORE the response-format footer — appended after it,
@@ -3997,7 +4046,7 @@ Your guidance: '''
                 config.get("parameters_to_extract", [])
             ),
             fitting_strategy=config.get("fitting_strategy", ""),
-            skill_rules=skill_rules_text,
+            skill_rules=skill_rules_text + _joint_conformance_note(state),
             script=script,
         )
 
@@ -5055,6 +5104,8 @@ Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2
             except Exception:
                 pass
         prompt_parts.append("\n\n" + VERIFIER_TOOL_SCRUTINY_PRINCIPLE)
+        from .._input_integrity import VERIFIER_PRINCIPLE
+        prompt_parts.append("\n\n" + VERIFIER_PRINCIPLE)
         from .._qc_profile import verification_addendum
         if verification_addendum(state):
             prompt_parts.append(verification_addendum(state))
@@ -9298,6 +9349,10 @@ Return JSON with:
     "script": "full python script - NO plt.show()"
 }}
 '''
+    # Measured inputs only (#757 review): the trend script computes the set-level answer
+    from .._input_integrity import CODEGEN_PRINCIPLE as _P_TREND, with_principle as _wp_TREND
+    TREND_ANALYSIS_INSTRUCTIONS = _wp_TREND(TREND_ANALYSIS_INSTRUCTIONS, _P_TREND)
+
 
     def __init__(self, model, logger: logging.Logger, generation_config, safety_settings,
                  parse_fn: Callable, executor: Any, output_dir: str, max_corrections: int = 3):
@@ -9385,6 +9440,8 @@ Return JSON with:
 
 Return JSON with: {{"diagnosis": "...", "script": "corrected script"}}
 """
+        from .._input_integrity import CODEGEN_PRINCIPLE, with_principle
+        prompt = with_principle(prompt, CODEGEN_PRINCIPLE)
         
         try:
             response = self.model.generate_content(contents=[prompt], generation_config=self.generation_config, safety_settings=self.safety_settings)

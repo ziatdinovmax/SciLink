@@ -4163,3 +4163,21 @@ You have: analysis visualization, extracted features, sample metadata.
 ```
 "target" makes a recommendation directly actionable by an instrument; set it to null when the recommendation is not a direct acquisition (e.g. sample preparation or a different technique).
 """
+
+
+# Measured inputs only (#754): one principle per role, shared by the three
+# analysis agents (see _input_integrity). Attached here, after every template
+# is defined, so each caller of these constants gets it.
+from ._input_integrity import (CODEGEN_PRINCIPLE as _CODEGEN_P, CONFORMANCE_PRINCIPLE as _CONFORM_P,
+                               JUDGE_PRINCIPLE as _JUDGE_P, VERIFIER_PRINCIPLE as _VERIFY_P,
+                               with_principle as _with_principle)
+FITTING_SCRIPT_INSTRUCTIONS = _with_principle(FITTING_SCRIPT_INSTRUCTIONS, _CODEGEN_P)
+FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = _with_principle(FITTING_SCRIPT_CORRECTION_INSTRUCTIONS, _CODEGEN_P)
+BANK_EDIT_ADAPT_INSTRUCTIONS = _with_principle(BANK_EDIT_ADAPT_INSTRUCTIONS, _CODEGEN_P)
+IMAGE_ANALYSIS_SCRIPT_INSTRUCTIONS = _with_principle(IMAGE_ANALYSIS_SCRIPT_INSTRUCTIONS, _CODEGEN_P)
+IMAGE_ANALYSIS_SCRIPT_REFINEMENT_PROMPT = _with_principle(IMAGE_ANALYSIS_SCRIPT_REFINEMENT_PROMPT, _CODEGEN_P)
+IMAGE_ANALYSIS_SCRIPT_CORRECTION_INSTRUCTIONS = _with_principle(IMAGE_ANALYSIS_SCRIPT_CORRECTION_INSTRUCTIONS, _CODEGEN_P)
+PLAN_CONFORMANCE_CHECK_INSTRUCTIONS = _with_principle(PLAN_CONFORMANCE_CHECK_INSTRUCTIONS, _CONFORM_P)
+IMAGE_ANALYSIS_PLAN_CONFORMANCE_CHECK_INSTRUCTIONS = _with_principle(
+    IMAGE_ANALYSIS_PLAN_CONFORMANCE_CHECK_INSTRUCTIONS, _CONFORM_P)
+IMAGE_ANALYSIS_BEST_OF_N_SELECTION_PROMPT = _with_principle(IMAGE_ANALYSIS_BEST_OF_N_SELECTION_PROMPT, _JUDGE_P)

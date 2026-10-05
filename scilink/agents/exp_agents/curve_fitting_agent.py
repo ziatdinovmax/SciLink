@@ -509,6 +509,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # With custom skill file
             result = agent.analyze("data.csv", skill="/path/to/my_skill.md")
         """
+        # The call as made, for a joint analysis's re-entry (#754); the joint
+        # run's own manifest arrives internally and is never forwarded.
+        _joint_manifest = kwargs.pop("_joint_manifest", None)
+        _call_args = {k: v for k, v in locals().items()
+                      if k not in ("self", "kwargs", "_joint_manifest")}
+        _call_args.update(kwargs)
         # Use provided overrides or fall back to instance defaults
         effective_r2_threshold = r2_threshold if r2_threshold is not None else self.r2_threshold
         effective_max_retries = max_model_retries if max_model_retries is not None else self.max_model_retries
@@ -923,6 +929,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # System info
             "system_info": handled_system_info,
             "series_metadata": series_metadata or {},
+            # A joint analysis (#754): every unit is an input of this one run.
+            "joint_manifest": str(_joint_manifest) if _joint_manifest else None,
+            "joint_control": (series_metadata or {}).get("variable") if _joint_manifest else None,
             "analysis_hints": hints,
             "analysis_objective": objective,
             "task_mode": effective_task_mode,
@@ -1119,6 +1128,11 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 if state.get("error_dict"):
                     self.logger.error(f"Pipeline failed at {step_name}: {state['error_dict']}")
                     break
+                if (state.get("analysis_shape") == "joint" and not state.get("is_single_spectrum", True)
+                        and not _joint_manifest):
+                    # The planner says the method needs every unit at once
+                    # (#754): one analysis over all of them, not a series.
+                    return self._run_joint(state, _call_args)
                     
             except Exception as e:
                 self.logger.error(f"Pipeline step {step_name} raised exception: {e}")
@@ -1193,6 +1207,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # carries staged_solutions / banked_scripts, matching the returned
         # dict (they were previously written before the hooks and silently
         # missing from the file).
+        if _joint_manifest:
+            # on the run's record, which every reuse reader consults (#757)
+            final_results["analysis_shape"] = "joint"
         results_path = self.output_dir / "analysis_results.json"
         with open(results_path, 'w', encoding="utf-8") as f:
             serializable = self._make_serializable(final_results)
@@ -1295,6 +1312,48 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         except Exception as e:  # noqa: BLE001 - normalization is a fallback, never fatal
             self.logger.warning(f"  File normalization failed: {e}")
         return None
+
+    def _run_joint(self, state: dict, call_args: dict) -> Dict[str, Any]:
+        """A series whose plan is ``joint`` (#754): stage every unit as an
+        input of ONE analysis and run it on the first unit, re-entering
+        ``analyze`` with the same arguments. The result is that one analysis,
+        stamped ``analysis_shape: joint`` with the units it read."""
+        from ._joint import JOINT, stage_joint_units
+        paths = list(state.get("spectrum_paths") or [])
+        stack = state.get("spectrum_stack")
+        n = len(paths) if paths else (len(stack) if stack is not None else 0)
+        meta = state.get("series_metadata") or {}
+        values = meta.get("values") or []
+        units = []
+        for i in range(n):
+            u = {"path": paths[i] if i < len(paths) else f"unit_{i}",
+                 "control_value": values[i] if i < len(values) else None}
+            units.append(u)
+
+        def to_array(src: str):
+            if stack is not None and not paths:
+                return stack[int(src.rsplit("_", 1)[-1])]
+            return load_curve_data(src, system_info=state.get("system_info"))
+        manifest = stage_joint_units(units, Path(self.output_dir) / "joint_inputs", to_array=to_array)
+        self.logger.info(f"🔗 Joint analysis: the plan needs all {n} measurements in one analysis; "
+                         f"running it once over every unit (manifest {manifest}).")
+        args = dict(call_args)
+        args["data"] = paths[0] if paths else np.asarray(stack[0])
+        args["_joint_manifest"] = str(manifest)
+        # the joint run uses the skills the series run chose, not a second pick
+        if not args.get("skill"):
+            _names = [s.get("name") for s in (state.get("skills_loaded") or [])
+                      if isinstance(s, dict) and s.get("name")]
+            if _names:
+                args["skill"] = _names if len(_names) > 1 else _names[0]
+        result = self.analyze(**args)
+        if isinstance(result, dict):
+            result["analysis_shape"] = JOINT
+            result["joint_units"] = [{"source": u["path"], "control_value": u.get("control_value")}
+                                     for u in units]
+            from ._joint import redirect_warning
+            result.setdefault("warnings", []).append(redirect_warning(n))
+        return result
 
     def _load_auxiliary_items(self, auxiliary_data, auxiliary_label) -> dict:
         """Load one or several auxiliary datasets into the multi-aux state.
@@ -1814,6 +1873,8 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         Fully failure-isolated; gated by ``SCILINK_SCRIPT_BANK`` /
         persistent-memory setting.
         """
+        if state.get("joint_manifest"):
+            return []          # a joint script reads its own run's files by path (#757)
         # Realtime frames never bank: a verbatim re-execution learns nothing
         # new, and per-frame updates would inflate the anchor record's
         # cross-session success stats (a 500-frame campaign is one success,

@@ -354,6 +354,11 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             When Tier 2 runs: tier1_results, tier2_results sub-dicts
             for traceability.
         """
+        # The call as made, for a joint analysis's re-entry (#754).
+        _joint_manifest = kwargs.pop("_joint_manifest", None)
+        _call_args = {k: v for k, v in locals().items()
+                      if k not in ("self", "kwargs", "_joint_manifest")}
+        _call_args.update(kwargs)
         # Use provided overrides or fall back to instance defaults
         effective_outlier_sigma = (
             outlier_sigma if outlier_sigma is not None else self.outlier_sigma
@@ -622,6 +627,9 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # System info
             "system_info": handled_system_info,
             "series_metadata": series_metadata or {},
+            # A joint analysis (#754): every unit is an input of this one run.
+            "joint_manifest": str(_joint_manifest) if _joint_manifest else None,
+            "joint_control": (series_metadata or {}).get("variable") if _joint_manifest else None,
             "analysis_hints": hints,
             "analysis_objective": objective,
             "reference_scripts": _load_reference_scripts(reference_scripts),
@@ -737,6 +745,10 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                         f"❌ Pipeline failed at {step_name}: {state['error_dict']}"
                     )
                     break
+                if (state.get("analysis_shape") == "joint" and not state.get("is_single_image", True)
+                        and not _joint_manifest):
+                    # The planner says the method needs every unit at once (#754).
+                    return self._run_joint(state, _call_args)
 
             except Exception as e:
                 import traceback
@@ -884,6 +896,9 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         final_results["stage_timings"] = self._stage_timer.summary()
         self._stage_timer.log_summary(self.logger)
 
+        if _joint_manifest:
+            # on the run's record, which every reuse reader consults (#757)
+            final_results["analysis_shape"] = "joint"
         # Save final merged results
         results_path = self.output_dir / "analysis_results.json"
         with open(results_path, "w", encoding="utf-8") as f:
@@ -926,6 +941,42 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     def _compute_image_statistics(image: np.ndarray) -> dict:
         """Compute statistics for an image."""
         return compute_image_statistics(image)
+
+    def _run_joint(self, state: dict, call_args: dict) -> Dict[str, Any]:
+        """A series whose plan is ``joint`` (#754): every image is an input of
+        ONE analysis, run on the first image (see the curve agent's)."""
+        from ._joint import JOINT, stage_joint_units
+        paths = list(state.get("image_paths") or [])
+        stack = state.get("image_stack")
+        n = len(paths) if paths else (len(stack) if stack is not None else 0)
+        values = (state.get("series_metadata") or {}).get("values") or []
+        units = [{"path": paths[i] if i < len(paths) else f"unit_{i}",
+                  "control_value": values[i] if i < len(values) else None} for i in range(n)]
+
+        def to_array(src: str):
+            if stack is not None and not paths:
+                return stack[int(src.rsplit("_", 1)[-1])]
+            return load_image_data(src)
+        manifest = stage_joint_units(units, Path(self.output_dir) / "joint_inputs", to_array=to_array)
+        self.logger.info(f"🔗 Joint analysis: the plan needs all {n} images in one analysis; "
+                         f"running it once over every unit (manifest {manifest}).")
+        args = dict(call_args)
+        args["data"] = paths[0] if paths else np.asarray(stack[0])
+        args["_joint_manifest"] = str(manifest)
+        # the joint run uses the skills the series run chose, not a second pick
+        if not args.get("skill"):
+            _names = [s.get("name") for s in (state.get("skills_loaded") or [])
+                      if isinstance(s, dict) and s.get("name")]
+            if _names:
+                args["skill"] = _names if len(_names) > 1 else _names[0]
+        result = self.analyze(**args)
+        if isinstance(result, dict):
+            result["analysis_shape"] = JOINT
+            result["joint_units"] = [{"source": u["path"], "control_value": u.get("control_value")}
+                                     for u in units]
+            from ._joint import redirect_warning
+            result.setdefault("warnings", []).append(redirect_warning(n))
+        return result
 
     def _load_auxiliary_items(self, auxiliary_data, auxiliary_label) -> dict:
         """Load one or several auxiliary datasets into the multi-aux state.
@@ -1188,6 +1239,8 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         outcome. Fully failure-isolated; gated by ``SCILINK_SCRIPT_BANK`` /
         persistent-memory setting.
         """
+        if state.get("joint_manifest"):
+            return []          # a joint script reads its own run's files by path (#757)
         if state.get("_strict_replay"):
             # A live loop's fast path: the recipe runs unreviewed on every
             # frame with no model call. Banking each frame credited a

@@ -18,6 +18,7 @@ from ....skills._shared.image_processor import load_image
 from ..preprocess import HyperspectralPreprocessingAgent
 from ..metadata_converter import (resolve_axis_spec, describe_axes_for_prompt,
                                   signal_axis_values)
+from .._input_integrity import VERIFIER_PRINCIPLE
 from ..instruct import (
     COMPONENT_INITIAL_ESTIMATION_INSTRUCTIONS,
     COMPONENT_SELECTION_WITH_ELBOW_INSTRUCTIONS,
@@ -3555,6 +3556,14 @@ class RunDynamicAnalysisController:
                                      if fit_mask is not None else None),
                     data_facts=data_facts,
                 )
+                # measured inputs only (#754), up front of the code-gen prompt
+                from .._input_integrity import CODEGEN_PRINCIPLE, with_principle
+                base_prompt = with_principle(base_prompt, CODEGEN_PRINCIPLE)
+                if state.get("joint_manifest"):
+                    # a joint analysis's inputs (#754)
+                    from .._joint import joint_units_block
+                    base_prompt += joint_units_block(state["joint_manifest"],
+                                                     control_name=(state.get("joint_control") or None))
 
                 # Registered tools from the _shared registry (this agent + active
                 # skills). Pre-loaded into the sandbox globals below, so generated
@@ -4885,7 +4894,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             method=(code_str or "(unavailable)")[:6000],
             result_summary=f"Output '{feature_desc}': {result_summary}",
             tool_descriptions=tool_descriptions or "(no registered tool was called)",
-            tool_scrutiny=VERIFIER_TOOL_SCRUTINY_PRINCIPLE,
+            tool_scrutiny=VERIFIER_TOOL_SCRUTINY_PRINCIPLE + "\n\n" + VERIFIER_PRINCIPLE,
             attempt_history=attempt_history,
         )]
         prompt.append("Result dashboard (map + histogram):")

@@ -212,7 +212,27 @@ def _auxiliary_display_items(state: dict) -> list:
     return [it for it in (state.get("auxiliary_items") or []) if it.get("plot_bytes")]
 
 
+
+def _joint_conformance_note(state: dict) -> str:
+    """A joint run's contract for the conformance check (#754): reading every
+    listed measurement is the plan, not a breach of the data-loading rules."""
+    if not state.get("joint_manifest"):
+        return ""
+    from .._joint import joint_contract_note
+    return joint_contract_note(state["joint_manifest"], control_name=(state.get("joint_control") or None))
+
 def _append_auxiliary_context(prompt: list, state: dict) -> None:
+    if state.get("joint_manifest"):
+        # a joint analysis's note on its inputs (#754)
+        from .._joint import joint_units_planning_text
+        _note = joint_units_planning_text(state["joint_manifest"],
+                                          control_name=(state.get("joint_control") or None))
+        if _note:
+            prompt.append(_note)
+    _append_auxiliary_context_items(prompt, state)
+
+
+def _append_auxiliary_context_items(prompt: list, state: dict) -> None:
     """Append auxiliary reference dataset(s) to an LLM prompt if available."""
     items = _auxiliary_display_items(state)
     if not items:
@@ -1134,6 +1154,10 @@ def analysis_plan_subject(state: dict) -> dict:
     if outputs:
         blocks.append(block("text", label="📄 Expected outputs", markdown=", ".join(outputs)))
 
+    if not is_single:
+        # the series' shape, before its regimes (#757)
+        from .._joint import shape_blocks
+        blocks += shape_blocks(state.get("analysis_shape"), num)
     series_plan = state.get("series_analysis_plan") or {}
     regimes = series_plan.get("regimes") or []
     if regimes and not is_single:
@@ -1217,6 +1241,9 @@ class ImagePlanningController:
         mode_str = "SINGLE IMAGE" if is_single else f"SERIES ({num_images} images)"
         print(f"📋 PROPOSED ANALYSIS PLAN - {mode_str}")
         print("=" * 60)
+        if not is_single:
+            from .._joint import shape_text
+            print(shape_text(state.get("analysis_shape"), num_images))
 
         if state.get("observations"):
             print(f"\n🔍 Observations:\n   {state['observations']}")
@@ -1362,6 +1389,7 @@ class ImagePlanningController:
             "expected_outputs": result.get("expected_outputs", []),
             "literature_query": result.get("literature_query"),
             "series_analysis_plan": result.get("series_analysis_plan"),
+            "analysis_shape": result.get("analysis_shape"),
         }
 
     def _apply_plan_to_state(self, state: dict, plan: dict) -> dict:
@@ -1629,9 +1657,17 @@ class ImagePlanningController:
             num_images=num_images,
             num_images_minus_1=num_images - 1,
         ))
+        from .._joint import PLANNER_RULE
+        prompt.append(PLANNER_RULE + "\n")
 
     def _extract_series_plan(self, state: dict, result: dict) -> None:
         """Extract and validate series_analysis_plan from LLM response."""
+        if not state.get("is_single_image", True) and isinstance(result, dict) and (
+                result.get("analysis_shape") is not None
+                or "analysis_shape" in (result.get("series_analysis_plan") or {})):
+            # the series' shape (#754): a revision that omits it keeps the first
+            from .._joint import analysis_shape_of
+            state["analysis_shape"] = analysis_shape_of(result)
         series_plan = result.get("series_analysis_plan")
         if not isinstance(series_plan, dict) or state.get("is_single_image", True):
             state["series_analysis_plan"] = None
@@ -1686,6 +1722,7 @@ class ImagePlanningController:
             f"Quality Criteria: {state.get('quality_criteria', 'N/A')}"
         )
 
+        from .._joint import revision_note
         prompt = [
             self._get_instructions(state),
             "\n## Image",
@@ -1694,6 +1731,8 @@ class ImagePlanningController:
             "\n## Metadata\n" + json.dumps(state.get("system_info", {}), indent=2),
             f"\n## Current Plan\n{current_plan}",
             f"\n## User Feedback\nAdjust the plan based on this feedback: \"{feedback}\"",
+            # a joint plan is named, so feedback can undo it (#757)
+            *[n for n in (revision_note(state.get("analysis_shape")),) if n],
         ]
 
         _append_objective_context(prompt, state)
@@ -2094,6 +2133,10 @@ IMPORTANT: If one result is clearly better than others (better feature detection
 more complete coverage), select it even if it is not perfect. Only return acceptable=false if ALL
 results are fundamentally flawed.
 '''
+    # Measured inputs only (#754)
+    from .._input_integrity import JUDGE_PRINCIPLE as _P_JUDGE_PROMPT, with_principle as _wp_JUDGE_PROMPT
+    JUDGE_PROMPT = _wp_JUDGE_PROMPT(JUDGE_PROMPT, _P_JUDGE_PROMPT)
+
 
     HUMAN_FEEDBACK_PROMPT = '''## Analysis Quality Issue
 
@@ -2380,6 +2423,10 @@ Your guidance: '''
                 "about a companion as if it were the measurement; it is an operand "
                 "for analyzing the primary.\n"
             )
+        if state.get("joint_manifest"):
+            from .._joint import joint_units_block
+            auxiliary_block += joint_units_block(state["joint_manifest"],
+                                                 control_name=(state.get("joint_control") or None))
 
         from ....skills._shared._registry import format_tool_inventory
 
@@ -2491,6 +2538,9 @@ Your guidance: '''
                 prompt = prompt.replace(_marker, _guidance + "\n" + _marker, 1)
             else:
                 prompt += _guidance
+        # A joint run's inputs stay the contract through a correction (#754).
+        from .._joint import with_joint_note
+        prompt = with_joint_note(prompt, state)
         # Last-resort timeout escalation (set transiently by
         # _correct_script_with_timeout_escalation; absent otherwise).
         # Injected BEFORE the response-format footer — appended after it,
@@ -2570,7 +2620,7 @@ Your guidance: '''
             features_to_extract=", ".join(
                 config.get("features_to_extract", [])
             ),
-            skill_rules=skill_rules_text,
+            skill_rules=skill_rules_text + _joint_conformance_note(state),
             script=script,
         )
 
@@ -3201,6 +3251,8 @@ Return JSON:
             except Exception:
                 pass
         prompt_parts.append("\n\n" + VERIFIER_TOOL_SCRUTINY_PRINCIPLE)
+        from .._input_integrity import VERIFIER_PRINCIPLE
+        prompt_parts.append("\n\n" + VERIFIER_PRINCIPLE)
         from .._qc_profile import verification_addendum
         if verification_addendum(state):
             prompt_parts.append(verification_addendum(state))
@@ -5288,6 +5340,10 @@ In all cases, preserve the output contract: the script must print \
 Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
 "diagnosis": "what you changed and why", "script": "full Python script"}}
 '''
+    # Measured inputs only (#754)
+    from .._input_integrity import CODEGEN_PRINCIPLE as _P_USER_FEEDBACK_SCRIPT_PROMPT, with_principle as _wp_USER_FEEDBACK_SCRIPT_PROMPT
+    USER_FEEDBACK_SCRIPT_PROMPT = _wp_USER_FEEDBACK_SCRIPT_PROMPT(USER_FEEDBACK_SCRIPT_PROMPT, _P_USER_FEEDBACK_SCRIPT_PROMPT)
+
 
     def _apply_user_feedback(
         self,
@@ -7084,6 +7140,10 @@ Return JSON with:
     "script": "full python script - NO plt.show()"
 }}
 '''
+    # Measured inputs only (#757 review): the trend script computes the set-level answer
+    from .._input_integrity import CODEGEN_PRINCIPLE as _P_TREND, with_principle as _wp_TREND
+    TREND_ANALYSIS_INSTRUCTIONS = _wp_TREND(TREND_ANALYSIS_INSTRUCTIONS, _P_TREND)
+
 
     def __init__(
         self,
@@ -7214,6 +7274,8 @@ Return JSON with:
 
 Return JSON with: {{"diagnosis": "...", "script": "corrected script"}}
 """
+        from .._input_integrity import CODEGEN_PRINCIPLE, with_principle
+        prompt = with_principle(prompt, CODEGEN_PRINCIPLE)
 
         try:
             response = self.model.generate_content(
