@@ -4526,6 +4526,14 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                             # map held to the anchor's own statistics, or not
                             _held = bool(isinstance(_ref, dict) and not _ref.get("values_may_move")
                                          and all(isinstance(_ref.get(k), (int, float)) for k in ("min", "max")))
+                            if not _held:
+                                # no gate: a certification reference may certify, never
+                                # decide the verdict (#753 — a single cube's recipe copy)
+                                _cert = (state.get("certification_maps") or {}).get(feature_name)
+                                if isinstance(_cert, dict) and all(isinstance(_cert.get(k), (int, float))
+                                                                   for k in ("min", "max")):
+                                    from .._replay import map_health
+                                    _held = map_health(result_map, fit_mask, _cert, True)[0]
                             ctx.identity_checked = _held and getattr(ctx, "identity_checked", True)
                         self.logger.info(
                             f"    🔒 Deterministic replay gate on {feature_name}: "

@@ -419,6 +419,17 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
     return reconstructed_verdict(full)
 
 
+def replay_certification_reason(full_result: Optional[dict]) -> Optional[str]:
+    """Why a replay's interpretation is not certified (#753), for the
+    ``analyses`` row beside :func:`replay_escalation`, so the board quotes
+    the reason. None when the run is not an uncertified replay."""
+    rv = (full_result or {}).get("reuse_validity") or {}
+    if not rv.get("reused") or interpretation_checked_by(rv):
+        return None
+    from ._replay import certification_reason
+    return certification_reason(rv) or None
+
+
 def replay_escalation(full_result: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """The judge's reading of a replay whose certificate was withheld (#712
     escalation), as the ``analyses`` row carries it: trigger, belongs_to,

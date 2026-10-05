@@ -367,6 +367,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         # --- Locked-script replay (harmonized re-run) -----------------------
         reuse_records = None
+        certification_maps = None          # a recipe's certification-only reference (#753)
         if reuse_locked_script:
             if not prior_analysis_paths:
                 return {
@@ -403,6 +404,12 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 # the anchor's plausible ranges like the series' own replays,
                 # not to coverage alone. An explicit reference still wins.
                 replay_reference = self._recipe_sidecar_reference(prior_analysis_paths)
+            # With no gate to hold it to, the recipe's certification reference
+            # (#753) only certifies: the verdict stays the one a replay of the
+            # run would get (a single cube's recipe was approved by review, not
+            # by a map gate, #711), and the run folder certifies the same way.
+            certification_maps = (None if replay_reference
+                                  else self._recipe_certification_maps(prior_analysis_paths))
             # Verbatim replay is a single-attempt contract: a failure must be
             # reported (or salvaged), never regenerated into a different
             # method — that would silently break cross-dataset comparability.
@@ -446,6 +453,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             )
             qc_profile = THOROUGH
         self._strict_replay = bool(strict_replay)
+        self._qc_profile_name = getattr(qc_profile, "name", "")
         # Per-call, never sticky: the agent instance may be reused.
         self._qc_profile = qc_profile
         if qc_profile.name != "thorough":
@@ -597,6 +605,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             reuse_records=reuse_records,
             locked_targets=locked_targets,
             replay_reference=replay_reference,
+            certification_maps=certification_maps,
             strict_replay=strict_replay,
         )
         
@@ -858,8 +867,12 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 payload["verdict"] = response["verdict"]          # the run's stamped verdict (#712)
             # what a replay of this cube's recipe is certified against (#753): its
             # required maps' statistics, as a series lock records them; it
-            # travels with the board's copy of the records
-            _maps = {m["name"]: {**{k: m["stats"][k] for k in ("min", "max", "mean") if k in m["stats"]},
+            # travels with the board's copy of the records. A live frame (a
+            # strict replay, the realtime profile) is not a recipe source and
+            # writes none — the same rule as the curve writer.
+            _live_frame = bool(getattr(self, "_strict_replay", False)
+                               or getattr(self, "_qc_profile_name", "") == "realtime")
+            _maps = {} if _live_frame else {m["name"]: {**{k: m["stats"][k] for k in ("min", "max", "mean") if k in m["stats"]},
                                  **({"coverage": m["coverage"]} if m.get("coverage") is not None else {})}
                      for m in payload["feature_records"]
                      if isinstance(m.get("stats"), dict) and m.get("name")}
@@ -1791,7 +1804,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         """The ``reference_maps`` of a board recipe copy's map gate: the
         ``dynamic_analysis_records.recipe.json`` sidecar beside the records
         file (a path to the file or to its folder). None when there is none,
-        or its gate is not a map gate (a single cube's copy carries none)."""
+        or its gate is not a map gate (a single cube's copy carries none: its
+        reference only certifies, :meth:`_recipe_certification_maps`)."""
         for raw in prior_analysis_paths or []:
             p = Path(str(raw))
             side = (p.with_name("dynamic_analysis_records.recipe.json") if p.is_file()
@@ -1801,15 +1815,33 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             except (OSError, ValueError, AttributeError):
                 continue
             gate = data.get("quality_gate") or {}
-            cert = data.get("certification_reference") or {}
-            # the recorded map gate, else the reference the copy carries (#753:
-            # a single cube's copy has no gate, only its reference)
-            ref = (gate.get("reference_maps") if gate.get("kind") == "map_health"
-                   else cert.get("reference_maps") if cert.get("kind") == "maps" else None)
+            ref = gate.get("reference_maps") if gate.get("kind") == "map_health" else None
             if isinstance(ref, dict) and ref:
                 self.logger.info(f"   🔒 Replay held to the recipe's recorded map gate "
                                  f"({len(ref)} reference map(s), from {side.name})")
                 return ref
+        return None
+
+    def _recipe_certification_maps(self, prior_analysis_paths: list) -> dict | None:
+        """The reference maps a replay is CERTIFIED against when no map gate
+        holds it (#753): a board copy's sidecar ``certification_reference``,
+        or the run folder's own (``analysis_results.json``), so a copy and its
+        run certify alike. Never a gate: it withholds a certificate, it does
+        not decide the verdict (#711)."""
+        for raw in prior_analysis_paths or []:
+            p = Path(str(raw))
+            folder = p.parent if p.is_file() else p
+            for src in (folder / "dynamic_analysis_records.recipe.json", folder / "analysis_results.json"):
+                try:
+                    data = json.loads(src.read_text(encoding="utf-8")) or {}
+                except (OSError, ValueError, AttributeError):
+                    continue
+                cert = data.get("certification_reference") or {}
+                maps = cert.get("reference_maps") if cert.get("kind") == "maps" else None
+                if isinstance(maps, dict) and maps:
+                    self.logger.info(f"   🔒 Replay certified against the recipe's reference "
+                                     f"({len(maps)} map(s), from {src.name}); its verdict is the run's")
+                    return maps
         return None
 
     def _load_prior_dynamic_records(self, prior_analysis_paths: list) -> list:
@@ -2359,6 +2391,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         reuse_records: list | None = None,
         locked_targets: list | None = None,
         replay_reference: dict | None = None,
+        certification_maps: dict | None = None,
         strict_replay: bool = False,
     ) -> tuple[Dict[str, Any] | None, Dict[str, Any] | None]:
         """
@@ -2444,7 +2477,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 **({"reuse_records": reuse_records,
                     "skip_decomposition": True,
                     "_strict_replay": bool(strict_replay),
-                    "replay_reference": replay_reference or {}} if reuse_records else {}),
+                    "replay_reference": replay_reference or {},
+                    "certification_maps": certification_maps or {}} if reuse_records else {}),
                 # Locked targets, fresh code: plan fixed, decomposition skipped,
                 # codegen ladder intact (see SelectRefinementTargetController).
                 **({"locked_targets": locked_targets,

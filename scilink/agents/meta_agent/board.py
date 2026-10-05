@@ -752,8 +752,9 @@ def _claim_verified(row: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
     held = []                                  # every reason that holds, not the first
     if row.get("decided_by") == "replay_gate" and not row.get("interpretation_checked"):
         held.append("a locked-script replay passed the replay gate (the numbers), but its interpretation "
-                    "is not certified — the state and identity checks against the regime's units did not "
-                    "both agree, or could not run")
+                    "is not certified — " + (row.get("certification_reason")
+                                             or "the state and identity checks against the regime's units did "
+                                                "not both agree, or could not run"))
     def _shown(names):
         return ", ".join(map(str, names[:6])) + (f" (+{len(names) - 6} more)" if len(names) > 6 else "")
     failed = list(row.get("failed_outputs") or [])

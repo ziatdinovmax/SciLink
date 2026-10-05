@@ -20,7 +20,7 @@ import test_series_verdict_path as curve                          # noqa: E402
 
 from scilink.agents.exp_agents import _replay                      # noqa: E402
 from scilink.agents.exp_agents._verification_record import (       # noqa: E402
-    interpretation_checked_by, prior_recipe_candidates, recipe_sidecar)
+    analysis_verdict, interpretation_checked_by, prior_recipe_candidates, recipe_sidecar)
 from scilink.agents.meta_agent import board as board_mod          # noqa: E402
 from scilink.agents.meta_agent.board import Board                 # noqa: E402
 
@@ -108,12 +108,16 @@ def test_a_single_runs_copy_carries_its_reference_curve_and_cube(tmp_path):
                                                  "agent_name": "a"}]})
     recs = {r["payload"]["analysis_id"]: Path(r["payload"]["path"]) for r in board.records() if r["kind"] == "recipe"}
     assert recipe_sidecar(recs["c1"])["certification_reference"]["kind"] == "curve"
-    # the hyperspectral reader takes the maps from a single cube's copy (it has no map gate)
+    # a single cube's copy has no map gate: its reference certifies, it never gates
+    # (#758 review), and the copy and its run folder give the replay the same inputs
     from scilink.agents.exp_agents.hyperspectral_analysis_agent import HyperspectralAnalysisAgent
     import logging
     ag = HyperspectralAnalysisAgent.__new__(HyperspectralAnalysisAgent)
     ag.logger = logging.getLogger("t")
-    assert ag._recipe_sidecar_reference([str(recs["h1"])]) == maps["reference_maps"]
+    assert ag._recipe_sidecar_reference([str(recs["h1"])]) is None
+    assert ag._recipe_certification_maps([str(recs["h1"])]) == maps["reference_maps"]
+    assert ag._recipe_sidecar_reference([str(cube)]) is None
+    assert ag._recipe_certification_maps([str(cube)]) == maps["reference_maps"]
 
 
 def test_the_curve_driver_stamps_each_regimes_reference(tmp_path):
@@ -136,3 +140,53 @@ def test_the_curve_driver_stamps_each_regimes_reference(tmp_path):
     single = {"default": {"unit": "spectrum_0000"}}
     _restamp_regimes(tmp_path, single, [{**rows[0], "regime": None}])
     assert single["default"]["certification_reference"]["identity"]["n_units"] == 1
+
+
+def test_a_certification_reference_never_decides_a_cube_replays_verdict(tmp_path, monkeypatch):
+    """The same reference as a GATE rejects a map outside its range; as a
+    certification reference it only withholds the certificate, and the
+    verdict is what a replay with no reference gets (#758 review: a single
+    cube's copy must replay like its run)."""
+    import test_hs_locked_replay as lr
+    from scilink.agents.exp_agents.controllers import hyperspectral_controllers as hc
+    far = {"Mean_Map": {"min": 100.0, "max": 110.0, "mean": 105.0, "coverage": 1.0}}   # data mean ~0.5
+    near = {"Mean_Map": {"min": 0.3, "max": 0.7, "mean": 0.5, "coverage": 1.0}}
+
+    def replay(sub, **extra):
+        monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+        st = lr._replay_state(tmp_path / sub)
+        st.update(extra)
+        plan = hc.SelectRefinementTargetController(lr._ExplodingModel(), lr.LOGGER, generation_config=None,
+                                                   safety_settings=None, parse_fn=lambda r: ({}, None))
+        st = plan.execute(st)
+        ctrl = hc.RunDynamicAnalysisController(lr._ExplodingModel(), lr.LOGGER, generation_config=None,
+                                               safety_settings=None, parse_fn=lambda r: ({}, None))
+        st = ctrl.execute(st)
+        rec = (st.get("dynamic_analysis_records") or [{}])[0]
+        return rec.get("task_success"), rec.get("identity_checked")
+
+    plain_ok, _ = replay("plain")
+    assert replay("cert_far", certification_maps=far) == (plain_ok, False)      # the verdict is the run's
+    assert replay("cert_near", certification_maps=near) == (plain_ok, True)     # certified
+    assert replay("gate_far", replay_reference=far)[0] is False                 # a gate still decides
+
+
+def test_the_board_says_why_a_replay_is_not_certified(tmp_path, monkeypatch):
+    """The analyses row carries the reason and the board's provisional claim
+    quotes it, instead of a generic phrase (#758 review)."""
+    from scilink.agents.exp_agents._verification_record import replay_certification_reason
+    _, _, copy = _post_series_copy(tmp_path, None)                     # a copy with no reference
+    res, _, _, _ = curve._replay(tmp_path / "r", monkeypatch, {"LOW": 0.99}, prior=copy,
+                                 data=rc.spectrum(rc.ANATASE, seed=41),
+                                 extra_params={"LOW": rc.auto_detect_parameters(rc.ANATASE, seed=42)})
+    why = replay_certification_reason(res)
+    assert why == _replay.NO_REFERENCE
+    board = Board(tmp_path / "meta2")
+    row = {"analysis_id": "r1", "status": "success", "verified": True, "reason": "replay gate passed",
+           "decided_by": "replay_gate", "interpretation_checked": False, "certification_reason": why,
+           "agent_name": "CurveFittingAgent", "output_directory": str(tmp_path / "r")}
+    board_mod.post_delegation(board, {"index": 3, "label": "replay", "mode": "analysis", "status": "success"},
+                              {"analyses": [row], "key_findings": ["[r1] anatase bands at 144 and 639"]})
+    claims = [r for r in board.records() if r["kind"] == "claim"]
+    assert claims and all(not c.get("verified") for c in claims)
+    assert any(_replay.NO_REFERENCE in c["evidence"]["gate"] for c in claims)

@@ -823,3 +823,27 @@ def no_interpretation_check() -> Dict[str, Any]:
     """The certification entry of a replay whose modality has no
     interpretation check (an image): never certified, and saying why."""
     return {"checked": False, "reason": NO_INTERPRETATION_CHECK}
+
+
+def certification_reason(rv: Optional[Dict[str, Any]]) -> str:
+    """Why a replay's interpretation is NOT certified, in one phrase, from
+    its ``reuse_validity`` — so the board quotes the reason instead of a
+    generic one (#753). '' when it is certified or nothing says why."""
+    rv = rv or {}
+    cert = rv.get("certification") or {}
+    if isinstance(cert, dict) and cert.get("reason"):
+        return str(cert["reason"])
+    ident = rv.get("identity") or {}
+    if isinstance(ident, dict) and ident.get("reason") == NO_REFERENCE:
+        return NO_REFERENCE
+    reasons = []
+    if isinstance(ident, dict) and ident.get("flagged"):
+        reasons.append("identity flagged: the recipe found different strong features than the regime's units")
+    dist = rv.get("state_distance")
+    if rv.get("state_flag"):
+        reasons.append("state flagged: the new data differs from the regime's own data")
+    elif isinstance(dist, (int, float)) and dist > CERTIFY_STATE_BAR:
+        reasons.append(f"state distance {dist:.2f} is above the certification bar {CERTIFY_STATE_BAR}")
+    if not reasons and str(rv.get("state_check") or "").startswith("skipped"):
+        reasons.append(str(rv["state_check"]))
+    return "; ".join(reasons)
