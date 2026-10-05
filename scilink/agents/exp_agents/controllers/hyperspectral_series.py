@@ -1154,8 +1154,12 @@ def extract_series_plan(result: Any, n: int, reduction: Optional[dict],
 
 
 def render_regime_plan(plan: Optional[dict], series_metadata: dict,
-                       scout: Optional[dict] = None, n: int = 0) -> str:
-    """Console rendering of a regime plan for the human gate."""
+                       scout: Optional[dict] = None, n: int = 0, shape: Optional[str] = None) -> str:
+    """Console rendering of a regime plan for the human gate; ``shape`` is
+    the planner's declared analysis shape (#757)."""
+    if shape == "joint":
+        from .._joint import shape_text
+        return "\n".join(["", "=" * 60, "📋 PROPOSED SERIES PLAN", "=" * 60, shape_text(shape, n), ""])
     meta = series_metadata or {}
     values = meta.get("values") if isinstance(meta.get("values"), list) else []
     var, unit = meta.get("variable") or "index", meta.get("unit") or ""
@@ -1188,10 +1192,14 @@ def render_regime_plan(plan: Optional[dict], series_metadata: dict,
 
 
 def regime_plan_subject(plan: Optional[dict], series_metadata: dict,
-                        scout: Optional[dict] = None, n: int = 0) -> dict:
+                        scout: Optional[dict] = None, n: int = 0, shape: Optional[str] = None) -> dict:
     """What the regime-plan gate shows, as subject blocks (scilink.hitl):
-    the sections ``render_regime_plan`` prints, from the same plan."""
+    the sections ``render_regime_plan`` prints, from the same plan. A joint
+    plan has no regimes: the gate shows the shape, not the one-regime default."""
     from ....hitl import make_subject, subject_block as block
+    from .._joint import JOINT, shape_blocks
+    if shape == JOINT:
+        return make_subject("📋 Proposed series plan", shape_blocks(shape, n))
 
     meta = series_metadata or {}
     values = meta.get("values") if isinstance(meta.get("values"), list) else []

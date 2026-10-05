@@ -896,6 +896,9 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         final_results["stage_timings"] = self._stage_timer.summary()
         self._stage_timer.log_summary(self.logger)
 
+        if _joint_manifest:
+            # on the run's record, which every reuse reader consults (#757)
+            final_results["analysis_shape"] = "joint"
         # Save final merged results
         results_path = self.output_dir / "analysis_results.json"
         with open(results_path, "w", encoding="utf-8") as f:
@@ -960,11 +963,19 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         args = dict(call_args)
         args["data"] = paths[0] if paths else np.asarray(stack[0])
         args["_joint_manifest"] = str(manifest)
+        # the joint run uses the skills the series run chose, not a second pick
+        if not args.get("skill"):
+            _names = [s.get("name") for s in (state.get("skills_loaded") or [])
+                      if isinstance(s, dict) and s.get("name")]
+            if _names:
+                args["skill"] = _names if len(_names) > 1 else _names[0]
         result = self.analyze(**args)
         if isinstance(result, dict):
             result["analysis_shape"] = JOINT
             result["joint_units"] = [{"source": u["path"], "control_value": u.get("control_value")}
                                      for u in units]
+            from ._joint import redirect_warning
+            result.setdefault("warnings", []).append(redirect_warning(n))
         return result
 
     def _load_auxiliary_items(self, auxiliary_data, auxiliary_label) -> dict:
@@ -1228,6 +1239,8 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         outcome. Fully failure-isolated; gated by ``SCILINK_SCRIPT_BANK`` /
         persistent-memory setting.
         """
+        if state.get("joint_manifest"):
+            return []          # a joint script reads its own run's files by path (#757)
         if state.get("_strict_replay"):
             # A live loop's fast path: the recipe runs unreviewed on every
             # frame with no model call. Banking each frame credited a

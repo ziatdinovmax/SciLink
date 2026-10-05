@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence  # noqa: F401
 
 import numpy as np
 
@@ -156,3 +156,70 @@ def with_joint_note(prompt: str, state: dict) -> str:
         return prompt
     marker = "**Response:**"
     return prompt.replace(marker, note + "\n" + marker, 1) if marker in prompt else prompt + note
+
+
+#: Why a joint run's script is not replayed (#757 review): it reads the
+#: measurements of its own run by their paths, so on new data it would rest on
+#: the old ones, and a replay gate has no reason to object.
+REPLAY_REFUSAL = ("a joint analysis's script reads the measurements of its own run by their paths; "
+                  "replayed on new data it would rest on those old measurements, so it is not replayed "
+                  "(a replay over a new set of measurements is not designed yet)")
+
+
+def _shape_in(path: Path) -> Optional[str]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return data.get("analysis_shape") if isinstance(data, dict) else None
+
+
+def replay_refusal(path: Any) -> Optional[str]:
+    """``REPLAY_REFUSAL`` when ``path`` (a run folder, a script or records file
+    inside one, or a board copy with its ``<stem>.recipe.json`` sidecar)
+    belongs to a joint run, else None. The one check every reuse reader
+    consults, whatever the agent."""
+    if path is None:
+        return None
+    p = Path(str(path))
+    candidates = []
+    if p.is_dir():
+        candidates.append(p / "analysis_results.json")
+    else:
+        candidates.append(p.with_name(f"{p.stem}.recipe.json"))       # a board copy's sidecar
+        for up in (p.parent, p.parent.parent):                         # the run it sits in
+            candidates.append(up / "analysis_results.json")
+    return REPLAY_REFUSAL if any(_shape_in(c) == JOINT for c in candidates) else None
+
+
+def shape_text(shape: Any, n_units: int) -> str:
+    """The plan gate's line on the series' shape (console)."""
+    if shape == JOINT:
+        return (f"🔗 Analysis shape: JOINT, one analysis over all {n_units} measurements together. "
+                f"No per-measurement rows, no trend, no regimes. Type feedback to analyse each "
+                f"measurement separately instead.")
+    return f"🔗 Analysis shape: per unit, one analysis per measurement ({n_units}), then the trend."
+
+
+def shape_blocks(shape: Any, n_units: int) -> list:
+    """The plan gate's subject blocks for the series' shape: a fields row, and
+    a notice when it is joint, so Enter accepts what was shown (#757)."""
+    from ...hitl import subject_block
+    joint = shape == JOINT
+    blocks = [subject_block("fields", label="🔗 Analysis shape", items=[{
+        "label": "shape",
+        "value": (f"joint: one analysis over all {n_units} measurements" if joint
+                  else f"per unit: one analysis per measurement ({n_units})"),
+        **({"flag": "warn"} if joint else {})}])]
+    if joint:
+        blocks.append(subject_block("notice", title="One analysis over every measurement", tone="warn", lines=[
+            f"The series of {n_units} becomes ONE analysis whose inputs are all the measurements.",
+            "No per-measurement rows, no trend, no regimes.",
+            "Type feedback to analyse each measurement separately instead."]))
+    return blocks
+
+
+def redirect_warning(n_units: int) -> str:
+    """The joint run's warning on its result, for a headless caller or the meta."""
+    return (f"Run as ONE joint analysis over all {n_units} measurements (the planner declared "
+            f"analysis_shape: joint), not as a series: no per-measurement rows, no trend.")

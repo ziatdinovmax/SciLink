@@ -854,6 +854,9 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 payload["stage_timings"] = response["stage_timings"]
             if isinstance(response.get("verdict"), dict):
                 payload["verdict"] = response["verdict"]          # the run's stamped verdict (#712)
+            if getattr(self, "_joint_manifest", None):
+                # on the run's record, which every reuse reader consults (#757)
+                payload["analysis_shape"] = "joint"
             path = self.output_dir / "analysis_results.json"
             with open(path, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, indent=2, default=str)
@@ -974,7 +977,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 targets[0]["extra_outputs"] = extra
         return targets
 
-    def _run_joint(self, data_paths: list, series_metadata: dict | None) -> dict:
+    def _run_joint(self, data_paths: list, series_metadata: dict | None, skill=None) -> dict:
         """A series whose plan is ``joint`` (#754): every cube is an input of
         ONE analysis, run on the first. Cubes are listed by path, not copied."""
         from ._joint import JOINT, stage_joint_units
@@ -987,12 +990,16 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         args = dict(getattr(self, "_joint_call_args", {}) or {})
         args["data"] = str(data_paths[0])
         args["series_metadata"] = series_metadata
+        if skill and not args.get("skill"):
+            args["skill"] = skill          # the skills the series chose, not a second pick
         args["_joint_manifest"] = str(manifest)
         result = self.analyze(**args)
         if isinstance(result, dict):
             result["analysis_shape"] = JOINT
             result["joint_units"] = [{"source": u["path"], "control_value": u.get("control_value")}
                                      for u in units]
+            from ._joint import redirect_warning
+            result.setdefault("warnings", []).append(redirect_warning(len(units)))
         return result
 
     def _analyze_series(
@@ -1104,7 +1111,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         if plan_state.get("analysis_shape") == "joint":
             # The planner says the method needs every dataset at once (#754):
             # one analysis over all of them, not anchor + replays.
-            return self._run_joint(list(data_paths), series_metadata)
+            return self._run_joint(list(data_paths), series_metadata, skill=unit_skill)
         if series_plan:
             regimes = series_plan["regimes"]
         else:
@@ -1490,7 +1497,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             return plan
         from ...hitl import request_human_feedback
         for _round in range(self._REGIME_GATE_MAX_ROUNDS):
-            rendered = _series.render_regime_plan(plan, series_metadata, scout, n)
+            rendered = _series.render_regime_plan(plan, series_metadata, scout, n,
+                                                  shape=plan_state.get("analysis_shape"))
             print(rendered)
             try:
                 answer = request_human_feedback(
@@ -1498,7 +1506,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     kind="review_plan",
                     context=rendered,      # non-terminal channels can show the plan
                     origin={"stage": "series_regime_plan", "round": _round + 1},
-                    subject=_series.regime_plan_subject(plan, series_metadata, scout, n),
+                    subject=_series.regime_plan_subject(plan, series_metadata, scout, n,
+                                                        shape=plan_state.get("analysis_shape")),
                 ).strip()
             except (EOFError, KeyboardInterrupt):
                 self.logger.info("  Regime plan gate: no answer — plan accepted as is.")
@@ -1804,6 +1813,12 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                               sorted(base.glob("*/dynamic_analysis_records.json"))
                               + sorted(base.glob("results/*/dynamic_analysis_records.json")))
             for cand in candidates:
+                from ._joint import replay_refusal
+                _refused = replay_refusal(cand)
+                if _refused:
+                    # the one check every reuse reader consults (#757)
+                    self.logger.warning(f"Prior records {cand} not replayed: {_refused}.")
+                    continue
                 try:
                     recs = json.loads(read_text_utf8(cand))
                 except Exception as e:  # noqa: BLE001 - skip unreadable, keep looking
@@ -1848,6 +1863,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         failure-isolated; gated by ``SCILINK_SCRIPT_BANK`` /
         persistent-memory setting.
         """
+        if getattr(self, "_joint_manifest", None):
+            return []          # a joint script reads its own run's files by path (#757)
         if getattr(self, "_series_role", None) == "replay":
             # The anchor banked this script once for the series; banking each
             # verbatim replay would inflate its proven-N per dataset.

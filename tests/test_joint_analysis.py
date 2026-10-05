@@ -114,6 +114,7 @@ def test_a_curve_series_planned_joint_runs_once_over_every_unit(tmp_path, monkey
         assert all(np.load(r["path"]).shape[-1] in (2, 200) or np.load(r["path"]).shape[0] == 2 for r in rows)
         assert res["error"]["error"] == "joint run reached"
         assert res["analysis_shape"] == "joint" and [u["source"] for u in res["joint_units"]] == paths
+        assert any("ONE joint analysis" in w for w in res["warnings"])        # a headless caller sees the switch
     else:
         # no declaration: the series mode as on main, nothing staged
         assert [s["single"] for s in planner.seen] == [False] and stop.reached
@@ -272,3 +273,161 @@ def test_a_joint_runs_checks_and_repairs_are_told_its_inputs_are_the_contract(tm
         for prompt in sent:
             assert ("Joint analysis contract" in prompt) is joint
             assert ("joint_unit_0002.npy" in prompt) is joint
+
+
+# ---------------------------------------------------------------------------
+# #757 review: a joint run's script is never replayed; the shape is shown
+# ---------------------------------------------------------------------------
+
+def _joint_run(tmp_path, records=None):
+    run = tmp_path / "joint_run"
+    (run / "scripts").mkdir(parents=True)
+    (run / "scripts" / "fitting_script.py").write_text("print('reads joint_unit files by path')")
+    (run / "analysis_results.json").write_text(json.dumps({"status": "success", "analysis_shape": "joint"}))
+    if records is not None:
+        (run / "dynamic_analysis_records.json").write_text(json.dumps(records))
+    return run
+
+
+def test_no_reuse_reader_replays_a_joint_runs_script(tmp_path):
+    from scilink.agents.exp_agents._verification_record import prior_recipe_candidates, prior_recipe_scripts
+    run = _joint_run(tmp_path)
+    assert _joint.replay_refusal(run) and _joint.replay_refusal(run / "scripts" / "fitting_script.py")
+    assert prior_recipe_scripts(run, single_name="fitting_script.py") == []
+    assert prior_recipe_candidates(run, single_name="fitting_script.py") == []
+    assert prior_recipe_scripts(run, single_name="fitting_script.py",
+                                named=run / "scripts" / "fitting_script.py") == []
+    # a board copy carries the marker in its sidecar, away from the run
+    copy = tmp_path / "board" / "fitting_script.py"
+    copy.parent.mkdir()
+    copy.write_text("x")
+    (copy.parent / "fitting_script.recipe.json").write_text(json.dumps({"analysis_shape": "joint"}))
+    assert prior_recipe_scripts(copy.parent, single_name="fitting_script.py", named=copy) == []
+    # a per-unit run is replayed as on main
+    plain = tmp_path / "plain"
+    (plain / "scripts").mkdir(parents=True)
+    (plain / "scripts" / "fitting_script.py").write_text("print(1)")
+    assert _joint.replay_refusal(plain) is None
+    assert prior_recipe_scripts(plain, single_name="fitting_script.py") == [("print(1)", None)]
+
+
+def test_a_strict_replay_of_a_joint_cube_run_never_runs(tmp_path):
+    """Through a real reuse: the zero-model strict replay of a hyperspectral
+    run reads its records; a joint run's are refused, so nothing replays and
+    the frame is not a verified replay. The same records from a per-unit run
+    replay as on main."""
+    import test_hs_locked_replay as hs
+    np.save(tmp_path / "cube.npy", hs._peak_cube(center=660.0, seed=1))
+    recs = [{"target": "peak position", "task_success": True, "required_outputs": ["Peak_Position"],
+             "script": hs.PEAK_SCRIPT, "quality_history": {"approved": True}}]
+    for joint, out in ((True, "j"), (False, "p")):
+        run = tmp_path / f"anchor_{out}"
+        run.mkdir()
+        (run / "dynamic_analysis_records.json").write_text(json.dumps(recs))
+        if joint:
+            (run / "analysis_results.json").write_text(json.dumps({"analysis_shape": "joint"}))
+        try:
+            res = hs._strict_agent(tmp_path, out).analyze(
+                str(tmp_path / "cube.npy"), system_info=dict(hs.AXIS_OK), prior_analysis_paths=[str(run)],
+                reuse_locked_script=True, strict_replay=True)
+        except Exception as e:               # strict replay with no script to replay refuses outright
+            res = {"status": "error", "error": str(e)}
+        if joint:
+            assert res.get("status") != "success" and not (res.get("verdict") or {}).get("verified")
+        else:
+            assert res["status"] == "success" and res["script_reuse"]["verbatim"] is True
+
+
+def test_the_board_marks_a_joint_runs_recipe_copy(tmp_path):
+    from scilink.agents.meta_agent import board as bd
+    run = _joint_run(tmp_path)
+    specs = bd._recipe_specs("a1", {"output_directory": str(run), "agent_name": "curve"})
+    assert specs and specs[0]["payload"]["analysis_shape"] == "joint"
+    plain = tmp_path / "plain"
+    (plain / "scripts").mkdir(parents=True)
+    (plain / "scripts" / "fitting_script.py").write_text("print(1)")
+    specs = bd._recipe_specs("a2", {"output_directory": str(plain), "agent_name": "curve"})
+    assert all("analysis_shape" not in s["payload"] for s in specs)
+
+
+def test_a_joint_script_is_never_banked(tmp_path, monkeypatch):
+    """A/B on one state (the script bank suite's): the same approved script is
+    banked from a per-unit run and refused from a joint run, whose paths are
+    its own run's files."""
+    import test_script_bank as sb
+    from scilink.agents.exp_agents.curve_fitting_agent import CurveFittingAgent
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path))
+    monkeypatch.setenv("SCILINK_MEMORY", "1")
+    monkeypatch.delenv("SCILINK_SCRIPT_BANK", raising=False)
+    assert CurveFittingAgent._maybe_bank_scripts(sb._fake_agent(tmp_path / "a"), sb._curve_state())
+    joint = dict(sb._curve_state(), joint_manifest=str(tmp_path / "m.json"))
+    assert CurveFittingAgent._maybe_bank_scripts(sb._fake_agent(tmp_path / "b"), joint) == []
+
+
+def test_the_plan_gates_show_the_shape():
+    from scilink.agents.exp_agents.controllers.curve_fitting_controllers import fitting_plan_subject
+    from scilink.agents.exp_agents.controllers.image_analysis_controllers import analysis_plan_subject
+    from scilink.agents.exp_agents.controllers.hyperspectral_series import regime_plan_subject, render_regime_plan
+
+    def kinds(subject):
+        return [(b["type"], b.get("label") or b.get("title")) for b in subject["blocks"]]
+    for shape in ("joint", None):
+        joint = shape == "joint"
+        cs = fitting_plan_subject({"is_single_spectrum": False, "num_spectra": 5, "analysis_shape": shape})
+        im = analysis_plan_subject({"is_single_image": False, "num_images": 5, "analysis_shape": shape})
+        hs_ = regime_plan_subject(None, {}, {}, 5, shape=shape)
+        for s in (cs, im, hs_):
+            assert (("notice", "One analysis over every measurement") in kinds(s)) is joint
+        # a joint cube plan has no regimes: the gate does not show the one-regime default
+        assert ("1 regime" in json.dumps(hs_)) is (not joint)
+        assert ("JOINT" in render_regime_plan(None, {}, {}, 5, shape=shape)) is joint
+    # a single-unit plan shows no shape at all
+    assert "Analysis shape" not in json.dumps(fitting_plan_subject({"is_single_spectrum": True}))
+
+
+def test_the_trend_codegen_and_its_correction_carry_the_principle():
+    from scilink.agents.exp_agents.controllers.curve_fitting_controllers import ConditionalTrendAnalysisController
+    from scilink.agents.exp_agents.controllers.image_analysis_controllers import ConditionalImageTrendController
+    from scilink.agents.exp_agents.controllers.hyperspectral_series import HyperspectralSeriesTrendController
+    from scilink.agents.exp_agents import derive_outputs
+    for c in (ConditionalTrendAnalysisController, ConditionalImageTrendController,
+              HyperspectralSeriesTrendController):
+        assert CODEGEN_PRINCIPLE in c.TREND_ANALYSIS_INSTRUCTIONS
+    assert CODEGEN_PRINCIPLE in derive_outputs.DERIVE_PROMPT
+    sent = []
+
+    class Model:
+        def generate_content(self, *a, **k):
+            c = k.get("contents", a[0] if a else None)
+            sent.append(c if isinstance(c, str) else "\n".join(map(str, c)))
+            raise RuntimeError("captured")
+    import logging
+    for cls in (ConditionalTrendAnalysisController, ConditionalImageTrendController):
+        ctrl = cls.__new__(cls)
+        ctrl.model, ctrl.logger, ctrl.generation_config, ctrl.safety_settings = Model(), logging.getLogger("t"), None, None
+        sent.clear()
+        try:
+            ctrl._correct_script("print(1)", "boom", 1)
+        except Exception:
+            pass
+        assert sent and CODEGEN_PRINCIPLE in sent[0], cls.__name__
+
+
+def test_the_joint_marker_is_on_the_runs_record_on_disk(tmp_path, monkeypatch):
+    """The marker every reuse reader consults is written into the joint run's
+    analysis_results.json, not only stamped on the returned dict; that record
+    then refuses a replay."""
+    from scilink.agents.exp_agents import curve_fitting_agent as cfa
+
+    class Plan:
+        def execute(self, state):
+            if not state.get("joint_manifest"):
+                state["analysis_shape"] = "joint"
+            return state
+    monkeypatch.setattr(cfa, "create_unified_curve_fitting_pipeline", lambda *a, **k: [Plan()])
+    out = tmp_path / "out"
+    ag = cfa.CurveFittingAgent(api_key="sk-dummy", output_dir=str(out), enable_human_feedback=False)
+    res = ag.analyze(_curves(tmp_path), series_metadata={"variable": "condition", "values": [1, 2, 3]})
+    assert res["analysis_shape"] == "joint"
+    assert json.loads((out / "analysis_results.json").read_text())["analysis_shape"] == "joint"
+    assert _joint.replay_refusal(out)

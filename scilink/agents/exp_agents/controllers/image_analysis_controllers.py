@@ -1154,6 +1154,10 @@ def analysis_plan_subject(state: dict) -> dict:
     if outputs:
         blocks.append(block("text", label="📄 Expected outputs", markdown=", ".join(outputs)))
 
+    if not is_single:
+        # the series' shape, before its regimes (#757)
+        from .._joint import shape_blocks
+        blocks += shape_blocks(state.get("analysis_shape"), num)
     series_plan = state.get("series_analysis_plan") or {}
     regimes = series_plan.get("regimes") or []
     if regimes and not is_single:
@@ -1237,6 +1241,9 @@ class ImagePlanningController:
         mode_str = "SINGLE IMAGE" if is_single else f"SERIES ({num_images} images)"
         print(f"📋 PROPOSED ANALYSIS PLAN - {mode_str}")
         print("=" * 60)
+        if not is_single:
+            from .._joint import shape_text
+            print(shape_text(state.get("analysis_shape"), num_images))
 
         if state.get("observations"):
             print(f"\n🔍 Observations:\n   {state['observations']}")
@@ -7130,6 +7137,10 @@ Return JSON with:
     "script": "full python script - NO plt.show()"
 }}
 '''
+    # Measured inputs only (#757 review): the trend script computes the set-level answer
+    from .._input_integrity import CODEGEN_PRINCIPLE as _P_TREND, with_principle as _wp_TREND
+    TREND_ANALYSIS_INSTRUCTIONS = _wp_TREND(TREND_ANALYSIS_INSTRUCTIONS, _P_TREND)
+
 
     def __init__(
         self,
@@ -7260,6 +7271,8 @@ Return JSON with:
 
 Return JSON with: {{"diagnosis": "...", "script": "corrected script"}}
 """
+        from .._input_integrity import CODEGEN_PRINCIPLE, with_principle
+        prompt = with_principle(prompt, CODEGEN_PRINCIPLE)
 
         try:
             response = self.model.generate_content(

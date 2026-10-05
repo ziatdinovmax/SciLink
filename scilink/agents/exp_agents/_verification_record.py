@@ -828,7 +828,14 @@ def prior_recipe_scripts(anchor_dir, *, single_name: str, named=None) -> List[Tu
       when the anchor was refit since, and when the recipe's own gate did
       not pass, so a replay that fits is not mistaken for an approved model);
     - for a series from before the record, the first unit script.
-    Empty when the run holds no script."""
+    Empty when the run holds no script, or when it is a joint run (#757):
+    its script reads its own run's measurements by path and is not replayed.
+    """
+    from ._joint import replay_refusal
+    _refused = replay_refusal(named if named is not None else anchor_dir)
+    if _refused:
+        logging.getLogger(__name__).warning(f"Prior recipe not replayed: {_refused}.")
+        return []
     if named is not None:
         named = Path(named)
         return [(named.read_text(encoding="utf-8"), f"{named.name} (the script file named)")]

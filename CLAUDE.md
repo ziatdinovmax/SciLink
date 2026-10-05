@@ -174,7 +174,14 @@ series mode above, byte-for-byte) or `joint`, and a joint plan is run as ONE
 analysis whose inputs are every unit, staged with a manifest
 (`exp_agents/_joint.py`: the planner rule, the declaration, staging and the
 prompt text are shared; each agent supplies only how a unit becomes an
-array). **The measured inputs are the only inputs** (`_input_integrity.py`):
+array). A joint run's script reads its own run's measurements by path, so it
+is a record, not a recipe: the run's `analysis_results.json` (and a board
+copy's sidecar) carries `analysis_shape: joint`, every reuse reader refuses it
+with the reason through one check (`_joint.replay_refusal`, consulted by
+`prior_recipe_scripts` and the hyperspectral records loader), and it is never
+banked — until a replay over a new set of measurements is designed. Every plan
+gate shows the shape (a notice when joint), so Enter accepts what was shown.
+**The measured inputs are the only inputs** (`_input_integrity.py`):
 one principle per role — code generation (never construct an input the
 method needs; return null with the reason), plan conformance (constructing
 inputs is never a justified deviation), the verifier that drives retries (a
