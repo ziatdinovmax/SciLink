@@ -1101,6 +1101,8 @@ def build_regime_plan_prompt(state: Dict[str, Any], scout: Dict[str, Any]) -> li
     _append_prior_knowledge_context(prompt, state)
     prompt.append(HYPERSPECTRAL_SERIES_REGIME_SUPPLEMENT.format(
         num_datasets=n, num_datasets_minus_1=n - 1))
+    from .._joint import PLANNER_RULE
+    prompt.append(PLANNER_RULE + "\n")
     return prompt
 
 
@@ -1275,6 +1277,11 @@ def plan_series_regimes(model, generation_config, safety_settings, parse_fn: Cal
                 return None
         if result.get("observations"):
             logger.info(f"  Planner observations: {str(result['observations'])[:400]}")
+        # the series' shape (#754), on the planning state the driver reads;
+        # a revision that omits it keeps the first
+        if "analysis_shape" in result or "analysis_shape" in (result.get("series_analysis_plan") or {}):
+            from .._joint import analysis_shape_of
+            state["analysis_shape"] = analysis_shape_of(result)
         plan = extract_series_plan(result, n, scout.get("reduction"), logger)
         if plan:
             for r in plan["regimes"]:

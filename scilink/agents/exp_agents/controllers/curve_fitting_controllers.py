@@ -647,8 +647,24 @@ def _auxiliary_display_items(state: dict) -> list:
     return [it for it in (state.get("auxiliary_items") or []) if it.get("plot_bytes")]
 
 
+
+def _joint_conformance_note(state: dict) -> str:
+    """A joint run's contract for the conformance check (#754): reading every
+    listed measurement is the plan, not a breach of the data-loading rules."""
+    if not state.get("joint_manifest"):
+        return ""
+    from .._joint import joint_contract_note
+    return joint_contract_note(state["joint_manifest"], control_name=(state.get("joint_control") or None))
+
 def _append_auxiliary_context(prompt: list, state: dict) -> None:
-    """Append auxiliary reference dataset(s) to an LLM prompt if available."""
+    """Append auxiliary reference dataset(s) to an LLM prompt if available,
+    and a joint analysis's note on its inputs (#754)."""
+    if state.get("joint_manifest"):
+        from .._joint import joint_units_planning_text
+        _note = joint_units_planning_text(state["joint_manifest"],
+                                          control_name=(state.get("joint_control") or None))
+        if _note:
+            prompt.append(_note)
     items = _auxiliary_display_items(state)
     if not items:
         return
@@ -3018,9 +3034,17 @@ class CurveFittingPlanningController:
             num_spectra=num_spectra,
             num_spectra_minus_1=num_spectra - 1,
         ))
+        from .._joint import PLANNER_RULE
+        prompt.append(PLANNER_RULE + "\n")
 
     def _extract_series_plan(self, state: dict, result: dict) -> None:
         """Extract and validate series_analysis_plan from LLM response."""
+        if not state.get("is_single_spectrum", True) and isinstance(result, dict) and (
+                "analysis_shape" in result
+                or "analysis_shape" in (result.get("series_analysis_plan") or {})):
+            # the series' shape (#754): a revision that omits it keeps the first
+            from .._joint import analysis_shape_of
+            state["analysis_shape"] = analysis_shape_of(result)
         series_plan = result.get("series_analysis_plan")
         if not isinstance(series_plan, dict) or state.get("is_single_spectrum", True):
             state["series_analysis_plan"] = None
@@ -3514,6 +3538,10 @@ Examine each fit carefully. Look at:
 IMPORTANT: If one fit is clearly better than others (better residuals, more physical parameters),
 select it even if it's not perfect. Only return acceptable=false if ALL fits are fundamentally flawed.
 '''
+    # Measured inputs only (#754)
+    from .._input_integrity import JUDGE_PRINCIPLE as _P_JUDGE_PROMPT, with_principle as _wp_JUDGE_PROMPT
+    JUDGE_PROMPT = _wp_JUDGE_PROMPT(JUDGE_PROMPT, _P_JUDGE_PROMPT)
+
 
     BEST_OF_N_JUDGE_PROMPT = '''You are a scientific data fitting expert selecting the best result among {num_candidates} independent fitting runs of the SAME data under the SAME fitting plan.
 
@@ -3548,6 +3576,10 @@ justify via residual structure.
     "reasoning": "Brief comparison: why this run's fit is best and what the others got wrong"
 }}
 '''
+    # Measured inputs only (#754)
+    from .._input_integrity import JUDGE_PRINCIPLE as _P_BEST_OF_N_JUDGE_PROMPT, with_principle as _wp_BEST_OF_N_JUDGE_PROMPT
+    BEST_OF_N_JUDGE_PROMPT = _wp_BEST_OF_N_JUDGE_PROMPT(BEST_OF_N_JUDGE_PROMPT, _P_BEST_OF_N_JUDGE_PROMPT)
+
 
     HUMAN_FEEDBACK_PROMPT = '''## Fit Quality Issue
 
@@ -3768,6 +3800,10 @@ Your guidance: '''
         # Phase 2: extra columns from the same file (e.g. an uncertainty column
         # the planner flagged), staged per-spectrum as canonical operand files.
         auxiliary_block += extra_operand_block
+        if state.get("joint_manifest"):
+            from .._joint import joint_units_block
+            auxiliary_block += joint_units_block(state["joint_manifest"],
+                                                 control_name=(state.get("joint_control") or None))
 
         prompt = self.script_instructions.format(
             analysis_approach=config.get("analysis_approach", "Fit the data"),
@@ -3914,6 +3950,9 @@ Your guidance: '''
                 prompt = prompt.replace(_marker, _guidance + "\n" + _marker, 1)
             else:
                 prompt += _guidance
+        # A joint run's inputs stay the contract through a correction (#754).
+        from .._joint import with_joint_note
+        prompt = with_joint_note(prompt, state)
         # Last-resort timeout escalation (set transiently by
         # _correct_script_with_timeout_escalation; absent otherwise).
         # Injected BEFORE the response-format footer — appended after it,
@@ -3997,7 +4036,7 @@ Your guidance: '''
                 config.get("parameters_to_extract", [])
             ),
             fitting_strategy=config.get("fitting_strategy", ""),
-            skill_rules=skill_rules_text,
+            skill_rules=skill_rules_text + _joint_conformance_note(state),
             script=script,
         )
 
@@ -5055,6 +5094,8 @@ Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2
             except Exception:
                 pass
         prompt_parts.append("\n\n" + VERIFIER_TOOL_SCRUTINY_PRINCIPLE)
+        from .._input_integrity import VERIFIER_PRINCIPLE
+        prompt_parts.append("\n\n" + VERIFIER_PRINCIPLE)
         from .._qc_profile import verification_addendum
         if verification_addendum(state):
             prompt_parts.append(verification_addendum(state))

@@ -347,6 +347,14 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 structure_image_path="stem_image.png"
             )
         """
+        # The call as made, for a joint analysis's re-entry (#754): kept on the
+        # instance for the series driver, which decides the shape.
+        _joint_manifest = kwargs.pop("_joint_manifest", None)
+        self._joint_call_args = {k: v for k, v in locals().items()
+                                 if k not in ("self", "kwargs", "_joint_manifest")}
+        self._joint_call_args.update(kwargs)
+        self._joint_manifest = str(_joint_manifest) if _joint_manifest else None
+        self._joint_control = (series_metadata or {}).get("variable") if _joint_manifest else None
         # Operating profile (#346): accepted for surface parity; see the
         # parameter note — realtime is curve-only in v1.
         # Use the per-call override or fall back to the instance default
@@ -966,6 +974,27 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 targets[0]["extra_outputs"] = extra
         return targets
 
+    def _run_joint(self, data_paths: list, series_metadata: dict | None) -> dict:
+        """A series whose plan is ``joint`` (#754): every cube is an input of
+        ONE analysis, run on the first. Cubes are listed by path, not copied."""
+        from ._joint import JOINT, stage_joint_units
+        values = (series_metadata or {}).get("values") or []
+        units = [{"path": str(p), "control_value": values[i] if i < len(values) else None}
+                 for i, p in enumerate(data_paths)]
+        manifest = stage_joint_units(units, Path(self.output_dir) / "joint_inputs")
+        self.logger.info(f"🔗 Joint analysis: the plan needs all {len(units)} datasets in one "
+                         f"analysis; running it once over every dataset (manifest {manifest}).")
+        args = dict(getattr(self, "_joint_call_args", {}) or {})
+        args["data"] = str(data_paths[0])
+        args["series_metadata"] = series_metadata
+        args["_joint_manifest"] = str(manifest)
+        result = self.analyze(**args)
+        if isinstance(result, dict):
+            result["analysis_shape"] = JOINT
+            result["joint_units"] = [{"source": u["path"], "control_value": u.get("control_value")}
+                                     for u in units]
+        return result
+
     def _analyze_series(
         self,
         data_paths: list,
@@ -1072,6 +1101,10 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 self._parse_llm_response, plan_state, scout, self.logger)
             series_plan = self._regime_plan_gate(series_plan, plan_state, scout,
                                                  series_metadata, n, reuse_locked_script)
+        if plan_state.get("analysis_shape") == "joint":
+            # The planner says the method needs every dataset at once (#754):
+            # one analysis over all of them, not anchor + replays.
+            return self._run_joint(list(data_paths), series_metadata)
         if series_plan:
             regimes = series_plan["regimes"]
         else:
@@ -2363,6 +2396,9 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "structure_image_blob": structure_image_blob,
                 "analysis_hints": hints,
                 "analysis_objective": objective,
+                # A joint analysis (#754): every dataset is an input of this run.
+                "joint_manifest": getattr(self, "_joint_manifest", None),
+                "joint_control": getattr(self, "_joint_control", None),
                 "reference_scripts": _load_reference_scripts(reference_scripts),
                 "prior_knowledge": prior_knowledge or [],
                 "literature_context": literature_context,
