@@ -1255,14 +1255,19 @@ def plan_series_regimes(model, generation_config, safety_settings, parse_fn: Cal
     try:
         prompt = build_regime_plan_prompt(state, scout)
         if feedback:
+            from .._joint import JOINT, revision_note
+            _joint_now = state.get("analysis_shape") == JOINT
             prev = (json.dumps({k: previous_plan.get(k) for k in ("rationale", "regimes", "transition_points")},
                                indent=1, default=str)
-                    if previous_plan else "one regime containing every dataset")
+                    if previous_plan else
+                    ("one JOINT analysis over every dataset (no regimes)" if _joint_now
+                     else "one regime containing every dataset"))
             prompt.append(
                 "\n## Analyst feedback on the previous plan\n"
                 f"Previous plan:\n{prev}\n\nThe analyst says: {feedback}\n"
                 "Revise the plan to honour this feedback (it overrides your own reading "
-                "of the evidence where they conflict) and return the full JSON again.")
+                "of the evidence where they conflict) and return the full JSON again."
+                + (revision_note(JOINT) if _joint_now else ""))
         response = model.generate_content(
             contents=prompt, generation_config=generation_config,
             safety_settings=safety_settings)

@@ -578,6 +578,16 @@ class MeasurementLoop:
                 raise RuntimeError(
                     "setup(): the reference analysis did not succeed — "
                     f"{(ref_result or {}).get('error')}")
+            if ref_result.get("analysis_shape") == "joint":
+                # A live recipe is replayed frame by frame; a joint reference's
+                # script reads the reference frames by their paths, so every
+                # frame would rest on the old measurements (#757). Refused for
+                # every modality, before anything is laid out as an anchor.
+                from ..agents.exp_agents._joint import REPLAY_REFUSAL
+                raise RuntimeError(
+                    "setup(): the reference was analysed as ONE joint analysis over all the "
+                    f"reference frames, which a live loop cannot replay: {REPLAY_REFUSAL}. "
+                    "Use a single reference frame, or ask for a per-frame analysis.")
             anchor = (ref_result.get("output_directory") or str(run_dir))
             source = ("bank" if ref_result.get("cold_start")
                       else f"reference:{profile or 'thorough'}")

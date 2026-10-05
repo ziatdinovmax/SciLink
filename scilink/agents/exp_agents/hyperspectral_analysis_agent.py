@@ -382,11 +382,13 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 }
             reuse_records = self._load_prior_dynamic_records(prior_analysis_paths)
             if not reuse_records:
+                from ._joint import replay_refusal
+                _joint_why = next((r for r in (replay_refusal(p) for p in prior_analysis_paths) if r), None)
                 return {
                     "status": "error",
                     "error": {
                         "error": "No approved prior script to replay",
-                        "details": (
+                        "details": (f"The prior run is a joint analysis: {_joint_why}." if _joint_why else
                             f"None of {list(prior_analysis_paths)!r} carries a "
                             "dynamic_analysis_records.json with an approved "
                             "(task_success) script. Run the donor analysis "

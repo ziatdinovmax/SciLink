@@ -3181,6 +3181,7 @@ class CurveFittingPlanningController:
                 f" — {state.get('column_mapping_note', '')}"
             )
 
+        from .._joint import revision_note
         prompt = [
             self.instructions,
             "\n## Data Plot",
@@ -3189,6 +3190,8 @@ class CurveFittingPlanningController:
             "\n## Metadata\n" + json.dumps(state.get("system_info", {}), indent=2),
             f"\n## Current Plan\n{current_plan}",
             f"\n## User Feedback\nAdjust the plan based on this feedback: \"{feedback}\"",
+            # a joint plan is named, so feedback can undo it (#757)
+            *[n for n in (revision_note(state.get("analysis_shape")),) if n],
         ]
 
         _append_column_structure(prompt, state)

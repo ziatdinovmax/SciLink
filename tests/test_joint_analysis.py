@@ -431,3 +431,114 @@ def test_the_joint_marker_is_on_the_runs_record_on_disk(tmp_path, monkeypatch):
     assert res["analysis_shape"] == "joint"
     assert json.loads((out / "analysis_results.json").read_text())["analysis_shape"] == "joint"
     assert _joint.replay_refusal(out)
+
+
+@pytest.mark.parametrize("shape", ["joint", None])
+def test_a_live_loop_refuses_a_joint_reference(tmp_path, shape):
+    """#757 re-review: a loop armed on several reference frames analyses them
+    as a series; a joint reference's script reads those frames by path, so a
+    per-frame replay would rest on them. setup() refuses it with the reason,
+    through the real setup(); the same reference analysed per unit arms."""
+    import test_measurement_loop as ml
+    from scilink.live.measurement_loop import MeasurementLoop
+    anchor = ml.make_anchor(tmp_path)
+
+    class Ref(ml.FakeAgent):
+        def analyze(self, data, **kw):
+            return {**ml.good(6.0), "output_directory": str(anchor),
+                    **({"analysis_shape": "joint"} if shape else {})}
+    loop = MeasurementLoop(str(tmp_path / "loop"), agent_factory=Ref)
+    if shape:
+        with pytest.raises(RuntimeError, match="ONE joint analysis"):
+            loop.setup(reference="ref.csv")
+        assert loop.status()["armed"] is False
+    else:
+        loop.setup(reference="ref.csv")
+        assert loop.status()["armed"] is True
+
+
+class _Reviser:
+    """A planner that records what it was told and answers with a fixed JSON."""
+
+    def __init__(self, answer):
+        self.answer, self.prompts = answer, []
+
+    def generate_content(self, contents=None, *a, **k):
+        c = contents if contents is not None else a[0]
+        self.prompts.append("\n".join(x for x in c if isinstance(x, str)) if isinstance(c, list) else str(c))
+        return json.dumps(self.answer)
+
+
+def test_typed_feedback_can_undo_a_joint_cube_plan():
+    """#757 re-review: through the real plan_series_regimes, the reviser of a
+    joint plan is told it is joint (not "one regime"), an explicit per_unit
+    reply flips it back, and a per-unit plan's revision prompt is unchanged."""
+    import logging
+    from scilink.agents.exp_agents.controllers import hyperspectral_series as hs_
+    parse = lambda r: (json.loads(r), None)                       # noqa: E731
+    log = logging.getLogger("t")
+    state = {"num_images": 3, "series_metadata": {}, "system_info": {}, "analysis_shape": "joint"}
+    model = _Reviser({"observations": "separately", "analysis_shape": "per_unit"})
+    hs_.plan_series_regimes(model, None, None, parse, state, {}, log,
+                            feedback="analyse each cube separately", previous_plan=None)
+    assert "JOINT" in model.prompts[0] and "one regime containing every dataset" not in model.prompts[0]
+    assert state["analysis_shape"] == "per_unit"
+    # a per-unit plan's revision prompt carries no joint note
+    state = {"num_images": 3, "series_metadata": {}, "system_info": {}, "analysis_shape": "per_unit"}
+    model = _Reviser({"observations": "ok"})
+    hs_.plan_series_regimes(model, None, None, parse, state, {}, log, feedback="merge them", previous_plan=None)
+    assert "Analysis shape of the current plan" not in model.prompts[0]
+    assert "one regime containing every dataset" in model.prompts[0]
+
+
+@pytest.mark.parametrize("shape", ["joint", "per_unit"])
+def test_typed_feedback_can_undo_a_joint_curve_plan(shape):
+    import logging
+    from scilink.agents.exp_agents.controllers.curve_fitting_controllers import CurveFittingPlanningController
+    ctrl = CurveFittingPlanningController.__new__(CurveFittingPlanningController)
+    ctrl.model = _Reviser({"observations": "o", "physical_model": "m", "analysis_shape": "per_unit"})
+    ctrl.logger, ctrl.generation_config, ctrl.instructions = logging.getLogger("t"), None, "Plan."
+    ctrl._parse = lambda r: (json.loads(r), None)
+    state = {"original_plot_bytes": b"x", "data_statistics": {}, "system_info": {},
+             "is_single_spectrum": False, "num_spectra": 3, "analysis_shape": shape,
+             "physical_model": "joint model", "analysis_approach": "a", "parameters_to_extract": []}
+    state = ctrl._refine_plan(state, "analyse each spectrum separately")
+    assert ("Analysis shape of the current plan" in ctrl.model.prompts[0]) is (shape == "joint")
+    assert state["analysis_shape"] == "per_unit"
+
+
+def test_a_board_copy_of_a_joint_run_is_written_with_its_marker_and_refused(tmp_path):
+    """End to end through the real post_delegation: the board copies a joint
+    run's script, writes the sidecar with analysis_shape, and a replay of the
+    COPY (away from the run) is refused; a per-unit run's copy is replayed."""
+    from scilink.agents.meta_agent import board as bd
+    from scilink.agents.exp_agents._verification_record import prior_recipe_scripts
+    joint = _joint_run(tmp_path / "j")
+    plain = tmp_path / "p" / "plain"
+    (plain / "scripts").mkdir(parents=True)
+    (plain / "scripts" / "fitting_script.py").write_text("print(1)")
+    (plain / "analysis_results.json").write_text(json.dumps({"status": "success"}))
+    board = bd.Board(tmp_path / "session")
+    for k, (aid, run) in enumerate((("aj", joint), ("ap", plain)), 1):
+        bd.post_delegation(board, {"index": k, "label": f"item {k}", "mode": "analysis", "status": "success"},
+                           {"analyses": [{"analysis_id": aid, "status": "success", "verified": True, "reason": "ok",
+                                          "output_directory": str(run), "agent_name": "CurveFittingAgent"}]})
+    recs = {r["payload"]["analysis_id"]: r for r in board.records() if r["kind"] == "recipe"}
+    copy_j, copy_p = Path(recs["aj"]["payload"]["path"]), Path(recs["ap"]["payload"]["path"])
+    assert json.loads(copy_j.with_name(f"{copy_j.stem}.recipe.json").read_text())["analysis_shape"] == "joint"
+    assert prior_recipe_scripts(copy_j.parent, single_name="fitting_script.py", named=copy_j) == []
+    assert prior_recipe_scripts(copy_p.parent, single_name="fitting_script.py", named=copy_p)
+
+
+def test_the_live_cube_reader_and_the_fan_out_donor_picker_refuse_a_joint_run(tmp_path):
+    from scilink.live.modality import HyperspectralModality
+    from scilink.agents.meta_agent.fanout import find_donor_reuse_dir
+    recs = [{"target": "t", "task_success": True, "script": "def analyze_feature(d, a): pass"}]
+    joint = _joint_run(tmp_path / "j", records=recs)
+    plain = tmp_path / "p"
+    plain.mkdir()
+    (plain / "dynamic_analysis_records.json").write_text(json.dumps(recs))
+    assert HyperspectralModality._approved(str(joint)) == ([], None)
+    assert HyperspectralModality._approved(str(plain))[0]
+    assert find_donor_reuse_dir(tmp_path / "j") == (None, None)
+    assert find_donor_reuse_dir(tmp_path / "p")[1] == "records"

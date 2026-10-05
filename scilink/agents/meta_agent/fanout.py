@@ -464,7 +464,10 @@ def find_donor_reuse_dir(donor_dir) -> tuple:
         return None, None
     cands = sorted(donor_dir.rglob(_SCRIPT_RECORD_NAME),
                    key=lambda p: p.stat().st_mtime)
+    from ..exp_agents._joint import replay_refusal
     for c in reversed(cands):
+        if replay_refusal(c):
+            continue    # a joint run's records read its own run's files: no donor (#757)
         try:
             recs = json.loads(c.read_text(encoding="utf-8"))
         except Exception:  # noqa: BLE001 - keep looking
@@ -479,6 +482,8 @@ def find_donor_reuse_dir(donor_dir) -> tuple:
             continue
         if (res.parent / _SCRIPT_RECORD_NAME).exists():
             continue    # hyperspectral run: its records (judged above) are authoritative
+        if replay_refusal(res.parent):
+            continue    # a joint run's script reads its own run's files: no donor (#757)
         try:
             status = json.loads(res.read_text(encoding="utf-8")).get("status")
         except Exception:  # noqa: BLE001 - keep looking

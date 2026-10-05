@@ -179,7 +179,10 @@ is a record, not a recipe: the run's `analysis_results.json` (and a board
 copy's sidecar) carries `analysis_shape: joint`, every reuse reader refuses it
 with the reason through one check (`_joint.replay_refusal`, consulted by
 `prior_recipe_scripts` and the hyperspectral records loader), and it is never
-banked — until a replay over a new set of measurements is designed. Every plan
+banked — until a replay over a new set of measurements is designed. The live
+loop's `setup()` refuses a joint reference outright, and the fan-out's donor
+picker never takes one. A board copy separated from its sidecar carries no
+marker and cannot be recognised as joint: keep the two together. Every plan
 gate shows the shape (a notice when joint), so Enter accepts what was shown.
 **The measured inputs are the only inputs** (`_input_integrity.py`):
 one principle per role — code generation (never construct an input the

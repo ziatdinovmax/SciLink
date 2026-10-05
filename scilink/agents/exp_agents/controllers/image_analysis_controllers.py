@@ -1722,6 +1722,7 @@ class ImagePlanningController:
             f"Quality Criteria: {state.get('quality_criteria', 'N/A')}"
         )
 
+        from .._joint import revision_note
         prompt = [
             self._get_instructions(state),
             "\n## Image",
@@ -1730,6 +1731,8 @@ class ImagePlanningController:
             "\n## Metadata\n" + json.dumps(state.get("system_info", {}), indent=2),
             f"\n## Current Plan\n{current_plan}",
             f"\n## User Feedback\nAdjust the plan based on this feedback: \"{feedback}\"",
+            # a joint plan is named, so feedback can undo it (#757)
+            *[n for n in (revision_note(state.get("analysis_shape")),) if n],
         ]
 
         _append_objective_context(prompt, state)

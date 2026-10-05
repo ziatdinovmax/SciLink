@@ -223,3 +223,16 @@ def redirect_warning(n_units: int) -> str:
     """The joint run's warning on its result, for a headless caller or the meta."""
     return (f"Run as ONE joint analysis over all {n_units} measurements (the planner declared "
             f"analysis_shape: joint), not as a series: no per-measurement rows, no trend.")
+
+
+def revision_note(shape: Any) -> str:
+    """For a plan revision when the CURRENT plan is joint (#757 re-review):
+    the reviser is told so and asked to restate the shape, so typed feedback
+    can undo a joint call (a reply that omits the field keeps joint). Empty
+    for a per-unit plan, whose revision prompts are unchanged."""
+    if shape != JOINT:
+        return ""
+    return ("\n## Analysis shape of the current plan\nThe current plan is JOINT "
+            '("analysis_shape": "joint"): ONE analysis over all the measurements together. '
+            'Restate "analysis_shape" in your answer: "per_unit" if the feedback asks for each '
+            'measurement to be analysed separately, "joint" to keep one analysis.')

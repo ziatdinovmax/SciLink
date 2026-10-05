@@ -342,6 +342,9 @@ class HyperspectralModality(CurveModality):
         path = cls._records_file(anchor)
         if path is None:
             return [], None
+        from ..agents.exp_agents._joint import replay_refusal
+        if replay_refusal(path):
+            return [], None            # a joint run's records are a record, not a recipe (#757)
         try:
             records = json.loads(path.read_text())
         except Exception:  # noqa: BLE001
