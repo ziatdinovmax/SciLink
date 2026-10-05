@@ -399,7 +399,10 @@ agent's: an image reuse has no identity check on its `reuse_validity` and
 is never certified, so its claims stay provisional. A hyperspectral
 replay's `identity_checked` is the map gate's range rule — every required
 map inside the anchor's plausible range — a weaker certificate than the
-curve's two checks. The verdict stays the gate's, on the fast clock and
+curve's two checks. With no map gate (a single cube's run folder or its board
+copy) the run's own `certification_reference` maps certify by the same rule
+and never gate: the verdict is the run's, and a single-cube reuse can now be
+certified, which it never was before #753. The verdict stays the gate's, on the fast clock and
 off it. Why not a verdict: a deterministic check asked an interpretive
 question ("same phase, read the same way?" — the question the live section
 says no gate can answer) has the precision to withhold a certificate, not to

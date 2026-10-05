@@ -172,19 +172,31 @@ def test_a_certification_reference_never_decides_a_cube_replays_verdict(tmp_path
 
 
 def test_the_board_says_why_a_replay_is_not_certified(tmp_path, monkeypatch):
-    """The analyses row carries the reason and the board's provisional claim
-    quotes it, instead of a generic phrase (#758 review)."""
-    from scilink.agents.exp_agents._verification_record import replay_certification_reason
+    """The ``analyses`` row run_task builds carries the reason, and the
+    board's provisional claim quotes it instead of a generic phrase (#758
+    review: through the orchestrator's real row-building, not a hand-made
+    row)."""
+    import contextlib, io
+    from scilink.agents.exp_agents.analysis_orchestrator import AnalysisOrchestratorAgent, AnalysisMode
     _, _, copy = _post_series_copy(tmp_path, None)                     # a copy with no reference
     res, _, _, _ = curve._replay(tmp_path / "r", monkeypatch, {"LOW": 0.99}, prior=copy,
                                  data=rc.spectrum(rc.ANATASE, seed=41),
                                  extra_params={"LOW": rc.auto_detect_parameters(rc.ANATASE, seed=42)})
-    why = replay_certification_reason(res)
-    assert why == _replay.NO_REFERENCE
+    with contextlib.redirect_stdout(io.StringIO()):
+        orch = AnalysisOrchestratorAgent(base_dir=str(tmp_path / "s"), api_key="sk-dummy",
+                                         model_name="claude-opus-4-6", analysis_mode=AnalysisMode.AUTONOMOUS)
+
+        def chat(prompt):
+            orch.analysis_results.append({"analysis_id": "r1", "agent_name": "CurveFittingAgent", "status": "success",
+                                          "output_directory": str(tmp_path / "r"), "full_result": res})
+            return "replayed"
+        orch.chat = chat
+        result = orch.run_task("replay the recipe")
+    row = result["analyses"][0]
+    assert row["certification_reason"] == _replay.NO_REFERENCE
     board = Board(tmp_path / "meta2")
-    row = {"analysis_id": "r1", "status": "success", "verified": True, "reason": "replay gate passed",
-           "decided_by": "replay_gate", "interpretation_checked": False, "certification_reason": why,
-           "agent_name": "CurveFittingAgent", "output_directory": str(tmp_path / "r")}
+    row = {**row, "verified": True, "reason": "replay gate passed", "decided_by": "replay_gate",
+           "interpretation_checked": False}                                # the claim path under test
     board_mod.post_delegation(board, {"index": 3, "label": "replay", "mode": "analysis", "status": "success"},
                               {"analyses": [row], "key_findings": ["[r1] anatase bands at 144 and 639"]})
     claims = [r for r in board.records() if r["kind"] == "claim"]
