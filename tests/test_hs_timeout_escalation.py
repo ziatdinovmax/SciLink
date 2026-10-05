@@ -440,3 +440,20 @@ def test_what_this_change_leaves_alone(tmp_path, monkeypatch):
         ex = Exec(outcomes)
         _locked_exec.stage_and_run_adaptive(ex, "print(1)", np.zeros(4), tmp_path / f"run{len(limits)}{outcomes[-1]['status']}")
         assert ex.limits == limits
+
+
+def test_a_rerun_of_the_same_script_keeps_the_runs_deadline(tmp_path, monkeypatch):
+    """#755 review: a rerun of a remembered script is a retry, so what the
+    memory adds over the base limit is bounded by the time left; only the
+    FIRST limit is unclamped. Started unclamped, the reruns ran seconds past a
+    deadline main keeps."""
+    import time
+    orig_state = hs._replay_state
+    monkeypatch.setattr(hs, "_replay_state",
+                        lambda p, r=None: dict(orig_state(p, r), max_verification_iterations=3))
+    monkeypatch.setattr(_locked_exec, "TIMEOUT_HARD_CAP_S", 4)
+    stuck = SLOW_SCRIPT.replace("time.sleep(1.6)", "time.sleep(30)")
+    t0 = time.monotonic()
+    state = _dynamic(tmp_path, monkeypatch, hs._records(stuck), seconds=1, deadline_s=9)
+    assert not state["dynamic_analysis_records"][0]["task_success"]
+    assert time.monotonic() - t0 < 9 + 1 + 0.9          # the deadline, plus main's one-base-limit grace

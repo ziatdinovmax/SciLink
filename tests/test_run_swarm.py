@@ -275,6 +275,10 @@ def test_a_datacube_series_item_gets_the_fan_out_branchs_budget(meta, monkeypatc
     # a budget the caller gives is taken as is, for every item
     res = json.loads(swarm.run_swarm(meta, items, item_time_budget_s=0.6))
     assert {r["label"]: r["status"] for r in res["results"]} == {"cube series": "error", "one cube": "error"}
+    # the item's pattern scopes the folder, as it does for the memory estimate:
+    # one matching cube is not a series, so no multiple
+    res = json.loads(swarm.run_swarm(meta, [dict(items[0], pattern="A.npy"), items[1]]))
+    assert {r["label"]: r["status"] for r in res["results"]} == {"cube series": "error", "one cube": "error"}
 
 
 def test_usage_is_charged_to_each_item_under_the_coordinators_session(meta, monkeypatch, tmp_path):

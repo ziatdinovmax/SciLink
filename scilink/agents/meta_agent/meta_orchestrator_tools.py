@@ -853,7 +853,8 @@ class MetaOrchestratorTools:
                             "data_path": {"type": "string",
                                           "description": "Optional, analysis items: the "
                                                          "dataset path, used to estimate the "
-                                                         "item's memory."},
+                                                         "item's memory and set its time "
+                                                         "budget."},
                             "context": {"type": "object",
                                         "description": "Optional context, as for a "
                                                        "delegate_to_* call."},
