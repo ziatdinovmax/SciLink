@@ -12,6 +12,16 @@ detect:
     module). Detection should treat the `nwchem` binary on $PATH, or any
     of these env vars, as a positive hit. Unlike PySCF (a python module),
     NWChem is an external executable, so python_modules is empty.
+# Basis-set convergence: run the calc up a basis ladder and adopt the smallest
+# basis past which the observable stops changing within tolerance. The default
+# observable is the total energy; for a property-specific case (dipole,
+# HOMO-LUMO gap) set `observable` to that property — it converges faster than
+# the absolute energy, which approaches the CBS limit only slowly.
+convergence:
+  - parameter: basis
+    ladder: [def2-svp, def2-tzvp, def2-qzvp]   # def2 family, increasing size
+    observable: total_energy                   # eV; or homo_lumo_gap / dipole
+    tolerance: 0.05                            # eV — "basis adequate" energy scale
 ---
 # NWChem Molecular Quantum Chemistry Skill
 

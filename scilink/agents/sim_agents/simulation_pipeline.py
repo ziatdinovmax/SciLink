@@ -428,6 +428,18 @@ def _reparameterize(flagged, system_description, backend, components,
     )
 
 
+def _convergence_specs(software: str, scale: str) -> list:
+    """Return the engine skill's ``convergence:`` frontmatter block, or []."""
+    try:
+        from ...skills.loader import load_skill
+        meta = load_skill(software, domain=scale).get("meta") or {}
+        specs = meta.get("convergence") or []
+        return specs if isinstance(specs, list) else []
+    except Exception as e:  # a missing/malformed block must never break a run
+        logger.debug("no convergence specs for %s/%s: %r", software, scale, e)
+        return []
+
+
 def _run_workflow_once(
     user_request: str,
     *,
@@ -456,6 +468,7 @@ def _run_workflow_once(
     auto_fix: bool = True,
     required_observables: Optional[list] = None,
     derive_observables: bool = False,
+    converge_parameters: bool = False,
 ) -> Dict[str, Any]:
     """Run the full structure → inputs → validation pipeline for any scale.
 
@@ -802,6 +815,66 @@ def _run_workflow_once(
         reason = ("non-LLM method uses expert-defined inputs"
                   if method != "llm" else "validation disabled by caller")
         result["input_validation"] = {"status": "skipped", "message": reason}
+
+    # ── Step 3.5: numeric parameter convergence (opt-in; static scales) ──
+    # For a static calc whose engine skill declares a `convergence:` block, run
+    # each parameter's ladder to a plateau and adopt the converged settings into
+    # the deck before the production run. Same family as reference_check /
+    # derive_observables: opt-in, engine-neutral, skill-declared. Needs an
+    # executor + run_command since the ladder members are executed.
+    if (converge_parameters and scale in ("periodic_dft", "molecular_qc")
+            and executor is not None and run_command):
+        specs = _convergence_specs(software, scale)
+        base_inputs = _collect_input_files(gen_result)
+        if specs and base_inputs:
+            try:
+                from .convergence import converge_parameters as _run_convergence
+                from ...skills._shared._registry import get_tool_function
+                _set = get_tool_function("set_convergence_param",
+                                         active_skills=[software])
+                _read = get_tool_function("read_convergence_observable",
+                                          active_skills=[software])
+                entry = gen_result.get("entry_file")
+
+                def _run_ladder(param, members, _entry=entry):
+                    dirs: Dict[Any, str] = {}
+                    root = os.path.join(output_dir, "convergence", str(param))
+                    for setting, member_inputs in members.items():
+                        rdir = os.path.join(root, str(setting))
+                        cmd = (run_command.format(script=_entry)
+                               if _entry and "{script}" in run_command
+                               else run_command)
+                        executor.run(member_inputs, cmd, rdir)
+                        dirs[setting] = rdir
+                    return dirs
+
+                pc = _run_convergence(
+                    base_inputs=base_inputs, specs=specs,
+                    set_param=lambda i, p, v: _set(input_files=i, param=p, value=v),
+                    read_observable=lambda d, o: _read(output_dir=d, observable=o),
+                    run_ladder=_run_ladder,
+                )
+                # Adopt converged settings into the deck the production run uses.
+                gen_result["input_files"] = pc.final_inputs
+                for name, contents in pc.final_inputs.items():
+                    (Path(output_dir) / name).write_text(contents, encoding="utf-8")
+                result["parameter_convergence"] = {
+                    "all_converged": pc.all_converged,
+                    "parameters": {
+                        s.param_name: {
+                            "converged": s.convergence.converged,
+                            "setting": s.convergence.setting,
+                            "value": s.convergence.value,
+                            "observations": s.observations,
+                            "reason": s.convergence.reason,
+                        } for s in pc.sweeps
+                    },
+                }
+                result["steps_completed"].append("parameter_convergence")
+            except Exception as e:  # convergence is best-effort; never break the run
+                logger.warning("Parameter convergence skipped: %s", e)
+                result["parameter_convergence"] = {
+                    "status": "error", "message": str(e)}
 
     # ── Step 4: supervised execution + refinement (only when an executor is
     # supplied; DFT's default executor=None stops here and runs externally) ──
