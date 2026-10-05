@@ -7447,13 +7447,6 @@ class OrchestratorTools:
             import subprocess
 
             print(f"  ⚡ Tool: Querying knowledge data: '{query}'")
-            # the query runs model-written code: the same consent every other
-            # code-generation path asks for (#685)
-            from ...executors import require_sandbox_approval
-            if not require_sandbox_approval(context="query_knowledge_data (a model-written query script)"):
-                return json.dumps({"status": "error", "message": (
-                    "Sandbox approval declined — the query script was not run. Set UNSAFE_EXECUTION_OK=true "
-                    "or run inside Docker / VM / Colab to enable code execution.")})
 
             # 1. Discover queryable files / directory databases. Informational
             #    only — an explicit `file_name` path is resolved directly below,
@@ -7480,6 +7473,15 @@ class OrchestratorTools:
                     "message": "Multiple queryable sources found. Specify file_name.",
                     "available_files": [f["name"] for f in queryable]
                 })
+
+            # the query runs model-written code: the same consent every other
+            # code-generation path asks for (#685), asked once the data is found,
+            # so "no queryable files" and "declined" read differently
+            from ...executors import require_sandbox_approval
+            if not require_sandbox_approval(context="query_knowledge_data (a model-written query script)"):
+                return json.dumps({"status": "error", "message": (
+                    "Sandbox approval declined — the query script was not run. Set UNSAFE_EXECUTION_OK=true "
+                    "or run inside Docker / VM / Colab to enable code execution.")})
 
             # 2b. Branch: directory database vs single file
             if isinstance(target, dict) and target.get("type") == "directory":
@@ -7508,6 +7510,7 @@ class OrchestratorTools:
                 read_instruction=info["read_instruction"],
                 query=query,
             )
+
 
             # 5. Generate and execute (with 1 retry)
             scripts_dir = Path(self.orch.base_dir) / "knowledge_query_scripts"

@@ -661,16 +661,25 @@ def _sandbox_preexec():
 
 def _run_tracked(argv, *, timeout=None, input=None, text=True, cwd=None, env=None,
                  shell=False, preexec=None, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                 stdin=None):
+                 stdin=None, encoding=None, errors=None):
     """``subprocess.run``'s shape for a process SciLink must be able to end:
     its own session and process group (a Job on Windows), registered for the
     user's Stop, and its whole tree killed on a timeout or an interrupt, so a
     grandchild (an MPI rank, a solver's helper) never outlives it (#685).
     Returns a ``CompletedProcess``; raises ``subprocess.TimeoutExpired`` on a
-    timeout, as ``subprocess.run`` does."""
+    timeout, as ``subprocess.run`` does.
+
+    A worker's cancel (a budget, memory or coordinator cancel, or the turn's
+    Stop) is checked before the process starts and after it ends: the kill
+    that ends a running engine returns as an ordinary result, and without the
+    check the worker went on to start its next engine run, which no one-shot
+    kill covers."""
+    from scilink.utils.log_context import raise_if_cancelled
+    raise_if_cancelled()
     proc = subprocess.Popen(argv, stdin=subprocess.PIPE if input is not None else stdin,
                             stdout=stdout, stderr=stderr, text=text, cwd=cwd, env=env, shell=shell,
-                            preexec_fn=preexec, start_new_session=_NEW_SESSION)
+                            preexec_fn=preexec, start_new_session=_NEW_SESSION,
+                            encoding=encoding, errors=errors)
     _mark_own_group(proc)
     _register_subprocess(proc)
     try:
@@ -685,6 +694,7 @@ def _run_tracked(argv, *, timeout=None, input=None, text=True, cwd=None, env=Non
             raise
     finally:
         _unregister_subprocess(proc)
+    raise_if_cancelled()
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 
@@ -701,18 +711,21 @@ def run_generated_script(script_path, *, timeout=None, args=None, cwd=None, extr
 
 
 def run_engine(cmd, *, timeout=None, cwd=None, env=None, shell=False, input=None, text=None,
-               capture_output=False, check=False, stdin=None, stdout=None, stderr=None, **_ignored):
+               capture_output=False, check=False, stdin=None, stdout=None, stderr=None,
+               encoding=None, errors=None):
     """Run an external engine (LAMMPS, AMBER tools, packmol, a training run)
     so the user's Stop reaches it and a timeout ends its whole tree (#685).
     A drop-in for ``subprocess.run`` at these call sites: the same keywords
     (``capture_output``, ``check``, ``stdin``, ``stdout``, ``stderr``,
     ``text``, ``input``), the same ``CompletedProcess`` and the same
     ``TimeoutExpired`` / ``CalledProcessError``. Engines keep the parent
-    environment (licences, PATH); the sandbox allowlist is for generated code."""
+    environment (licences, PATH); the sandbox allowlist is for generated code.
+    An unknown keyword is a ``TypeError``, as in ``subprocess.run``, never
+    silently dropped (``encoding`` and ``errors`` pass through)."""
     if capture_output:
         stdout = stderr = subprocess.PIPE
     proc = _run_tracked(cmd, timeout=timeout, cwd=cwd, env=env, shell=shell, input=input, text=bool(text),
-                        stdout=stdout, stderr=stderr, stdin=stdin)
+                        stdout=stdout, stderr=stderr, stdin=stdin, encoding=encoding, errors=errors)
     if check and proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd, proc.stdout, proc.stderr)
     return proc
