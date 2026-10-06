@@ -262,3 +262,71 @@ class TestInputDecks:
         agent.run_analysis("x", run_dir=tmp_path.name)        # RELATIVE run_dir
         assert captured["data_files"]
         assert all(os.path.isabs(v) for v in captured["data_files"].values())
+
+
+class TestInputDecksReachCodegen:
+    """The blocker Maxim flagged: INPUT_DECKS must reach the code-gen prompts,
+    not just the runtime preamble — otherwise the model keeps header-guessing."""
+
+    def _capture_llm(self, agent):
+        box = {}
+        def fake(prompt):
+            box["prompt"] = prompt
+            return "print('{\"status\": \"success\", \"value\": 1.0}')"
+        agent._llm = fake
+        return box
+
+    def test_generate_code_prompt_shows_input_decks(self, agent):
+        box = self._capture_llm(agent)
+        agent._generate_code(
+            task="shear viscosity", data_files={"stress.dat": "/run/stress.dat"},
+            recipe="read the pressure tensor", packages=["numpy"],
+            input_decks={"run.lammps":
+                         "fix s all ave/time 5 1 5 v_pxy v_pxz v_pyz file stress.dat\n"})
+        p = box["prompt"]
+        assert "INPUT_DECKS" in p and "v_pxy" in p and "run.lammps" in p
+
+    def test_refine_code_prompt_shows_input_decks(self, agent):
+        box = self._capture_llm(agent)
+        agent._refine_code(
+            code="bad()", error_info={"message": "boom"}, task="t",
+            recipe="", packages=["numpy"],
+            input_decks={"run.lammps": "variable pxy equal pxy\n"})
+        assert "INPUT_DECKS" in box["prompt"] and "variable pxy equal pxy" in box["prompt"]
+
+
+class TestResolveOutputsReviewFixes:
+    def test_gather_decks_ignores_dryrun_in_parent_path(self, agent, tmp_path):
+        run = tmp_path / "dryrun_vs_prod" / "run1"        # parent contains "dryrun"
+        run.mkdir(parents=True)
+        (run / "run.lammps").write_text(
+            "fix s all ave/time 5 1 5 v_pxy v_pxz v_pyz file stress.dat\n")
+        decks = agent._gather_input_decks(str(run))
+        assert "run.lammps" in decks                       # not skipped by the parent name
+
+    def test_gather_marks_truncation(self, agent, tmp_path):
+        (tmp_path / "run.lammps").write_text("units real\n" * 5000)
+        decks = agent._gather_input_decks(str(tmp_path), max_chars=800)
+        assert decks["run.lammps"].rstrip().endswith("[deck truncated]")
+
+    def test_no_llm_call_when_only_decks_unclassified(self, agent, tmp_path):
+        (tmp_path / "log.lammps").write_text("Step Temp\n0 298\n")     # classified
+        (tmp_path / "run.lammps").write_text("units real\nrun 10\n")   # a deck (not a candidate)
+        called = {"n": 0}
+        def boom(p):
+            called["n"] += 1
+            raise AssertionError("no model call when only input decks are unclassified")
+        agent._llm = boom
+        by = agent.resolve_outputs(str(tmp_path))
+        assert called["n"] == 0 and "thermo_log" in by
+
+    def test_rejects_model_path_outside_run_dir(self, agent, tmp_path):
+        (tmp_path / "run.lammps").write_text(
+            "fix s all ave/time 5 1 5 v_pxy v_pxz v_pyz file stress.dat\n")
+        (tmp_path / "stress.dat").write_text("# TimeStep v_pxy v_pxz v_pyz\n5 0.1 0.2 0.3\n")
+        (tmp_path.parent / "evil.log").write_text("outside the run\n")
+        agent._llm = lambda p: '{"thermo_log": ["../evil.log", "stress.dat"]}'
+        by = agent.resolve_outputs(str(tmp_path))
+        allp = [p for paths in by.values() for p in paths]
+        assert any(Path(p).name == "stress.dat" for p in allp)         # legit, kept
+        assert all("evil.log" not in p for p in allp)                  # escaped, rejected

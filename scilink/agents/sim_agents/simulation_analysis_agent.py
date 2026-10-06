@@ -123,6 +123,7 @@ class SimulationAnalysisAgent(BaseAnalysisAgent):
         resolve or the LLM step errors -- so it is a strict superset of
         :meth:`classify_outputs` and never loses a match.
         """
+        import fnmatch
         import json
 
         static = self.classify_outputs(run_dir)
@@ -130,40 +131,60 @@ class SimulationAnalysisAgent(BaseAnalysisAgent):
         vocab = sorted(self._output_format_map().keys())
         if not root.exists() or not vocab:
             return static
-
+        root_resolved = root.resolve()
         classified = {p for paths in static.values() for p in paths}
-        peeks: List[tuple] = []
-        has_unclassified = False
+        deck_pats = self._input_deck_patterns()
+
+        def _rel(p: Path) -> str:
+            try:
+                return str(p.relative_to(root))
+            except ValueError:
+                return p.name
+
+        # Input decks are CONTEXT (ground truth for mapping), never candidates to
+        # classify; already-classified outputs need no resolving. So the model is
+        # asked only about the UNCLASSIFIED, non-deck files — which is also what
+        # decides whether a model call is worth making at all.
+        deck_peeks: List[tuple] = []
+        candidate_peeks: List[tuple] = []
         for p in sorted(root.rglob("*")):
             if not p.is_file():
                 continue
-            head = self._peek(p)
-            if head is None:            # binary / unreadable -> not an analysis input
+            rel = _rel(p)
+            is_deck = any(fnmatch.fnmatch(p.name, pat) for pat in deck_pats)
+            if is_deck:
+                if "dryrun" in rel.lower():
+                    continue                       # dry-run deck: ignore entirely
+                head = self._peek(p, n_lines=400, max_chars=8000)
+                if head is not None:
+                    deck_peeks.append((rel, head))
                 continue
-            try:
-                rel = str(p.relative_to(root))
-            except ValueError:
-                rel = p.name
-            peeks.append((rel, head))
-            if str(p) not in classified:
-                has_unclassified = True
-        # Nothing the static map missed -> no reason to spend an LLM call.
-        if not peeks or not has_unclassified:
+            if str(p) in classified:
+                continue                           # already mapped by the floor
+            head = self._peek(p)
+            if head is None:                       # binary / unreadable
+                continue
+            candidate_peeks.append((rel, head))
+
+        # Nothing unrecognized (input decks don't count) -> no reason to call the model.
+        if not candidate_peeks:
             return static
 
-        listing = "\n\n".join(f"### {rel}\n{head}" for rel, head in peeks[:60])
+        context = "\n\n".join(f"### {rel} (INPUT DECK)\n{head}"
+                              for rel, head in deck_peeks)
+        listing = "\n\n".join(f"### {rel}\n{head}"
+                              for rel, head in candidate_peeks[:200])
         prompt = (
-            "A simulation run produced the files below (path, then first lines). "
-            "Some are INPUT decks (a LAMMPS run script with fix/run/dump "
-            "commands, a VASP INCAR, an NWChem .nw); use them as ground truth "
-            "for what each OUTPUT file contains -- e.g. a line "
-            "`fix ... ave/time ... v_pxy v_pxz v_pyz ... file stress.dat` means "
-            "stress.dat is the pressure-tensor time series. Map only the OUTPUT "
-            "files to data kinds, using ONLY these kinds: "
+            "A simulation run produced the OUTPUT files below (path, then first "
+            "lines). Use the INPUT DECKS as ground truth for what each output "
+            "holds -- e.g. a line `fix ... ave/time ... v_pxy v_pxz v_pyz ... "
+            "file stress.dat` means stress.dat is the pressure-tensor time "
+            "series. Map each OUTPUT file to data kinds, using ONLY these kinds: "
             f"{json.dumps(vocab)}. A file may map to more than one kind; omit "
-            "input decks and files that fit no kind. Respond with JSON: "
+            "files that fit no kind. Respond with JSON: "
             "{\"<data_kind>\": [\"<relative path>\", ...]}.\n\n"
-            f"FILES:\n\n{listing}"
+            f"INPUT DECKS (context):\n\n{context}\n\n"
+            f"OUTPUT FILES to map:\n\n{listing}"
         )
         try:
             mapping = self._extract_json(self._llm(prompt)) or {}
@@ -177,7 +198,14 @@ class SimulationAnalysisAgent(BaseAnalysisAgent):
                 continue
             for rel in rels:
                 try:
-                    p = (root / rel)
+                    p = (root / rel).resolve()
+                except (OSError, RuntimeError, ValueError):
+                    continue
+                # Keep the model inside run_dir — an absolute or ../ path would
+                # otherwise pull in a file outside the run and collide on basename.
+                if p != root_resolved and root_resolved not in p.parents:
+                    continue
+                try:
                     if p.is_file() and p.stat().st_size > 0:
                         bucket = out.setdefault(kind, [])
                         if str(p) not in bucket:
@@ -303,18 +331,28 @@ class SimulationAnalysisAgent(BaseAnalysisAgent):
         for p in sorted(root.rglob("*")):
             if len(decks) >= max_decks:
                 break
-            if not p.is_file() or "dryrun" in str(p).lower():
+            if not p.is_file():
+                continue
+            try:
+                rel = str(p.relative_to(root))
+            except ValueError:
+                rel = p.name
+            # Match "dryrun" on the path RELATIVE to run_dir — a parent folder
+            # that happens to contain "dryrun" must not skip every real deck.
+            if "dryrun" in rel.lower():
                 continue
             if not any(fnmatch.fnmatch(p.name, pat) for pat in pats):
                 continue
-            text = self._peek(p, n_lines=500, max_chars=max_chars)
-            if not text:
-                continue
             try:
-                key = str(p.relative_to(root))
-            except ValueError:
-                key = p.name
-            decks[key] = text
+                text = p.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if not text.strip():
+                continue
+            # Mark a cut so a lost `fix`/`variable`/`file` line is visible, not silent.
+            if len(text) > max_chars:
+                text = text[:max_chars] + "\n# ... [deck truncated]\n"
+            decks[rel] = text
         return decks
 
     def run_analysis(self, research_goal: str, run_dir: Optional[str] = None,

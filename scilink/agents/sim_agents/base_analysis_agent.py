@@ -259,6 +259,7 @@ class BaseAnalysisAgent(ABC):
                 "output_type": output_type,
                 "verify": verify,
                 "preamble": preamble,
+                "input_decks": input_decks or {},
             },
             data=data_files,
             data_path=str(self.output_dir),
@@ -281,13 +282,15 @@ class BaseAnalysisAgent(ABC):
         task, data_files = s["task"], s["data_files"]
         recipe, pkgs = s["recipe"], s["packages"]
         output_type, preamble = s["output_type"], s["preamble"]
+        input_decks = s.get("input_decks")
 
-        code = self._generate_code(task, data_files, recipe, pkgs, output_type)
+        code = self._generate_code(task, data_files, recipe, pkgs, output_type,
+                                   input_decks=input_decks)
         error_info: Dict[str, Any] = {}
         for attempt in range(self.max_refinement_attempts + 1):
             if attempt > 0:
                 code = self._refine_code(code, error_info, task, recipe, pkgs,
-                                         output_type)
+                                         output_type, input_decks=input_decks)
             result = self._execute_script(preamble + code, task)
             if result.get("ok"):
                 # The script ran and produced its answer (success OR an honest
@@ -391,7 +394,8 @@ class BaseAnalysisAgent(ABC):
 
         code = self._generate_code(task, data_files, recipe, pkgs, output_type,
                                     verification_feedback=feedback,
-                                    recipe_advisory=advisory)
+                                    recipe_advisory=advisory,
+                                    input_decks=s.get("input_decks"))
         result = self._execute_script(preamble + code, task)
         if result.get("ok"):
             out = {k: v for k, v in result.items() if k != "ok"}
@@ -448,7 +452,8 @@ class BaseAnalysisAgent(ABC):
                        recipe: str, packages: List[str],
                        output_type: str = "scalar",
                        verification_feedback: str = "",
-                       recipe_advisory: bool = False) -> str:
+                       recipe_advisory: bool = False,
+                       input_decks: Optional[Dict[str, str]] = None) -> str:
         """Generate a self-contained analysis script for ``task``.
 
         ``output_type`` selects the output contract the script must satisfy: a
@@ -464,6 +469,23 @@ class BaseAnalysisAgent(ABC):
         """
         files_desc = "\n".join(f"  - {name}: {path}"
                                for name, path in data_files.items())
+        decks_block = ""
+        if input_decks:
+            decks_joined = "\n\n".join(
+                f"### {name}\n{text}" for name, text in input_decks.items())
+            decks_block = (
+                "INPUT DECKS (global `INPUT_DECKS` maps deck filename -> its "
+                "text) — the run's INPUT scripts, the GROUND TRUTH for what each "
+                "output file and column is. Identify columns by reading the "
+                "deck, NOT by guessing from an output's header: a "
+                "`fix ... ave/time ... v_pxy v_pxz v_pyz ... file stress.dat` "
+                "line means stress.dat's data columns are those values in that "
+                "order (trace `v_<name>` to its `variable <name> equal ...` and "
+                "`c_<id>[i]` to its `compute <id> ...`); a `thermo_style custom "
+                "...`/`dump ...` line names the thermo/trajectory columns. The "
+                "deck also names which output file holds what (`... file <x>`).\n"
+                f"{decks_joined}\n\n"
+            )
         output_contract = self._output_contract(output_type)
         feedback_block = (
             f"\nPRIOR ATTEMPT FEEDBACK:\n{verification_feedback}\n"
@@ -481,14 +503,16 @@ class BaseAnalysisAgent(ABC):
             "JSON object on the LAST line of stdout.\n\n"
             f"TASK: {task}\n\n"
             f"DATA FILES (globals `DATA_FILES` maps name -> path):\n{files_desc}\n\n"
+            + decks_block
             + (f"{recipe_label}:\n{recipe}\n\n" if recipe else "")
             + feedback_block
             + "REQUIREMENTS:\n"
             f"- Import only from: {', '.join(packages)}.\n"
-            "- `DATA_FILES` (dict name->path) and `OUTPUT_DIR` (str) are ALREADY "
-            "defined as globals at runtime — reference them directly; do NOT "
-            "import, redefine, guard, or reassign them. Read inputs from "
-            "DATA_FILES; write any files into OUTPUT_DIR.\n"
+            "- `DATA_FILES` (dict name->path), `OUTPUT_DIR` (str), and "
+            "`INPUT_DECKS` (dict deck-filename->text) are ALREADY defined as "
+            "globals at runtime — reference them directly; do NOT import, "
+            "redefine, guard, or reassign them. Read inputs from DATA_FILES, map "
+            "columns via INPUT_DECKS, and write any files into OUTPUT_DIR.\n"
             + output_contract
             + "- Handle missing/short data gracefully; never hang or prompt.\n\n"
             "Return ONLY the Python code, no markdown."
@@ -527,7 +551,8 @@ class BaseAnalysisAgent(ABC):
 
     def _refine_code(self, code: str, error_info: Dict[str, Any], task: str,
                      recipe: str, packages: List[str],
-                     output_type: str = "scalar") -> str:
+                     output_type: str = "scalar",
+                     input_decks: Optional[Dict[str, str]] = None) -> str:
         """Regenerate a failed script from its error.
 
         The output contract is restated here for the same ``output_type`` as the
@@ -536,10 +561,24 @@ class BaseAnalysisAgent(ABC):
         is meant to enforce rather than the scalar default.
         """
         err = error_info.get("concise_error") or error_info.get("message", "")
+        decks_block = ""
+        if input_decks:
+            decks_joined = "\n\n".join(
+                f"### {name}\n{text}" for name, text in input_decks.items())
+            decks_block = (
+                "\nINPUT_DECKS (global, deck-filename->text) is the ground truth "
+                "for which output file/column is what — map columns by reading "
+                "the deck's `fix ave/time`/`thermo_style`/`compute` lines (and "
+                "the `variable`/`compute` they reference), not by guessing "
+                f"headers:\n{decks_joined}\n"
+            )
         prompt = (
             "The following analysis script failed. Fix it and return the full "
-            "corrected script. Use globals DATA_FILES / OUTPUT_DIR (already "
-            "defined; do not redefine). It MUST satisfy this output contract:\n"
+            "corrected script. Use globals DATA_FILES / OUTPUT_DIR / INPUT_DECKS "
+            "(already defined; do not redefine). It MUST satisfy this output "
+            "contract:\n"
+            + self._output_contract(output_type)
+            + decks_block
             + self._output_contract(output_type)
             + f"\nTASK: {task}\n\n"
             + (f"RECIPE:\n{recipe}\n\n" if recipe else "")
