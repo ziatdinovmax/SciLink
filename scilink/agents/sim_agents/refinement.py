@@ -35,7 +35,7 @@ import os
 import shutil
 import subprocess
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol
@@ -860,6 +860,18 @@ def _select_deck_fix(fixes, entry: str, real_deck: str):
     return max(candidates, key=len) if candidates else None
 
 
+def _member_context(ctx: RefinementContext) -> RefinementContext:
+    """A fresh refinement context for one fan-out member.
+
+    Shares the campaign's configuration (goal, routing, budget, autonomy,
+    required observables, interaction handle) but starts its own ``cycle`` and
+    a new ``history`` list, so each member's cycle budget and stall check are
+    independent of its siblings'. The caller merges the per-member histories
+    back into the shared context in member order after the stage settles.
+    """
+    return replace(ctx, cycle=0, history=[])
+
+
 def run_campaign(
     stages: List[Stage],
     executor: Executor,
@@ -951,17 +963,30 @@ def run_campaign(
             # Fan-out: every member is refined independently. A failing member
             # does not abort its siblings — collect them all, then judge the
             # stage against its success quorum.
+            #
+            # Each member refines in its OWN context (fresh cycle + history) so
+            # a member's cycle budget and stall check are not entangled with its
+            # siblings'; the histories are merged back into the shared context in
+            # member order after the stage settles. With serial dispatch this is
+            # identical to refining on the shared context (the members' records
+            # already landed in that order), and it is the precondition for
+            # dispatching members concurrently later (see #745).
             members = []
             n_success = 0
             any_aborted = False
+            member_histories: List[List[Dict[str, Any]]] = []
             for ph in stage.phases:
-                rec = _refine_phase(ph, executor, run_critic, policy, ctx)
+                member_ctx = _member_context(ctx)
+                rec = _refine_phase(ph, executor, run_critic, policy, member_ctx)
+                member_histories.append(member_ctx.history)
                 flat.append(rec)
                 members.append(rec)
                 if rec["status"] == "success":
                     n_success += 1
                 elif rec["status"] == "aborted":
                     any_aborted = True
+            for member_history in member_histories:
+                ctx.history.extend(member_history)
             required = (stage.min_success if stage.min_success is not None
                         else len(stage.phases))
             if n_success >= required:

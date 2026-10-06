@@ -208,6 +208,45 @@ class TestClusterExecutorRun:
         assert sched.cancelled == ["12345"]
         assert (run_dir / _RC).read_text() == "timeout"
 
+    def test_submit_returns_handle_then_poll_reports_terminal(self, tmp_path):
+        # The non-blocking seam: submit() hands back a follow-up handle, and
+        # poll() reports non-terminal then terminal without sleeping.
+        conn = FakeConn()
+        sched = FakeScheduler(conn, terminal_after=2)
+        ex = ClusterExecutor(conn, scheduler=sched, remote_root="/scratch")
+        handle = ex.submit({"in.lj": "S"}, "lmp -in in.lj", str(tmp_path / "m"))
+        assert handle["job_id"] == "12345"
+        assert handle["remote_dir"] == "/scratch/m"
+        assert ex.poll(handle)["terminal"] is False   # poll 1 -> RUNNING
+        assert ex.poll(handle)["terminal"] is True     # poll 2 -> COMPLETED
+
+    def test_submit_failure_handle_has_no_job_id(self, tmp_path):
+        conn = FakeConn()
+        sched = FakeScheduler(conn, submit_raises=True)
+        ex = ClusterExecutor(conn, scheduler=sched)
+        run_dir = tmp_path / "m"
+        handle = ex.submit({"in.lj": "S"}, "lmp -in in.lj", str(run_dir))
+        assert "job_id" not in handle
+        assert "Job submission failed" in handle["error"]
+        assert (run_dir / _RC).read_text() == "submit_error"
+
+    def test_cancel_check_cancels_mid_wait_instead_of_orphaning(self, tmp_path):
+        # A Stop mid-wait must cancel the scheduler job, not leave it running.
+        conn = FakeConn()
+        sched = FakeScheduler(conn, terminal_after=9999)   # never finishes
+        polls = {"n": 0}
+        def cancel_check():
+            polls["n"] += 1
+            return polls["n"] >= 2        # let it poll once, then Stop
+        ex = ClusterExecutor(conn, scheduler=sched, poll_interval=0,
+                             timeout=10_000, cancel_check=cancel_check)
+        run_dir = tmp_path / "m"
+        result = ex.run({"in.lj": "S"}, "lmp -in in.lj", str(run_dir))
+        assert result["status"] == "error"
+        assert "cancelled" in result["error"].lower()
+        assert sched.cancelled == ["12345"]            # job was cancelled
+        assert (run_dir / _RC).read_text() == "cancelled"
+
     def test_connect_factory_builds_profile_and_connects(self, monkeypatch):
         # The factory assembles the profile, opens the connection, and forwards
         # executor kwargs — without any real SSH.
