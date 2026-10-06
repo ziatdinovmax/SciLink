@@ -76,6 +76,33 @@ PINNED_BOUND_FIX = (
 )
 
 
+_WIDTH_WORDS = ("sigma", "gamma", "width", "fwhm", "hwhm", "lw")
+
+
+def _is_width(name) -> bool:
+    return any(w in str(name).lower().replace("-", "_").split("_") for w in _WIDTH_WORDS) \
+        or str(name).lower() in _WIDTH_WORDS
+
+
+def _other_width_carries(pv: dict, name, pb: dict) -> bool:
+    """Whether another width of the same component carries the line — clear
+    of its own floor and at least ten times this one — so this one at its
+    floor leaves the other pure lineshape, not a collapse or a real floor."""
+    mine = (pv or {}).get(name)
+    if not isinstance(mine, (int, float)) or isinstance(mine, bool):
+        return False
+    for k, v in (pv or {}).items():
+        if k == name or not _is_width(k) or "err" in str(k).lower():
+            continue
+        if not isinstance(v, (int, float)) or isinstance(v, bool) or not (v == v):
+            continue
+        b = (pb or {}).get(k)
+        floor = b[0] if isinstance(b, (list, tuple)) and len(b) == 2 and isinstance(b[0], (int, float)) else 0.0
+        if v > 0 and v > 10 * max(floor or 0.0, 0.0) and v >= 10 * abs(mine):
+            return True
+    return False
+
+
 def validate_bound_pinning(parameters, bounds, rel_tol: float = 0.01) -> list:
     """Deterministic pinned-at-bound check (#592).
 
@@ -122,6 +149,18 @@ def validate_bound_pinning(parameters, bounds, rel_tol: float = 0.01) -> list:
                 tol = rel_tol * abs(lo if hi is None else hi)
             tol = max(tol, 1e-12)
             if any(f in str(name).lower() for f in _FRACTION_KEYS):
+                continue
+            # A mixing fraction is recognised by its bounds too, not only its
+            # name (#761: ``fL`` at 1 is a pure Lorentzian): exactly [0, 1] on
+            # a parameter that is not an amplitude (a normalised amplitude
+            # capped at 1 is a real ceiling).
+            if (lo == 0.0 and hi == 1.0 and not any(
+                    t in str(name).lower() for t in ("amp", "height", "area", "intens", "scale", "norm"))):
+                continue
+            # One width of a two-width lineshape (a Voigt's Gaussian and
+            # Lorentzian parts) at ~0 is the other pure lineshape, not a
+            # collapse, while the other width still carries the line (#761).
+            if lo is not None and v <= max(lo, 0.0) + tol and _is_width(name) and _other_width_carries(pv, name, pb):
                 continue
 
             def _at(bound):

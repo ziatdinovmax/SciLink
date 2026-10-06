@@ -2574,7 +2574,8 @@ NOT any material/phase name, NOT any model name)
 (e.g. "sp² carbon" — do not add)
    - Axis labels: use xlabel/ylabel from sample metadata if provided; else generic "X" / "Y"
 6. Also save `fit.npy` (current working directory): a 1-D NumPy array of the fitted
-   model evaluated at the SAME x-points as `data.npy` (length N). The reviewer uses
+   model evaluated at the SAME x-points as `data.npy` (length N), in the SAME space as
+   `data.npy` — add back any baseline or background you subtracted. The reviewer uses
    it to compute residual diagnostics (residual = data_y − fit). If you masked or
    excluded any points, still evaluate the model at all N x-points so lengths match.
 
@@ -2638,7 +2639,7 @@ never as missing keys.
 **Narrow exception — timeout errors ONLY:** if the error says the script timed out, the script is too slow, not wrong. You may change the COMPUTATIONAL strategy — vectorize loops, reduce optimizer restarts/iterations, replace brute-force search with an efficient optimizer — but every rule above still holds: same model, same parameters, same fit domain/window, and ALL of the data.
 **Narrow exception — a parameter PINNED AT ITS BOUND:** if the error names parameters that ended at a bound, the fit is degenerate (the optimizer wanted to go further). You MUST widen exactly those bounds — an amplitude/scale ceiling to a data-relative expression (e.g. `2 * np.max(y)`) or unbounded, a position/width window far enough to contain the feature — and keep everything else (model, components, fit domain, initial-guess logic) unchanged. Report the bounds you use in the results' `"bounds"` field.
 
-**I/O contract (do not deviate):** the data is `data.npy` in the current working directory — load it with `np.load` (do NOT look for .csv/.txt/.dat or glob for other files); save the plot to `visualization.png`; print one line `FIT_RESULTS_JSON:{{...}}` with the fit results. Missing any of these fails the run. Also keep saving `fit.npy` (1-D fitted curve at the `data.npy` x-points, length N) if the script you are fixing already did — it feeds the reviewer's residual diagnostics.
+**I/O contract (do not deviate):** the data is `data.npy` in the current working directory — load it with `np.load` (do NOT look for .csv/.txt/.dat or glob for other files); save the plot to `visualization.png`; print one line `FIT_RESULTS_JSON:{{...}}` with the fit results. Missing any of these fails the run. Also keep saving `fit.npy` (1-D fitted curve at the `data.npy` x-points, length N, in the same space as `data.npy`, baseline included) if the script you are fixing already did — it feeds the reviewer's residual diagnostics.
 
 **Plot labels must be neutral** if your fix touches `visualization.png`: \
 use "Data"/"Fit"/"Component N"/"Residuals" only — no material names, no peak assignments, no model names in titles/legends/annotations.

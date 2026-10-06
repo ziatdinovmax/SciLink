@@ -173,6 +173,26 @@ def _canonical_r2(y, fit):
         return None
 
 
+def _beyond_axis(pins, stats):
+    """``(pins, beyond)``: a CENTRE pinned at a bound that coincides with an
+    end of the measured axis is a band whose maximum lies outside the data,
+    not a failed fit."""
+    lo, hi = (stats or {}).get("x_range") or [None, None]
+    if lo is None or hi is None or hi <= lo or not pins:
+        return list(pins or []), []
+    tol = 5e-3 * (hi - lo)
+    keep, beyond = [], []
+    for p in pins:
+        name = str(p.get("parameter", "")).lower().replace("-", "_").split("_")
+        is_centre = any(t in name for t in ("center", "centre", "position", "pos", "x0", "mu"))
+        b = p.get("bound")
+        if is_centre and isinstance(b, (int, float)) and (abs(b - lo) <= tol or abs(b - hi) <= tol):
+            beyond.append(dict(p, reason="centre beyond the measured axis"))
+        else:
+            keep.append(p)
+    return keep, beyond
+
+
 def _format_residual_diagnostics(diag) -> str:
     """Compact text block of residual diagnostics for the verifier prompt — gives
     the LLM numbers to reason over instead of eyeballing a compressed plot."""
@@ -4355,6 +4375,7 @@ Your guidance: '''
                         _pins, _ = split_pins_by_targets(
                             validate_bound_pinning(_fr.get("parameters"), _fr.get("bounds")),
                             _freeze(_fr.get("targets")), _fr.get("parameters"))
+                        _pins, _ = _beyond_axis(_pins, stats)   # a band peaking outside the axis
                         if _pins and hold_recipe:
                             self.logger.warning(
                                 f"    ⚠️ Pinned at bound — {describe_pinned(_pins)}; the locked "
@@ -4461,6 +4482,12 @@ Your guidance: '''
         pinned, secondary_pins = split_pins_by_targets(
             validate_bound_pinning(fit_results.get("parameters"), fit_results.get("bounds")),
             _freeze(fit_results.get("targets")), fit_results.get("parameters"))
+        # A centre held at the END of the measured axis is a band peaking
+        # outside the range: its centre cannot be measured, so it is reported
+        # with no value, like a secondary pin, and does not make the fit of
+        # the spectrum degenerate.
+        pinned, _beyond = _beyond_axis(pinned, stats)
+        secondary_pins = list(secondary_pins) + _beyond
         if secondary_pins:
             # #742: a pin on a component the fit declared NOT a target (a
             # background, a baseline, an overlap) is a caveat: the targets'
