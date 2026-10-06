@@ -209,6 +209,7 @@ class BaseAnalysisAgent(ABC):
         packages: Optional[List[str]] = None,
         verify: bool = True,
         output_type: str = "scalar",
+        input_decks: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Compute one property from ``data_files`` via verified codegen.
 
@@ -226,6 +227,12 @@ class BaseAnalysisAgent(ABC):
             packages: Packages the script may import (defaults to the standard set).
             verify: When True, run the LLM plausibility gate on the result.
             output_type: ``"scalar"`` | ``"curve"`` | ``"image"`` | ``"datacube"``.
+            input_decks: Optional ``{name: text}`` of the run's input deck(s),
+                exposed to the generated code as ``INPUT_DECKS`` — the ground
+                truth for what each output file/column is (e.g. follow a
+                ``fix ave/time ... v_pxy ... file stress.dat`` line back to its
+                ``variable``/``compute`` to map columns), rather than guessing
+                from an output's header label.
 
         Returns:
             ``{"status", "value"?, "units"?, "verification"?, "code_path",
@@ -240,6 +247,7 @@ class BaseAnalysisAgent(ABC):
                 output_type, sorted(_OUTPUT_TYPES))
         preamble = (
             f"DATA_FILES = {json.dumps(data_files)}\n"
+            f"INPUT_DECKS = {json.dumps(input_decks or {})}\n"
             f"OUTPUT_DIR = {json.dumps(str(self.output_dir))}\n\n"
         )
         ctx = QCItemContext(

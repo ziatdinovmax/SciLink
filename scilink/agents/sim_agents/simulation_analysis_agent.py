@@ -255,6 +255,68 @@ class SimulationAnalysisAgent(BaseAnalysisAgent):
         # everything available rather than nothing).
         return selected or eligible
 
+    def _input_deck_patterns(self) -> set:
+        """fnmatch patterns for engine input decks, from skills' ``inputs:``.
+
+        Mirrors :meth:`_output_format_map` for inputs: the analysis needs the run
+        deck (the ground truth for what each output column is) and learns the
+        deck's filename convention from the engine skill, not from code. Cached.
+        """
+        if getattr(self, "_input_pat_cache", None) is not None:
+            return self._input_pat_cache
+        from ...skills.loader import list_all_skills, load_skill
+
+        pats: set = set()
+        for domain, names in list_all_skills().items():
+            for name in names:
+                try:
+                    meta = load_skill(name, domain=domain).get("meta") or {}
+                except Exception:
+                    continue
+                inp = meta.get("inputs")
+                groups = (inp.values() if isinstance(inp, dict)
+                          else [inp] if inp else [])
+                for g in groups:
+                    if isinstance(g, str):
+                        g = [g]
+                    pats.update(str(p) for p in g)
+        self._input_pat_cache = pats
+        return pats
+
+    def _gather_input_decks(self, run_dir: str, *, max_decks: int = 10,
+                            max_chars: int = 20000) -> Dict[str, str]:
+        """Read the run's input deck files (text), keyed by path relative to run_dir.
+
+        Fed to :meth:`compute_property` as ``INPUT_DECKS`` so the analysis maps
+        output columns to physical quantities by reading the deck -- e.g. follow
+        a ``fix ave/time ... v_pxy ... file stress.dat`` line back to
+        ``variable pxy equal pxy`` -- instead of guessing from a column header.
+        Dry-run decks are skipped.
+        """
+        import fnmatch
+
+        pats = self._input_deck_patterns()
+        root = Path(run_dir)
+        if not pats or not root.exists():
+            return {}
+        decks: Dict[str, str] = {}
+        for p in sorted(root.rglob("*")):
+            if len(decks) >= max_decks:
+                break
+            if not p.is_file() or "dryrun" in str(p).lower():
+                continue
+            if not any(fnmatch.fnmatch(p.name, pat) for pat in pats):
+                continue
+            text = self._peek(p, n_lines=500, max_chars=max_chars)
+            if not text:
+                continue
+            try:
+                key = str(p.relative_to(root))
+            except ValueError:
+                key = p.name
+            decks[key] = text
+        return decks
+
     def run_analysis(self, research_goal: str, run_dir: Optional[str] = None,
                      **kwargs) -> Dict[str, Any]:
         """Compute the goal's properties from the run output in ``run_dir``.
@@ -265,7 +327,11 @@ class SimulationAnalysisAgent(BaseAnalysisAgent):
         when no output data is recognized, else ``"success"`` even if individual
         analyses fail (their per-property error is recorded).
         """
-        run_dir = run_dir or str(self.output_dir)
+        # Resolve to an ABSOLUTE path up front: DATA_FILES paths must be openable
+        # from the sandbox's own working directory, not the caller's CWD, so a
+        # relative run_dir (what a tool call often passes) would otherwise yield
+        # relative, unopenable paths in the generated code.
+        run_dir = str(Path(run_dir or self.output_dir).resolve())
         # Deck-grounded resolution (superset of the static filename match) so an
         # output written to a self-named file still reaches the analysis.
         by_kind = self.resolve_outputs(run_dir)
@@ -289,6 +355,9 @@ class SimulationAnalysisAgent(BaseAnalysisAgent):
                 except ValueError:
                     key = Path(p).name
                 data_files[key] = p
+        # The run deck(s): ground truth for what each output column is, so the
+        # analysis maps columns by reading the deck rather than guessing headers.
+        input_decks = self._gather_input_decks(run_dir)
         results: Dict[str, Any] = {}
         for skill in selected:
             meta = skill.get("meta") or {}
@@ -301,7 +370,7 @@ class SimulationAnalysisAgent(BaseAnalysisAgent):
                 results[prop] = self.compute_property(
                     task=f"{prop} for the research goal: {research_goal}",
                     data_files=data_files, recipe=recipe,
-                    output_type=output_type)
+                    output_type=output_type, input_decks=input_decks)
 
         return {"status": "success", "results": results,
                 "output_directory": str(self.output_dir),

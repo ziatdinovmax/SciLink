@@ -209,3 +209,56 @@ class TestResolveOutputs:
         assert "not_a_kind" not in by
         assert all(Path(p).name != "ghost.dat" for p in by.get("thermo_log", []))
         assert any(Path(p).name == "log.lammps" for p in by["thermo_log"])
+
+
+class TestInputDecks:
+    """The run deck is handed to the analysis as INPUT_DECKS so column identity
+    comes from the deck (fix ave/time / variable / compute), not header guessing."""
+
+    def test_inputs_frontmatter_declares_lammps_deck(self, agent):
+        pats = agent._input_deck_patterns()
+        assert "run.lammps" in pats and "in.*" in pats     # from the lammps skill
+
+    def test_gather_reads_deck_and_skips_dryrun(self, agent, tmp_path):
+        (tmp_path / "run.lammps").write_text(
+            "fix s all ave/time 5 1 5 v_pxy v_pxz v_pyz file stress.dat\n")
+        (tmp_path / "_dryrun").mkdir()
+        (tmp_path / "_dryrun" / "run.lammps").write_text("DRYRUN\n")
+        decks = agent._gather_input_decks(str(tmp_path))
+        assert "run.lammps" in decks and "v_pxy" in decks["run.lammps"]
+        assert not any("dryrun" in k.lower() for k in decks)
+
+    def test_run_analysis_passes_input_decks_to_codegen(self, agent, tmp_path, monkeypatch):
+        (tmp_path / "log.lammps").write_text("Step Temp\n0 298\n")
+        (tmp_path / "run.lammps").write_text(
+            "units real\nfix s all ave/time 5 1 5 v_pxy v_pxz v_pyz file stress.dat\n")
+        captured = {}
+        def fake_compute(task, data_files, *, recipe="", output_type="scalar",
+                         input_decks=None, **kw):
+            captured["input_decks"] = input_decks
+            return {"status": "success", "value": 1.0}
+        monkeypatch.setattr(agent, "compute_property", fake_compute)
+        monkeypatch.setattr(agent, "_skill_catalog",
+                            lambda: [_skill("gk", ["shear_viscosity"], ["thermo_log"])])
+        monkeypatch.setattr(agent, "_select_properties", lambda g, e: e)
+        agent._llm = lambda p: "{}"          # resolver LLM add -> nothing (static floor)
+        agent.run_analysis("compute viscosity", run_dir=str(tmp_path))
+        assert captured["input_decks"] and "run.lammps" in captured["input_decks"]
+        assert "v_pxy" in captured["input_decks"]["run.lammps"]
+
+    def test_run_analysis_resolves_relative_run_dir_to_absolute(self, agent, tmp_path, monkeypatch):
+        import os
+        (tmp_path / "log.lammps").write_text("Step Temp\n0 298\n")
+        captured = {}
+        def fake_compute(task, data_files, **kw):
+            captured["data_files"] = data_files
+            return {"status": "success", "value": 1.0}
+        monkeypatch.setattr(agent, "compute_property", fake_compute)
+        monkeypatch.setattr(agent, "_skill_catalog",
+                            lambda: [_skill("gk", ["shear_viscosity"], ["thermo_log"])])
+        monkeypatch.setattr(agent, "_select_properties", lambda g, e: e)
+        agent._llm = lambda p: "{}"
+        monkeypatch.chdir(tmp_path.parent)
+        agent.run_analysis("x", run_dir=tmp_path.name)        # RELATIVE run_dir
+        assert captured["data_files"]
+        assert all(os.path.isabs(v) for v in captured["data_files"].values())
