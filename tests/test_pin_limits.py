@@ -7,9 +7,9 @@ fit's space.
   A collapsed single width, an amplitude capped at 1 and a real floor still
   pin.
 - A centre held at an end of the measured axis is a band peaking outside the
-  range. With no targets declared, the whole component is reported with no
-  value (half a profile measures nothing), like a secondary pin, and the fit
-  is not called degenerate; a declared target stays a pin, as on main.
+  range: NOT MEASURED. The whole component is reported with no value (half a
+  profile measures nothing), target or not, and the other bands stand; only a
+  fit with no declared target left measured stays a pin.
 - The lineshape exemptions are the curve agent's (opt-in): the hyperspectral
   scalar check keeps main's rule.
 - ``fit.npy`` is saved in the same space as ``data.npy``, baseline included
@@ -68,9 +68,11 @@ def test_a_centre_at_the_end_of_the_axis_is_beyond_the_range():
     stats = {"x_range": [374.1, 4000.0]}
     pins = [{"component": "edge", "parameter": "center", "value": 374.1, "bound": 374.1, "side": "lower"},
             {"component": "b2", "parameter": "center", "value": 700.0, "bound": 700.0, "side": "upper"},
-            {"component": "b3", "parameter": "fwhm", "value": 4000.0, "bound": 4000.0, "side": "upper"}]
+            {"component": "b3", "parameter": "fwhm", "value": 4000.0, "bound": 4000.0, "side": "upper"},
+            # a bound widened past the data: the centre is outside the axis
+            {"component": "past", "parameter": "center", "value": 365.0, "bound": 365.0, "side": "lower"}]
     keep, beyond = cc._beyond_axis(pins, stats)
-    assert [p["component"] for p in keep] == ["b2", "b3"] and [p["component"] for p in beyond] == ["edge"]
+    assert [p["component"] for p in keep] == ["b2", "b3"] and [p["component"] for p in beyond] == ["edge", "past"]
     assert cc._beyond_axis(pins, {}) == (pins, [])
 
 
@@ -88,56 +90,86 @@ def _controller(tmp_path, corrections):
     return c
 
 
-def test_through_the_fit_loop_an_edge_centre_is_a_caveat_not_a_degenerate_fit(tmp_path, monkeypatch):
-    params = {"edge": {"center": float(X[0]), "amplitude": 0.4, "fwhm": 120.0},
+def _edge_run(tmp_path, monkeypatch, targets, edge_extra=None, edge_bounds=None):
+    params = {"edge": {"center": float(X[0]), "center_err": 0.3, "amplitude": 0.4, "fwhm": 120.0, **(edge_extra or {})},
               "main": {"center": 1400.0, "amplitude": 0.8, "fwhm": 60.0}}
-    bounds = {"edge": {"center": [float(X[0]), 500.0]}, "main": {"center": [1300.0, 1500.0]}}
+    bounds = {"edge": {"center": [float(X[0]), 500.0], **(edge_bounds or {})}, "main": {"center": [1300.0, 1500.0]}}
+    fr = {"model_type": "2PV", "parameters": params, "bounds": bounds, "fit_quality": {"r_squared": 0.99}}
+    if targets is not None:
+        fr["targets"] = targets
     run = {"status": "success", "visualization_path": "viz.png", "visualization_bytes": b"", "exec": {},
-           "stdout": "FIT_RESULTS_JSON:" + json.dumps({"model_type": "2PV", "parameters": params, "bounds": bounds,
-                                                        "fit_quality": {"r_squared": 0.99}})}
+           "stdout": "FIT_RESULTS_JSON:" + json.dumps(fr)}
     monkeypatch.setattr(cc, "stage_and_run_adaptive", lambda *a, **k: run)
     corrections = []
     res = _controller(tmp_path, corrections)._fit_single_spectrum(
         {}, np.column_stack([X, np.ones_like(X)]), "s.csv", "s", 0, base_script="first")
-    assert res["success"] and "pinned_at_bound" not in res and corrections == []
-    assert [p["component"] for p in res["secondary_pins"]] == ["edge"]
-    # none of the edge band's values is a measurement: its width and area come from half a profile
-    assert all(v is None for v in res["parameters"]["edge"].values())
-    assert res["parameters"]["main"]["center"] == 1400.0
+    return res, corrections
 
 
-def test_a_declared_targets_edge_centre_stays_a_pin(tmp_path, monkeypatch):
-    """The plan asked for that band and its maximum is not in the data: a
-    degenerate fit, as on main (#742; #764 review). Not repaired in the loop."""
-    params = {"edge": {"center": float(X[0]), "amplitude": 0.4, "fwhm": 120.0},
-              "main": {"center": 1400.0, "amplitude": 0.8, "fwhm": 60.0}}
-    bounds = {"edge": {"center": [float(X[0]), 500.0]}, "main": {"center": [1300.0, 1500.0]}}
-    run = {"status": "success", "visualization_path": "viz.png", "visualization_bytes": b"", "exec": {},
-           "stdout": "FIT_RESULTS_JSON:" + json.dumps({"model_type": "2PV", "parameters": params, "bounds": bounds,
-                                                        "targets": ["edge"], "fit_quality": {"r_squared": 0.99}})}
-    monkeypatch.setattr(cc, "stage_and_run_adaptive", lambda *a, **k: run)
-    corrections = []
-    res = _controller(tmp_path, corrections)._fit_single_spectrum(
-        {}, np.column_stack([X, np.ones_like(X)]), "s.csv", "s", 0, base_script="first")
+def test_an_edge_band_is_not_measured_and_the_other_bands_stand(tmp_path, monkeypatch):
+    """A band peaking beyond the axis is reported as not measured, every one
+    of its values empty, whether or not it is a declared target; the fit of
+    the other bands stands and nothing is repaired."""
+    for targets in (None, ["edge", "main"], ["main"]):
+        res, corrections = _edge_run(tmp_path, monkeypatch, targets)
+        assert res["success"] and "pinned_at_bound" not in res and corrections == [], targets
+        assert [p["component"] for p in res["not_measured"]] == ["edge"], targets
+        assert "secondary_pins" not in res, targets
+        assert all(v is None for v in res["parameters"]["edge"].values()), targets
+        assert res["parameters"]["main"] == {"center": 1400.0, "amplitude": 0.8, "fwhm": 60.0}, targets
+        assert any(c.startswith("Not measured: edge") for c in res["caveats"]), targets
+
+
+def test_a_not_measured_bands_other_pins_go_with_it(tmp_path, monkeypatch):
+    res, _ = _edge_run(tmp_path, monkeypatch, ["edge", "main"],
+                       edge_extra={"fwhm": 300.0}, edge_bounds={"fwhm": [1.0, 300.0]})
+    assert "pinned_at_bound" not in res and [p["component"] for p in res["not_measured"]] == ["edge"]
+
+
+def test_a_fit_whose_every_target_is_beyond_the_axis_stays_a_pin(tmp_path, monkeypatch):
+    """Nothing the plan asked for was measured: not a verified fit."""
+    res, corrections = _edge_run(tmp_path, monkeypatch, ["edge"])
     assert corrections == []                                                 # no repair can move it into the data
     assert [p["component"] for p in res["pinned_at_bound"]] == ["edge"]
+    assert "not_measured" not in res
 
 
-def test_a_declared_non_target_edge_band_is_emptied_too(tmp_path, monkeypatch):
-    """Targets declared, the edge band not among them: a secondary pin, and
-    none of its values is a measurement, as with no targets (#764 re-review)."""
-    params = {"edge": {"center": float(X[0]), "amplitude": 0.4, "fwhm": 120.0},
-              "main": {"center": 1400.0, "amplitude": 0.8, "fwhm": 60.0}}
-    bounds = {"edge": {"center": [float(X[0]), 500.0]}, "main": {"center": [1300.0, 1500.0]}}
-    run = {"status": "success", "visualization_path": "viz.png", "visualization_bytes": b"", "exec": {},
-           "stdout": "FIT_RESULTS_JSON:" + json.dumps({"model_type": "2PV", "parameters": params, "bounds": bounds,
-                                                        "targets": ["main"], "fit_quality": {"r_squared": 0.99}})}
-    monkeypatch.setattr(cc, "stage_and_run_adaptive", lambda *a, **k: run)
-    res = _controller(tmp_path, [])._fit_single_spectrum(
-        {}, np.column_stack([X, np.ones_like(X)]), "s.csv", "s", 0, base_script="first")
-    assert res["success"] and "pinned_at_bound" not in res
-    assert all(v is None for v in res["parameters"]["edge"].values())
-    assert res["parameters"]["main"] == {"center": 1400.0, "amplitude": 0.8, "fwhm": 60.0}
+def test_a_follower_with_a_band_beyond_the_axis_verifies_with_a_caveat_flag(tmp_path, monkeypatch):
+    """Through the series: the unit carries a non-refit `not_measured` flag,
+    is not relaxed and refit, and verifies on the bands it measured."""
+    import test_series_verdict_path as sv
+    from scilink.agents.exp_agents._verification_record import analysis_verdict
+
+    class EdgeExecutor(sv.FakeExecutor):
+        def execute_script(self, script, working_dir=None, timeout=None, **kw):
+            res = super().execute_script(script, working_dir=working_dir, timeout=timeout, **kw)
+            name = self.calls[-1][0] if self.calls else None
+            if res.get("status") != "success":
+                return res
+            out = json.loads(res["stdout"].split("FIT_RESULTS_JSON:", 1)[1])
+            lo = float(sv.X[0])
+            out["parameters"]["edge"] = {"center": lo if name == "spectrum_0001" else 160.0, "amplitude": 0.3, "fwhm": 50.0}
+            out["bounds"] = {"edge": {"center": [lo, 300.0]}, "peak_1": {"fwhm": [1.0, 40.0]}}
+            out["targets"] = ["peak_1", "edge"]
+            res["stdout"] = "FIT_RESULTS_JSON:" + json.dumps(out)
+            return res
+
+    follower_r2 = {"spectrum_0001": 0.97, "spectrum_0002": 0.96}
+    ex = EdgeExecutor(follower_r2)
+    state, _ = sv.run_series(tmp_path, monkeypatch, names=sv.NAMES, anchors={"spectrum_0000": sv.OK},
+                             follower_r2=follower_r2, executor=ex)
+    raw = {u["name"]: u for u in state["series_results"]}
+    results = sv.compile_results(tmp_path, state)
+    by_name = {u["name"]: u for u in results["individual_results"]}
+    flags = {f["name"]: f["reason"] for f in (state.get("flagged_spectra") or [])}
+    row = raw["spectrum_0001"]
+    assert [n for n, _ in ex.calls].count("spectrum_0001") == 1             # nothing relaxed or refit
+    assert not row.get("pinned_at_bound") and row["not_measured"][0]["component"] == "edge"
+    assert all(v is None for v in row["parameters"]["edge"].values())
+    assert row["parameters"]["peak_1"]["center"] == 144.0                    # the other bands stand
+    assert flags.get("spectrum_0001") == "not_measured"
+    assert by_name["spectrum_0001"]["unit_verdict"]["verified"] is True
+    assert analysis_verdict(results)["verified"] is True
 
 
 def test_the_fit_is_saved_in_the_datas_space():

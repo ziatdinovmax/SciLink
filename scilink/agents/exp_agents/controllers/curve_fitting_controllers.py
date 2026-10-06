@@ -173,10 +173,20 @@ def _canonical_r2(y, fit):
         return None
 
 
+# Flags that are caveats on a fit that stands, never failures or refit reasons.
+CAVEAT_FLAGS = frozenset({"secondary_pin", "not_measured"})
+
+
+def describe_not_measured(items) -> str:
+    """``edge (centre held at the axis end 374.1); ...``"""
+    return "; ".join(f"{p['component']} (centre held at the axis end {p['bound']:.6g})" for p in items)
+
+
 def _beyond_axis(pins, stats):
-    """``(pins, beyond)``: a CENTRE pinned at a bound that coincides with an
-    end of the measured axis is a band whose maximum lies outside the data,
-    not a failed fit."""
+    """``(pins, beyond)``: a CENTRE pinned at a bound at or beyond an end of
+    the measured axis is a band whose maximum lies outside the data, not a
+    failed fit (a script may widen the bound past the data; the centre is
+    then outside it)."""
     lo, hi = (stats or {}).get("x_range") or [None, None]
     if lo is None or hi is None or hi <= lo or not pins:
         return list(pins or []), []
@@ -186,7 +196,7 @@ def _beyond_axis(pins, stats):
         name = str(p.get("parameter", "")).lower().replace("-", "_").split("_")
         is_centre = any(t in name for t in ("center", "centre", "position", "pos", "x0", "mu"))
         b = p.get("bound")
-        if is_centre and isinstance(b, (int, float)) and (abs(b - lo) <= tol or abs(b - hi) <= tol):
+        if is_centre and isinstance(b, (int, float)) and (b <= lo + tol or b >= hi - tol):
             beyond.append(dict(p, reason="centre beyond the measured axis"))
         else:
             keep.append(p)
@@ -4483,29 +4493,32 @@ Your guidance: '''
             validate_bound_pinning(fit_results.get("parameters"), fit_results.get("bounds"), lineshape_limits=True),
             _freeze(fit_results.get("targets")), fit_results.get("parameters"))
         # A centre held at the END of the measured axis is a band peaking
-        # outside the range. When the script declared targets and this band is
-        # one, it stays a pin: the plan asked for it and its maximum is not in
-        # the data (#742). Otherwise none of its values is a measurement (its
-        # width and area come from half a profile): the whole component is
-        # reported with no value, like a secondary pin, and the fit of the
-        # spectrum is not degenerate. A declared non-target edge band (already
-        # a secondary pin) is emptied the same way.
-        pinned, _beyond = _beyond_axis(pinned, stats)
-        _edge = []
-        if _beyond and _freeze(fit_results.get("targets")):
-            pinned = list(pinned) + _beyond
-        elif _beyond:
-            secondary_pins = list(secondary_pins) + _beyond
-            _edge = _beyond
-        _edge = _edge + _beyond_axis(secondary_pins, stats)[1]
-        if _edge:
+        # outside the range: it is NOT MEASURED. None of its values is a
+        # measurement (its width and area come from half a profile), so the
+        # whole component is reported with no value, and the other bands
+        # stand, target or not. Only when no declared target is left measured
+        # does it stay a pin: a fit with nothing measured is not verified.
+        pinned, _edge_t = _beyond_axis(pinned, stats)
+        secondary_pins, _edge_s = _beyond_axis(secondary_pins, stats)
+        _targets = _freeze(fit_results.get("targets"))
+        if _edge_t and _targets and set(_targets) <= {p["component"] for p in _edge_t}:
+            pinned, _edge_t = list(pinned) + _edge_t, []
+        not_measured = _edge_t + _edge_s
+        if not_measured:
+            # its other pins (a width railed on half a profile) go with it
+            _nm = {p["component"] for p in not_measured}
+            pinned = [p for p in pinned if p["component"] not in _nm]
+            secondary_pins = [p for p in secondary_pins if p["component"] not in _nm]
             _params = fit_results.get("parameters") or {}
-            for comp in {p["component"] for p in _edge}:
+            for comp in {p["component"] for p in not_measured}:
                 vals = _params.get(comp)
                 if isinstance(vals, dict):
                     for k in list(vals):
                         if isinstance(vals[k], (int, float)) and not isinstance(vals[k], bool):
                             vals[k] = None
+            self.logger.warning(
+                "    ⚠️ Not measured — band peaking beyond the measured axis (its values are reported "
+                "as no value; the other bands stand): %s", describe_not_measured(not_measured))
         if secondary_pins:
             # #742: a pin on a component the fit declared NOT a target (a
             # background, a baseline, an overlap) is a caveat: the targets'
@@ -4541,6 +4554,8 @@ Your guidance: '''
             fit_quality["pinned_at_bound"] = pinned
         if secondary_pins:
             fit_quality["secondary_pins"] = secondary_pins
+        if not_measured:
+            fit_quality["not_measured"] = not_measured
         residual_diag = None
         residual_zoom_panels = []
         try:
@@ -4640,6 +4655,12 @@ Your guidance: '''
                 "Secondary component pinned at bound — " + describe_pinned(secondary_pins)
                 + ": those values are not measurements (reported as no value); the declared "
                   "targets' fit is unaffected."]
+        if not_measured:
+            result["not_measured"] = not_measured
+            result["caveats"] = list(result.get("caveats") or []) + [
+                "Not measured: " + describe_not_measured(not_measured)
+                + ". Those bands peak beyond the measured axis; their values are reported as no value, "
+                  "and the other bands' fit is unaffected."]
         if pinned:
             result["pinned_at_bound"] = pinned
             if hold_recipe:
@@ -7746,12 +7767,22 @@ Return JSON with:
                     "recommendation": recommendation
                 })
 
-        # A secondary component pinned at its bound (#742) is a caveat, not a
-        # failure: a non-refit flag, so a reader of the table or the report
-        # learns why that cell is empty. Never over another flag.
+        # A secondary component pinned at its bound (#742), or a band peaking
+        # beyond the measured axis, is a caveat, not a failure: a non-refit
+        # flag, so a reader of the table or the report learns why that cell is
+        # empty. Never over another flag.
         from ...skills._shared.curve_fitting_tools import describe_pinned
         already = {f["index"] for f in flagged}
         for r in series_results:
+            nm = (r.get("fit_quality") or {}).get("not_measured") if r.get("success") else None
+            if nm and r["index"] not in already:
+                already.add(r["index"])
+                flagged.append({
+                    "index": r["index"], "name": r["name"], "reason": "not_measured",
+                    "r_squared": None, "series_mean": None, "series_std": None, "deviation_sigma": None,
+                    "recommendation": ("Caveat, not a failure: not measured — " + describe_not_measured(nm)
+                                       + ". Those bands peak beyond the measured axis (no value); the other "
+                                         "bands' fit is unaffected.")})
             sec = (r.get("fit_quality") or {}).get("secondary_pins") if r.get("success") else None
             if sec and r["index"] not in already:
                 flagged.append({
@@ -8768,7 +8799,7 @@ Return JSON: {{"script": "<the complete modified script>"}}
         series_context_parts = []
         # a unit flagged only with a secondary-pin caveat (#742) fitted fine
         def _failing(r):
-            return (not r.get("success")) or (r.get("flagged") and r.get("flag_reason") != "secondary_pin")
+            return (not r.get("success")) or (r.get("flagged") and r.get("flag_reason") not in CAVEAT_FLAGS)
         successful = [r for r in series_results if not _failing(r)]
         if successful:
             r2_vals = [r.get("fit_quality", {}).get("r_squared") or 0 for r in successful]
@@ -10099,7 +10130,7 @@ class UnifiedCurveReportController:
         n_total = len(series_results) or n_flagged
         # a secondary-pin caveat (#742) is not a failing frame: it never makes
         # a verified series read as a series-wide mismatch
-        n_failing = sum(1 for f in flagged_spectra if f.get("reason") != "secondary_pin")
+        n_failing = sum(1 for f in flagged_spectra if f.get("reason") not in CAVEAT_FLAGS)
         majority = n_failing >= max(2, 0.5 * n_total)
         # When flagged frames are the MAJORITY, they are not isolated
         # anomalies — the model/reference set does not describe the series.
