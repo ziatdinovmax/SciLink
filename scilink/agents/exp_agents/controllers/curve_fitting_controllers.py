@@ -4373,7 +4373,7 @@ Your guidance: '''
                         # a pin on a SECONDARY component (background, overlap)
                         # is a caveat, not a reason to relax and refit (#742)
                         _pins, _ = split_pins_by_targets(
-                            validate_bound_pinning(_fr.get("parameters"), _fr.get("bounds")),
+                            validate_bound_pinning(_fr.get("parameters"), _fr.get("bounds"), lineshape_limits=True),
                             _freeze(_fr.get("targets")), _fr.get("parameters"))
                         _pins, _ = _beyond_axis(_pins, stats)   # a band peaking outside the axis
                         if _pins and hold_recipe:
@@ -4480,14 +4480,27 @@ Your guidance: '''
             validate_bound_pinning, describe_pinned, PINNED_BOUND_FIX)
         from ...skills._shared.curve_fitting_tools import split_pins_by_targets
         pinned, secondary_pins = split_pins_by_targets(
-            validate_bound_pinning(fit_results.get("parameters"), fit_results.get("bounds")),
+            validate_bound_pinning(fit_results.get("parameters"), fit_results.get("bounds"), lineshape_limits=True),
             _freeze(fit_results.get("targets")), fit_results.get("parameters"))
         # A centre held at the END of the measured axis is a band peaking
-        # outside the range: its centre cannot be measured, so it is reported
-        # with no value, like a secondary pin, and does not make the fit of
-        # the spectrum degenerate.
+        # outside the range. When the script declared targets and this band is
+        # one, it stays a pin: the plan asked for it and its maximum is not in
+        # the data (#742). Otherwise none of its values is a measurement (its
+        # width and area come from half a profile): the whole component is
+        # reported with no value, like a secondary pin, and the fit of the
+        # spectrum is not degenerate.
         pinned, _beyond = _beyond_axis(pinned, stats)
-        secondary_pins = list(secondary_pins) + _beyond
+        if _beyond and _freeze(fit_results.get("targets")):
+            pinned = list(pinned) + _beyond
+        elif _beyond:
+            secondary_pins = list(secondary_pins) + _beyond
+            _params = fit_results.get("parameters") or {}
+            for comp in {p["component"] for p in _beyond}:
+                vals = _params.get(comp)
+                if isinstance(vals, dict):
+                    for k in list(vals):
+                        if isinstance(vals[k], (int, float)) and not isinstance(vals[k], bool):
+                            vals[k] = None
         if secondary_pins:
             # #742: a pin on a component the fit declared NOT a target (a
             # background, a baseline, an overlap) is a caveat: the targets'

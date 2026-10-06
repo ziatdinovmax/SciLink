@@ -77,33 +77,57 @@ PINNED_BOUND_FIX = (
 
 
 _WIDTH_WORDS = ("sigma", "gamma", "width", "fwhm", "hwhm", "lw")
+_CENTRE_WORDS = ("center", "centre", "cent", "position", "pos", "x0", "mu", "loc")
+_AMPLITUDE_WORDS = ("amp", "height", "area", "intens", "scale", "norm")
+_GAUSS_WORDS = ("sigma", "g", "gauss", "gaussian")
+_LORENTZ_WORDS = ("gamma", "l", "lor", "lorentz", "lorentzian")
+
+
+def _words(name) -> list:
+    return [w for w in str(name).lower().replace("-", "_").split("_") if w]
 
 
 def _is_width(name) -> bool:
-    return any(w in str(name).lower().replace("-", "_").split("_") for w in _WIDTH_WORDS) \
-        or str(name).lower() in _WIDTH_WORDS
+    return any(w in _words(name) for w in _WIDTH_WORDS)
 
 
-def _other_width_carries(pv: dict, name, pb: dict) -> bool:
-    """Whether another width of the same component carries the line — clear
-    of its own floor and at least ten times this one — so this one at its
-    floor leaves the other pure lineshape, not a collapse or a real floor."""
-    mine = (pv or {}).get(name)
-    if not isinstance(mine, (int, float)) or isinstance(mine, bool):
+def _gl_partner(pv: dict, name):
+    """The other half of ONE line's Gaussian/Lorentzian width pair: the name
+    with its Gaussian word swapped for a Lorentzian one, or the reverse
+    (``sigma``/``gamma``, ``p1_sigma``/``p1_gamma``, ``fwhm_g``/``fwhm_l``,
+    ``gaussian_fwhm``/``lorentzian_fwhm``). None when there is no such pair —
+    another peak's width or the other side of an asymmetric profile is not
+    the same line."""
+    words = _words(name)
+    by_words = {tuple(_words(k)): k for k in (pv or {})}
+    for i, w in enumerate(words):
+        swaps = _LORENTZ_WORDS if w in _GAUSS_WORDS else _GAUSS_WORDS if w in _LORENTZ_WORDS else ()
+        for other in swaps:
+            key = tuple(words[:i] + [other] + words[i + 1:])
+            if key in by_words and by_words[key] != name:
+                return by_words[key]
+    return None
+
+
+def _pure_lineshape(pv: dict, name, value, lo, pb: dict) -> bool:
+    """One width of a Gaussian/Lorentzian pair at its floor while its partner
+    carries the line: the other pure lineshape. The partner must be clear of
+    its own floor and at least ten times this width, and this floor itself
+    small beside it (<= 5 %), so a real floor — an instrument resolution —
+    still pins."""
+    partner = _gl_partner(pv, name)
+    if partner is None:
         return False
-    for k, v in (pv or {}).items():
-        if k == name or not _is_width(k) or "err" in str(k).lower():
-            continue
-        if not isinstance(v, (int, float)) or isinstance(v, bool) or not (v == v):
-            continue
-        b = (pb or {}).get(k)
-        floor = b[0] if isinstance(b, (list, tuple)) and len(b) == 2 and isinstance(b[0], (int, float)) else 0.0
-        if v > 0 and v > 10 * max(floor or 0.0, 0.0) and v >= 10 * abs(mine):
-            return True
-    return False
+    v2 = (pv or {}).get(partner)
+    if not isinstance(v2, (int, float)) or isinstance(v2, bool) or not (v2 == v2) or v2 <= 0:
+        return False
+    b2 = (pb or {}).get(partner)
+    floor2 = b2[0] if isinstance(b2, (list, tuple)) and len(b2) == 2 and isinstance(b2[0], (int, float)) else 0.0
+    return (v2 > 10 * max(floor2 or 0.0, 0.0) and v2 >= 10 * abs(value)
+            and max(lo or 0.0, 0.0) <= 0.05 * v2)
 
 
-def validate_bound_pinning(parameters, bounds, rel_tol: float = 0.01) -> list:
+def validate_bound_pinning(parameters, bounds, rel_tol: float = 0.01, lineshape_limits: bool = False) -> list:
     """Deterministic pinned-at-bound check (#592).
 
     ``bounds`` mirrors ``parameters``: ``{component: {param: [lo, hi]}}`` with
@@ -119,6 +143,11 @@ def validate_bound_pinning(parameters, bounds, rel_tol: float = 0.01) -> list:
     a failed fit. What remains is the failure mode this guards against: a
     feature larger than a ceiling baked from another spectrum, or a
     position / width driven to the edge of its window.
+    ``lineshape_limits`` (curve fits): a mixing fraction at exactly 0 or 1
+    recognised by its [0, 1] bounds, and one width of a Gaussian/Lorentzian
+    pair at its floor while the other carries the line, are pure lineshapes,
+    not pins. Off by default: the hyperspectral scalar check keeps the rule
+    above.
     Returns ``[{component, parameter, value, bound, side}]``; empty when
     compliant or when no bounds were reported. Never raises.
     """
@@ -150,18 +179,21 @@ def validate_bound_pinning(parameters, bounds, rel_tol: float = 0.01) -> list:
             tol = max(tol, 1e-12)
             if any(f in str(name).lower() for f in _FRACTION_KEYS):
                 continue
-            # A mixing fraction is recognised by its bounds too, not only its
-            # name (#761: ``fL`` at 1 is a pure Lorentzian): exactly [0, 1] on
-            # a parameter that is not an amplitude (a normalised amplitude
-            # capped at 1 is a real ceiling).
-            if (lo == 0.0 and hi == 1.0 and not any(
-                    t in str(name).lower() for t in ("amp", "height", "area", "intens", "scale", "norm"))):
-                continue
-            # One width of a two-width lineshape (a Voigt's Gaussian and
-            # Lorentzian parts) at ~0 is the other pure lineshape, not a
-            # collapse, while the other width still carries the line (#761).
-            if lo is not None and v <= max(lo, 0.0) + tol and _is_width(name) and _other_width_carries(pv, name, pb):
-                continue
+            if lineshape_limits:
+                # Curve lineshapes only (#761; the hyperspectral scalar check
+                # keeps main's rule). A mixing fraction is recognised by its
+                # bounds too, not only its name (``fL`` at 1 is a pure
+                # Lorentzian): exactly [0, 1] on a parameter that is not an
+                # amplitude, a position or a width (on a normalised axis those
+                # are real limits).
+                if (lo == 0.0 and hi == 1.0 and not any(
+                        t in str(name).lower() for t in _AMPLITUDE_WORDS + _CENTRE_WORDS + _WIDTH_WORDS)):
+                    continue
+                # One width of ONE line's Gaussian/Lorentzian pair at its floor
+                # while the other carries the line is the other pure lineshape.
+                if (lo is not None and v <= max(lo, 0.0) + tol and _is_width(name)
+                        and _pure_lineshape(pv, name, v, lo, pb)):
+                    continue
 
             def _at(bound):
                 # Within the span tolerance AND close relative to the numbers
