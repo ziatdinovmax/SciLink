@@ -958,7 +958,7 @@ Settled rules, each learned from a live run or a review:
   best-of-N candidate all poll the thread's cancel
   (`log_context.register_cancel`, `inherited_context`). A new agent that spawns
   its own threads uses `attributed_to_current` or `inherited_context`, or its
-  threads run on after their item is cancelled.
+  threads run on after their item is cancelled. And every process SciLink starts is stoppable: model-written code runs through the script executor (`ScriptExecutor`, or `executors.run_generated_script` where a caller needs `subprocess.run`'s shape — SciLink's interpreter, no provider keys, the sandbox limits, consent asked first), and an external engine through `executors.run_engine` (Stop registration, its whole tree killed on a timeout, the parent environment kept); a new call site never calls `subprocess.run` on generated code or an engine (#685).
 - **The provider and the stores are shared.** At most `SCILINK_LLM_MAX_INFLIGHT`
   calls per model are in flight (`wrappers/llm_limiter.py`, held per request,
   never across a backoff); usage is charged per worker; the distill staging,

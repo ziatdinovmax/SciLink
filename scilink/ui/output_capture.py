@@ -87,9 +87,12 @@ class OutputCapture:
                 pass  # Best-effort; stop event will still propagate via print()
 
     def __enter__(self) -> "OutputCapture":
-        from scilink.utils.log_context import clear_stop
+        from scilink.utils.log_context import clear_stop, register_turn_stop
         self._agent_thread_id = threading.get_ident()
         clear_stop(self._agent_thread_id)
+        # the turn's Stop is this thread's cancel for the turn: a wait that
+        # polls the cancel (an engine run about to start) ends on it too
+        self._prev_cancel = register_turn_stop(self._stop_event)
         self._old_stdout = sys.stdout
         self._old_stderr = sys.stderr
         sys.stdout = TeeStream(self._old_stdout, self._buffer, self._stop_event)
@@ -97,8 +100,10 @@ class OutputCapture:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        from scilink.utils.log_context import restore_cancel
         sys.stdout = self._old_stdout
         sys.stderr = self._old_stderr
+        restore_cancel(getattr(self, "_prev_cancel", None))
 
     def getvalue(self) -> str:
         return self._buffer.getvalue()

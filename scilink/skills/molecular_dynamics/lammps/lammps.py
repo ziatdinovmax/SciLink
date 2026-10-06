@@ -16,6 +16,7 @@ Called by MDSimulationAgent when the LAMMPS skill is active.
 Decoupled from the skill so they can be tested independently.
 """
 
+from scilink.executors import run_engine  # stoppable, whole-tree kill (#685)
 import os
 import re
 import shutil
@@ -113,7 +114,7 @@ def check_lammps() -> Dict[str, Any]:
     if lmp_path:
         try:
             import subprocess
-            proc = subprocess.run(
+            proc = run_engine(
                 [lmp_path, "-h"], capture_output=True, text=True, timeout=10,
             )
             in_packages = False

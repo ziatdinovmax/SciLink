@@ -166,11 +166,17 @@ class RoutedCapture:
             _ROUTES[self._agent_thread_id] = _Route(
                 self._buffer, self._buffer_lock, self._stop_event, self._tag,
                 echo=self._echo)
+        # the turn's Stop is this thread's cancel for the turn: a wait that
+        # polls the cancel (an engine run about to start) ends on it too
+        from scilink.utils.log_context import register_turn_stop
+        self._prev_cancel = register_turn_stop(self._stop_event)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        from scilink.utils.log_context import restore_cancel
         with _ROUTES_LOCK:
             _ROUTES.pop(self._agent_thread_id, None)
+        restore_cancel(getattr(self, "_prev_cancel", None))
 
     def getvalue(self) -> str:
         with self._buffer_lock:

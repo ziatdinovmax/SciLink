@@ -13,6 +13,7 @@ They are intentionally decoupled from the skill (which provides LLM
 context) so that the tools can be tested and used independently.
 """
 
+from scilink.executors import run_engine  # stoppable, whole-tree kill (#685)
 import os
 import shutil
 import subprocess
@@ -91,7 +92,7 @@ def run_pdb4amber(
     logger.info(f"pdb4amber: {' '.join(cmd)}")
 
     try:
-        proc = subprocess.run(
+        proc = run_engine(
             cmd, capture_output=True, text=True,
             cwd=working_dir, timeout=timeout,
         )
@@ -153,7 +154,7 @@ def run_antechamber(
     logger.info(f"antechamber: {' '.join(cmd)}")
 
     try:
-        proc = subprocess.run(
+        proc = run_engine(
             cmd, capture_output=True, text=True,
             cwd=working_dir, timeout=timeout,
         )
@@ -213,7 +214,7 @@ def run_parmchk2(
     logger.info(f"parmchk2: {' '.join(cmd)}")
 
     try:
-        proc = subprocess.run(
+        proc = run_engine(
             cmd, capture_output=True, text=True,
             cwd=working_dir, timeout=timeout,
         )
@@ -389,7 +390,7 @@ def run_tleap(
     logger.info(f"tleap: {' '.join(cmd)}")
 
     try:
-        subprocess.run(
+        run_engine(
             cmd, capture_output=True, text=True,
             cwd=working_dir, timeout=timeout,
         )

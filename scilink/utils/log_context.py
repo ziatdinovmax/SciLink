@@ -111,6 +111,31 @@ def unregister_cancel() -> None:
         _CANCEL_EVENTS.pop(threading.get_ident(), None)
 
 
+def current_cancel() -> Optional[threading.Event]:
+    """The CURRENT thread's registered cancel event, or None (so a scope that
+    registers its own can restore the one it found)."""
+    return _CANCEL_EVENTS.get(threading.get_ident())
+
+
+def register_turn_stop(event: threading.Event) -> Optional[threading.Event]:
+    """Make a turn's Stop event (a capture's) the current thread's cancel for
+    the turn, so every wait that polls the cancel — an engine run about to
+    start, an LLM slot, a backoff — ends on the user's Stop too. Returns the
+    event it replaced, for :func:`restore_cancel`."""
+    prev = current_cancel()
+    register_cancel(event)
+    return prev
+
+
+def restore_cancel(prev: Optional[threading.Event]) -> None:
+    """Undo :func:`register_turn_stop`: put back the event it replaced, or
+    none, so a reused thread id never inherits a stale Stop."""
+    if prev is not None:
+        register_cancel(prev)
+    else:
+        unregister_cancel()
+
+
 def cancel_watched() -> bool:
     """Whether a cancel can reach the current thread at all: it carries a
     cancel event, or it is an attributed worker whose turn may be stopped."""

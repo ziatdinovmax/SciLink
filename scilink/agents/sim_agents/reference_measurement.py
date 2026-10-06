@@ -17,6 +17,7 @@ pure-component reference is a local liquid-box packer for now; it is injectable
 ``build_box`` once that lands on main.
 """
 
+from scilink.executors import run_engine  # stoppable, whole-tree kill (#685)
 import logging
 import os
 import shutil
@@ -86,7 +87,7 @@ def _pack_pure_box(smiles: str, n_molecules: int, init_density: float,
             "end structure\n", encoding="utf-8"
         )
         with open(inp) as fh:
-            subprocess.run(["packmol"], stdin=fh, cwd=str(work), check=True,
+            run_engine(["packmol"], stdin=fh, cwd=str(work), check=True,
                            stdout=subprocess.DEVNULL)
 
         atoms = _ase_read(str(packed))

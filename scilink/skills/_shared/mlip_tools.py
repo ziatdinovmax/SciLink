@@ -12,6 +12,7 @@ points raise NotImplementedError with actionable messages so failures are
 obvious rather than silent.
 """
 
+from scilink.executors import run_engine  # stoppable, whole-tree kill (#685)
 import os
 import json
 import logging
@@ -826,7 +827,7 @@ def _mace_train(
     logger.info(f"Starting MACE training ({model_name})...")
 
     with open(stdout_log, "w", encoding="utf-8") as out, open(stderr_log, "w", encoding="utf-8") as err:
-        proc = subprocess.run(
+        proc = run_engine(
             cli, stdout=out, stderr=err,
             cwd=working_dir,
             timeout=int(timeout_hours * 3600),
