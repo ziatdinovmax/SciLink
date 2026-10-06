@@ -50,6 +50,9 @@ def test_pure_lineshape_limits_are_not_pins_and_real_ones_still_are():
                  {"p": {"sigma_left": [1e-3, 50], "sigma_right": [0.1, 50]}}) == [("p", "sigma_left")]
     assert _pins({"p": {"center": 1.0}}, {"p": {"center": [0, 1]}}) == [("p", "center")]
     assert _pins({"p": {"sigma": 2.5, "gamma": 30.0}}, {"p": {"sigma": [2.5, 50], "gamma": [0.1, 50]}}) == [("p", "sigma")]
+    # a skewness railed at a negative bound is not a width at zero (#764 re-review)
+    assert _pins({"p": {"gamma": -10.0, "sigma": 150.0}}, {"p": {"gamma": [-10, 10], "sigma": [1, 500]}}) == [("p", "gamma")]
+    assert _pins({"p": {"gamma": -1.0, "sigma": 50.0}}, {"p": {"gamma": [-1, 1], "sigma": [1, 500]}}) == [("p", "gamma")]
 
 
 def test_the_lineshape_exemptions_are_curve_only():
@@ -118,6 +121,23 @@ def test_a_declared_targets_edge_centre_stays_a_pin(tmp_path, monkeypatch):
         {}, np.column_stack([X, np.ones_like(X)]), "s.csv", "s", 0, base_script="first")
     assert corrections == []                                                 # no repair can move it into the data
     assert [p["component"] for p in res["pinned_at_bound"]] == ["edge"]
+
+
+def test_a_declared_non_target_edge_band_is_emptied_too(tmp_path, monkeypatch):
+    """Targets declared, the edge band not among them: a secondary pin, and
+    none of its values is a measurement, as with no targets (#764 re-review)."""
+    params = {"edge": {"center": float(X[0]), "amplitude": 0.4, "fwhm": 120.0},
+              "main": {"center": 1400.0, "amplitude": 0.8, "fwhm": 60.0}}
+    bounds = {"edge": {"center": [float(X[0]), 500.0]}, "main": {"center": [1300.0, 1500.0]}}
+    run = {"status": "success", "visualization_path": "viz.png", "visualization_bytes": b"", "exec": {},
+           "stdout": "FIT_RESULTS_JSON:" + json.dumps({"model_type": "2PV", "parameters": params, "bounds": bounds,
+                                                        "targets": ["main"], "fit_quality": {"r_squared": 0.99}})}
+    monkeypatch.setattr(cc, "stage_and_run_adaptive", lambda *a, **k: run)
+    res = _controller(tmp_path, [])._fit_single_spectrum(
+        {}, np.column_stack([X, np.ones_like(X)]), "s.csv", "s", 0, base_script="first")
+    assert res["success"] and "pinned_at_bound" not in res
+    assert all(v is None for v in res["parameters"]["edge"].values())
+    assert res["parameters"]["main"] == {"center": 1400.0, "amplitude": 0.8, "fwhm": 60.0}
 
 
 def test_the_fit_is_saved_in_the_datas_space():

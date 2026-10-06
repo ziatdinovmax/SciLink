@@ -4488,14 +4488,19 @@ Your guidance: '''
         # the data (#742). Otherwise none of its values is a measurement (its
         # width and area come from half a profile): the whole component is
         # reported with no value, like a secondary pin, and the fit of the
-        # spectrum is not degenerate.
+        # spectrum is not degenerate. A declared non-target edge band (already
+        # a secondary pin) is emptied the same way.
         pinned, _beyond = _beyond_axis(pinned, stats)
+        _edge = []
         if _beyond and _freeze(fit_results.get("targets")):
             pinned = list(pinned) + _beyond
         elif _beyond:
             secondary_pins = list(secondary_pins) + _beyond
+            _edge = _beyond
+        _edge = _edge + _beyond_axis(secondary_pins, stats)[1]
+        if _edge:
             _params = fit_results.get("parameters") or {}
-            for comp in {p["component"] for p in _beyond}:
+            for comp in {p["component"] for p in _edge}:
                 vals = _params.get(comp)
                 if isinstance(vals, dict):
                     for k in list(vals):

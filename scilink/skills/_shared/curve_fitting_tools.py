@@ -97,7 +97,10 @@ def _gl_partner(pv: dict, name):
     (``sigma``/``gamma``, ``p1_sigma``/``p1_gamma``, ``fwhm_g``/``fwhm_l``,
     ``gaussian_fwhm``/``lorentzian_fwhm``). None when there is no such pair —
     another peak's width or the other side of an asymmetric profile is not
-    the same line."""
+    the same line. The pairing is by name only: another model's ``gamma``
+    beside a ``sigma`` (an exponentially modified Gaussian's rate) or two
+    peaks labelled ``g`` and ``l`` read as a pair too; the floor and ratio
+    tests in ``_pure_lineshape`` are what keep a railed value pinned."""
     words = _words(name)
     by_words = {tuple(_words(k)): k for k in (pv or {})}
     for i, w in enumerate(words):
@@ -191,7 +194,10 @@ def validate_bound_pinning(parameters, bounds, rel_tol: float = 0.01, lineshape_
                     continue
                 # One width of ONE line's Gaussian/Lorentzian pair at its floor
                 # while the other carries the line is the other pure lineshape.
-                if (lo is not None and v <= max(lo, 0.0) + tol and _is_width(name)
+                # A width's floor is non-negative: a value at a negative lower
+                # bound is a skewness or an offset railed at its limit, not a
+                # width at zero (lmfit's skewed Gaussian names its skew gamma).
+                if (lo is not None and lo >= 0.0 and v <= lo + tol and _is_width(name)
                         and _pure_lineshape(pv, name, v, lo, pb)):
                     continue
 
