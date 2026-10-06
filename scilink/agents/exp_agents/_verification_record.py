@@ -419,6 +419,17 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
     return reconstructed_verdict(full)
 
 
+def replay_certification_reason(full_result: Optional[dict]) -> Optional[str]:
+    """Why a replay's interpretation is not certified (#753), for the
+    ``analyses`` row beside :func:`replay_escalation`, so the board quotes
+    the reason. None when the run is not an uncertified replay."""
+    rv = (full_result or {}).get("reuse_validity") or {}
+    if not rv.get("reused") or interpretation_checked_by(rv):
+        return None
+    from ._replay import certification_reason
+    return certification_reason(rv) or None
+
+
 def replay_escalation(full_result: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """The judge's reading of a replay whose certificate was withheld (#712
     escalation), as the ``analyses`` row carries it: trigger, belongs_to,
@@ -800,7 +811,10 @@ def series_recipes(full_result: Optional[dict]) -> List[Dict[str, Any]]:
                         "model": r.get("model") if isinstance(r.get("model"), str) else None,
                         "gate": r.get("gate") if isinstance(r.get("gate"), dict) else None,
                         # a cube's recipe is a records FILE with a fixed name (#734)
-                        "file": r.get("file") if isinstance(r.get("file"), str) else None})
+                        "file": r.get("file") if isinstance(r.get("file"), str) else None,
+                        # what a replay of it is certified against (#753): opaque here
+                        "certification_reference": (r.get("certification_reference")
+                                                    if isinstance(r.get("certification_reference"), dict) else None)})
     out.sort(key=lambda r: (r.get("index") if isinstance(r.get("index"), int) else 1 << 30))
     return out
 
@@ -882,6 +896,9 @@ def prior_recipe_candidates(anchor_dir, *, single_name: str, named=None) -> List
     # the gate the prior RUN was held to: what a recipe with no gate of its
     # own (a single run's script, a named unit script) is replayed under
     run_gate = recorded.get("quality_gate") if isinstance(recorded.get("quality_gate"), dict) else None
+    # a single run's reference (#753): what a replay of its script is certified against
+    run_ref = (recorded.get("certification_reference")
+               if isinstance(recorded.get("certification_reference"), dict) else None)
     if named is not None:
         # a script FILE: the board's copy carries its gate and model in a
         # sidecar (<stem>.recipe.json); a unit script inside a run takes the
@@ -889,17 +906,21 @@ def prior_recipe_candidates(anchor_dir, *, single_name: str, named=None) -> List
         side = recipe_sidecar(named)
         return [{"script": t, "label": lbl, "regime": side.get("regime"), "unit": side.get("unit"), "verified": None,
                  "drift_state": None, "x_range": None, "model": side.get("model"),
-                 "gate": side.get("quality_gate") if isinstance(side.get("quality_gate"), dict) else run_gate}
+                 "gate": side.get("quality_gate") if isinstance(side.get("quality_gate"), dict) else run_gate,
+                 # the copy's reference travels in its sidecar (#753)
+                 "certification_reference": side.get("certification_reference") or run_ref}
                 for t, lbl in pairs]
     if not pairs or pairs[0][1] is None or "locked recipe" not in (pairs[0][1] or ""):
         return [{"script": t, "label": lbl, "regime": None, "unit": None, "verified": None, "drift_state": None,
-                 "x_range": None, "model": None, "gate": run_gate} for t, lbl in pairs]
+                 "x_range": None, "model": None, "gate": run_gate, "certification_reference": run_ref}
+                for t, lbl in pairs]
     recipes = series_recipes(recorded)
     out = []
     for (t, lbl), r in zip(pairs, recipes):
         out.append({"script": t, "label": lbl, "regime": r.get("regime"), "unit": r.get("unit"),
                     "verified": r.get("verified"), "drift_state": r.get("drift_state"), "x_range": r.get("x_range"),
-                    "model": r.get("model"), "gate": r.get("gate") or run_gate})
+                    "model": r.get("model"), "gate": r.get("gate") or run_gate,
+                    "certification_reference": r.get("certification_reference")})
     return out
 
 
@@ -926,6 +947,8 @@ def recipe_sidecar(named) -> Dict[str, Any]:
         for k in ("regime", "unit", "model", "analysis_id"):
             if data.get(k) is not None:
                 out[k] = str(data[k])[:300]
+        if isinstance(data.get("certification_reference"), dict):
+            out["certification_reference"] = data["certification_reference"]      # opaque (#753)
         gate = data.get("quality_gate")
         if isinstance(gate, dict):
             # a malformed gate is no gate: it must round-trip through the

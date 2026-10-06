@@ -399,7 +399,10 @@ agent's: an image reuse has no identity check on its `reuse_validity` and
 is never certified, so its claims stay provisional. A hyperspectral
 replay's `identity_checked` is the map gate's range rule — every required
 map inside the anchor's plausible range — a weaker certificate than the
-curve's two checks. The verdict stays the gate's, on the fast clock and
+curve's two checks. With no map gate (a single cube's run folder or its board
+copy) the run's own `certification_reference` maps certify by the same rule
+and never gate: the verdict is the run's, and a single-cube reuse can now be
+certified, which it never was before #753. The verdict stays the gate's, on the fast clock and
 off it. Why not a verdict: a deterministic check asked an interpretive
 question ("same phase, read the same way?" — the question the live section
 says no gate can answer) has the precision to withhold a certificate, not to
@@ -981,7 +984,7 @@ Settled rules, each learned from a live run or a review:
   where each regime locks (the curve, image and hyperspectral drivers alike;
   a cube's recipe is a records FILE, copied under its unit's own folder by the
   name `prior_analysis_paths` reads, with its map gate in the sidecar, which a
-  replay of the copy is held to when its caller passes no reference, #734) — so an agent's folder is never read again for it and the
+  replay of the copy is held to when its caller passes no reference, #734); and every copy carries, in its sidecar only (never in the board record: it can be large), the opaque `certification_reference` its agent stamped where it recorded the recipe — a curve regime's state and identity from its units, a cube's reference maps — so a replay of the copy is certified, flagged and escalated as a replay of the run is; a copy with none, and an image replay (no interpretation check by design), says why on its record (`_replay.NO_REFERENCE`, `NO_INTERPRETATION_CHECK`), #753 — so an agent's folder is never read again for it and the
   agents' own layout and reuse are untouched by the swarm; a verifier's
   physics approval inside the gate's soft band counts, a bypassed verification
   below threshold does not; a CLAIM of a run that also reported outputs no gate

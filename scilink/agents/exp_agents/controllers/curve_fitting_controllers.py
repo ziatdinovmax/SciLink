@@ -1076,11 +1076,13 @@ def _restamp_regimes(output_dir, recipe_by_regime: dict, series_results: list) -
     regime's spread (an anchor-only stamp fails units of its own regime
     that drifted along it). A regime whose units' files cannot be read
     keeps the anchor's stamp."""
-    from .._replay import drift_state_of_curves
+    from .._replay import curve_certification_reference, drift_state_of_curves, identity_features
     by_regime: Dict[Any, list] = {}
+    params_of: Dict[int, Any] = {}
     for r in series_results or []:
         if isinstance(r, dict) and r.get("success") and isinstance(r.get("index"), int):
             by_regime.setdefault(r.get("regime"), []).append(r["index"])
+            params_of[r["index"]] = r.get("parameters")
     for regime, rec in (recipe_by_regime or {}).items():
         # a single-regime series tags no row (its recipe is keyed "default"):
         # its units are the untagged rows
@@ -1102,6 +1104,14 @@ def _restamp_regimes(output_dir, recipe_by_regime: dict, series_results: list) -
                 rec["drift_state"] = st
                 rec["drift_state_units"] = len(st.get("seed") or [])      # the curves the monitor seeded
                 rec["x_range"] = float(max(float(np.nanmax(c[0]) - np.nanmin(c[0])) for c in curves))
+        # what a replay of this recipe is certified against, carried WITH the
+        # recipe (#753): a copy of it (the swarm board's) is certified as a
+        # replay of the run is
+        samples = [identity_features(params_of[i]) for i in sorted(units_idx)
+                   if isinstance(params_of.get(i), dict)]
+        ref = curve_certification_reference(rec.get("drift_state"), rec.get("x_range"), samples)
+        if ref is not None:
+            rec["certification_reference"] = ref
 
 
 def _regime_of_named(state: dict) -> Optional[str]:
@@ -1245,6 +1255,11 @@ def _regime_references(state: dict, candidates: list) -> list:
         rows_by_regime.setdefault(r.get("regime"), []).append(r)
     for c in candidates:
         regime = c.get("regime")
+        # the reference the recipe CARRIES (#753): a board copy has no run
+        # behind it, so its state and identity come from here
+        cref = c.get("certification_reference") if isinstance(c.get("certification_reference"), dict) else {}
+        drift = (c.get("drift_state") if isinstance(c.get("drift_state"), dict)
+                 else cref.get("drift_state") if isinstance(cref.get("drift_state"), dict) else None)
         units = rows_by_regime.get(regime) if regime is not None else rows
         if not units and set(rows_by_regime) <= {None}:
             units = rows                 # a single-regime series tags no row: they are all its one recipe's
@@ -1270,24 +1285,26 @@ def _regime_references(state: dict, candidates: list) -> list:
                 # a unit covering too little of the first unit's axis is not
                 # seeded (the monitor's rule); the reference says how many
                 dropped = len(curves) - len(getattr(monitor, "_seed", curves))
-            elif isinstance(c.get("drift_state"), dict):
-                monitor = state_monitor(state=c["drift_state"])
-                xs = c["drift_state"].get("x") or []
+            elif drift is not None:
+                monitor = state_monitor(state=drift)
+                xs = drift.get("x") or []
                 x_range = (max(xs) - min(xs)) if xs else None
-            if x_range is None and isinstance(c.get("x_range"), (int, float)):
-                x_range = float(c["x_range"])
+            for _xr in (c.get("x_range"), cref.get("x_range")):
+                if x_range is None and isinstance(_xr, (int, float)):
+                    x_range = float(_xr)
         except Exception:  # noqa: BLE001
             monitor = None
         samples = [identity_features(r.get("parameters")) for r in units if isinstance(r.get("parameters"), dict)]
-        identity = identity_reference(samples, x_range=x_range) if samples else None
+        identity = (identity_reference(samples, x_range=x_range) if samples
+                    else cref.get("identity") if isinstance(cref.get("identity"), dict) else None)
         anchor_curve = None
         if curves:
             anchor_curve = curves[0]
-        elif isinstance(c.get("drift_state"), dict) and c["drift_state"].get("seed"):
+        elif drift is not None and drift.get("seed"):
             # the anchor's curve as the lock recorded it: block means on the grid
             try:
-                xs = np.asarray(c["drift_state"].get("x") or [], dtype=float)
-                row = np.asarray(c["drift_state"]["seed"][0], dtype=float)
+                xs = np.asarray(drift.get("x") or [], dtype=float)
+                row = np.asarray(drift["seed"][0], dtype=float)
                 if xs.size and row.size and xs.size >= row.size:
                     block = xs.size // row.size
                     anchor_curve = (xs[:row.size * block].reshape(-1, block).mean(axis=1), row)
@@ -5498,7 +5515,8 @@ Return JSON with:
             first = (extra[0] if extra else None) or (_prior_curve_fit_candidates(ctx.state) or [None])[0] or {}
             regime = _regime_of_named(ctx.state) or first.get("regime")
             refs = _regime_references(ctx.state, [{"regime": regime, "drift_state": first.get("drift_state"),
-                                                   "x_range": first.get("x_range")}])
+                                                   "x_range": first.get("x_range"),
+                                                   "certification_reference": first.get("certification_reference")}])
         xy = _extract_xy(ctx.data)
         distances = None
         if len(candidates) > 1 and refs and xy is not None and any(r.get("monitor") is not None for r in refs):
@@ -5711,7 +5729,11 @@ Return JSON with:
         a check that cannot run (no reference) says so."""
         from .._replay import CERTIFY_STATE_BAR, SAME_STATE_BAR, identity_check, identity_features
         out = {"caveat": "", "identity": {"checked": False}, "distance": distance, "state_flag": False}
-        if ref is None:
+        if ref is None or (ref.get("monitor") is None and not ref.get("identity") and distance is None):
+            # nothing to certify against: said, never silent (#753)
+            from .._replay import NO_REFERENCE
+            out["identity"]["reason"] = NO_REFERENCE
+            out["state_check"] = "skipped: " + NO_REFERENCE
             return out
         try:
             if distance is None and ref.get("monitor") is not None and xy is not None:
@@ -7861,7 +7883,8 @@ Return JSON with:
             # candidate, matched to the new data by fingerprint and tried by
             # qc_try_reuse — unless script_edits were validated against the
             # first, which is then the only one.
-            state["_reuse_candidates"] = ([{k: c.get(k) for k in ("script", "source", "regime", "unit", "drift_state", "x_range")}
+            state["_reuse_candidates"] = ([{k: c.get(k) for k in ("script", "source", "regime", "unit", "drift_state", "x_range",
+                                                                   "certification_reference")}
                                            for c in cands]
                                           if len(cands) > 1 and not state.get("script_edits") else [])
             # the gate the recipe was approved under (the prior run's), which

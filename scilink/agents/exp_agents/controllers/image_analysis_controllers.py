@@ -34,6 +34,8 @@ from datetime import datetime
 from typing import Callable, Optional, Any, Dict, List
 import numpy as np
 
+from .._replay import no_interpretation_check as _no_interpretation_check  # #753
+
 from .._locked_exec import (
     stage_and_run, stage_and_run_adaptive, script_uses_canonical_input,
     is_timeout_error, trailing_timeout_failures, should_escalate_timeout_model,
@@ -3726,6 +3728,8 @@ Return JSON with:
             (self.logger.info if ok else self.logger.warning)(
                 "   🔒 Deterministic replay gate: " + ("pass" if ok else f"REJECT — {reason}"))
             reuse_result["reuse_validity"] = {
+                # an image replay is never certified, and says why (#753)
+                "certification": _no_interpretation_check(),
                 "reused": True, "source": ctx.reuse_source, "gate": "deterministic",
                 "verdict": "good" if ok else "poor", "message": reason or "replay gate passed"}
             reuse_result["quality_history"] = self._build_quality_history(
@@ -3741,6 +3745,8 @@ Return JSON with:
             reuse_result.setdefault(
                 "error", "the locked script could not execute on this image")
             reuse_result["reuse_validity"] = {
+                # an image replay is never certified, and says why (#753)
+                "certification": _no_interpretation_check(),
                 "reused": True, "source": ctx.reuse_source, "verdict": "failed",
                 "message": "Strict replay: the locked script failed on this image; "
                            "no in-frame repair or re-derivation."}
@@ -3789,6 +3795,8 @@ Return JSON with:
                     f"but should be treated as low-confidence."
                 )
             reuse_result["reuse_validity"] = {
+                # an image replay is never certified, and says why (#753)
+                "certification": _no_interpretation_check(),
                 "reused": True,
                 "source": ctx.reuse_source,
                 "quality_score": v_score,
@@ -6011,6 +6019,7 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
                 # schema-drift caveat so the orchestrator can react.
                 if idx == 0 and reuse_script and not result.get("reuse_validity"):
                     result["reuse_validity"] = {
+                        "certification": _no_interpretation_check(),
                         "reused": False,
                         "source": reuse_source,
                         "verdict": "script_failed",

@@ -672,6 +672,7 @@ def _recipe_specs(aid: str, rec: Dict[str, Any]) -> List[Dict[str, Any]]:
                                     # the board's copy is held to this gate (#717)
                                     **({"quality_gate": r["gate"]} if isinstance(r.get("gate"), dict) else {}),
                                     **({"model": r["model"]} if r.get("model") else {}),
+
                                     "note": ("the locked script of this regime's anchor, as its followers "
                                              "replayed it; a copy the board owns")},
                         "status": "verified" if ok else "provisional",
@@ -679,6 +680,10 @@ def _recipe_specs(aid: str, rec: Dict[str, Any]) -> List[Dict[str, Any]]:
                                      "gate": ("the anchor's gate: " + str(r.get("reason") or "")) if ok
                                      else ("the anchor's gate did not pass: " + str(r.get("reason") or ""))},
                         "_text": r["script"],
+                        # what a replay of the copy is certified against, verbatim, for the
+                        # sidecar only: a reference is too large for a board record (#753)
+                        **({"_certification_reference": r["certification_reference"]}
+                           if isinstance(r.get("certification_reference"), dict) else {}),
                         # a script is <unit>.py; a recipe FILE keeps the name its agent
                         # reads it by (a cube's dynamic_analysis_records.json), in its
                         # unit's own folder so two regimes' files never collide (#734)
@@ -692,19 +697,30 @@ def _recipe_specs(aid: str, rec: Dict[str, Any]) -> List[Dict[str, Any]]:
         gate = _run_gate(rec.get("output_directory"))
         from ..exp_agents._joint import replay_refusal
         joint = bool(replay_refusal(rec.get("output_directory")))
+        cert = _run_record_key(rec.get("output_directory"), "certification_reference")
         out.append({"kind": "recipe",
                     "payload": {"analysis_id": aid, "agent": rec.get("agent_name"),
                                 **({"quality_gate": gate} if gate else {}),
                                 # a joint run's script reads its own run's files by path:
                                 # the sidecar says so, and no replay of the copy runs (#757)
                                 **({"analysis_shape": "joint"} if joint else {}),
+
                                 "note": "the run's approved script; a copy the board owns"},
                     "status": "verified" if run_verified else "provisional",
                     "evidence": {"analysis_ids": [aid],
                                  "gate": ("approved analysis script: " if run_verified
                                           else "script of an unapproved run: ") + run_why},
-                    "_source": str(script), "_name": script.name})
+                    "_source": str(script), "_name": script.name,
+                    **({"_certification_reference": cert} if isinstance(cert, dict) else {})})
     return out
+
+
+def _run_record_key(out_dir: Any, key: str) -> Any:
+    """One key of a single run's ``analysis_results.json``, or None."""
+    try:
+        return json.loads((Path(out_dir) / "analysis_results.json").read_text(encoding="utf-8")).get(key)
+    except Exception:  # noqa: BLE001 - a run with no record carries nothing
+        return None
 
 
 def _run_gate(out_dir: Any) -> Optional[Dict[str, Any]]:
@@ -736,8 +752,9 @@ def _claim_verified(row: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
     held = []                                  # every reason that holds, not the first
     if row.get("decided_by") == "replay_gate" and not row.get("interpretation_checked"):
         held.append("a locked-script replay passed the replay gate (the numbers), but its interpretation "
-                    "is not certified — the state and identity checks against the regime's units did not "
-                    "both agree, or could not run")
+                    "is not certified — " + (row.get("certification_reason")
+                                             or "the state and identity checks against the regime's units did "
+                                                "not both agree, or could not run"))
     def _shown(names):
         return ", ".join(map(str, names[:6])) + (f" (+{len(names) - 6} more)" if len(names) > 6 else "")
     failed = list(row.get("failed_outputs") or [])
@@ -928,6 +945,7 @@ def _materialize_recipe(board: Board, entry: Dict[str, Any], spec: Dict[str, Any
     text, source = spec.pop("_text", None), spec.pop("_source", None)
     name = spec.pop("_name", None)
     subdir = spec.pop("_subdir", None)
+    cert_ref = spec.pop("_certification_reference", None)
     if spec.get("kind") != "recipe" or not name or (text is None and source is None):
         return spec
     folder = (board.path.parent / "recipes"
@@ -945,7 +963,9 @@ def _materialize_recipe(board: Board, entry: Dict[str, Any], spec: Dict[str, Any
     # a figure-of-merit recipe replayed under the R² default, #717)
     side = {k: spec["payload"][k] for k in ("quality_gate", "model", "regime", "unit", "analysis_id", "analysis_shape")
             if spec["payload"].get(k)}
-    if side.get("quality_gate") or side.get("analysis_shape"):
+    if isinstance(cert_ref, dict):
+        side["certification_reference"] = cert_ref
+    if side.get("quality_gate") or side.get("analysis_shape") or side.get("certification_reference"):
         try:
             _write_once(folder, f"{dest.stem}.recipe.json", json.dumps(side, indent=1, default=str))
         except Exception:  # noqa: BLE001 - the script copy stands without its sidecar

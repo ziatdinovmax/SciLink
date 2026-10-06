@@ -47,6 +47,9 @@ def test_a_strict_replay_is_a_whole_image_analysis_with_no_model_call(tmp_path):
     assert model.calls == []
     rv = result["reuse_validity"]
     assert rv["verdict"] == "good" and rv["gate"] == "deterministic"
+    # an image replay is never certified, and says why (#753)
+    from scilink.agents.exp_agents._replay import NO_INTERPRETATION_CHECK
+    assert rv["certification"] == {"checked": False, "reason": NO_INTERPRETATION_CHECK}
     reference = json.loads((prior / "analysis_results.json").read_text())["extracted_features"]
     assert result["extracted_features"] == reference      # same image, same script, same numbers
     assert (result.get("stage_timings") or {}).get("llm_calls", 0) == 0

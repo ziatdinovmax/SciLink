@@ -2145,6 +2145,14 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             results["fitting_parameters"] = fit_results.get("parameters", {})
             results["fit_quality"] = fit_results.get("fit_quality", {})
             results["literature_files"] = state.get("literature_files")
+            # what a replay of this run's script is certified against (#753),
+            # recorded where the series driver locked it; it travels with
+            # the board's copy of the script. A live frame (realtime, strict
+            # replay) is not a recipe source, so it writes none.
+            _locked = list((state.get("locked_recipes") or {}).values())
+            if (len(_locked) == 1 and isinstance(_locked[0].get("certification_reference"), dict)
+                    and state.get("_qc_profile") != "realtime" and not state.get("_strict_replay")):
+                results["certification_reference"] = _locked[0]["certification_reference"]
             
             # Include quality warning if present
             if series_results and series_results[0].get("quality_warning"):

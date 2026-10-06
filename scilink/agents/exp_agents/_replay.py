@@ -787,3 +787,63 @@ def select_recipe(candidates: Sequence[Tuple[str, Optional[str]]],
         return {**kept, "tried": tried, "order": order, "ambiguous": ambiguous, "margin": margin}
     return {"chosen": None, "result": None, "verdict": None, "source": None, "tried": tried,
             "last_failed": last_failed, "order": order, "ambiguous": ambiguous, "margin": margin}
+
+
+
+# ---------------------------------------------------------------------------
+# The certification reference a recipe carries (#753)
+# ---------------------------------------------------------------------------
+# What a replay of a recipe is certified against travels WITH the recipe:
+# each agent stamps an opaque ``certification_reference`` where it records a
+# recipe (curve: the regime's state and identity; hyperspectral: its reference
+# maps), the board copies it verbatim into a copy's sidecar, and the reader
+# hands it back for a recipe FILE as for a run folder. Shared code never reads
+# inside it; when there is none, the replay says why in one of two words.
+
+#: A recipe that should carry a reference and does not (an older copy, or a
+#: copy separated from its sidecar).
+NO_REFERENCE = "no certification reference: the recipe carries none (an older copy, or one separated from its sidecar)"
+#: A modality with no interpretation check (an image replay): its claims stay
+#: provisional by design (#753).
+NO_INTERPRETATION_CHECK = "this modality has no interpretation check; a replay's claims stay provisional"
+
+
+def curve_certification_reference(drift_state: Optional[Dict[str, Any]], x_range: Optional[float],
+                                  samples: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """A curve regime's reference: the state its units occupy (the drift
+    monitor's stamp), the axis span, and what its units found (the identity
+    reference). None when there is neither a state nor a sample."""
+    identity = identity_reference(samples, x_range=x_range) if samples else None
+    if drift_state is None and identity is None:
+        return None
+    return {"kind": "curve", "drift_state": drift_state, "x_range": x_range, "identity": identity}
+
+
+def no_interpretation_check() -> Dict[str, Any]:
+    """The certification entry of a replay whose modality has no
+    interpretation check (an image): never certified, and saying why."""
+    return {"checked": False, "reason": NO_INTERPRETATION_CHECK}
+
+
+def certification_reason(rv: Optional[Dict[str, Any]]) -> str:
+    """Why a replay's interpretation is NOT certified, in one phrase, from
+    its ``reuse_validity`` — so the board quotes the reason instead of a
+    generic one (#753). '' when it is certified or nothing says why."""
+    rv = rv or {}
+    cert = rv.get("certification") or {}
+    if isinstance(cert, dict) and cert.get("reason"):
+        return str(cert["reason"])
+    ident = rv.get("identity") or {}
+    if isinstance(ident, dict) and ident.get("reason") == NO_REFERENCE:
+        return NO_REFERENCE
+    reasons = []
+    if isinstance(ident, dict) and ident.get("flagged"):
+        reasons.append("identity flagged: the recipe found different strong features than the regime's units")
+    dist = rv.get("state_distance")
+    if rv.get("state_flag"):
+        reasons.append("state flagged: the new data differs from the regime's own data")
+    elif isinstance(dist, (int, float)) and dist > CERTIFY_STATE_BAR:
+        reasons.append(f"state distance {dist:.2f} is above the certification bar {CERTIFY_STATE_BAR}")
+    if not reasons and str(rv.get("state_check") or "").startswith("skipped"):
+        reasons.append(str(rv["state_check"]))
+    return "; ".join(reasons)

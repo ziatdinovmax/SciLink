@@ -13,7 +13,8 @@ import inspect
 import json
 from scilink.utils.text_io import atomic_write_json
 import logging
-from ._verification_record import (analysis_verdict, replay_escalation, series_anchor_unit, series_coverage,
+from ._verification_record import (analysis_verdict, replay_certification_reason, replay_escalation,
+                                   series_anchor_unit, series_coverage,
                                    series_recipes, ungated_outputs_of, failed_outputs_of)
 import os
 import time
@@ -1748,6 +1749,9 @@ class AnalysisOrchestratorAgent:
                     # the judge (#712 escalation): an opinion beside the
                     # verdict, which the board posts as a provisional claim
                     "escalation": replay_escalation(rec.get("full_result")),
+                    # why a replay's interpretation is not certified (#753): the
+                    # board quotes it on the provisional claim
+                    "certification_reason": replay_certification_reason(rec.get("full_result")),
                     # outputs the run reported that no gate checked (a
                     # hyperspectral task's scalars, #722): the verdict does not
                     # cover them, so the board keeps the run's claims provisional
