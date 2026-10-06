@@ -4597,6 +4597,11 @@ class OrchestratorTools:
                     _flags = self._flag_reasons(file_path) if _skipped_units else {}
                     _skipped_reasons = {u: self._EMPTY_VALUE_REASONS.get(_flags[u], _flags[u])
                                         for u in _skipped_units if u in _flags}
+                    # a value left empty ON PURPOSE (not measured, a secondary
+                    # pin) is no extraction gap; any other flag may still have
+                    # its value under another column, so it keeps the hint
+                    _by_design = {u for u in _skipped_units
+                                  if _flags.get(u) in self._EMPTY_VALUE_REASONS}
                     _named = [f"{u} ({_skipped_reasons[u]})" if u in _skipped_reasons else u
                               for u in _skipped_units]
                     df_to_append = df_to_append[_keep]
@@ -4701,11 +4706,11 @@ class OrchestratorTools:
                         f"{_bad_cols}"
                         + (f" (units: {', '.join(_named)})" if _skipped_units else "")
                         + ". The optimizer will NOT see these units."
-                        + ("" if _skipped_units and len(_skipped_reasons) == len(_skipped_units) else
+                        + ("" if _skipped_units and len(_by_design) == len(_skipped_units) else
                            " If they report the quantity under a different column, re-ingest "
                            "a table where it is filled in under the target name.")
-                        + (" A unit named with a reason had no value to report: the analysis "
-                           "left it empty on purpose." if _skipped_reasons else ""))
+                        + (" " + ", ".join(sorted(_by_design)) + " had no value to report: the "
+                           "analysis left it empty on purpose." if _by_design else ""))
                 return json.dumps(_resp)
                 
             except Exception as e:

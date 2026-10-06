@@ -99,12 +99,15 @@ def _controller(tmp_path, corrections):
     return c
 
 
-def _edge_run(tmp_path, monkeypatch, targets, edge_extra=None, edge_bounds=None, only_edge=False):
+def _edge_run(tmp_path, monkeypatch, targets, edge_extra=None, edge_bounds=None, only_edge=False,
+              background=False):
     params = {"edge": {"center": float(X[0]), "center_err": 0.3, "amplitude": 0.4, "fwhm": 120.0, **(edge_extra or {})},
               "main": {"center": 1400.0, "amplitude": 0.8, "fwhm": 60.0}}
     bounds = {"edge": {"center": [float(X[0]), 500.0], **(edge_bounds or {})}, "main": {"center": [1300.0, 1500.0]}}
     if only_edge:
         params.pop("main"); bounds.pop("main")
+    if background:                                                           # a polynomial, no position
+        params["background"] = {"c0": 0.05, "c1": -1e-5}
     fr = {"model_type": "2PV", "parameters": params, "bounds": bounds, "fit_quality": {"r_squared": 0.99}}
     if targets is not None:
         fr["targets"] = targets
@@ -148,11 +151,16 @@ def test_a_fit_whose_every_target_is_beyond_the_axis_stays_a_pin(tmp_path, monke
     # a declared name that is no fitted component does not count as measured
     res, _ = _edge_run(tmp_path, monkeypatch, ["edge", "edge_area_ratio"])
     assert [p["component"] for p in res["pinned_at_bound"]] == ["edge"] and "not_measured" not in res
-    # the only band beyond the axis, with typo-only targets or none
+    # the only band beyond the axis, with typo-only targets or none, alone or
+    # beside a background: a background measures nothing the plan asked for
     for targets in (["D band"], None):
-        res, _ = _edge_run(tmp_path, monkeypatch, targets, only_edge=True)
-        assert [p["component"] for p in res["pinned_at_bound"]] == ["edge"], targets
-        assert "not_measured" not in res, targets
+        for bg in (False, True):
+            res, _ = _edge_run(tmp_path, monkeypatch, targets, only_edge=True, background=bg)
+            assert [p["component"] for p in res["pinned_at_bound"]] == ["edge"], (targets, bg)
+            assert "not_measured" not in res, (targets, bg)
+    # ... unless the script declared the background a target: its choice
+    res, _ = _edge_run(tmp_path, monkeypatch, ["edge", "background"], only_edge=True, background=True)
+    assert "pinned_at_bound" not in res and [p["component"] for p in res["not_measured"]] == ["edge"]
 
 
 def test_an_off_axis_parameter_railed_outside_the_axis_is_still_repaired(tmp_path, monkeypatch):
@@ -240,32 +248,48 @@ def test_the_caveat_says_a_derived_value_is_not_a_measurement_either(tmp_path, m
     assert "any value derived from them" in cav and "is not a measurement either" in cav
 
 
-def test_the_planning_ingestion_says_why_a_not_measured_unit_has_no_value(tmp_path, monkeypatch):
-    """A verified unit whose band was not measured keeps its features.csv row
-    with that cell empty; the ingestion skips it like any missing value, and
-    says why instead of suggesting the quantity sits under another column."""
-    import pandas as pd
+def _ingest_table(tmp_path, units):
     import test_ingest_unverified as iu
-    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
     run = tmp_path / "run"
     run.mkdir()
     rows = []
-    for i, (name, feats, flag) in enumerate([("d1", {"Depth_mean": 0.1}, None),
-                                             ("d2", {}, "not_measured"),
-                                             ("d3", {"Depth_mean": 0.3}, None),
-                                             ("d4", {"other": 1.0}, None)]):
+    for i, (name, feats, flag) in enumerate(units):
         r = {"index": i, "name": name, "data_path": None, "success": True, "verified": True,
              "extracted_features": feats, "unit_verdict": {"verified": True, "reason": "x"}}
         if flag:
             r.update(flagged=True, flag_reason=flag)
         rows.append(r)
     (run / "series_analysis_results.json").write_text(json.dumps({
-        "results": rows, "series_metadata": {"variable": "dose", "values": [10, 20, 30, 40], "unit": "mJ"}}))
+        "results": rows, "series_metadata": {"variable": "dose", "values": [10 * (i + 1) for i in range(len(units))],
+                                             "unit": "mJ"}}))
     table = Path(iu.write_feature_table(run))
-    assert list(pd.read_csv(table)["flag_reason"].fillna("")) == ["", "not_measured", "", ""]
-    out = iu._ingest(iu._orch(tmp_path), table)
+    return iu._ingest(iu._orch(tmp_path), table)
+
+
+def test_the_planning_ingestion_says_why_a_not_measured_unit_has_no_value(tmp_path, monkeypatch):
+    """A verified unit whose band was not measured keeps its features.csv row
+    with that cell empty; the ingestion skips it like any missing value and
+    says why. Any other flag (an outlier) may have its value under another
+    column, so it keeps the extraction hint (#764 re-review)."""
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+    out = _ingest_table(tmp_path, [("d1", {"Depth_mean": 0.1}, None),
+                                   ("d2", {}, "not_measured"),
+                                   ("d3", {"Depth_mean": 0.3}, None),
+                                   ("d4", {"other": 1.0}, None),
+                                   ("d5", {"depth_mean_nm": 0.5}, "statistical_outlier")])
     assert out["status"] == "success" and out["rows_added"] == 2, out
-    assert out["rows_skipped_units"] == ["d2", "d4"]
-    assert out["rows_skipped_reasons"] == {"d2": "not measured: a band peaking beyond the measured axis"}
+    assert out["rows_skipped_units"] == ["d2", "d4", "d5"]
+    assert out["rows_skipped_reasons"] == {"d2": "not measured: a band peaking beyond the measured axis",
+                                           "d5": "statistical_outlier"}
     assert "d2 (not measured: a band peaking beyond the measured axis)" in out["warning"]
-    assert "different column" in out["warning"]                              # d4 has no reason: the hint stays
+    assert "different column" in out["warning"]                              # d4, d5: the hint stays
+    assert "d2 had no value to report" in out["warning"] and "d5 had" not in out["warning"]
+
+
+def test_an_empty_value_by_design_alone_drops_the_extraction_hint(tmp_path, monkeypatch):
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+    out = _ingest_table(tmp_path, [("d1", {"Depth_mean": 0.1}, None),
+                                   ("d2", {}, "not_measured"),
+                                   ("d3", {"Depth_mean": 0.3}, None)])
+    assert out["rows_skipped_units"] == ["d2"]
+    assert "different column" not in out["warning"] and "d2 had no value to report" in out["warning"]

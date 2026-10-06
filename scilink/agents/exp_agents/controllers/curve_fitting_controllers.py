@@ -190,6 +190,16 @@ def describe_not_measured(items) -> str:
     return "; ".join(f"{p['component']} (centre held at the axis end {p['bound']:.6g})" for p in items)
 
 
+_CENTRE_TOKENS = ("center", "centre", "position", "pos", "x0", "mu")
+
+
+def _is_band(values) -> bool:
+    """A fitted component with a position on the axis (a band, a line), as
+    opposed to a background or a baseline."""
+    return isinstance(values, dict) and any(
+        t in str(k).lower().replace("-", "_").split("_") for k in values for t in _CENTRE_TOKENS)
+
+
 def _beyond_axis(pins, stats, bounds=None):
     """``(pins, beyond)``: a CENTRE pinned at a bound at or beyond an end of
     the measured axis is a band whose maximum lies outside the data, not a
@@ -204,7 +214,7 @@ def _beyond_axis(pins, stats, bounds=None):
     keep, beyond = [], []
     for p in pins:
         name = str(p.get("parameter", "")).lower().replace("-", "_").split("_")
-        is_centre = any(t in name for t in ("center", "centre", "position", "pos", "x0", "mu"))
+        is_centre = any(t in name for t in _CENTRE_TOKENS)
         b = p.get("bound")
         rng = ((bounds or {}).get(p.get("component")) or {}).get(p.get("parameter"))
         on_axis = (isinstance(rng, (list, tuple)) and len(rng) == 2
@@ -4517,10 +4527,13 @@ Your guidance: '''
         _bounds = fit_results.get("bounds")
         pinned, _edge_t = _beyond_axis(pinned, stats, _bounds)
         secondary_pins, _edge_s = _beyond_axis(secondary_pins, stats, _bounds)
-        # the targets as split_pins_by_targets reads them: the declared names
-        # that are fitted components, else every fitted component
-        _fitted = {k for k, v in (fit_results.get("parameters") or {}).items() if isinstance(v, dict)}
-        _targets = (set(_freeze(fit_results.get("targets")) or []) & _fitted) or _fitted
+        # what could have been measured: the declared targets that are fitted
+        # components; else the fitted BANDS (a background measures nothing
+        # the plan asked for); else every fitted component
+        _params = fit_results.get("parameters") or {}
+        _fitted = {k for k, v in _params.items() if isinstance(v, dict)}
+        _targets = ((set(_freeze(fit_results.get("targets")) or []) & _fitted)
+                    or {k for k in _fitted if _is_band(_params[k])} or _fitted)
         if _edge_t and _targets <= {p["component"] for p in _edge_t}:
             pinned, _edge_t = list(pinned) + _edge_t, []
         not_measured = _edge_t + _edge_s
