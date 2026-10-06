@@ -294,7 +294,7 @@ facts). A value outside its own declared bounds is unchecked, never passed:
 those bounds are another parameterisation's (seen on real data: a Gaussian's
 sigma bounds declared for its FWHM hid a width pinned in sigma). A failed
 column is never aliased by the locked-schema completion, and a live frame
-names a failed tracked number in `withheld`. Nothing reads a name: what is checked is what the script
+names a failed tracked number in `withheld`. The completion aliases only drift, never another number: a units suffix on ONE side, read from that side's own records (the schema source's units travel as `schema["units"]`), or a prefix with no uncertainty or noise word in it; two different units are two numbers, and a sibling such as an uncertainty stays under its own name, the locked column a gap (#752). A prefix naming another quantity by some other word is not recognised, and still aliases (`Band2_Depth` → `Depth`), as before. Nothing reads a name: what is checked is what the script
 declared it fitted; a plain number stays unchecked, as before.
 
 **Through the meta agent, a series is ONE delegation.** The meta's routing

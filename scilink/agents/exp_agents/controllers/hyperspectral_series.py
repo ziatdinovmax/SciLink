@@ -1316,19 +1316,110 @@ def _norm_name(name: str) -> str:
     return "".join(ch for ch in str(name).lower() if ch.isalnum())
 
 
+#: A prefix word that names another quantity: never drift, even as a
+#: prefix. Matched as a whole word of the original name, never as a
+#: substring (``ci`` must not hit ``Specific_Area``).
+_QUANTITY_PREFIX_WORDS = frozenset({"err", "error", "errors", "uncert", "uncertainty", "unc", "std", "stdev",
+                                    "stddev", "sigma", "snr", "noise", "ci", "var", "variance"})
+
+
+def _words(name: str) -> List[str]:
+    """The words of an original column name: split on separators and at a
+    lower-to-upper case change (``Fit_R2`` and ``FitR2`` give the same)."""
+    import re
+    return [w.lower() for w in re.split(r"[^A-Za-z0-9]+", re.sub(r"([a-z])([A-Z])", r"\1_\2", str(name))) if w]
+
+
+def _column_units(row: Dict[str, Any]) -> Dict[str, str]:
+    """Each flat column of a row's records -> the normalised units suffix the
+    flattening appended to it ('' when none)."""
+    out: Dict[str, str] = {}
+    for m in row.get("feature_records") or []:
+        if not isinstance(m, dict):
+            continue
+        units = str(m.get("units") or "").strip()
+        suffix = (_norm_name(units.replace(" ", "").replace("/", "per"))
+                  if units and units.lower() not in ("a.u.", "au", "") else "")
+        for col in flatten_feature_records([m]):
+            out[col] = suffix
+    return out
+
+
+def _is_quantity_word(word: str) -> bool:
+    """A listed quantity word up to its digits and a plural (``CI95``,
+    ``Uncertainties``, ``Errors``); the four-letter floor keeps ``cis`` from
+    reading as a plural of ``ci``."""
+    w = word.strip("0123456789")
+    forms = [w]
+    if len(w) >= 4 and w.endswith("ies"):
+        forms.append(w[:-3] + "y")
+    elif len(w) >= 4 and w.endswith("s"):
+        forms.append(w[:-1])
+    return any(f in _QUANTITY_PREFIX_WORDS for f in forms)
+
+
+def _same_quantity(candidate: str, target: str, units: str = "", target_units: str = "") -> bool:
+    """Whether column ``candidate`` is the locked column ``target`` up to
+    drift (#752): a units suffix on ONE side (that side's own, from its
+    record), or a prefix none of whose words names another quantity. Two
+    units that differ (nm and eV) are another number, never drift; so is any
+    other suffix (``_uncertainty``, ``_err``, ``_snr``). Names compare
+    normalised, so a case or separator difference is drift too.
+
+    A prefix that names another QUANTITY by a word not in the list
+    (``Band2_Depth`` against ``Depth``) is not recognised here: only the
+    listed uncertainty and noise words are."""
+    if units and target_units and units != target_units:
+        return False                                   # another unit is another number, never drift
+    c, t = _norm_name(candidate), _norm_name(target)
+    if not c or not t or min(len(c), len(t)) < 4:
+        return False
+
+    def _strip(name, u):
+        return name[:-len(u)] if u and name.endswith(u) and len(name) > len(u) else name
+    core, tcore = _strip(c, units), _strip(t, target_units)
+    if core == tcore:
+        return True                                    # the same quantity, a units suffix on one side
+    if tcore.startswith(core) or core.startswith(tcore):
+        return False                                   # one side has a suffix that is not its units
+    for longer, shorter, original in ((core, tcore, candidate), (tcore, core, target)):
+        if longer.endswith(shorter) and len(longer) > len(shorter):
+            n_prefix = len(longer) - len(shorter)
+            words, seen = [], ""
+            for w in _words(original):                 # the prefix's words in the original name
+                if len(seen) >= n_prefix:
+                    break
+                words.append(w)
+                seen += w
+            if seen != longer[:n_prefix]:
+                words = [longer[:n_prefix]]            # boundaries do not align: judge it as one word
+            return not any(_is_quantity_word(w) for w in words)
+    return False
+
+
 def complete_locked_schema(row: Dict[str, Any], locked_columns: List[str],
-                           logger: Optional[logging.Logger] = None) -> Dict[str, Any]:
+                           logger: Optional[logging.Logger] = None,
+                           locked_units: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Make a fresh-code dataset row report the series' locked column names.
 
     Regime anchors and refits run with the locked TARGETS and required output
     names, so the primary columns already match; what still drifts is a
     units suffix (``..._mean_eV`` vs ``..._mean``) or a prefix on the extra
     diagnostic maps (``Fit_R2_mean`` vs ``R2_mean``). For every locked column
-    the row lacks, a unique row column whose normalised name contains, or is
-    contained in, the locked name is aliased under the locked name (the
+    the row lacks, a unique row column that is the same quantity up to that
+    drift (:func:`_same_quantity`) is aliased under the locked name (the
     original is dropped so the feature table does not carry two half-empty
     siblings). Whatever cannot be matched is recorded as
     ``locked_schema_gap`` on the row — reported, not silently NaN.
+
+    Only drift is aliased, never a different number (#752): a units suffix on
+    one side — the row column's own (read from its record, as the flattening
+    appends it) or the locked column's (``locked_units``, from the schema
+    source's records); two different units are two numbers — or a prefix
+    with no uncertainty or noise word in it. With no units known for a side,
+    a suffix on that side is not drift. A sibling such as
+    ``Band2_Depth_uncertainty`` is a different number from ``Band2_Depth``
+    and stays under its own name; the locked column is a gap.
     """
     feats = dict(row.get("extracted_features") or {})
     gap: List[str] = []
@@ -1340,16 +1431,15 @@ def complete_locked_schema(row: Dict[str, Any], locked_columns: List[str],
         [{**m, "scalar": m["raw_value"]} for m in row.get("feature_records") or []
          if isinstance(m, dict) and str(m.get("check", "")).startswith("failed")
          and isinstance(m.get("raw_value"), (int, float))]))
+    units_of = _column_units(row)
     for col in locked_columns:
         if col in feats or col in failed_cols:
             continue
-        target = _norm_name(col)
         cands = []
         for k in feats:
             if k in locked_columns or k in aliased.values():
                 continue
-            nk = _norm_name(k)
-            if nk and target and (nk in target or target in nk) and min(len(nk), len(target)) >= 4:
+            if _same_quantity(k, col, units_of.get(k, ""), (locked_units or {}).get(col, "")):
                 cands.append(k)
         if len(cands) == 1:
             feats[col] = feats.pop(cands[0])
