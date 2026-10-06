@@ -220,6 +220,8 @@ def test_a_follower_with_a_band_beyond_the_axis_verifies_with_a_caveat_flag(tmp_
     assert all(v is None for v in row["parameters"]["edge"].values())
     assert row["parameters"]["peak_1"]["center"] == 144.0                    # the other bands stand
     assert flags.get("spectrum_0001") == "not_measured"
+    rec = next(f["recommendation"] for f in state["flagged_spectra"] if f["name"] == "spectrum_0001")
+    assert "any value derived from them" in rec                               # the series synthesis reads it
     assert by_name["spectrum_0001"]["unit_verdict"]["verified"] is True
     assert analysis_verdict(results)["verified"] is True
 
@@ -228,3 +230,42 @@ def test_the_fit_is_saved_in_the_datas_space():
     from scilink.agents.exp_agents import instruct as I
     assert "add back any baseline or background you subtracted" in I.FITTING_SCRIPT_INSTRUCTIONS
     assert "baseline included" in I.FITTING_SCRIPT_CORRECTION_INSTRUCTIONS
+
+
+def test_the_caveat_says_a_derived_value_is_not_a_measurement_either(tmp_path, monkeypatch):
+    """A value the script derived from the band (a ratio, a relative
+    intensity) cannot be found by its name; its readers are told."""
+    res, _ = _edge_run(tmp_path, monkeypatch, None)
+    cav = next(c for c in res["caveats"] if c.startswith("Not measured"))
+    assert "any value derived from them" in cav and "is not a measurement either" in cav
+
+
+def test_the_planning_ingestion_says_why_a_not_measured_unit_has_no_value(tmp_path, monkeypatch):
+    """A verified unit whose band was not measured keeps its features.csv row
+    with that cell empty; the ingestion skips it like any missing value, and
+    says why instead of suggesting the quantity sits under another column."""
+    import pandas as pd
+    import test_ingest_unverified as iu
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+    run = tmp_path / "run"
+    run.mkdir()
+    rows = []
+    for i, (name, feats, flag) in enumerate([("d1", {"Depth_mean": 0.1}, None),
+                                             ("d2", {}, "not_measured"),
+                                             ("d3", {"Depth_mean": 0.3}, None),
+                                             ("d4", {"other": 1.0}, None)]):
+        r = {"index": i, "name": name, "data_path": None, "success": True, "verified": True,
+             "extracted_features": feats, "unit_verdict": {"verified": True, "reason": "x"}}
+        if flag:
+            r.update(flagged=True, flag_reason=flag)
+        rows.append(r)
+    (run / "series_analysis_results.json").write_text(json.dumps({
+        "results": rows, "series_metadata": {"variable": "dose", "values": [10, 20, 30, 40], "unit": "mJ"}}))
+    table = Path(iu.write_feature_table(run))
+    assert list(pd.read_csv(table)["flag_reason"].fillna("")) == ["", "not_measured", "", ""]
+    out = iu._ingest(iu._orch(tmp_path), table)
+    assert out["status"] == "success" and out["rows_added"] == 2, out
+    assert out["rows_skipped_units"] == ["d2", "d4"]
+    assert out["rows_skipped_reasons"] == {"d2": "not measured: a band peaking beyond the measured axis"}
+    assert "d2 (not measured: a band peaking beyond the measured axis)" in out["warning"]
+    assert "different column" in out["warning"]                              # d4 has no reason: the hint stays

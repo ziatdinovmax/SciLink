@@ -176,6 +176,14 @@ def _canonical_r2(y, fit):
 # Flags that are caveats on a fit that stands, never failures or refit reasons.
 CAVEAT_FLAGS = frozenset({"secondary_pin", "not_measured"})
 
+# What a reader of a not-measured band is told. A value the script derived
+# from that band elsewhere (a ratio, a relative intensity, a total) cannot be
+# found by its name, so the readers are told the principle.
+NOT_MEASURED_NOTE = (
+    "Those bands peak beyond the measured axis: their values are reported as no value, and any "
+    "value derived from them (a ratio, a relative intensity normalised to them, a total) is not a "
+    "measurement either. The other bands' fit is unaffected.")
+
 
 def describe_not_measured(items) -> str:
     """``edge (centre held at the axis end 374.1); ...``"""
@@ -4671,8 +4679,7 @@ Your guidance: '''
             result["not_measured"] = not_measured
             result["caveats"] = list(result.get("caveats") or []) + [
                 "Not measured: " + describe_not_measured(not_measured)
-                + ". Those bands peak beyond the measured axis; their values are reported as no value, "
-                  "and the other bands' fit is unaffected."]
+                + ". " + NOT_MEASURED_NOTE]
         if pinned:
             result["pinned_at_bound"] = pinned
             if hold_recipe:
@@ -7793,8 +7800,7 @@ Return JSON with:
                     "index": r["index"], "name": r["name"], "reason": "not_measured",
                     "r_squared": None, "series_mean": None, "series_std": None, "deviation_sigma": None,
                     "recommendation": ("Caveat, not a failure: not measured — " + describe_not_measured(nm)
-                                       + ". Those bands peak beyond the measured axis (no value); the other "
-                                         "bands' fit is unaffected.")})
+                                       + ". " + NOT_MEASURED_NOTE)})
             sec = (r.get("fit_quality") or {}).get("secondary_pins") if r.get("success") else None
             if sec and r["index"] not in already:
                 flagged.append({
