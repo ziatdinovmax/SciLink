@@ -62,6 +62,45 @@ def _read_total_energy_eV(output_dir: str):
     return float(matches[-1]) * _HARTREE_EV
 
 
+def _set_orbital_basis(deck: str, value: Any) -> tuple:
+    """Rewrite ``library <x>`` → ``library <value>`` only in the orbital basis.
+
+    A basis sweep must touch the AO (orbital) basis and nothing else. NWChem
+    decks also carry ``library`` lines the sweep must leave alone: an ``ecp``
+    block (``* library def2-ecp``) and named auxiliary/fitting bases
+    (``basis "cd basis" ... * library def2-universal-jkfit``). Rewriting those
+    (as a deck-wide substitution does) turns an ECP into a non-ECP basis and
+    corrupts the fitting set, so every rung past Kr fails or gives wrong
+    energies. Scope the substitution to the orbital basis block — opened by a
+    bare ``basis`` or ``basis "ao basis"`` and closed by ``end``.
+
+    Returns ``(new_deck, n_substitutions)``.
+    """
+    out_lines = []
+    in_orbital_basis = False
+    n = 0
+    for line in deck.split("\n"):
+        toks = line.strip().lower().split()
+        if toks and toks[0] == "basis":
+            # Orbital basis unless it is a *named* auxiliary basis (e.g.
+            # "cd basis", "fitting basis"); unnamed or "ao basis" is the orbital one.
+            m = re.search(r'"([^"]*)"', line)
+            name = (m.group(1).lower() if m else "ao basis")
+            in_orbital_basis = name in ("ao basis", "")
+            out_lines.append(line)
+        elif in_orbital_basis and toks == ["end"]:
+            in_orbital_basis = False
+            out_lines.append(line)
+        elif in_orbital_basis:
+            new_line, k = _LIBRARY_RE.subn(
+                lambda mm: f"{mm.group(1)}{value}", line)
+            n += k
+            out_lines.append(new_line)
+        else:
+            out_lines.append(line)
+    return "\n".join(out_lines), n
+
+
 def _deck_key(input_files: Dict[str, str]) -> str:
     """Return the NWChem deck filename (the single `.nw` file)."""
     nw = [k for k in input_files if k.lower().endswith(".nw")]
@@ -95,9 +134,10 @@ def set_convergence_param(
             f"unknown NWChem convergence parameter {param!r}; only 'basis'")
     key = _deck_key(input_files)
     deck = input_files[key]
-    new_deck, n = _LIBRARY_RE.subn(lambda m: f"{m.group(1)}{value}", deck)
+    new_deck, n = _set_orbital_basis(deck, value)
     if n == 0:
-        raise ValueError("no `library <basis>` line found in the NWChem deck")
+        raise ValueError(
+            "no `library <basis>` line found in the NWChem orbital basis block")
     out = dict(input_files)
     out[key] = new_deck
     return out
@@ -130,13 +170,13 @@ def read_convergence_observable(
     try:
         import cclib
         import numpy as np
-        from pathlib import Path
-        logs = (list(Path(output_dir).glob("*.out"))
-                + list(Path(output_dir).glob("*.log"))
-                + list(Path(output_dir).glob("*.nwout")))
-        if not logs:
+        # Use the same log resolver as total_energy — an unsorted glob can pick
+        # run_stderr.log (the executor writes both run_stdout.log and
+        # run_stderr.log), which cclib reads as empty -> None every rung.
+        log = _find_nwchem_log(output_dir)
+        if log is None:
             return None
-        data = cclib.io.ccread(str(logs[0]))
+        data = cclib.io.ccread(str(log))
         if data is None:
             return None
         if observable == "homo_lumo_gap":

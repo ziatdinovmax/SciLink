@@ -119,11 +119,31 @@ def read_convergence_observable(
 
     try:
         if observable == "energy_per_atom":
+            # A run that hit NELM without electronic convergence still reports a
+            # final energy; accepting it would let the comparator fake or block a
+            # plateau. An unconverged rung reads as None (per this hook's contract).
+            if not vr.converged_electronic:
+                logger.warning(
+                    "SCF not electronically converged in %s; energy_per_atom=None",
+                    output_dir)
+                return None
             n = len(vr.final_structure)
             return float(vr.final_energy) / n if n else None
         if observable == "lattice_constant_a":
+            # A geometry observable — require ionic relaxation (and its SCF
+            # steps) to have converged, not just a parsable final structure.
+            if not vr.converged:
+                logger.warning(
+                    "relaxation not converged in %s; lattice_constant_a=None",
+                    output_dir)
+                return None
             return float(vr.final_structure.lattice.abc[0])
         if observable == "band_gap":
+            if not vr.converged_electronic:
+                logger.warning(
+                    "SCF not electronically converged in %s; band_gap=None",
+                    output_dir)
+                return None
             return float(vr.eigenvalue_band_properties[0])
     except Exception as e:
         logger.warning("could not read %s from %s: %s", observable, output_dir, e)

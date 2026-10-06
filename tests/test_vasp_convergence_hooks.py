@@ -14,9 +14,58 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+import types  # noqa: E402
+
 from scilink.skills.periodic_dft.vasp.vasp_convergence import (  # noqa: E402
-    set_convergence_param, kspacing_to_mesh,
+    set_convergence_param, kspacing_to_mesh, read_convergence_observable,
 )
+
+
+class _StructList(list):
+    """A final_structure stand-in: len() = atom count, plus a .lattice."""
+
+
+class TestObservableConvergenceGate:
+    """An unconverged rung must read as None, not a bogus number that could
+    fake or block a plateau."""
+
+    def _patch_vasprun(self, monkeypatch, tmp_path, **attrs):
+        (tmp_path / "vasprun.xml").write_text("<modeling/>")  # just needs to exist
+        struct = _StructList(range(attrs.get("natoms", 2)))
+        struct.lattice = types.SimpleNamespace(abc=(attrs.get("a", 3.6),) * 3)
+        fake = types.SimpleNamespace(
+            converged_electronic=attrs.get("converged_electronic", True),
+            converged=attrs.get("converged", True),
+            final_energy=attrs.get("energy", -10.0),
+            final_structure=struct,
+            eigenvalue_band_properties=(attrs.get("gap", 1.2),),
+        )
+        monkeypatch.setattr("pymatgen.io.vasp.outputs.Vasprun",
+                            lambda *a, **k: fake)
+        return str(tmp_path)
+
+    def test_energy_none_when_scf_unconverged(self, monkeypatch, tmp_path):
+        d = self._patch_vasprun(monkeypatch, tmp_path, converged_electronic=False)
+        assert read_convergence_observable(d, "energy_per_atom") is None
+
+    def test_energy_value_when_converged(self, monkeypatch, tmp_path):
+        d = self._patch_vasprun(monkeypatch, tmp_path,
+                                converged_electronic=True, energy=-10.0, natoms=2)
+        assert read_convergence_observable(d, "energy_per_atom") == -5.0
+
+    def test_band_gap_none_when_scf_unconverged(self, monkeypatch, tmp_path):
+        d = self._patch_vasprun(monkeypatch, tmp_path, converged_electronic=False)
+        assert read_convergence_observable(d, "band_gap") is None
+
+    def test_lattice_none_when_relaxation_unconverged(self, monkeypatch, tmp_path):
+        # Electronically converged but ionic relaxation did not finish.
+        d = self._patch_vasprun(monkeypatch, tmp_path,
+                                converged_electronic=True, converged=False)
+        assert read_convergence_observable(d, "lattice_constant_a") is None
+
+    def test_lattice_value_when_fully_converged(self, monkeypatch, tmp_path):
+        d = self._patch_vasprun(monkeypatch, tmp_path, converged=True, a=3.61)
+        assert read_convergence_observable(d, "lattice_constant_a") == 3.61
 
 
 class TestSetConvergenceParam:

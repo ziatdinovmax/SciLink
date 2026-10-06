@@ -121,5 +121,55 @@ def test_step_skipped_for_md_scale(tmp_path, monkeypatch):
     assert "parameter_convergence" not in result
 
 
+def test_adoption_removes_base_file_the_converged_setting_dropped(tmp_path, monkeypatch):
+    # k-point convergence drops the KPOINTS file (INCAR KSPACING supersedes it).
+    # The stale KPOINTS that generation wrote into output_dir must be removed,
+    # or the production run (which executes in output_dir) reads it and silently
+    # ignores the converged spacing.
+    monkeypatch.setattr(sp, "_generate_inputs", lambda **kw: {
+        "status": "success",
+        "input_files": {"INCAR": "PREC = Accurate\n", "POSCAR": "Cu\n",
+                        "KPOINTS": "Gamma\n0\nAuto\n20\n"},
+        "entry_file": None,
+    })
+    spec = {"parameter": "k-points", "ladder": [0.5, 0.3, 0.2],
+            "observable": "energy_per_atom", "tolerance": 0.005}
+    monkeypatch.setattr(sp, "_convergence_specs", lambda software, scale: [spec])
+    energies = {"0.5": -5.0, "0.3": -5.41, "0.2": -5.412}
+
+    def fake_get_tool_function(name, active_skills=None):
+        if name == "set_convergence_param":
+            def _set(input_files, param, value):      # k-points: drop KPOINTS
+                out = {k: v for k, v in input_files.items() if k != "KPOINTS"}
+                out["INCAR"] = f"KSPACING = {value}\n"
+                return out
+            return _set
+        if name == "read_convergence_observable":
+            return lambda output_dir, observable: energies.get(Path(output_dir).name)
+        raise LookupError(name)
+
+    monkeypatch.setattr(reg, "get_tool_function", fake_get_tool_function)
+    monkeypatch.setattr(sp, "_collect_stages", lambda *a, **k: [])
+    monkeypatch.setattr(rf, "run_campaign", lambda *a, **k: {"status": "success"})
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "KPOINTS").write_text("Gamma\n0\nAuto\n20\n")   # as generation wrote
+
+    structure = tmp_path / "POSCAR"
+    structure.write_text("Cu\n")
+    result = sp.run_complete_workflow(
+        "converge Cu k-points", scale="periodic_dft", software="vasp",
+        structure_file=str(structure), output_dir=str(out_dir),
+        validate=False, executor=_FakeExecutor(), run_command="vasp_std",
+        converge_parameters=True, api_key="k")
+
+    assert "parameter_convergence" in result["steps_completed"]
+    # Converged spacing adopted into the deck, and the stale KPOINTS removed.
+    assert result["input_generation"]["input_files"]["INCAR"].startswith("KSPACING")
+    assert "KPOINTS" not in result["input_generation"]["input_files"]
+    assert not (out_dir / "KPOINTS").exists()
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

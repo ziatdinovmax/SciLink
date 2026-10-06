@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from scilink.skills.molecular_qc.nwchem.nwchem_convergence import (  # noqa: E402
-    set_convergence_param, read_convergence_observable,
+    set_convergence_param, read_convergence_observable, _find_nwchem_log,
 )
 
 _DECK = (
@@ -47,6 +47,31 @@ class TestSetConvergenceParam:
         out = set_convergence_param({"calc.nw": deck}, "basis", "def2-qzvp")
         assert out["calc.nw"].count("library def2-qzvp") == 2
         assert "def2-svp" not in out["calc.nw"]
+
+    def test_leaves_ecp_and_fitting_basis_untouched(self):
+        # A def2 deck for a heavy element carries an ECP and a cd fitting basis
+        # whose `library` lines must NOT be rewritten by a basis sweep (doing so
+        # turns the ECP into a non-ECP basis and corrupts the fitting set).
+        deck = (
+            "basis\n  * library def2-svp\nend\n"
+            'basis "cd basis"\n  * library def2-universal-jkfit\nend\n'
+            "ecp\n  * library def2-ecp\nend\n"
+            "dft\n  xc b3lyp\nend\ntask dft energy\n"
+        )
+        out = set_convergence_param({"heavy.nw": deck}, "basis", "def2-tzvp")["heavy.nw"]
+        assert "* library def2-tzvp" in out                 # orbital basis changed
+        assert "* library def2-universal-jkfit" in out       # cd fitting preserved
+        assert "* library def2-ecp" in out                   # ECP preserved
+        assert "jkfit" not in out.replace("def2-universal-jkfit", "")  # not clobbered
+
+
+class TestLogResolution:
+    def test_find_log_prefers_stdout_over_stderr(self, tmp_path):
+        # The executor writes BOTH run_stdout.log and run_stderr.log; the gap /
+        # dipole observables must read stdout, not whichever glob returns first.
+        (tmp_path / "run_stderr.log").write_text("srun: error ...\n")
+        (tmp_path / "run_stdout.log").write_text("   Total DFT energy = -76.0\n")
+        assert _find_nwchem_log(str(tmp_path)).name == "run_stdout.log"
 
     def test_case_insensitive_library_keyword(self):
         out = set_convergence_param(

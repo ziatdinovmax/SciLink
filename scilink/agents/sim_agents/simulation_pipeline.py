@@ -858,6 +858,16 @@ def _run_workflow_once(
                 gen_result["input_files"] = pc.final_inputs
                 for name, contents in pc.final_inputs.items():
                     (Path(output_dir) / name).write_text(contents, encoding="utf-8")
+                # Remove base-deck files the converged settings dropped (e.g. a
+                # KPOINTS file superseded by INCAR KSPACING). The executor writes
+                # the files it is given but never deletes, and the production run
+                # executes in output_dir, so a stale file left on disk would
+                # silently override the converged setting.
+                for name in set(base_inputs) - set(pc.final_inputs):
+                    try:
+                        (Path(output_dir) / name).unlink()
+                    except FileNotFoundError:
+                        pass
                 result["parameter_convergence"] = {
                     "all_converged": pc.all_converged,
                     "parameters": {
