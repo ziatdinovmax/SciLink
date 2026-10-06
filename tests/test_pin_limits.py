@@ -71,8 +71,17 @@ def test_a_centre_at_the_end_of_the_axis_is_beyond_the_range():
             {"component": "b3", "parameter": "fwhm", "value": 4000.0, "bound": 4000.0, "side": "upper"},
             # a bound widened past the data: the centre is outside the axis
             {"component": "past", "parameter": "center", "value": 365.0, "bound": 365.0, "side": "lower"}]
-    keep, beyond = cc._beyond_axis(pins, stats)
+    bounds = {"past": {"center": [365.0, 500.0]}}                            # its window reaches into the data
+    keep, beyond = cc._beyond_axis(pins, stats, bounds)
     assert [p["component"] for p in keep] == ["b2", "b3"] and [p["component"] for p in beyond] == ["edge", "past"]
+    # a bound past the data on a parameter that is not a position on the axis is a failed fit
+    # (#764 re-review): a relative shift, a log-space mu, an offset
+    for par, rng in (("pos_shift", [-5.0, 5.0]), ("mu", [-3.0, 3.0]), ("x0", [-1.0, 1.0])):
+        pin = {"component": "b", "parameter": par, "value": rng[0], "bound": rng[0], "side": "lower"}
+        assert cc._beyond_axis([pin], stats, {"b": {par: rng}}) == ([pin], []), par
+    far = [{"component": "past", "parameter": "center", "value": 300.0, "bound": 300.0, "side": "lower"}]
+    assert cc._beyond_axis(far, stats) == (far, [])                          # no bounds: only at the axis end
+    assert cc._beyond_axis(far, stats, {"past": {"center": [300.0, 500.0]}})[1] == [dict(far[0], reason="centre beyond the measured axis")]
     assert cc._beyond_axis(pins, {}) == (pins, [])
 
 
@@ -90,10 +99,12 @@ def _controller(tmp_path, corrections):
     return c
 
 
-def _edge_run(tmp_path, monkeypatch, targets, edge_extra=None, edge_bounds=None):
+def _edge_run(tmp_path, monkeypatch, targets, edge_extra=None, edge_bounds=None, only_edge=False):
     params = {"edge": {"center": float(X[0]), "center_err": 0.3, "amplitude": 0.4, "fwhm": 120.0, **(edge_extra or {})},
               "main": {"center": 1400.0, "amplitude": 0.8, "fwhm": 60.0}}
     bounds = {"edge": {"center": [float(X[0]), 500.0], **(edge_bounds or {})}, "main": {"center": [1300.0, 1500.0]}}
+    if only_edge:
+        params.pop("main"); bounds.pop("main")
     fr = {"model_type": "2PV", "parameters": params, "bounds": bounds, "fit_quality": {"r_squared": 0.99}}
     if targets is not None:
         fr["targets"] = targets
@@ -127,11 +138,52 @@ def test_a_not_measured_bands_other_pins_go_with_it(tmp_path, monkeypatch):
 
 
 def test_a_fit_whose_every_target_is_beyond_the_axis_stays_a_pin(tmp_path, monkeypatch):
-    """Nothing the plan asked for was measured: not a verified fit."""
+    """Nothing the plan asked for was measured: not a verified fit. The
+    targets are read as split_pins_by_targets reads them: declared names that
+    are fitted components, else every fitted component (#764 re-review)."""
     res, corrections = _edge_run(tmp_path, monkeypatch, ["edge"])
     assert corrections == []                                                 # no repair can move it into the data
     assert [p["component"] for p in res["pinned_at_bound"]] == ["edge"]
     assert "not_measured" not in res
+    # a declared name that is no fitted component does not count as measured
+    res, _ = _edge_run(tmp_path, monkeypatch, ["edge", "edge_area_ratio"])
+    assert [p["component"] for p in res["pinned_at_bound"]] == ["edge"] and "not_measured" not in res
+    # the only band beyond the axis, with typo-only targets or none
+    for targets in (["D band"], None):
+        res, _ = _edge_run(tmp_path, monkeypatch, targets, only_edge=True)
+        assert [p["component"] for p in res["pinned_at_bound"]] == ["edge"], targets
+        assert "not_measured" not in res, targets
+
+
+def test_an_off_axis_parameter_railed_outside_the_axis_is_still_repaired(tmp_path, monkeypatch):
+    """Through the fit loop: a relative shift, a log-space mu and an offset at
+    a bound outside the axis pin and are repaired, as before (#764 re-review)."""
+    for par, rng in (("pos_shift", [-5.0, 5.0]), ("mu", [-3.0, 3.0]), ("x0", [-1.0, 1.0])):
+        res, corrections = _edge_run(tmp_path, monkeypatch, None, edge_extra={"center": 600.0, par: rng[0]},
+                                     edge_bounds={"center": [500.0, 700.0], par: rng})
+        assert corrections, par                                              # repaired
+        assert [(p["component"], p["parameter"]) for p in res["pinned_at_bound"]] == [("edge", par)], par
+        assert "not_measured" not in res, par
+
+
+def test_the_single_spectrum_synthesis_is_told_why_a_value_is_empty():
+    sent = {}
+
+    class Model:
+        def generate_content(self, contents, **kw):
+            sent["prompt"] = "\n".join(c for c in contents if isinstance(c, str))
+            raise RuntimeError("stop after the prompt")
+
+    syn = cc.UnifiedCurveSynthesisController(Model(), logging.getLogger("t764"), None, None,
+                                             lambda r: ({}, None), "", "out")
+    caveat = "Not measured: edge (centre held at the axis end 374.1). Those bands peak beyond the measured axis."
+    state = {"original_plot_bytes": b"", "fit_results": {"parameters": {"edge": {"center": None}}, "fit_quality": {}},
+             "series_results": [{"caveats": [caveat]}], "system_info": {}}
+    try:
+        syn._synthesize_single_spectrum(state)
+    except Exception:
+        pass
+    assert "## Fit caveats" in sent["prompt"] and caveat in sent["prompt"]
 
 
 def test_a_follower_with_a_band_beyond_the_axis_verifies_with_a_caveat_flag(tmp_path, monkeypatch):

@@ -182,11 +182,13 @@ def describe_not_measured(items) -> str:
     return "; ".join(f"{p['component']} (centre held at the axis end {p['bound']:.6g})" for p in items)
 
 
-def _beyond_axis(pins, stats):
+def _beyond_axis(pins, stats, bounds=None):
     """``(pins, beyond)``: a CENTRE pinned at a bound at or beyond an end of
     the measured axis is a band whose maximum lies outside the data, not a
-    failed fit (a script may widen the bound past the data; the centre is
-    then outside it)."""
+    failed fit. A bound PAST the data counts only for a position on the
+    axis, one whose declared range reaches into the data (a script may widen
+    a band's window past the axis); a relative shift, a log-space ``mu`` or
+    an offset railed outside the axis is a failed fit, as before."""
     lo, hi = (stats or {}).get("x_range") or [None, None]
     if lo is None or hi is None or hi <= lo or not pins:
         return list(pins or []), []
@@ -196,7 +198,13 @@ def _beyond_axis(pins, stats):
         name = str(p.get("parameter", "")).lower().replace("-", "_").split("_")
         is_centre = any(t in name for t in ("center", "centre", "position", "pos", "x0", "mu"))
         b = p.get("bound")
-        if is_centre and isinstance(b, (int, float)) and (b <= lo + tol or b >= hi - tol):
+        rng = ((bounds or {}).get(p.get("component")) or {}).get(p.get("parameter"))
+        on_axis = (isinstance(rng, (list, tuple)) and len(rng) == 2
+                   and all(isinstance(r, (int, float)) for r in rng)
+                   and max(min(rng), lo) <= min(max(rng), hi))
+        at_end = isinstance(b, (int, float)) and (abs(b - lo) <= tol or abs(b - hi) <= tol)
+        past = isinstance(b, (int, float)) and (b < lo - tol or b > hi + tol) and on_axis
+        if is_centre and (at_end or past):
             beyond.append(dict(p, reason="centre beyond the measured axis"))
         else:
             keep.append(p)
@@ -4385,7 +4393,7 @@ Your guidance: '''
                         _pins, _ = split_pins_by_targets(
                             validate_bound_pinning(_fr.get("parameters"), _fr.get("bounds"), lineshape_limits=True),
                             _freeze(_fr.get("targets")), _fr.get("parameters"))
-                        _pins, _ = _beyond_axis(_pins, stats)   # a band peaking outside the axis
+                        _pins, _ = _beyond_axis(_pins, stats, _fr.get("bounds"))   # a band peaking outside the axis
                         if _pins and hold_recipe:
                             self.logger.warning(
                                 f"    ⚠️ Pinned at bound — {describe_pinned(_pins)}; the locked "
@@ -4498,10 +4506,14 @@ Your guidance: '''
         # whole component is reported with no value, and the other bands
         # stand, target or not. Only when no declared target is left measured
         # does it stay a pin: a fit with nothing measured is not verified.
-        pinned, _edge_t = _beyond_axis(pinned, stats)
-        secondary_pins, _edge_s = _beyond_axis(secondary_pins, stats)
-        _targets = _freeze(fit_results.get("targets"))
-        if _edge_t and _targets and set(_targets) <= {p["component"] for p in _edge_t}:
+        _bounds = fit_results.get("bounds")
+        pinned, _edge_t = _beyond_axis(pinned, stats, _bounds)
+        secondary_pins, _edge_s = _beyond_axis(secondary_pins, stats, _bounds)
+        # the targets as split_pins_by_targets reads them: the declared names
+        # that are fitted components, else every fitted component
+        _fitted = {k for k, v in (fit_results.get("parameters") or {}).items() if isinstance(v, dict)}
+        _targets = (set(_freeze(fit_results.get("targets")) or []) & _fitted) or _fitted
+        if _edge_t and _targets <= {p["component"] for p in _edge_t}:
             pinned, _edge_t = list(pinned) + _edge_t, []
         not_measured = _edge_t + _edge_s
         if not_measured:
@@ -9817,6 +9829,14 @@ same trend.
                 f"\n## Quality warning\n{quality_warning}\n"
                 "Note: Alternative models were attempted but this was the best fit achieved."
             )
+
+        # Why a fitted value is reported as no value (a band not measured, a
+        # secondary pin): an empty value is not a zero or a missing band.
+        _fit_caveats = (series_results[0].get("caveats") if series_results else None) or []
+        if _fit_caveats:
+            prompt_parts.append(
+                "\n## Fit caveats (a value reported as null is not a measurement)\n"
+                + "\n".join(f"- {c}" for c in _fit_caveats))
 
         if series_results and series_results[0].get("quality_history"):
             prompt_parts.append(
