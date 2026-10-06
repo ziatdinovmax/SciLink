@@ -92,6 +92,100 @@ class SimulationAnalysisAgent(BaseAnalysisAgent):
                     break
         return dict(present)
 
+    @staticmethod
+    def _peek(path: Path, n_lines: int = 10, max_chars: int = 2000):
+        """First ``n_lines`` of a text file (or ``None`` if binary/unreadable)."""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = []
+                for _ in range(n_lines):
+                    ln = f.readline()
+                    if not ln:
+                        break
+                    lines.append(ln.rstrip("\n"))
+        except (OSError, UnicodeDecodeError):
+            return None
+        return "\n".join(lines)[:max_chars]
+
+    def resolve_outputs(self, run_dir: str) -> Dict[str, List[str]]:
+        """Map output files to data kinds by reading the run, deck-grounded.
+
+        :meth:`classify_outputs` only matches fixed filename patterns, so an
+        output the engine wrote to a self-named file -- e.g. a
+        ``fix ave/time ... v_pxy v_pxz v_pyz ... file stress.dat`` pressure-
+        tensor series -- is missed and never reaches the analysis. This
+        generalizes it without putting any filename in code: the LLM reads a
+        header peek of every file (the input deck included) and maps the OUTPUT
+        files to the skills' data-kind vocabulary, using the deck as ground
+        truth for what each file holds. The static classification is the floor;
+        the LLM can only ADD files (existing, non-empty) to it, and the method
+        falls back to the static map when there is nothing unrecognized to
+        resolve or the LLM step errors -- so it is a strict superset of
+        :meth:`classify_outputs` and never loses a match.
+        """
+        import json
+
+        static = self.classify_outputs(run_dir)
+        root = Path(run_dir)
+        vocab = sorted(self._output_format_map().keys())
+        if not root.exists() or not vocab:
+            return static
+
+        classified = {p for paths in static.values() for p in paths}
+        peeks: List[tuple] = []
+        has_unclassified = False
+        for p in sorted(root.rglob("*")):
+            if not p.is_file():
+                continue
+            head = self._peek(p)
+            if head is None:            # binary / unreadable -> not an analysis input
+                continue
+            try:
+                rel = str(p.relative_to(root))
+            except ValueError:
+                rel = p.name
+            peeks.append((rel, head))
+            if str(p) not in classified:
+                has_unclassified = True
+        # Nothing the static map missed -> no reason to spend an LLM call.
+        if not peeks or not has_unclassified:
+            return static
+
+        listing = "\n\n".join(f"### {rel}\n{head}" for rel, head in peeks[:60])
+        prompt = (
+            "A simulation run produced the files below (path, then first lines). "
+            "Some are INPUT decks (a LAMMPS run script with fix/run/dump "
+            "commands, a VASP INCAR, an NWChem .nw); use them as ground truth "
+            "for what each OUTPUT file contains -- e.g. a line "
+            "`fix ... ave/time ... v_pxy v_pxz v_pyz ... file stress.dat` means "
+            "stress.dat is the pressure-tensor time series. Map only the OUTPUT "
+            "files to data kinds, using ONLY these kinds: "
+            f"{json.dumps(vocab)}. A file may map to more than one kind; omit "
+            "input decks and files that fit no kind. Respond with JSON: "
+            "{\"<data_kind>\": [\"<relative path>\", ...]}.\n\n"
+            f"FILES:\n\n{listing}"
+        )
+        try:
+            mapping = self._extract_json(self._llm(prompt)) or {}
+        except Exception as exc:        # LLM/parse failure -> static is the floor
+            self.logger.warning("resolve_outputs LLM step failed: %s", exc)
+            return static
+
+        out = {k: list(v) for k, v in static.items()}
+        for kind, rels in mapping.items():
+            if kind not in vocab or not isinstance(rels, list):
+                continue
+            for rel in rels:
+                try:
+                    p = (root / rel)
+                    if p.is_file() and p.stat().st_size > 0:
+                        bucket = out.setdefault(kind, [])
+                        if str(p) not in bucket:
+                            bucket.append(str(p))
+                except OSError:
+                    continue
+        return out
+
     def _skill_catalog(self) -> List[Dict[str, Any]]:
         """Return the loaded analysis skills (``{name, meta, sections}``).
 
@@ -172,7 +266,9 @@ class SimulationAnalysisAgent(BaseAnalysisAgent):
         analyses fail (their per-property error is recorded).
         """
         run_dir = run_dir or str(self.output_dir)
-        by_kind = self.classify_outputs(run_dir)
+        # Deck-grounded resolution (superset of the static filename match) so an
+        # output written to a self-named file still reaches the analysis.
+        by_kind = self.resolve_outputs(run_dir)
         if not by_kind:
             return {"status": "error", "message": f"no recognized output in {run_dir}",
                     "results": {}, "output_directory": str(self.output_dir)}

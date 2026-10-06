@@ -157,3 +157,55 @@ class TestRealSkills:
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+class TestResolveOutputs:
+    """Deck-grounded output resolution: a superset of the static filename match
+    that also recovers an output written to a self-named file."""
+
+    def _write_run(self, d):
+        (d / "run.lammps").write_text(
+            "units real\n"
+            "fix stresslog all ave/time 5 1 5 v_pxy v_pxz v_pyz v_temp v_vol "
+            "file stress.dat\n"
+            "thermo 1000\nrun 5000\n")
+        (d / "log.lammps").write_text("Step Temp Press\n0 298 1.0\n")
+        (d / "stress.dat").write_text("# TimeStep v_pxy v_pxz v_pyz\n5 0.1 0.2 0.3\n")
+
+    def test_adds_deck_named_output_to_static_floor(self, agent, tmp_path):
+        self._write_run(tmp_path)
+        agent._llm = lambda prompt: '{"thermo_log": ["stress.dat"]}'
+        by = agent.resolve_outputs(str(tmp_path))
+        names = {Path(p).name for p in by["thermo_log"]}
+        assert "log.lammps" in names        # static floor kept
+        assert "stress.dat" in names        # LLM-added, deck-grounded
+
+    def test_no_llm_call_when_nothing_unclassified(self, agent, tmp_path):
+        (tmp_path / "log.lammps").write_text("Step Temp\n0 298\n")
+        (tmp_path / "vasprun.xml").write_text("<modeling/>")
+        called = {"n": 0}
+        def _boom(prompt):
+            called["n"] += 1
+            raise AssertionError("LLM must not be called when static is complete")
+        agent._llm = _boom
+        by = agent.resolve_outputs(str(tmp_path))
+        assert called["n"] == 0
+        assert set(by) == {"thermo_log", "dft_output"}
+
+    def test_falls_back_to_static_on_llm_error(self, agent, tmp_path):
+        self._write_run(tmp_path)
+        def _raise(prompt):
+            raise RuntimeError("api down")
+        agent._llm = _raise
+        by = agent.resolve_outputs(str(tmp_path))
+        names = {Path(p).name for p in by.get("thermo_log", [])}
+        assert "log.lammps" in names        # static floor survived
+        assert "stress.dat" not in names    # the LLM add never happened
+
+    def test_ignores_unknown_kinds_and_missing_paths(self, agent, tmp_path):
+        self._write_run(tmp_path)
+        agent._llm = lambda p: '{"not_a_kind": ["stress.dat"], "thermo_log": ["ghost.dat"]}'
+        by = agent.resolve_outputs(str(tmp_path))
+        assert "not_a_kind" not in by
+        assert all(Path(p).name != "ghost.dat" for p in by.get("thermo_log", []))
+        assert any(Path(p).name == "log.lammps" for p in by["thermo_log"])
