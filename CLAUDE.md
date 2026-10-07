@@ -928,7 +928,8 @@ and 3 (reactions, #708) are on `main`, the replay policies the board's
 "verified" rests on were settled between stages (#712: #713, #714, #717,
 #715), and stage 4 (scheduling) is next — the local scheduler first, the AWS
 worker tasks as their own PR with the hosted-campaigns work (the proposal's
-"Between stage 3 and stage 4" says why).
+"Between stage 3 and stage 4" says why; "Since the stage-4 scoping" lists what
+has landed since and the worker contract every placement implements).
 Settled rules, each learned from a live run or a review:
 
 - **A swarm item is a fresh agent.** It does not remember earlier delegations;

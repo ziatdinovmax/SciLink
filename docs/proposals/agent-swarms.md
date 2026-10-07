@@ -693,13 +693,23 @@ ran on it peaked at 6 to 8 GB, and what they loaded was the DCNN ensemble
 and its working arrays, not the input. The estimate cannot see that, and on
 a cloud task the error is the difference between a run and an OOM kill.
 
-- **Measure every item.** Record the peak resident memory of each item's
-  scripts: `ru_maxrss` of the sandbox subprocess, or the task's memory
-  metric. Keep it against `(mode, skill, data shape)` in a small table on
-  the campaign volume.
+- **Measure every item.** Record the peak resident memory of each item and
+  keep it against `(mode, skill, data shape)` in a small table on the
+  campaign volume.
+  - **A process worker** reports its whole peak through `wait4` /
+    `ru_maxrss`: the item's own arrays as well as its scripts.
+  - **A thread item** can report only its tracked subprocesses. The
+    process's own `RUSAGE_CHILDREN` is one maximum over every child of every
+    item, so it cannot be split per item.
+  - **A worker task** reports the task's memory metric.
+
+  So the table is filled by process workers, which is one more reason
+  heavy items run as processes.
 - **Size from what was measured.** Admission and task sizing read that
-  table. An unknown class gets a conservative default, and the first run
-  of a class is its measurement.
+  table. A class with no measurement yet falls back to the input-based
+  estimate (`fanout._branch_mem_estimate`, which since #724 / #750 follows
+  the largest unit, sees nested data and estimates a raw-instrument folder
+  by its preparation). The first run of a class is its measurement.
 - **Let the cgroup be the cap.** `SCILINK_SANDBOX_MEM_MB` (`RLIMIT_AS`)
   stays off by default, as `_sandbox_limits` documents: it breaks CUDA and
   Metal, which reserve more address space than they use. On a CPU task the
@@ -1222,13 +1232,19 @@ can already hit.
      `refused_cycles`, since the cap and the chain stop are refusals of the
      same shape; no would-be entry is opened for a refused reaction, the
      refusal sits on the triggering entry.
-4. **Scheduling.**
-   - Swarm budgets with reservation and the circuit breaker.
-   - Process workers for heavy items.
-   - Measured peak memory per item class, the pre-launch capacity plan
-     sized from it, and the runtime memory guard.
-   - Worth taking early, into today's fan-out: the plan's refusal of an
-     item larger than the host, and the guard.
+4. **Scheduling.** (Updated 2026-10-06: see "Since the stage-4 scoping"
+   for what has already landed and the worker contract.)
+   - Swarm budgets with reservation (tokens; the per-item wall-clock budget
+     is on `main` since #755) and the circuit breaker.
+   - Process workers for heavy items, behind the worker contract, launched
+     through `run_in_child` and stoppable.
+   - Measured peak memory per item class (read from the process worker),
+     the pre-launch capacity plan sized from it (the #750 estimate for a
+     class not yet measured), and the runtime memory guard (which cancels
+     through the contract).
+   - Into today's fan-out, still open: the plan's refusal of an item
+     larger than the host, and the guard. The swarm has both; fan-out does
+     not.
    - On AWS: worker tasks for heavy item classes, OOM and Spot
      reconciliation against ECS, and per-campaign provider quotas.
 5. **Several instruments.**
@@ -1648,6 +1664,94 @@ than scheduling logic, and they reuse the local coordinator's decisions, which
 must settle first. The ECS worker contract (task spec, item class → task size,
 the reconciliation events) may be written into this proposal before the local
 PR so that PR already stamps what the AWS layer will read.
+
+## Since the stage-4 scoping: what landed, and what it changes (2026-10-06)
+
+Several PRs merged after the scoping touch what stage 4 was to build.
+
+**Already on `main`, no longer stage-4 work:**
+- **The input-based memory estimate (#724, #750).**
+  - It follows the largest unit, not the sum, and walks nested folders.
+  - It reads an `.npy` from its header and an HDF5 file from its largest
+    dataset uncompressed.
+  - It estimates a raw-instrument folder by its preparation, and multiplies
+    by `series_workers`.
+  - It is what a class with no measured peak falls back to.
+- **Per-item wall-clock budgets (#700, #755).** A swarm analysis item gets
+  the fan-out branch's budget rule (a datacube series or a raw instrument
+  container gets its multiple), and a fan-out branch keeps its own depth
+  (#718). The swarm budget's open part is tokens with reservation.
+- **Cancellation reaches executor work (#685 / #760, #768).**
+  - Model-written code and external engines run through the executor's
+    tracked runner (`executors._run_tracked`): own session, Stop
+    registration, whole-tree kill on a timeout or a cancel.
+  - A cancelled worker (Stop, a time budget, the memory guard) ends the
+    engine it runs, and no further engine run starts.
+  - A turn's Stop now adds to a thread's own cancel instead of replacing it.
+- **Fresh-interpreter workers (#721, #730).** `utils.child_process.run_in_child`
+  is the one way SciLink starts a worker process, never a `multiprocessing`
+  spawn pool, which re-imports the caller's script. Every SciLink entry point
+  refuses to start inside a spawn bootstrap.
+- **A submit / poll seam on the cluster executor (#766).** `ClusterExecutor`
+  splits `run()` into `submit(...) → handle` and `poll(handle)`, with a
+  cancel-aware wait.
+
+**What this changes in the stage-4 PR:**
+1. **Process workers are stoppable, or they are not done.** `run_in_child`
+   still starts its child with a plain `Popen`. Neither Stop nor the memory
+   guard reaches it (the gap noted in #730), and that would hold for every
+   process worker. It must:
+   - run through the tracked runner (own session, the item's cancel
+     registered, whole-tree kill);
+   - be waited on by a thread that carries the item's cancel
+     (`inherited_context`).
+2. **The table of measured peaks comes from process workers** (see "Memory
+   is declared per item class"). A threaded item's peak cannot be split from
+   the process's.
+3. **One worker contract for every placement.** Below, in the shape #766
+   gave the cluster executor.
+4. **A cancelled item cancels its cluster jobs.** `ClusterExecutor`'s
+   `cancel_check` is whatever the caller passes, and nothing passes the
+   worker's cancel. A swarm simulation item cancelled for time or memory
+   would leave its scheduler jobs running. The default should be the
+   submitting thread's cancel (`log_context.cancel_requested`).
+5. **Fan-out gets the refusal and the guard.** It still admits a branch
+   whenever nothing else is running (`_admit_branch`), so the 8 GB analysis
+   that froze an 8 GB laptop would still start as a fan-out branch. The
+   swarm's `capacity_plan` refusal and `_guard_memory` should be shared, not
+   copied.
+
+**The worker contract.** One interface, three placements, so the local
+scheduler already stamps what the AWS layer will read:
+
+```
+submit(spec) -> handle
+    spec: plain data, no secrets — mode, task, context, data paths, the
+    item's budgets (time, tokens), the board snapshot it may read, its item
+    directory. A worker writes its findings to <item_dir>/findings.jsonl;
+    the coordinator stays the board's only writer.
+poll(handle) -> {state, result?, peak_rss_bytes?, stop_reason?}
+    state: queued | running | done | failed | cancelled | out_of_memory | interrupted
+cancel(handle) -> None          # idempotent
+```
+
+| placement | submit | poll / peak | cancel | `out_of_memory` / `interrupted` from |
+|---|---|---|---|---|
+| local process | `run_in_child` through the tracked runner | the result file; `wait4` / `ru_maxrss` | whole-tree kill | killed by SIGKILL with no result (the guard or the OS); lost on a restart |
+| HPC job | `ClusterExecutor.submit` (#766) | `ClusterExecutor.poll`; the scheduler's accounting | scheduler cancel | the scheduler's exit state |
+| ECS task | `RunTask` with the spec | `DescribeTasks`; the task's memory metric | `StopTask` | the task's stop reason (the container killed for memory, a Spot reclaim, a lost host) |
+
+- **The coordinator's loop** polls handles instead of thread futures.
+- **The memory guard** cancels through the contract.
+- **An item `out_of_memory`** is retried once at the next size (a task) or
+  alone (a local process).
+- **Thread items** (light, LLM-bound) keep running as threads in the
+  coordinator's process; the contract is for what is heavy.
+
+**Unchanged:** token budgets with reservation, the circuit breaker, the
+measured-peak table, the scoping (local scheduler first, the AWS placement
+with the hosted-campaigns work), and "nothing in stage 4 adds a judge or a
+new way to decide a verdict".
 
 ## Starting stage 2 (the board)
 
