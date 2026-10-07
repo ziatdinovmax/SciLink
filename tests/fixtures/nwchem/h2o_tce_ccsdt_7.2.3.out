@@ -1,0 +1,21 @@
+                              NWChem (excerpt)
+    Real energy-bearing lines from NWChem 7.2.3 (water / 3-21G), TCE module,
+    `tce; ccsd(t); end; task tce energy`. Captured on Deception 2026-10-07.
+    Kept as a fixture so the correlated-energy parser is tested against real
+    module wording ("<METHOD> total energy / hartree = ...") rather than a guess.
+    The "(T)" total is the one to extract; the "[T]" lines are a trap.
+
+         Total SCF energy =    -75.585380768303
+
+ CCSD correlation energy / hartree =        -0.130243948774105
+ CCSD total energy / hartree       =       -75.715624717076864
+
+                   CCSD(T)
+ Using plain CCSD(T) code
+
+ CCSD[T]  correction energy / hartree =        -0.001448190267540
+ CCSD[T] correlation energy / hartree =        -0.131692139041645
+ CCSD[T] total energy / hartree       =       -75.717072907344402
+ CCSD(T)  correction energy / hartree =        -0.001362362485734
+ CCSD(T) correlation energy / hartree =        -0.131606311259838
+ CCSD(T) total energy / hartree       =       -75.716987079562600

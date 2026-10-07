@@ -105,6 +105,14 @@ def _effective_kspacing(input_files: Dict[str, str]) -> Optional[float]:
     ``N_i = max(1, ceil(|b_i| / KSPACING))``). Returns ``None`` for a non-mesh
     KPOINTS (explicit/line-mode/length-style), a missing POSCAR, or anything
     unparseable — the caller then applies no floor rather than guessing.
+
+    The floor is therefore on the *spacing* (the coarsest axis, which limits
+    accuracy), not on the per-axis k-point counts. For a mesh that was not set
+    from the reciprocal-vector lengths this coarsest spacing can regenerate a
+    sparser mesh on the other axes (e.g. a uniform 8x8x8 on a 3x4x6 Å cell comes
+    back ~8x6x4 at the floor value), so "never below the base" holds for spacing,
+    not for the original counts — acceptable because the coarsest spacing is the
+    accuracy-limiting one.
     """
     kpoints_text = input_files.get(_KPOINTS)
     poscar_text = input_files.get("POSCAR")

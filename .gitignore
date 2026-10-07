@@ -275,3 +275,7 @@ webui/tsconfig.tsbuildinfo
 # Built React bundle: produced by `cd webui && npm run build:package` (or
 # scripts/build_webui.sh) at release time, never committed.
 scilink/server/static/
+
+# Checked-in NWChem test fixtures: real engine output captured as ground truth
+# for the convergence parsers (overrides the *.out rule above).
+!tests/fixtures/nwchem/*.out
