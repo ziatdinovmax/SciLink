@@ -1560,8 +1560,9 @@ references are to `main` at bed2f7f8.
   record.
 - *Taint stays on the board.* `independent_support_of`, `fuse_delegations`,
   `get_delegation_history` and steering read the ledger, not the fold, so a
-  tainted supporter still counts there; the next consumer of the fold is
-  stage 4's scheduling.
+  tainted supporter still counts there. (Stage 4's scheduling did not consume
+  the fold either — admission reads memory and tokens, not findings; the
+  first consumer is whichever of fusion or the instrument bridge needs it.)
 - *Matching uses the posted status*, not the folded one — unreachable
   within one swarm today (nothing retracts inside a run).
 - *`fired[].delegation_index`* names the first launch; a memory-cancelled
@@ -1829,6 +1830,35 @@ heavy items stay threads until one exists); a per-item live RSS for thread
 items (the process's own cannot be split). **Measured:** a fresh worker
 interpreter on this package is about 200 MB before it does anything, which
 is the floor every process item pays.
+
+**What "the core is done" means after stage 4, and what it does not.** On
+one machine, §1–§5 of the design are on `main`: ephemeral workers of every
+mode, the board with computed independence, deterministic reactions with
+taint and retraction, one question queue whose unattended gates never
+count as a decision, and a scheduler that refuses, admits, measures,
+guards, budgets and stops. The limits that remain, in one place:
+
+- *Placement.* Only `thread` and `process` exist; the HPC and ECS rows of
+  the contract are the AWS PR's (with per-campaign quotas and the board
+  across tasks).
+- *Attended swarms.* Heavy items stay threads, because a worker process
+  has no channel to the person; a Stop reaches them cooperatively (on a
+  print or a wait), not by a kill.
+- *Measurement.* A thread item's memory is not measured; a class's first
+  run is sized by the input-based estimate, and a class is as coarse as
+  `mode:kind:size:units` (two very different analyses of same-sized cubes
+  share a row, sized by the larger).
+- *Tokens.* The per-mode reservations are placeholders until a class is
+  measured; the counter is exact for tagged threads and for a process
+  worker's own calls, not for an untagged helper thread an agent starts
+  without `attributed_to_current` / `inherited_context`.
+- *Independence and taint.* Independence is the read graph (no common
+  ancestry); taint stays on the board, unread by fusion and scheduling.
+- *Subjects* are strings; *persistent specialists* read nothing from the
+  board; there is no board view in Mission Control and no swarm plan at
+  the web gate (stage 6).
+- *Several instruments* (stage 5): the instrument worker, the log-to-board
+  bridge, priority classes, standing subscriptions across turns.
 
 ## Starting stage 2 (the board)
 
