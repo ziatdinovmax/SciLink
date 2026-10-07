@@ -34,19 +34,33 @@ _ENERGY_RE = re.compile(
     r"Total\s+(?:DFT|SCF)\s+energy\s*=\s*(-?\d+\.\d+)", re.IGNORECASE)
 
 # Post-HF correlated total-energy lines, highest level of theory first. For an
-# MP2 or CCSD(T) (TCE) run the basis-dependent result is the correlated total,
-# not the SCF/DFT reference _ENERGY_RE matches — judging the sweep on the
-# reference would converge the wrong quantity and adopt too small a basis. The
-# presence of a correlated total is the signal the run was post-HF, so prefer
-# whichever the log holds. Formats vary: TCE uses "= " with an optional
-# "/ hartree"; the direct MP2 module uses a bare value or ":".
+# MP2 or CCSD(T) run the basis-dependent result is the correlated total, not the
+# SCF/DFT reference _ENERGY_RE matches — judging the sweep on the reference would
+# converge the wrong quantity and adopt too small a basis. The presence of a
+# correlated total is the signal the run was post-HF, so prefer whichever the
+# log holds (CCSD(T) > CCSD > MP2).
+#
+# Two module families write the line two different ways (both captured from real
+# NWChem 7.2.3 output on a water/3-21G run — see tests/fixtures/nwchem/):
+#   TCE module:      "CCSD(T) total energy / hartree    =   -75.716987..."
+#   classic/direct:  "Total CCSD(T) energy:                -75.716987..."
+#                    "Total MP2 energy           -75.708301..."   (no '=' or ':')
+# so each pattern matches BOTH "Total <M> energy" and "<M> total energy
+# [/ hartree]", with the number after '=', ':' or just whitespace. Traps avoided:
+# the leading (?<![\w-]) rejects the scaled variants "SCS-MP2"/"SCS-CCSD", and
+# matching CCSD(T) with literal "(T)" skips the "[T]"/"CCSD+T(CCSD)" lines.
+def _total_energy_re(method: str) -> "re.Pattern":
+    return re.compile(
+        rf"(?<![\w-])(?:Total\s+{method}\s+energy|"
+        rf"{method}\s+total\s+energy(?:\s*/\s*hartree)?)"
+        rf"\s*[=:]?\s+(-?\d+\.\d+)",
+        re.IGNORECASE)
+
+
 _CORRELATED_ENERGY_RES = (
-    re.compile(r"CCSD\(T\)\s+total\s+energy(?:\s*/\s*hartree)?\s*[=:]?\s+(-?\d+\.\d+)",
-               re.IGNORECASE),
-    re.compile(r"\bCCSD\s+total\s+energy(?:\s*/\s*hartree)?\s*[=:]?\s+(-?\d+\.\d+)",
-               re.IGNORECASE),
-    re.compile(r"(?:Total\s+MP2|MP2\s+total)\s+energy(?:\s*/\s*hartree)?\s*[=:]?\s+(-?\d+\.\d+)",
-               re.IGNORECASE),
+    _total_energy_re(r"CCSD\(T\)"),
+    _total_energy_re(r"CCSD"),
+    _total_energy_re(r"(?:MP2|MBPT\(2\))"),  # direct MP2 module, or TCE's MBPT(2)
 )
 
 

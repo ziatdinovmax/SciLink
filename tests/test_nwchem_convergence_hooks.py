@@ -149,6 +149,35 @@ class TestReadTotalEnergy:
         assert read_convergence_observable(str(tmp_path), "total_energy") is None
 
 
+class TestReadTotalEnergyFromRealLogs:
+    """Drive the extractor with REAL NWChem 7.2.3 output (both module families),
+    captured as fixtures. These are the cases that defeated the earlier regex:
+    the classic module writes 'Total <M> energy[:]', the TCE module writes
+    '<M> total energy / hartree =', and both carry SCS-* and [T] decoys."""
+
+    _HARTREE_EV = 27.211386245988
+    _FIX = Path(__file__).resolve().parent / "fixtures" / "nwchem"
+
+    def _read(self, tmp_path, fixture):
+        (tmp_path / "run_stdout.log").write_text((self._FIX / fixture).read_text())
+        return read_convergence_observable(str(tmp_path), "total_energy")
+
+    def test_tce_ccsdt_fixture(self, tmp_path):
+        # Must pick the (T) total, not CCSD, not SCF, not the CCSD[T] decoy.
+        v = self._read(tmp_path, "h2o_tce_ccsdt_7.2.3.out")
+        assert v == pytest.approx(-75.716987079562600 * self._HARTREE_EV)
+
+    def test_classic_mp2_ccsdt_fixture(self, tmp_path):
+        # Classic wording "Total CCSD(T) energy:"; not SCS-*, not CCSD+T(CCSD).
+        v = self._read(tmp_path, "h2o_direct_mp2_ccsdt_7.2.3.out")
+        assert v == pytest.approx(-75.716987101819456 * self._HARTREE_EV)
+
+    def test_dft_smoketest_fixture(self, tmp_path):
+        # A pure-DFT run: no correlated line, so the SCF/DFT reference is used.
+        v = self._read(tmp_path, "h2o_b3lyp_smoketest.out")
+        assert v == pytest.approx(-76.408706523741 * self._HARTREE_EV)
+
+
 class TestConvergenceFrontmatter:
     def test_nwchem_skill_declares_basis_convergence(self):
         from scilink.skills.loader import load_skill
