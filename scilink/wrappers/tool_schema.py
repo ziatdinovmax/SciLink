@@ -232,10 +232,12 @@ class _PortableCompletions:
                 kwargs["reasoning_effort"] = "none"
         _t0 = time.perf_counter()
         # SciLink's retry policy (transient errors only, backoff outside the
-        # in-flight slot); the SDK's own retries are off on this client.
-        from .litellm_wrapper import call_with_retries
+        # in-flight slot); the SDK's own retries are off on this client. A
+        # sampling parameter the model refuses is dropped as on the LiteLLM path.
+        from .litellm_wrapper import call_dropping_refused_sampling
         model = kwargs.get("model") or self._default_model
-        response = call_with_retries(lambda: self._raw.create(*args, **kwargs), None, model=model)
+        response = call_dropping_refused_sampling(lambda kw: self._raw.create(*args, **kw),
+                                                  kwargs, None, model)
         # The proxy path's chat loops call this shim directly: count the
         # call (and trace it when tracing is on) like the wrapper classes.
         try:
