@@ -51,6 +51,48 @@ _STOPPED_PARENTS: set = set()
 # it beside the turn-level Stop, so a wait that polls it (a parked question,
 # an LLM slot) ends when the item is cancelled instead of on its next print.
 _CANCEL_EVENTS: Dict[int, threading.Event] = {}
+#: The swarm item a thread prints for, by thread id: its lines are tagged
+#: "[label] " at the line start (``fanout._ThreadStopStream``), and a thread
+#: the item starts (a best-of-N candidate, a helper) inherits the label
+#: through ``inherited_context`` / ``attributed_to_current`` as it inherits
+#: the cancel, so two items' candidates can be told apart.
+_LABELS: Dict[int, str] = {}
+#: Whether a labelled thread's next write begins a line (the tag goes only
+#: at line starts). Kept beside the label and cleared with it, so a reused
+#: thread id never inherits a mid-line state from a thread that ended.
+_LINE_START: Dict[int, bool] = {}
+
+
+def register_label(label: Optional[str]) -> None:
+    """Make ``label`` the CURRENT thread's worker label (``None`` clears)."""
+    tid = threading.get_ident()
+    with _LOCK:
+        if label:
+            _LABELS[tid] = str(label)
+            _LINE_START[tid] = True
+        else:
+            _LABELS.pop(tid, None)
+            _LINE_START.pop(tid, None)
+
+
+def unregister_label() -> None:
+    tid = threading.get_ident()
+    with _LOCK:
+        _LABELS.pop(tid, None)
+        _LINE_START.pop(tid, None)
+
+
+def line_start(thread_id: int) -> bool:
+    return _LINE_START.get(thread_id, True)
+
+
+def set_line_start(thread_id: int, value: bool) -> None:
+    _LINE_START[thread_id] = value
+
+
+def current_label(thread_id: Optional[int] = None) -> Optional[str]:
+    """The worker label the thread prints for, or ``None``."""
+    return _LABELS.get(threading.get_ident() if thread_id is None else thread_id)
 
 
 def register_worker(parent_thread_id: int, tag: str, prefix: bool = True) -> None:
@@ -236,6 +278,7 @@ class inherited_context:
     def __init__(self) -> None:
         from .. import tracing
         self.cancel = _CANCEL_EVENTS.get(threading.get_ident())
+        self.label = _LABELS.get(threading.get_ident())
         self.session, self.worker = tracing.current_session(), tracing.current_worker()
 
     def applied(self):
@@ -246,12 +289,16 @@ class inherited_context:
         def _cm():
             if self.cancel is not None:
                 register_cancel(self.cancel)
+            if self.label is not None:
+                register_label(self.label)
             try:
                 with tracing.attributed(session=self.session, worker=self.worker):
                     yield
             finally:
                 if self.cancel is not None:
                     unregister_cancel()
+                if self.label is not None:
+                    unregister_label()
         return _cm()
 
 
@@ -274,18 +321,23 @@ def attributed_to_current(fn: Callable, tag: str = "",
     from .. import tracing
     session, worker = tracing.current_session(), tracing.current_worker()
     cancel = _CANCEL_EVENTS.get(threading.get_ident())
+    label = _LABELS.get(threading.get_ident())
 
     @functools.wraps(fn)
     def _attributed(*args, **kwargs):
         register_worker(parent, tag, prefix=prefix)
         if cancel is not None:
             register_cancel(cancel)
+        if label is not None:
+            register_label(label)          # the item's lines stay the item's on its helpers
         try:
             with tracing.attributed(session=session, worker=worker):
                 return fn(*args, **kwargs)
         finally:
             if cancel is not None:
                 unregister_cancel()
+            if label is not None:
+                unregister_label()
             unregister_worker()
 
     return _attributed

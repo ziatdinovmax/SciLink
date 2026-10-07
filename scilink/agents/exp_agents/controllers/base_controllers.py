@@ -10,28 +10,77 @@ from pathlib import Path as pathlib_Path
 from ....hitl import make_subject, request_human_feedback, subject_block
 
 
+_STEP_NUMBER = r"(?:\(?(\d{1,2})[.)])"      # "2." "2)" "(2)"
+
+
 def numbered_steps(text: str) -> list:
-    """Split a strategy or pipeline written as one paragraph into its steps:
-    numbered steps (the rule the plan printers use: a step number only after
-    a sentence end, so "cm-1." or "8.7" are never split), else a chain of
-    "->" arrows, which is how a pipeline is often written. One step comes
-    back as one item."""
+    """Split a strategy or pipeline written as one paragraph into its steps
+    (#701) — a display rule only; the stored text is untouched.
+
+    Numbered steps first: a step number is recognised only IN SEQUENCE (1,
+    2, 3, …), written ``N.``, ``N)`` or ``(N)``, and only where the next
+    expected number follows the start of the text, a sentence end, a
+    semicolon or a line break — so ``0.15``, ``sigma=2.``, ``n_cage=4)``
+    and ``8.7 cm-1.`` are never split. With no numbering, a chain of
+    arrows (``->`` or ``→``) is a pipeline, unless an arrow sits inside
+    prose (a segment holding a sentence end, or over 160 characters, means
+    "implies", and splitting there left dangling fragments on a live
+    fitting strategy). Anything else is one step, returned whole.
+    """
     text = (text or "").strip()
     if not text:
         return []
-    parts = re.split(r"(?:^|\. )(?=\d+\. )", text)
-    steps = [re.sub(r"^\d+\.\s*", "", p).strip() for p in parts if p.strip()]
-    if len(steps) < 2 and " -> " in text:
-        # A chain only: "flatten -> segment -> measure". An arrow inside prose
-        # ("an S-shaped residual -> switch to asymmetric; ...") means
-        # "implies", and splitting there leaves dangling fragments (seen live
-        # on a fitting strategy), so a segment that holds a sentence end
-        # keeps the paragraph whole.
-        chain = [p.strip() for p in re.split(r"\s*->\s*", text) if p.strip()]
+    steps = _sequence_steps(text)
+    if len(steps) < 2 and re.search(r"\s(?:->|→)\s", text):
+        chain = [p.strip() for p in re.split(r"\s*(?:->|→)\s*", text) if p.strip()]
         if all(". " not in p and len(p) <= 160 for p in chain):
             steps = chain
-    steps = [st.rstrip(".") + "." if st and not st.endswith(".") else st for st in steps]
+    steps = [st.rstrip(" ;:.") + "." for st in steps if st.strip(" ;:.")]
     return steps if len(steps) > 1 else [text]
+
+
+def _sequence_steps(text: str) -> list:
+    """The numbered steps of ``text`` when its numbers run 1, 2, 3, … at
+    step boundaries; else ``[text]``."""
+    boundary = re.compile(r"(?:^|(?<=[.;:])\s+|\n\s*)" + _STEP_NUMBER + r"\s+")
+    marks = [(m.start(), m.end(), int(m.group(1))) for m in boundary.finditer(text)]
+    # The sequence starts at 1; or at 2 when the text opens with an
+    # unnumbered first step ("Calibrate … . 2) measure … 3) …" — the shape
+    # the gate showed as one list item, #701), which is then step 1 — and
+    # only when a 3 follows the 2.
+    first = 1 if any(n == 1 for _, _, n in marks) else 2
+    cuts, expected = [], first
+    for start, end, n in marks:
+        if n != expected:
+            continue
+        cuts.append((start, end))
+        expected += 1
+    if len(cuts) < 2:
+        # Two numbers in sequence, always: a lone "2)" after "Ref." / "Fig."
+        # / "Eq." is a citation, not an unnumbered first step followed by
+        # its second.
+        return [text]
+    steps = []
+    lead = text[:cuts[0][0]].strip()
+    if lead and first == 2:
+        steps.append(lead)
+    for i, (start, end) in enumerate(cuts):
+        stop = cuts[i + 1][0] if i + 1 < len(cuts) else len(text)
+        piece = text[end:stop].strip()
+        if i == 0 and lead and first == 1:
+            piece = f"{lead} {piece}".strip()     # prose before "1." stays with it
+        if piece:
+            steps.append(piece)
+    return steps if len(steps) > 1 else [text]
+
+
+def steps_text(text: str, indent: str = "   ") -> str:
+    """The console form of ``steps_block``: one numbered step per line,
+    indented to sit under the section's label; one step as it is."""
+    items = numbered_steps(text)
+    if len(items) > 1:
+        return f"\n{indent}".join(f"{i}. {st}" for i, st in enumerate(items, 1))
+    return items[0] if items else "N/A"
 
 
 def steps_block(label: str, text: str) -> dict:

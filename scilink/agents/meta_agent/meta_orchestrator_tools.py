@@ -12,6 +12,7 @@ refactor".
 """
 
 import json
+from .fanout import _cprint as _fanout_cprint
 from scilink.utils import path_fence as _path_fence
 import os
 import logging
@@ -790,7 +791,7 @@ class MetaOrchestratorTools:
         # -- run_swarm (several delegations of any mode at once) -------------
         def run_swarm(work_items: list, item_time_budget_s: float = None,
                       subscriptions: list = None, budget: dict = None) -> str:
-            print(f"  🐝 Swarm of {len(work_items or [])} item(s)"
+            _fanout_cprint(f"  🐝 Swarm of {len(work_items or [])} item(s)"
                   + (f", {len(subscriptions)} subscription(s)" if subscriptions else "") + "...")
             from .swarm import run_swarm as _run_swarm
             return _run_swarm(self.orch, work_items, item_time_budget_s=item_time_budget_s,
@@ -1077,7 +1078,7 @@ class MetaOrchestratorTools:
                                  branch_time_budget_s: float = None,
                                  allow_raw_branches: bool = False,
                                  force_rerun: bool = False) -> str:
-            print(f"  🔀 Parallel analysis over {len(branches or [])} dataset(s)"
+            _fanout_cprint(f"  🔀 Parallel analysis over {len(branches or [])} dataset(s)"
                   + (" (harmonized pipeline replay)" if harmonize else "")
                   + "...")
             return self.orch._run_fanout(branches, figure_style=figure_style,
@@ -1262,7 +1263,7 @@ class MetaOrchestratorTools:
 
         # -- resume_fanout (finish an interrupted parallel run) --------------
         def resume_fanout(retry_failed: bool = False) -> str:
-            print("  🔁 Resuming fan-out branches"
+            _fanout_cprint("  🔁 Resuming fan-out branches"
                   + (" (retrying failed ones)" if retry_failed else "") + "...")
             return self.orch._resume_fanout(retry_failed=retry_failed)
 

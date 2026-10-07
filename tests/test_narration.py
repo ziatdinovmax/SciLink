@@ -91,3 +91,143 @@ def test_bookkeeping_lines_close_a_specialist_answer():
     assert c.push("     Human feedback enabled: True").kind == "bookkeeping"
     assert c.push("      ✅ Auto-checkpoint saved").kind == "bookkeeping"
     assert c.push("plain after").kind == "plain"
+
+
+def test_a_swarm_items_tag_is_read_off_the_line_and_the_coordinators_lines_are_visible():
+    """A swarm item's lines carry "[label] "; the kind is read from what
+    follows, the label kept on the line. The coordinators' own lines (the
+    launch, a hold, the guard, a rerun, the heartbeat, an item finished)
+    are the visible fan-out kind, not plain."""
+    from scilink.ui.narration import split_worker_tag
+    c = LineClassifier()
+    th = c.push("[XRD 300 K]   💭 I'll examine the data first")
+    assert (th.kind, th.worker, th.text, th.verbose) == ("thought", "XRD 300 K", "💭 I'll examine the data first", False)
+    cont = c.push("[XRD 300 K]      and then fit")
+    assert (cont.kind, cont.worker, cont.text) == ("thought", "XRD 300 K", "and then fit")
+    tool = c.push("[purity plan]   🔧 Calling tool: generate_initial_plan")
+    assert (tool.kind, tool.worker) == ("tool_call", "purity plan")
+    cand = c.push("[fit A] [cand_02] Verification 1/7")
+    assert (cand.kind, cand.worker, cand.text) == ("candidate", "fit A", "[cand_02] Verification 1/7")
+    plain = c.push("[XRD 300 K] 2026-10-07 10:04:27,563 - INFO -   Points: 3000")
+    assert (plain.kind, plain.worker, plain.verbose) == ("plain", "XRD 300 K", True)
+    assert c.push("  💭 the meta's own thought").worker is None
+    from scilink.agents.meta_agent.fanout import coordinator_line
+    for text in ("  🐝 swarm_x: 2 item(s), up to 2 at a time",
+                 "  ⏸  holding branch 'purity plan' for memory headroom",
+                 "  🧯 free memory is low (0.10 GB) — cancelling 'heavy'",
+                 "  🔁 running 'heavy' again, alone",
+                 "  ⏳ 2 swarm item(s) still running ...",
+                 "  ✅ swarm item finished: XRD 300 K (success)",
+                 "  ⛔ not started: big cube — needs about 40.0 GB",
+                 "  ⏱️  swarm item 'slow one' exceeded its wall-clock budget (0s)"):
+        ln = c.push(coordinator_line(text))              # as the coordinators print them
+        assert (ln.kind, ln.verbose) == ("fanout", False), text
+    assert c.push("  ⏳ Waiting for orchestrator response ...").kind == "waiting"
+    assert c.push("  ✅ Sandbox approval already granted this session").kind == "bookkeeping"
+    assert split_worker_tag("[cand_01] x") == (None, "[cand_01] x")       # a candidate tag is not a worker
+
+
+def test_the_writers_label_is_always_one_the_reader_accepts():
+    """Round trip: whatever label the model wrote, ``worker_tag`` makes a tag
+    that ``split_worker_tag`` reads back (review of #774, item 1)."""
+    from scilink.ui.narration import WORKER_TAG_MAX, split_worker_tag, worker_tag
+    long = "Raman A7 anatase fraction vs annealing temperature series, second pass"
+    for label in (long, "XRD [300 K]", "cand_02", "cand-7 fit", "", "   ", "a\nb", "x" * 200):
+        tag = worker_tag(label)
+        assert 1 <= len(tag) <= WORKER_TAG_MAX and "[" not in tag and "]" not in tag and "\n" not in tag
+        got, rest = split_worker_tag(f"[{tag}] 💭 hello")
+        assert (got, rest) == (tag, "💭 hello"), label
+    assert worker_tag("XRD [300 K]") == "XRD (300 K)"
+    assert worker_tag(long).endswith("…") and len(worker_tag(long)) == WORKER_TAG_MAX
+    assert worker_tag("cand_02") == "item cand_02" and worker_tag("") == "item"
+    c = LineClassifier()
+    ln = c.push(f"[{worker_tag(long)}]   💭 a thought")
+    assert (ln.kind, ln.verbose) == ("thought", False) and ln.worker == worker_tag(long)
+
+
+def test_coordinator_lines_are_known_by_their_mark_not_their_wording():
+    """Item 4 (round 2): the coordinators mark their own lines
+    (``fanout.coordinator_line``); the reader shows a marked line and nothing
+    by its emoji, so an agent's "⏱ Nobody answered…" stays plain and a
+    reworded coordinator print needs no change here."""
+    from scilink.agents.meta_agent.fanout import coordinator_line
+    from scilink.ui.vocabulary import COORDINATOR_MARK
+    c = LineClassifier()
+    agents = ("  ⏱ Nobody answered the review in time; the plan is marked unattended",
+              "    🔁 Diagram render error (attempt 2): …",
+              "  ⏱️ Deep literature searches take a few minutes",
+              "  ⏳ Waiting for orchestrator response ...",
+              "  ✅ Sandbox approval already granted this session",
+              "  ⛔ Fan-out over this dataset set was already declined")
+    for text in agents:
+        ln = c.push(text)
+        assert ln.kind != "fanout" and ln.verbose, text
+    coordinators = ("  🐝 swarm_x: 2 item(s), up to 2 at a time",
+                    "  ⏸  holding branch 'purity plan' for memory headroom (needs ~0.5 GB)",
+                    "  🧯 free memory is low (0.10 GB) — cancelling 'heavy'",
+                    "  🔁 running 'heavy' again, alone",
+                    "  ⛔ not started: big cube — needs about 40.0 GB",
+                    "  ⛔ Fan-out declined: 'x' is a RAW instrument container",      # a refusal, whatever its words
+                    "  ⏱️  swarm item 'slow one' exceeded its wall-clock budget (0s)",
+                    "  ⏳ 2 swarm item(s) still running ...",
+                    "  ✅ swarm item finished: XRD 300 K (success)",
+                    "  🔁 Resuming fan-out branches in their original sessions")
+    for text in coordinators:
+        raw = c.push(text)
+        assert raw.kind != "fanout", text                        # the same words unmarked: an agent's line
+        marked = coordinator_line(text)
+        assert marked.startswith("  " + COORDINATOR_MARK) and COORDINATOR_MARK not in marked[3:]
+        ln = c.push(marked)
+        assert (ln.kind, ln.verbose, ln.text) == ("fanout", False, text.strip()), text
+    assert coordinator_line("🐝 SWARM — 2 item(s)") == COORDINATOR_MARK + "🐝 SWARM — 2 item(s)"
+    assert current_activity(coordinator_line("  🐝 swarm_x: 2 item(s), up to 2 at a time")) == "Swarm · 2 items"
+
+
+def test_every_coordinator_print_goes_through_the_marking_helper():
+    """The guard against drift: a new or reworded coordinator line printed
+    raw would be hidden again. Scanned: the coordinator modules
+    (``fanout.py``, ``swarm.py``) whole, and in the meta's tools only the
+    three wrappers that front the coordinators (``run_swarm``,
+    ``delegate_to_analyses``, ``resume_fanout``) — the agent's own
+    bookkeeping elsewhere in that module (the skill-memory actions' ✅
+    lines) is not a coordinator's and must stay a plain ``print``."""
+    import ast
+    import re
+    from pathlib import Path
+    import scilink.agents.meta_agent as pkg
+    root = Path(pkg.__file__).parent
+    raw = re.compile(r'(?<![\w.])print\((?=f?"\s*(?:🐝|⏸|🧯|🔁|⛔|⏱|⏳|✅|🔀))')
+
+    def scan(name, ranges=None):
+        src = (root / name).read_text(encoding="utf-8")
+        for i, line in enumerate(src.splitlines(), 1):
+            if raw.search(line) and (ranges is None or any(a <= i <= b for a, b in ranges)):
+                yield f"{name}:{i}: {line.strip()[:80]}"
+
+    offenders = list(scan("fanout.py")) + list(scan("swarm.py"))
+    tools_src = (root / "meta_orchestrator_tools.py").read_text(encoding="utf-8")
+    wrappers = {"run_swarm", "delegate_to_analyses", "resume_fanout"}
+    ranges = [(n.lineno, n.end_lineno) for n in ast.walk(ast.parse(tools_src))
+              if isinstance(n, ast.FunctionDef) and n.name in wrappers]
+    assert len(ranges) == 3, ranges
+    offenders += list(scan("meta_orchestrator_tools.py", ranges))
+    assert not offenders, "\n".join(offenders)
+    # and the agent's own lines in that module are NOT marked
+    assert tools_src.count("_fanout_cprint(") == 3
+    assert 'print(f"  ✅ Promoted' in tools_src
+
+
+def test_thought_and_answer_continuation_is_kept_per_worker():
+    """Item 5: item A's open thought never swallows item B's indented line,
+    and the meta's own stream is a writer of its own."""
+    c = LineClassifier()
+    assert c.push("[A]   💭 A thinks").kind == "thought"
+    b = c.push("[B]      an indented line of B")
+    assert (b.kind, b.worker) == ("plain", "B")
+    a2 = c.push("[A]      and A continues")
+    assert (a2.kind, a2.worker, a2.text) == ("thought", "A", "and A continues")
+    meta = c.push("     the meta's indented line")
+    assert (meta.kind, meta.worker) == ("plain", None)
+    assert c.push("[A] 🤖 Specialist:").kind == "answer_header"
+    assert c.push("[B] some result text of B").kind == "plain"           # not A's answer body
+    assert c.push("[A] the body of A's answer").kind == "answer_body"

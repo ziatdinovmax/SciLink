@@ -43,7 +43,7 @@ from .._locked_exec import (
 )
 from .._qc_engine import CodegenQCEngine, QCEngineSpec, QCItemContext
 from .base_controllers import (bestofn_join_subject, consensus_subject, consistency_subject,
-                               run_plan_refinement_gate, steps_block)
+                               run_plan_refinement_gate, steps_block, steps_text)
 from ....utils.codegen_parse import parse_codegen_response
 from ....utils.synthesis_parse import salvage_synthesis_from_response
 from ....hitl import request_human_feedback
@@ -1252,9 +1252,7 @@ class ImagePlanningController:
 
         print(f"\n📊 Approach:\n   {state.get('analysis_approach', 'N/A')}")
 
-        _pipeline = state.get("processing_pipeline", "N/A")
-        _pipeline = re.sub(r"\. (\d+)\. ", r".\n   \1. ", _pipeline)
-        print(f"\n⚙️  Pipeline:\n   {_pipeline}")
+        print(f"\n⚙️  Pipeline:\n   {steps_text(state.get('processing_pipeline') or 'N/A')}")
 
         print(f"\n🎯 Features to Extract:\n   {', '.join(state.get('features_to_extract', [])) or 'N/A'}")
         print(f"\n✅ Quality Criteria:\n   {state.get('quality_criteria', 'N/A')}")

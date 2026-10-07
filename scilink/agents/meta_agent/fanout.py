@@ -230,7 +230,7 @@ def _admit_branch(key: str, est: float, label: str, model: Optional[str] = None)
             open_for = provider_tripped(model)
             if open_for is not None:
                 if not breaker_logged:
-                    print(f"  ⏸  holding '{label}': the provider circuit breaker is open "
+                    _cprint(f"  ⏸  holding '{label}': the provider circuit breaker is open "
                           f"(retryable failures across workers); admission resumes in "
                           f"~{open_for:.0f} s")
                     breaker_logged = True
@@ -242,7 +242,7 @@ def _admit_branch(key: str, est: float, label: str, model: Optional[str] = None)
                 _mem_running[key] = est
                 return
             if not held_logged:
-                print(f"  ⏸  holding branch '{label}' for memory headroom "
+                _cprint(f"  ⏸  holding branch '{label}' for memory headroom "
                       f"(needs ~{est / 1e9:.1f} GB, available "
                       f"{avail / 1e9:.1f} GB; {len(_mem_running)} branch(es) "
                       "running)")
@@ -420,20 +420,64 @@ class Drain:
 # (#358) stands either way, so cancellation only shortens the waste.
 _branch_stop_events: Dict[int, "_threading.Event"] = {}
 _branch_stop_lock = _threading.Lock()
+# A swarm item's lines carry "[label] " at the line start; the label is the
+# thread's worker label in ``log_context`` — registered by the item's
+# thread, inherited by the threads it starts, read back by
+# ``ui.narration.split_worker_tag``. Fan-out branches register no label:
+# their console output stays as it was.
 
 
-def _register_branch_stop(event) -> None:
-    from ...utils.log_context import register_cancel
+def coordinator_line(text: str) -> str:
+    """A coordinator's own line, marked for the narration readers
+    (``vocabulary.COORDINATOR_MARK`` before its first character, after the
+    indentation): the readers show it by the mark alone, so a reworded or
+    new coordinator print needs no change on their side."""
+    from ...ui.vocabulary import COORDINATOR_MARK
+    stripped = text.lstrip(" ")
+    return text[:len(text) - len(stripped)] + COORDINATOR_MARK + stripped
+
+
+def _cprint(text: str, **kwargs) -> None:
+    """``print`` for the coordinators' own lines (the swarm's and the
+    fan-out's launch, holds, guard, reruns, budgets, refusals, heartbeat
+    and finishes)."""
+    print(coordinator_line(text), **kwargs)
+
+
+def _register_branch_stop(event, label: Optional[str] = None) -> None:
+    from ...ui.narration import worker_tag
+    from ...utils.log_context import register_cancel, register_label
     with _branch_stop_lock:
         _branch_stop_events[_threading.get_ident()] = event
     register_cancel(event)          # waits (a parked question, an LLM slot) poll it
+    if label:
+        register_label(worker_tag(label))   # what the reader accepts, always
 
 
 def _unregister_branch_stop() -> None:
-    from ...utils.log_context import unregister_cancel
+    from ...utils.log_context import unregister_cancel, unregister_label
     with _branch_stop_lock:
         _branch_stop_events.pop(_threading.get_ident(), None)
     unregister_cancel()
+    unregister_label()
+
+
+def tag_lines(label: str, data: str, at_start: bool) -> "tuple[str, bool]":
+    """``data`` with ``[label] `` before every line that begins in it (and
+    before its first character when ``at_start``); returns the text and
+    whether the next write begins a line."""
+    if not data:
+        return data, at_start
+    prefix = f"[{label}] "
+    pieces = data.split("\n")
+    out = []
+    for i, piece in enumerate(pieces):
+        begins = at_start if i == 0 else True
+        last = i == len(pieces) - 1
+        if begins and (piece or not last):
+            piece = prefix + piece
+        out.append(piece)
+    return "\n".join(out), data.endswith("\n")
 
 
 class _ThreadStopStream:
@@ -448,11 +492,17 @@ class _ThreadStopStream:
         self._original = original
 
     def write(self, data: str) -> int:
-        ev = _branch_stop_events.get(_threading.get_ident())
+        tid = _threading.get_ident()
+        ev = _branch_stop_events.get(tid)
         if ev is not None and ev.is_set():
             from ...ui.output_capture import AgentStoppedError
             raise AgentStoppedError(
                 "fan-out branch cancelled (wall-clock budget exceeded)")
+        from ...utils.log_context import current_label, line_start, set_line_start
+        label = current_label(tid)
+        if label is not None:
+            data, at_start = tag_lines(label, data, line_start(tid))
+            set_line_start(tid, at_start)
         return self._original.write(data)
 
     def flush(self) -> None:
@@ -1285,7 +1335,7 @@ def _cancel_overdue_branches(orch, pending, fut_entry, fut_stop, fut_label,
         e = fut_entry[f]
         budget = _budget_of(e)      # per-branch value from here on (messages, ledger)
         e["timed_out"] = True
-        print(f"  ⏱️  {noun} '{fut_label[f]}' exceeded "
+        _cprint(f"  ⏱️  {noun} '{fut_label[f]}' exceeded "
               f"its wall-clock budget ({int(budget)}s) — "
               "cancelling it (degraded, excluded from fusion).")
         logger.warning(
@@ -1334,7 +1384,7 @@ def _guard_step(orch, pending, fut_entry, fut_stop, fut_label, drain: "Drain",
     def on_cancel(fut, entry, reason):
         avail = _available_memory() or 0.0
         again = not entry.get("memory_retried")
-        print(f"  🧯 free memory is low ({avail / 1e9:.2f} GB) — cancelling branch "
+        _cprint(f"  🧯 free memory is low ({avail / 1e9:.2f} GB) — cancelling branch "
               f"'{fut_label[fut]}' " + ("and running it again alone afterwards"
                                          if again else "(already run again once)"))
         logger.warning(f"fan-out branch {entry['index']} ('{fut_label[fut]}') cancelled: {reason}")
@@ -1385,7 +1435,7 @@ def _relaunch_alone(orch, pool, entry: dict, queue_channel=None, branch_autonomy
         entry.pop("completed_at", None)
         entry.pop("error", None)
         entry.pop("_cancelled", None)
-    print(f"  🔁 running branch '{entry.get('label')}' again, alone")
+    _cprint(f"  🔁 running branch '{entry.get('label')}' again, alone")
     stop_ev = _threading.Event()
     fut = pool.submit(_attributed_branch(_run_one_branch), orch, branch, [], entry,
                       queue_channel, branch_autonomy, stop_ev)
@@ -1627,7 +1677,7 @@ def _already_ran_decline(orch, items: List[dict]) -> Optional[str]:
               if len(retryable) < len(f_lab) else "")
            + "To deliberately re-run everything (e.g. the data or the task "
              "changed), pass force_rerun=true.")
-    print("  ⛔ " + msg)
+    _cprint("  ⛔ " + msg)
     return json.dumps({"status": "declined", "reason": "already_ran",
                        **prior, "message": msg}, indent=2, default=str)
 
@@ -1732,7 +1782,7 @@ def resume_fanout(orch, retry_failed: bool = False) -> str:
     # under repeated interruption, mirroring the launch-time persistence.
     orch._auto_checkpoint(verbose=False)
 
-    print(f"  🔁 Resuming {len(stale)} fan-out branch(es) in their original "
+    _cprint(f"  🔁 Resuming {len(stale)} fan-out branch(es) in their original "
           "sessions"
           + (f" ({len(retried)} failed branch(es) retried)" if retried else "")
           + "...")
@@ -1778,12 +1828,12 @@ def resume_fanout(orch, retry_failed: bool = False) -> str:
             else:
                 done = set()
                 wait(drain.futs, timeout=_FANOUT_POLL_S)
-                print(f"  ⏳ waiting for the cancelled branch to end before the rerun "
+                _cprint(f"  ⏳ waiting for the cancelled branch to end before the rerun "
                       f"({int(time.monotonic() - (drain.since or t0))} s) ...")
             since_tick += time.monotonic() - t0
             for f in done:
                 f.result()
-                print(f"  ✅ resumed branch finished: {fut_label[f]} "
+                _cprint(f"  ✅ resumed branch finished: {fut_label[f]} "
                       f"(status: {fut_entry[f].get('status')})")
                 since_tick = 0.0
             _guard_step(orch, pending, fut_entry, fut_stop, fut_label, drain, rerun)
@@ -1797,7 +1847,7 @@ def resume_fanout(orch, retry_failed: bool = False) -> str:
                 pending = {fut}
             if pending and since_tick >= _FANOUT_HEARTBEAT_S:
                 since_tick = 0.0
-                print(f"  ⏳ {len(pending)} resumed branch(es) still "
+                _cprint(f"  ⏳ {len(pending)} resumed branch(es) still "
                       "running ...")
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
@@ -1959,10 +2009,10 @@ def run_fanout(orch, branches: List[dict],
     """
     _decline = raw_branch_decline(branches, allow_raw_branches)
     if _decline:
-        print("  ⛔ " + json.loads(_decline)["message"])
+        _cprint("  ⛔ " + json.loads(_decline)["message"])
         return _decline
     if allow_raw_branches and raw_instrument_branches(branches):
-        print(f"  ⏱️  raw-instrument branch(es) admitted: wall-clock budget x"
+        _cprint(f"  ⏱️  raw-instrument branch(es) admitted: wall-clock budget x"
               f"{FANOUT_RAW_INSTRUMENT_BUDGET_FACTOR:g} unless branch_time_budget_s is explicit")
     # --- normalize input ---
     norm: List[dict] = []
@@ -2036,7 +2086,7 @@ def run_fanout(orch, branches: List[dict],
 
     # --- sticky user decline (issue #557 part 1) ---
     if _user_already_declined(orch, by_id):
-        print("  ⛔ Fan-out over this dataset set was already declined by the "
+        _cprint("  ⛔ Fan-out over this dataset set was already declined by the "
               "user this turn; not asking again.")
         return _declined_by_user_payload(list(by_id), "user declined earlier "
                                          "this turn", repeated=True)
@@ -2103,7 +2153,7 @@ def run_fanout(orch, branches: List[dict],
     not_started = cap["refused"]
     if not_started:
         for r in not_started:
-            print(f"  ⛔ not started: {r['label']} — {r['reason']}")
+            _cprint(f"  ⛔ not started: {r['label']} — {r['reason']}")
         fanout_set = [i for i in fanout_set if any(by_id[i] is b for b in cap["run"])]
         if len(fanout_set) < 2:
             return json.dumps({
@@ -2117,7 +2167,7 @@ def run_fanout(orch, branches: List[dict],
 
     # --- confirmation ---
     if _user_already_declined(orch, fanout_set):
-        print("  ⛔ The pruned fan-out set was already declined by the user "
+        _cprint("  ⛔ The pruned fan-out set was already declined by the user "
               "this turn; not asking again.")
         return _declined_by_user_payload(fanout_set, "user declined earlier "
                                          "this turn", repeated=True)
@@ -2382,7 +2432,7 @@ def run_fanout(orch, branches: List[dict],
         orch._auto_checkpoint(verbose=False)
 
     # --- run concurrently; wiring per the mesh policy ---
-    print(f"  🔀 Launching {len(run_branches) - follower_start} parallel "
+    _cprint(f"  🔀 Launching {len(run_branches) - follower_start} parallel "
           f"analysis branches "
           f"(group {group_id}, "
           f"{'operand mesh — co-registered set' if mesh else 'independent branches'})...")
@@ -2447,7 +2497,7 @@ def run_fanout(orch, branches: List[dict],
             else:                 # only a rerun is left, waiting for the cancelled worker to end
                 done = set()
                 wait(drain.futs, timeout=_FANOUT_POLL_S)
-                print(f"  ⏳ waiting for the cancelled branch to end before the rerun "
+                _cprint(f"  ⏳ waiting for the cancelled branch to end before the rerun "
                       f"({int(time.monotonic() - (drain.since or t0))} s) ...")
             since_tick += time.monotonic() - t0
             if server is not None and server.error is not None:
@@ -2460,7 +2510,7 @@ def run_fanout(orch, branches: List[dict],
                           "remaining branch questions take their defaults, unattended.")
             for f in done:
                 f.result()  # _run_one_branch never raises; just surfaces oddities
-                print(f"  ✅ analysis branch finished: {fut_label[f]}  "
+                _cprint(f"  ✅ analysis branch finished: {fut_label[f]}  "
                       f"({n_total - len(pending)}/{n_total} done)")
                 since_tick = 0.0  # a completion already shows the run is alive
             # The memory guard (stage 4, the swarm's rule): under pressure the
@@ -2482,7 +2532,7 @@ def run_fanout(orch, branches: List[dict],
             if pending and since_tick >= _FANOUT_HEARTBEAT_S:
                 since_tick = 0.0
                 elapsed = int(time.monotonic() - start)
-                print(f"  ⏳ {len(pending)} of {n_total} parallel analyses still "
+                _cprint(f"  ⏳ {len(pending)} of {n_total} parallel analyses still "
                       f"running ... (~{elapsed}s elapsed)")
     finally:
         if server is not None:

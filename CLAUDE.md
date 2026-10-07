@@ -1165,7 +1165,26 @@ The narration reader (`scilink/ui/narration.py`, TS twin
 the activity label; the web runner emits it as an `activity` event, the
 shell shows it on its status row, and one fixture pins both readers.
 **When a chat-surface label or behaviour changes, change it in the
-vocabulary or the narration reader, not in one surface.**
+vocabulary or the narration reader, not in one surface.** A swarm item's
+lines carry its label at the line start (`[XRD 300 K] 💭 …`): the label is
+the thread's worker label in `log_context` (registered by the item's
+thread, inherited by every thread the item starts through
+`attributed_to_current` / `inherited_context` — a best-of-N candidate's
+lines are the item's too — and put through `narration.worker_tag`, so a
+label the model wrote is always a tag the reader accepts: one line, no
+brackets, at most 48 characters); the item's stream wrapper inserts it,
+and the process worker's relay only when its thread carries none. Both
+readers strip the tag (`split_worker_tag`), classify what follows with a
+continuation state kept PER worker (item B's indented line is never item
+A's thought), and keep the label on the line and in the activity ("XRD 300
+K · Curve Fitting Planning"). The swarm and fan-out coordinators' own lines
+are the visible `fanout` kind by a MARK the coordinators put on them
+(`vocabulary.COORDINATOR_MARK`, through `fanout.coordinator_line` /
+`_cprint` — every coordinator print in `fanout.py`, `swarm.py` and
+`meta_orchestrator_tools.py` goes through it, and a test scans the source
+for one that does not), never by wording or by an emoji an agent may print
+too; the readers give them activity labels of their own. A fan-out
+branch's lines carry no tag.
 
 **A human-feedback gate declares what is under review; it does not print
 it for the surfaces to parse.** Every gate holds a structured object at ask

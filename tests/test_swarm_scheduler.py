@@ -692,7 +692,7 @@ def test_the_workers_console_reaches_the_turn_and_its_log(capsys):
     h = pl.submit(_spec("plain"))
     pl.wait(h, poll_s=0.05)
     out = capsys.readouterr().out
-    assert all(f"worker line {i}" in out for i in range(3)), out[-500:]
+    assert all(f"[plain] worker line {i}" in out for i in range(3)), out[-500:]   # tagged with the item's label
     log = (Path(h.spec["base_dir"]) / placements.WORKER_LOG).read_text()
     assert "worker line 2" in log
 
