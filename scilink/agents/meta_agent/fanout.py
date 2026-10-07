@@ -420,31 +420,31 @@ class Drain:
 # (#358) stands either way, so cancellation only shortens the waste.
 _branch_stop_events: Dict[int, "_threading.Event"] = {}
 _branch_stop_lock = _threading.Lock()
-#: A swarm item's label, by its thread: its lines are tagged "[label] " at
-#: the line start so the surfaces can tell whose narration it is when
-#: several items print at once (``ui.narration.split_worker_tag`` reads it
-#: back). Fan-out branches set none: their console output stays as it was.
-_branch_labels: Dict[int, str] = {}
+#: Whether a thread's next write begins a line (for the "[label] " tag a
+#: swarm item's lines carry; the label itself is the thread's worker label
+#: in ``log_context`` — registered by the item's thread, inherited by the
+#: threads it starts, read back by ``ui.narration.split_worker_tag``).
+#: Fan-out branches register no label: their console output stays as it was.
 _at_line_start: Dict[int, bool] = {}
 
 
 def _register_branch_stop(event, label: Optional[str] = None) -> None:
-    from ...utils.log_context import register_cancel
+    from ...ui.narration import worker_tag
+    from ...utils.log_context import register_cancel, register_label
     with _branch_stop_lock:
         _branch_stop_events[_threading.get_ident()] = event
-        if label:
-            _branch_labels[_threading.get_ident()] = str(label)
-            _at_line_start[_threading.get_ident()] = True
     register_cancel(event)          # waits (a parked question, an LLM slot) poll it
+    if label:
+        register_label(worker_tag(label))   # what the reader accepts, always
 
 
 def _unregister_branch_stop() -> None:
-    from ...utils.log_context import unregister_cancel
+    from ...utils.log_context import unregister_cancel, unregister_label
     with _branch_stop_lock:
         _branch_stop_events.pop(_threading.get_ident(), None)
-        _branch_labels.pop(_threading.get_ident(), None)
         _at_line_start.pop(_threading.get_ident(), None)
     unregister_cancel()
+    unregister_label()
 
 
 def tag_lines(label: str, data: str, at_start: bool) -> "tuple[str, bool]":
@@ -483,7 +483,8 @@ class _ThreadStopStream:
             from ...ui.output_capture import AgentStoppedError
             raise AgentStoppedError(
                 "fan-out branch cancelled (wall-clock budget exceeded)")
-        label = _branch_labels.get(tid)
+        from ...utils.log_context import current_label
+        label = current_label(tid)
         if label is not None:
             data, _at_line_start[tid] = tag_lines(label, data, _at_line_start.get(tid, True))
         return self._original.write(data)

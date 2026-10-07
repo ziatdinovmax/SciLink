@@ -28,10 +28,40 @@ _CAND_RE = re.compile(r"^\[cand[_-]?0*(\d+)\]\s*(.*)$")
 # A swarm item's lines carry its label, "[XRD 300 K] …", inserted at the
 # line start by the item's own stream (fanout._ThreadStopStream) or the
 # process worker's relay; never a candidate tag, which has its own rule.
+# The writers put the label through ``worker_tag`` first, so what they
+# write is always what this reads.
+WORKER_TAG_MAX = 48
 _WORKER_RE = re.compile(r"^\[(?!cand[_-]?\d)([^\[\]\n]{1,48})\]\s?(.*)$", re.S)
-# The swarm and fan-out coordinators' own lines: the launch, an item held
-# for memory or the breaker, the guard, a rerun, a budget, a refusal.
-_COORDINATOR_RE = re.compile(r"^(?:🐝|⏸|🧯|🔁|⛔|⏱)")
+# The swarm and fan-out coordinators' own lines, by their wording — the
+# launch, an item held for memory or the breaker, the guard, a rerun, a
+# budget, a refusal, the heartbeat, an item finished. An agent's own line
+# that opens with the same emoji ("⏱ Nobody answered the review in time",
+# "🔁 Diagram render error") is not one.
+_COORDINATOR_RE = re.compile(
+    r"^(?:🐝 |"
+    r"⏸\s+holding (?:branch )?'|"
+    r"🧯 (?:free memory is low|'[^']*' ran out of memory)|"
+    r"🔁 (?:running (?:branch )?'[^']*' again|Resuming \d+ fan-out branch)|"
+    r"⛔ (?:not started:|reaction refused|not running '[^']*' again)|"
+    r"⏱️?\s+(?:swarm item|analysis branch|resumed branch|raw-instrument branch\(es\)) |"
+    r"⏳ (?:\d+ swarm item\(s\) still running|\d+ of \d+ parallel analyses still|"
+    r"\d+ resumed branch\(es\) still|waiting for the cancelled (?:worker|branch) to end)|"
+    r"✅ (?:swarm item|analysis branch|resumed branch) finished)")
+
+
+def worker_tag(label: object) -> str:
+    """The tag a writer puts before a swarm item's lines, from the item's
+    label as the model wrote it: one line, no brackets, at most
+    ``WORKER_TAG_MAX`` characters (cut with an ellipsis), never shaped like
+    a candidate tag — so the reader (``_WORKER_RE``) always accepts it."""
+    text = re.sub(r"\s+", " ", str(label or "").replace("[", "(").replace("]", ")")).strip()
+    if not text:
+        text = "item"
+    if re.match(r"^cand[_-]?\d", text, re.I):
+        text = "item " + text
+    if len(text) > WORKER_TAG_MAX:
+        text = text[:WORKER_TAG_MAX - 1].rstrip() + "…"
+    return text
 # The atom emoji may or may not carry its variation selector (U+FE0F).
 _HANDOFF_RE = re.compile(
     r"^(?:\U0001F9EA|\U0001F4CB|⚛️?)\s+Delegating to"
@@ -70,20 +100,34 @@ def split_worker_tag(clean: str) -> tuple:
     return m.group(1), m.group(2)
 
 
+class _Continuation:
+    """What a 💭 or 🤖 line opened and has not closed — per writer: the
+    meta's stream and each swarm item's are interleaved, and an indented
+    line of item B must never read as the continuation of item A's
+    thought."""
+    __slots__ = ("in_thought", "thought_specialist", "in_answer", "answer_specialist")
+
+    def __init__(self) -> None:
+        self.in_thought = False
+        self.thought_specialist = False
+        self.in_answer = False
+        self.answer_specialist = False
+
+
 class LineClassifier:
     """Stateful line classifier: a 💭 line opens a thought whose
     continuation lines are indented five spaces; a 🤖 line opens an answer
-    that runs until the next recognisable kind."""
+    that runs until the next recognisable kind. The state is kept per
+    worker (the meta's own lines and each swarm item's)."""
 
     def __init__(self) -> None:
-        self._in_thought = False
-        self._thought_specialist = False
-        self._in_answer = False
-        self._answer_specialist = False
+        self._by_worker: dict = {}
 
-    def _reset(self) -> None:
-        self._in_thought = False
-        self._in_answer = False
+    def _state(self, worker: Optional[str]) -> _Continuation:
+        st = self._by_worker.get(worker)
+        if st is None:
+            st = self._by_worker[worker] = _Continuation()
+        return st
 
     def push(self, raw: str) -> Line:
         clean = strip_ansi(raw.rstrip("\n"))
@@ -91,33 +135,35 @@ class LineClassifier:
         clean = clean.replace(THOUGHT_MARK, "")
         worker, clean = split_worker_tag(clean)
         s = clean.strip()
+        st = self._state(worker)
 
         def line(kind, text, spec=False, verbose=True):
             return Line(kind, text, spec, verbose, worker)
 
         if s.startswith("🤖"):
-            self._in_thought = False
-            self._in_answer = True
-            self._answer_specialist = specialist
+            st.in_thought = False
+            st.in_answer = True
+            st.answer_specialist = specialist
             return line("answer_header", s, specialist, verbose=False)
         if _HANDOFF_RE.match(s):
-            self._reset()
+            st.in_thought = st.in_answer = False
             return line("handoff", s, verbose=False)
         if s.startswith("💭"):
-            self._in_thought = True
-            self._in_answer = False
-            self._thought_specialist = specialist
+            st.in_thought = True
+            st.in_answer = False
+            st.thought_specialist = specialist
             return line("thought", s, specialist, verbose=False)
-        if self._in_thought and clean.startswith("     "):
-            return line("thought", s, self._thought_specialist, verbose=False)
-        self._in_thought = False
+        if st.in_thought and clean.startswith("     "):
+            return line("thought", s, st.thought_specialist, verbose=False)
+        st.in_thought = False
 
         kind = None
         if s.startswith("🔧 Calling tool:"):
             kind = "tool_call"
+        elif s.startswith("🔀") or _COORDINATOR_RE.match(s):
+            kind = "fanout"              # the coordinators' own lines, by their wording
         elif s.startswith("⏳"):
-            # the coordinator's heartbeat is its line; any other wait is verbose
-            kind = "fanout" if re.search(r"swarm item\(s\) still running|parallel analyses still", s) else "waiting"
+            kind = "waiting"
         elif s.startswith("⚠"):
             kind = "warning"
         elif s.startswith("💾"):
@@ -126,10 +172,6 @@ class LineClassifier:
             kind = "files"
         elif s.startswith("🧠 Memory:"):
             kind = "memory"
-        elif s.startswith("🔀") or _COORDINATOR_RE.match(s):
-            kind = "fanout"
-        elif s.startswith("✅") and re.match(r"^✅ (?:swarm item|analysis branch|resumed branch) finished", s):
-            kind = "fanout"
         elif s.startswith(("🔄", "✅", "⚡", "🙋", "📊", "🧠", "📚", "🖼", "📄", "🗑")):
             kind = "bookkeeping"     # the agents' own housekeeping / tool banners
         elif s.startswith("Human feedback enabled"):
@@ -139,11 +181,11 @@ class LineClassifier:
         elif _RULE_RE.match(s):
             kind = "rule"
         if kind is not None:
-            self._in_answer = False
+            st.in_answer = False
             return line(kind, s, verbose=kind not in VISIBLE_KINDS)
 
-        if self._in_answer:
-            return line("answer_body", clean, self._answer_specialist,
+        if st.in_answer:
+            return line("answer_body", clean, st.answer_specialist,
                         verbose=False)
         if not s:
             return line("blank", "")

@@ -124,3 +124,71 @@ def test_a_swarm_items_tag_is_read_off_the_line_and_the_coordinators_lines_are_v
     assert c.push("  ⏳ Waiting for orchestrator response ...").kind == "waiting"
     assert c.push("  ✅ Sandbox approval already granted this session").kind == "bookkeeping"
     assert split_worker_tag("[cand_01] x") == (None, "[cand_01] x")       # a candidate tag is not a worker
+
+
+def test_the_writers_label_is_always_one_the_reader_accepts():
+    """Round trip: whatever label the model wrote, ``worker_tag`` makes a tag
+    that ``split_worker_tag`` reads back (review of #774, item 1)."""
+    from scilink.ui.narration import WORKER_TAG_MAX, split_worker_tag, worker_tag
+    long = "Raman A7 anatase fraction vs annealing temperature series, second pass"
+    for label in (long, "XRD [300 K]", "cand_02", "cand-7 fit", "", "   ", "a\nb", "x" * 200):
+        tag = worker_tag(label)
+        assert 1 <= len(tag) <= WORKER_TAG_MAX and "[" not in tag and "]" not in tag and "\n" not in tag
+        got, rest = split_worker_tag(f"[{tag}] 💭 hello")
+        assert (got, rest) == (tag, "💭 hello"), label
+    assert worker_tag("XRD [300 K]") == "XRD (300 K)"
+    assert worker_tag(long).endswith("…") and len(worker_tag(long)) == WORKER_TAG_MAX
+    assert worker_tag("cand_02") == "item cand_02" and worker_tag("") == "item"
+    c = LineClassifier()
+    ln = c.push(f"[{worker_tag(long)}]   💭 a thought")
+    assert (ln.kind, ln.verbose) == ("thought", False) and ln.worker == worker_tag(long)
+
+
+def test_coordinator_lines_are_matched_by_wording_not_emoji():
+    """Item 4: an agent's own line that opens with the same emoji stays
+    plain (verbose); the coordinators' lines are the visible fan-out kind."""
+    c = LineClassifier()
+    for text in ("  ⏱ Nobody answered the review in time; the plan is marked unattended",
+                 "    🔁 Diagram render error (attempt 2): …",
+                 "  ⏱️ Deep literature searches take a few minutes",
+                 "  ⏳ Waiting for orchestrator response ...",
+                 "  ✅ Sandbox approval already granted this session",
+                 "  ⛔ Fan-out over this dataset set was already declined"):
+        ln = c.push(text)
+        assert ln.kind in ("plain", "waiting", "bookkeeping") and ln.verbose, text
+    for text in ("  🐝 swarm_x: 2 item(s), up to 2 at a time",
+                 "  ⏸  holding branch 'purity plan' for memory headroom (needs ~0.5 GB)",
+                 "  ⏸  holding 'x': the provider circuit breaker is open",
+                 "  🧯 free memory is low (0.10 GB) — cancelling 'heavy'",
+                 "  🧯 'heavy' ran out of memory — running it again alone afterwards",
+                 "  🔁 running 'heavy' again, alone",
+                 "  🔁 running branch 'B.npy' again, alone",
+                 "  🔁 Resuming 2 fan-out branch(es) in their original sessions...",
+                 "  ⛔ not started: big cube — needs about 40.0 GB",
+                 "  ⛔ reaction refused (sim on f0001): max_reactions (2) reached",
+                 "  ⏱️  swarm item 'slow one' exceeded its wall-clock budget (0s)",
+                 "  ⏱️  analysis branch 'B' exceeded its wall-clock budget (5s)",
+                 "  ⏳ 2 swarm item(s) still running ...",
+                 "  ⏳ 1 of 3 parallel analyses still running ... (~60s elapsed)",
+                 "  ⏳ waiting for the cancelled worker to end before the rerun (3 s) ...",
+                 "  ✅ swarm item finished: XRD 300 K (success)",
+                 "  ✅ analysis branch finished: A.npy  (1/2 done)",
+                 "  ✅ resumed branch finished: B.npy (status: success)"):
+        ln = c.push(text)
+        assert (ln.kind, ln.verbose) == ("fanout", False), text
+
+
+def test_thought_and_answer_continuation_is_kept_per_worker():
+    """Item 5: item A's open thought never swallows item B's indented line,
+    and the meta's own stream is a writer of its own."""
+    c = LineClassifier()
+    assert c.push("[A]   💭 A thinks").kind == "thought"
+    b = c.push("[B]      an indented line of B")
+    assert (b.kind, b.worker) == ("plain", "B")
+    a2 = c.push("[A]      and A continues")
+    assert (a2.kind, a2.worker, a2.text) == ("thought", "A", "and A continues")
+    meta = c.push("     the meta's indented line")
+    assert (meta.kind, meta.worker) == ("plain", None)
+    assert c.push("[A] 🤖 Specialist:").kind == "answer_header"
+    assert c.push("[B] some result text of B").kind == "plain"           # not A's answer body
+    assert c.push("[A] the body of A's answer").kind == "answer_body"

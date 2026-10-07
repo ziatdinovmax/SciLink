@@ -46,7 +46,8 @@ def _sequence_steps(text: str) -> list:
     marks = [(m.start(), m.end(), int(m.group(1))) for m in boundary.finditer(text)]
     # The sequence starts at 1; or at 2 when the text opens with an
     # unnumbered first step ("Calibrate … . 2) measure … 3) …" — the shape
-    # the gate showed as one list item, #701), which is then step 1.
+    # the gate showed as one list item, #701), which is then step 1 — and
+    # only when a 3 follows the 2.
     first = 1 if any(n == 1 for _, _, n in marks) else 2
     cuts, expected = [], first
     for start, end, n in marks:
@@ -54,7 +55,10 @@ def _sequence_steps(text: str) -> list:
             continue
         cuts.append((start, end))
         expected += 1
-    if not cuts or (first == 1 and len(cuts) < 2):
+    if len(cuts) < 2:
+        # Two numbers in sequence, always: a lone "2)" after "Ref." / "Fig."
+        # / "Eq." is a citation, not an unnumbered first step followed by
+        # its second.
         return [text]
     steps = []
     lead = text[:cuts[0][0]].strip()

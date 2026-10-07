@@ -30,6 +30,10 @@ check("thought continuation", (() => { cl.push("  💭 first"); return cl.push("
 check("specialist answer", (() => { const l = cl.push(`🤖${VOCAB.thought_mark} Specialist:`); return l.kind === "answer_header" && l.specialist; })());
 check("answer body follows", cl.push("the fit converged").kind === "answer_body");
 check("simulation handoff", cl.push("  ⚛️ Delegating to simulation specialist: x").kind === "handoff");
+check("worker tag read off the line", (() => { const l = cl.push("[XRD 300 K]   💭 first"); return l.kind === "thought" && l.worker === "XRD 300 K"; })());
+check("continuation is per worker", (() => { cl.push("[A]   💭 a thinks"); const b = cl.push("[B]      indented but B's"); return b.kind === "plain" && b.worker === "B"; })());
+check("coordinator line is visible", (() => { const l = cl.push("  🐝 swarm_x: 2 item(s), up to 2 at a time"); return l.kind === "fanout" && !l.verbose; })());
+check("an agent's ⏱ line is not a coordinator line", cl.push("  ⏱ Nobody answered the review in time").kind === "plain");
 
 console.log("vocabulary:");
 check("all modes present", ["meta", "analyze", "plan", "simulate"].every((k) => k in VOCAB.modes));

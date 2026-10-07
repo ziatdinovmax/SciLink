@@ -308,9 +308,11 @@ class _LogRelay:
     line tagged ``[label] `` like a thread item's (``fanout.tag_lines``)."""
 
     def __init__(self, path: Path, label: str, interval_s: float = 0.3):
+        from ...ui.narration import worker_tag
         self.path = path
-        self.label = str(label)
+        self.label = worker_tag(label)
         self._interval = interval_s
+        self._prefix = ""           # set on the relay's own thread (see _run)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -321,6 +323,11 @@ class _LogRelay:
         self._thread.start()
 
     def _run(self) -> None:
+        # Inside a swarm the relay thread inherits the item's label and the
+        # item's stream wrapper tags its prints; on its own (no label on this
+        # thread) it writes the tag itself, so a line is tagged once either way.
+        from ...utils.log_context import current_label
+        self._prefix = "" if current_label() else f"[{self.label}] "
         pos, buf = 0, b""
         while True:
             try:
@@ -335,13 +342,13 @@ class _LogRelay:
             buf = lines.pop()
             try:
                 for line in lines:
-                    print(f"[{self.label}] {line.decode('utf-8', 'replace')}")
+                    print(f"{self._prefix}{line.decode('utf-8', 'replace')}")
             except BaseException:  # noqa: BLE001 - the turn was stopped: nothing to relay to
                 return
             if self._stop.is_set():
                 if buf:
                     try:
-                        print(f"[{self.label}] {buf.decode('utf-8', 'replace')}")
+                        print(f"{self._prefix}{buf.decode('utf-8', 'replace')}")
                     except BaseException:  # noqa: BLE001
                         pass
                 return

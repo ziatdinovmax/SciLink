@@ -104,3 +104,100 @@ def test_the_relay_tags_a_process_workers_lines(capsys):
     pl.wait(h, poll_s=0.05)
     out = capsys.readouterr().out
     assert "[XRD 300 K] worker line 0" in out and "[XRD 300 K] worker line 2" in out
+
+
+def test_threads_an_item_starts_inherit_its_label(monkeypatch):
+    """Item 2 of the review: a best-of-N candidate thread started with
+    ``attributed_to_current`` or ``inherited_context`` prints under the
+    item's label, so two items' candidates can be told apart."""
+    from scilink.utils.log_context import attributed_to_current, inherited_context
+
+    class Sink:
+        chunks = []
+
+        def write(self, data):
+            Sink.chunks.append(data)
+            return len(data)
+
+        def flush(self):
+            pass
+    Sink.chunks = []
+    stream = fo._ThreadStopStream(Sink())
+    done = threading.Event()
+
+    def candidate(n):
+        stream.write(f"[cand_{n:02d}] Verification 1/7\n")
+
+    def item():
+        fo._register_branch_stop(threading.Event(), label="fit A")
+        try:
+            t1 = threading.Thread(target=attributed_to_current(candidate), args=(1,))
+            ctx = inherited_context()                      # made on the item's thread
+
+            def with_ctx():
+                with ctx.applied():                        # applied on the child
+                    candidate(2)
+            t2 = threading.Thread(target=with_ctx)
+            t1.start(); t2.start(); t1.join(5); t2.join(5)
+            stream.write("💭 the item itself\n")
+        finally:
+            fo._unregister_branch_stop()
+            done.set()
+    threading.Thread(target=item).start()
+    done.wait(10)
+    out = "".join(Sink.chunks)
+    assert "[fit A] [cand_01] Verification 1/7\n" in out and "[fit A] [cand_02] Verification 1/7\n" in out
+    assert "[fit A] 💭 the item itself\n" in out
+    from scilink.ui.narration import LineClassifier
+    ln = LineClassifier().push("[fit A] [cand_01] Verification 1/7")
+    assert (ln.kind, ln.worker) == ("candidate", "fit A")
+
+
+def test_a_long_or_bracketed_label_is_tagged_in_a_form_the_reader_accepts():
+    from scilink.ui.narration import LineClassifier
+    from scilink.utils.log_context import current_label
+
+    class Sink:
+        chunks = []
+
+        def write(self, data):
+            Sink.chunks.append(data)
+            return len(data)
+
+        def flush(self):
+            pass
+    Sink.chunks = []
+    stream = fo._ThreadStopStream(Sink())
+    done = threading.Event()
+    label = "Raman A7 anatase fraction vs annealing temperature series [second pass]"
+
+    def item():
+        fo._register_branch_stop(threading.Event(), label=label)
+        try:
+            Sink.tag = current_label()
+            stream.write("💭 a thought\n")
+        finally:
+            fo._unregister_branch_stop()
+            done.set()
+    threading.Thread(target=item).start()
+    done.wait(5)
+    ln = LineClassifier().push("".join(Sink.chunks).rstrip("\n"))
+    assert (ln.kind, ln.verbose, ln.worker) == ("thought", False, Sink.tag)
+    assert len(Sink.tag) <= 48 and "[" not in Sink.tag
+
+
+def test_the_relay_inside_a_labelled_item_does_not_tag_twice(capsys, monkeypatch):
+    import tempfile
+    from scilink.utils.log_context import register_label, unregister_label
+    from test_swarm_scheduler import TARGET
+    monkeypatch.setattr(sys, "stdout", fo._ThreadStopStream(sys.stdout))   # as a swarm installs it
+    register_label("XRD 300 K")
+    try:
+        pl = LocalProcess(target=TARGET)
+        h = pl.submit({"mode": "analysis", "task": "plain", "label": "XRD 300 K", "autonomy": "AUTONOMOUS",
+                       "host": {}, "base_dir": tempfile.mkdtemp(prefix="swarm-item-")})
+        pl.wait(h, poll_s=0.05)
+    finally:
+        unregister_label()
+    out = capsys.readouterr().out
+    assert "[XRD 300 K] worker line 1" in out and "[XRD 300 K] [XRD 300 K]" not in out

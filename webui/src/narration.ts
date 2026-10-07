@@ -64,8 +64,21 @@ const CAND_RE = /^\[cand[_-]?0*(\d+)\]\s*(.*)$/;
 // start by the item's own stream or the process worker's relay; never a
 // candidate tag, which has its own rule.
 const WORKER_RE = /^\[(?!cand[_-]?\d)([^[\]\n]{1,48})\]\s?([\s\S]*)$/;
-// The swarm and fan-out coordinators' own lines.
-const COORDINATOR_RE = /^(?:🐝|⏸|🧯|🔁|⛔|⏱)/u;
+// The swarm and fan-out coordinators' own lines, by their wording (an agent's
+// line opening with the same emoji — "⏱ Nobody answered…", "🔁 Diagram render
+// error" — is not one).
+const COORDINATOR_RE = new RegExp(
+  "^(?:🐝 |" +
+    "⏸\\s+holding (?:branch )?'|" +
+    "🧯 (?:free memory is low|'[^']*' ran out of memory)|" +
+    "🔁 (?:running (?:branch )?'[^']*' again|Resuming \\d+ fan-out branch)|" +
+    "⛔ (?:not started:|reaction refused|not running '[^']*' again)|" +
+    "⏱️?\\s+(?:swarm item|analysis branch|resumed branch|raw-instrument branch\\(es\\)) |" +
+    "⏳ (?:\\d+ swarm item\\(s\\) still running|\\d+ of \\d+ parallel analyses still|" +
+    "\\d+ resumed branch\\(es\\) still|waiting for the cancelled (?:worker|branch) to end)|" +
+    "✅ (?:swarm item|analysis branch|resumed branch) finished)",
+  "u",
+);
 
 /** ["XRD 300 K", "💭 …"] for a swarm item's tagged line, else [null, clean]. */
 export function splitWorkerTag(clean: string): [string | null, string] {
@@ -75,14 +88,31 @@ export function splitWorkerTag(clean: string): [string | null, string] {
 // The atom emoji may or may not carry its variation selector (U+FE0F).
 const HANDOFF_RE = /^(?:\u{1F9EA}|\u{1F4CB}|⚛️?)\s+Delegating to|^\u{1F9EC} Fusing delegations/u;
 
+/** What a 💭 or 🤖 line opened and has not closed — per writer: the meta's
+ * stream and each swarm item's are interleaved, and an indented line of item
+ * B must never read as the continuation of item A's thought. */
+interface Continuation {
+  inThought: boolean;
+  thoughtSpecialist: boolean;
+  inAnswer: boolean;
+  answerSpecialist: boolean;
+}
+
 /** Stateful: a 💭 line opens a thought whose continuation lines are
  * indented five spaces; a 🤖 line opens an answer that runs until the next
- * recognisable kind. */
+ * recognisable kind. The state is kept per worker (the meta's own lines and
+ * each swarm item's). */
 export class LineClassifier {
-  private inThought = false;
-  private thoughtSpecialist = false;
-  private inAnswer = false;
-  private answerSpecialist = false;
+  private byWorker = new Map<string | null, Continuation>();
+
+  private state(worker: string | null): Continuation {
+    let st = this.byWorker.get(worker);
+    if (!st) {
+      st = { inThought: false, thoughtSpecialist: false, inAnswer: false, answerSpecialist: false };
+      this.byWorker.set(worker, st);
+    }
+    return st;
+  }
 
   push(raw: string): NarrationLine {
     let clean = stripAnsi(raw.replace(/\n$/, ""));
@@ -91,50 +121,49 @@ export class LineClassifier {
     const [worker, rest] = splitWorkerTag(clean);
     clean = rest;
     const s = clean.trim();
+    const st = this.state(worker);
     const line = (kind: LineKind, text: string, spec = false, verbose = true) =>
       ({ kind, text, specialist: spec, verbose, worker });
 
     if (s.startsWith("🤖")) {
-      this.inThought = false;
-      this.inAnswer = true;
-      this.answerSpecialist = specialist;
+      st.inThought = false;
+      st.inAnswer = true;
+      st.answerSpecialist = specialist;
       return line("answer_header", s, specialist, false);
     }
     if (HANDOFF_RE.test(s)) {
-      this.inThought = false;
-      this.inAnswer = false;
+      st.inThought = false;
+      st.inAnswer = false;
       return line("handoff", s, false, false);
     }
     if (s.startsWith("💭")) {
-      this.inThought = true;
-      this.inAnswer = false;
-      this.thoughtSpecialist = specialist;
+      st.inThought = true;
+      st.inAnswer = false;
+      st.thoughtSpecialist = specialist;
       return line("thought", s, specialist, false);
     }
-    if (this.inThought && clean.startsWith("     ")) {
-      return line("thought", s, this.thoughtSpecialist, false);
+    if (st.inThought && clean.startsWith("     ")) {
+      return line("thought", s, st.thoughtSpecialist, false);
     }
-    this.inThought = false;
+    st.inThought = false;
 
     let kind: LineKind | null = null;
     if (s.startsWith("🔧 Calling tool:")) kind = "tool_call";
-    // the coordinator's heartbeat is its line; any other wait is verbose
-    else if (s.startsWith("⏳")) kind = /swarm item\(s\) still running|parallel analyses still/.test(s) ? "fanout" : "waiting";
+    else if (s.startsWith("🔀") || COORDINATOR_RE.test(s)) kind = "fanout"; // the coordinators' own lines
+    else if (s.startsWith("⏳")) kind = "waiting";
     else if (s.startsWith("⚠")) kind = "warning";
     else if (s.startsWith("💾")) kind = "checkpoint";
     else if (s.startsWith("📂") || s.startsWith("📁")) kind = "files";
     else if (s.startsWith("🧠 Memory:")) kind = "memory";
-    else if (s.startsWith("🔀") || COORDINATOR_RE.test(s)) kind = "fanout";
-    else if (/^✅ (?:swarm item|analysis branch|resumed branch) finished/u.test(s)) kind = "fanout";
     else if (/^(?:🔄|✅|⚡|🙋|📊|🧠|📚|🖼|📄|🗑)/u.test(s)) kind = "bookkeeping";
     else if (s.startsWith("Human feedback enabled")) kind = "bookkeeping";
     else if (CAND_RE.test(s)) kind = "candidate";
     else if (RULE_RE.test(s)) kind = "rule";
     if (kind !== null) {
-      this.inAnswer = false;
+      st.inAnswer = false;
       return line(kind, s, false, !VISIBLE_KINDS.has(kind));
     }
-    if (this.inAnswer) return line("answer_body", clean, this.answerSpecialist, false);
+    if (st.inAnswer) return line("answer_body", clean, st.answerSpecialist, false);
     if (!s) return line("blank", "");
     return line("plain", s);
   }

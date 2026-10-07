@@ -471,8 +471,14 @@ def test_numbered_steps_recognise_the_formats_plans_are_written_in():
         "flatten.", "segment with threshold 0.5.", "measure areas."]
     assert base.numbered_steps("flatten → segment → measure") == ["flatten.", "segment.", "measure."]
     assert base.numbered_steps("Set n_cage=4) and sigma=2. Then fit.") == ["Set n_cage=4) and sigma=2. Then fit."]
-    assert base.numbered_steps("Flatten the image. 2. Segment. 4. Measure.") == ["Flatten the image.", "Segment. 4. Measure."]
+    # an unnumbered first step counts only when a 2 AND a 3 follow it; a lone
+    # "2." (and a 4 out of sequence) leaves the paragraph whole
+    assert base.numbered_steps("Flatten the image. 2. Segment. 4. Measure.") == ["Flatten the image. 2. Segment. 4. Measure."]
     assert base.numbered_steps("1) load 2) crop 3) fit") == ["1) load 2) crop 3) fit"]   # no boundary: whole
+    # a lone "2)" after an abbreviation is a citation, not an unnumbered first step's second
+    for cite in ("Calibrate the detector gain (see Ref. 2) before fitting the peaks.",
+                 "Compare with Fig. 2) and Eq. 2) as needed."):
+        assert base.numbered_steps(cite) == [cite], cite
     # the console form: one step per line under the label, as the gate's steps block
     assert base.steps_text(one_line) == ("1. Calibrate at 0.15 nm/px.\n   2. measure_lattice_constant(window=0.2) "
                                          "with sigma=2.\n   3. detect_atoms_dcnn(n_cage=4) then refine.")
