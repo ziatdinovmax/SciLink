@@ -68,6 +68,8 @@ def _mode_modules():
 @pytest.fixture()
 def meta(tmp_path, monkeypatch):
     monkeypatch.setenv("SCILINK_HOME", str(tmp_path / "home"))
+    # The stand-in workers live in this process: every item runs as a thread.
+    monkeypatch.setenv("SCILINK_SWARM_PLACEMENT", "thread")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setattr(swarm, "_POLL_S", 0.05)
     # Admission and the guard read the machine's memory; the tests fix it.

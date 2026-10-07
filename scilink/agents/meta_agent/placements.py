@@ -1,0 +1,327 @@
+"""Where a swarm item runs: the worker contract and its local placements.
+
+One interface, so the local scheduler already stamps what a later placement
+(an HPC job through ``ClusterExecutor``, an ECS task) will be read by::
+
+    submit(spec) -> handle
+    poll(handle) -> {state, result?, peak_rss_bytes?, stop_reason?}
+    cancel(handle) -> None          # idempotent
+
+``spec`` is plain data and carries no secrets: the mode, the task, its
+context, the item's directory and budgets, and what the host the item runs
+for looks like (model, endpoints, file roots, the skills and MCP servers it
+shares). The keys live in the environment the worker inherits. A state is
+one of ``STATES``: ``done`` means the worker returned a result (the result's
+own ``status`` says how the work went); ``failed`` that the worker itself
+failed with nothing returned; ``out_of_memory`` that it was killed with
+nothing returned and nobody asked for the cancel — the memory guard or the
+operating system's killer; ``interrupted`` that it was lost on a restart.
+
+Two placements run here:
+
+- ``process`` — a fresh interpreter through ``utils.child_process.run_child``
+  (never a spawn pool, #721), waited on by a thread attributed to the item's
+  own: the item's cancel and the turn's Stop reach the child's whole tree,
+  and the child's memory is measured while it runs, which is what fills the
+  table of measured peaks per item class (``peaks.py``). An analysis item
+  with data runs here when nobody attends the swarm: its questions take
+  their defaults either way, and its process is the one that can be ended
+  and measured.
+- ``thread`` — today's path, in the coordinator's process: a planning or
+  simulation item (bound by model calls, no data of its own), and every item
+  of an attended swarm, whose questions need the person's channel. Its peak
+  cannot be split from the process's, so it measures nothing.
+
+The item's own thread is the waiter in both placements: it submits, polls
+until the handle is terminal and closes the delegation. A placement with no
+thread per item would be polled from the coordinator's loop through the
+same ``poll``.
+"""
+from __future__ import annotations
+
+import json
+import os
+import threading
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+STATES = ("queued", "running", "done", "failed", "cancelled", "out_of_memory", "interrupted")
+TERMINAL = frozenset(STATES[2:])
+PLACEMENTS = ("thread", "process")
+#: ``SCILINK_SWARM_PLACEMENT``: ``auto`` (the rule above), ``thread`` (every
+#: item in-process, the offline tests' setting), ``process`` (every analysis
+#: item with data in a process, attended or not — its questions then take
+#: their defaults).
+PLACEMENT_ENV = "SCILINK_SWARM_PLACEMENT"
+_RUN_ITEM = "scilink.agents.meta_agent.placements:run_item"
+_POLL_S = 0.5
+
+
+@dataclass
+class WorkerHandle:
+    """What ``submit`` returns; ``poll`` reads it, ``cancel`` sets it."""
+    spec: dict
+    placement: str
+    state: str = "queued"
+    result: Optional[dict] = None
+    peak_rss_bytes: Optional[float] = None
+    current_rss_bytes: Optional[float] = None
+    stop_reason: Optional[str] = None
+    usage: Dict[str, dict] = field(default_factory=dict)
+    unattended: int = 0
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    thread_id: Optional[int] = None
+
+    def snapshot(self) -> dict:
+        return {"state": self.state, "result": self.result, "peak_rss_bytes": self.peak_rss_bytes,
+                "stop_reason": self.stop_reason}
+
+
+# ------------------------------------------------------------------ the rule
+
+def placement_for(orch, item: dict, attended: bool) -> Tuple[str, str]:
+    """``(placement, reason)`` for one item under the rule in the module
+    docstring and ``SCILINK_SWARM_PLACEMENT``."""
+    forced = (os.environ.get(PLACEMENT_ENV) or "auto").strip().lower()
+    heavy = item.get("mode") == "analysis" and bool(item.get("data_path"))
+    if forced == "thread":
+        return "thread", f"{PLACEMENT_ENV}=thread"
+    if not heavy:
+        return "thread", "no data of its own: bound by model calls"
+    if attended and forced != "process":
+        return "thread", "the swarm is attended: its questions need the person's channel"
+    refusal = host_refusal(orch)
+    if refusal:
+        return "thread", refusal
+    return "process", ("an analysis item with data, nobody attending"
+                       if forced != "process" else f"{PLACEMENT_ENV}=process")
+
+
+def host_refusal(orch) -> Optional[str]:
+    """Why a fresh process could not stand in for ``orch`` — the one reason
+    today: an extension a process cannot inherit (a callable tool factory),
+    or a credential the meta holds that is not in the environment the child
+    inherits. The spec carries no secrets, so such a key cannot travel."""
+    for ext in getattr(orch, "_shared_extensions", None) or []:
+        if ext.get("kind") == "tools":
+            return "the meta shares custom tools (callables), which a process cannot inherit"
+    key = getattr(orch, "api_key", None)
+    if key and key not in os.environ.values():
+        return "the meta's API key is not in the environment a worker process inherits"
+    return None
+
+
+def host_spec(orch) -> dict:
+    """What a worker process needs to build a child as ``workers.build_child``
+    would for ``orch``: plain data, no key."""
+    fence = getattr(orch, "path_fence", None)
+    exts = []
+    for ext in getattr(orch, "_shared_extensions", None) or []:
+        if ext.get("kind") == "skill":
+            exts.append({"kind": "skill", "skill_path": str(ext["skill_path"])})
+        elif ext.get("kind") == "mcp":
+            exts.append({k: v for k, v in ext.items()
+                         if k in ("kind", "server_name", "command", "url", "env", "transport", "headers")})
+    return {
+        "model_name": getattr(orch, "model_name", None),
+        "base_url": getattr(orch, "base_url", None),
+        "embedding_model": getattr(orch, "embedding_model", None),
+        "embedding_api_key": None,
+        "embedding_base_url": getattr(orch, "embedding_base_url", None),
+        "futurehouse_api_key": None,
+        "knowledge_dir": (str(orch.knowledge_dir) if getattr(orch, "knowledge_dir", None) else None),
+        "file_roots": [str(r) for r in fence.roots] if fence is not None else None,
+        "extensions": exts,
+    }
+
+
+class _Host:
+    """The ``orch`` a worker process builds its child against."""
+
+    class _Fence:
+        def __init__(self, roots: Optional[List[str]]):
+            self.roots = [Path(r) for r in roots] if roots else []
+
+    def __init__(self, spec: dict):
+        self.api_key = None
+        self.model_name = spec.get("model_name")
+        self.base_url = spec.get("base_url")
+        self.embedding_model = spec.get("embedding_model")
+        self.embedding_api_key = spec.get("embedding_api_key")
+        self.embedding_base_url = spec.get("embedding_base_url")
+        self.futurehouse_api_key = spec.get("futurehouse_api_key")
+        self.knowledge_dir = spec.get("knowledge_dir")
+        self.path_fence = self._Fence(spec.get("file_roots")) if spec.get("file_roots") is not None else None
+        self._extensions = list(spec.get("extensions") or [])
+
+    def _propagate_extensions_to_child(self, child) -> None:
+        import logging
+        for ext in self._extensions:
+            try:
+                if ext.get("kind") == "skill":
+                    child.register_skill(ext["skill_path"])
+                elif ext.get("kind") == "mcp":
+                    child.connect_mcp_server(ext["server_name"], command=ext.get("command"),
+                                             url=ext.get("url"), env=ext.get("env"),
+                                             transport=ext.get("transport"), headers=ext.get("headers"))
+            except Exception as exc:  # noqa: BLE001 - as the meta: logged, the child stays usable
+                logging.getLogger(__name__).warning(
+                    f"Could not apply {ext.get('kind')} extension in the worker process: {exc}")
+
+
+def item_spec(orch, item: dict, task: str, base_dir: Path, autonomy: str) -> dict:
+    """The spec a process worker runs: the item's own fields, the host, and
+    whether the sandbox was approved in this session (a child cannot answer
+    the prompt, so the approval travels)."""
+    from ... import executors
+    return {
+        "mode": item["mode"], "task": task, "context": item.get("context"),
+        "label": item["label"], "base_dir": str(base_dir), "autonomy": autonomy,
+        "budget_s": item.get("_budget_s"), "host": host_spec(orch),
+        "sandbox_approved": bool(getattr(executors, "_GLOBAL_SANDBOX_APPROVED", False)
+                                 or (os.environ.get("UNSAFE_EXECUTION_OK") or "").lower() == "true"),
+    }
+
+
+# ------------------------------------------------------------- the child's side
+
+class _Defaults:
+    """The worker process's channel: every question gets its default, and is
+    counted, so the item's result says how many decisions nobody made."""
+
+    def __init__(self):
+        self.n = 0
+
+    def ask(self, req) -> str:
+        self.n += 1
+        return req.default or ""
+
+
+def _plain(value: Any) -> Any:
+    """JSON-shaped: what crosses the process boundary must pickle, and a
+    result that holds an agent's object must not travel with it."""
+    return json.loads(json.dumps(value, default=str))
+
+
+def run_item(spec: dict) -> dict:
+    """The worker process's side: build the child, run the task, return
+    ``{result, usage, unattended}``. Never raises for the work's failure (it
+    becomes an error result); what escapes is the process's failure."""
+    from ... import executors, hitl, tracing
+    from .workers import autonomy_for, build_child, release_child
+    if spec.get("sandbox_approved"):
+        executors._GLOBAL_SANDBOX_APPROVED = True
+        os.environ.setdefault("UNSAFE_EXECUTION_OK", "true")
+    channel = _Defaults()
+    hitl.set_thread_channel(channel)
+    usage: Dict[str, dict] = {}
+
+    def sink(model, prompt_tokens, completion_tokens, latency_s, session, worker=None):
+        row = usage.setdefault(str(model), {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                                           "seconds": 0.0})
+        row["calls"] += 1
+        row["prompt_tokens"] += int(prompt_tokens or 0)
+        row["completion_tokens"] += int(completion_tokens or 0)
+        row["seconds"] += float(latency_s or 0.0)
+    tracing.set_usage_sink(sink)
+    host = _Host(spec["host"])
+    base_dir = Path(spec["base_dir"])
+    child = None
+    try:
+        child = build_child(host, spec["mode"], base_dir, label=f"Swarm: {spec['label']}")
+        result = child.run_task(spec["task"], context=spec.get("context"),
+                                autonomy=autonomy_for(spec["mode"], spec["autonomy"]))
+    except Exception as exc:  # noqa: BLE001 - the work's failure is a result
+        result = {"status": "error", "error": str(exc), "summary": "", "key_findings": [],
+                  "files_produced": [], "suggested_followups": [], "warnings": []}
+    finally:
+        if child is not None:
+            release_child(child)
+        tracing.set_usage_sink(None)
+        hitl.set_thread_channel(None)
+    return {"result": _plain(result), "usage": usage, "unattended": channel.n}
+
+
+# ----------------------------------------------------------------- placements
+
+class LocalProcess:
+    """The ``process`` placement: ``run_item`` in a fresh interpreter."""
+
+    def __init__(self, target: str = _RUN_ITEM):
+        self.target = target
+
+    def submit(self, spec: dict) -> WorkerHandle:
+        from ...utils.log_context import attributed_to_current
+        handle = WorkerHandle(spec, "process")
+
+        def watch(current: float, peak: float) -> None:
+            handle.current_rss_bytes, handle.peak_rss_bytes = current, peak
+
+        def run() -> None:
+            from ...ui.output_capture import AgentStoppedError
+            from ...utils.child_process import ChildLost, run_child
+            handle.thread_id = threading.get_ident()
+            handle.state = "running"
+            try:
+                outcome = run_child(self.target, spec, watch=watch)
+            except ChildLost as exc:
+                handle.stop_reason = exc.reason
+                if handle.cancel_event.is_set():
+                    handle.state = "cancelled"
+                elif exc.killed:
+                    handle.state = "out_of_memory"
+                else:
+                    handle.state = "failed"
+                return
+            except AgentStoppedError as exc:          # the thread's cancel, after the kill
+                handle.stop_reason = handle.stop_reason or str(exc) or "cancelled"
+                handle.state = "cancelled"
+                return
+            except BaseException as exc:  # noqa: BLE001 - the placement's own failure
+                handle.stop_reason = f"{type(exc).__name__}: {exc}"
+                handle.state = "failed"
+                return
+            report = outcome.value if isinstance(outcome.value, dict) else {"result": outcome.value}
+            handle.result = report.get("result")
+            handle.usage = dict(report.get("usage") or {})
+            handle.unattended = int(report.get("unattended") or 0)
+            if outcome.peak_rss_bytes:
+                handle.peak_rss_bytes = max(handle.peak_rss_bytes or 0.0, outcome.peak_rss_bytes)
+            handle.state = "done"
+
+        # Attributed to the item's thread: the item's cancel reaches the
+        # waiter, and the child is registered where a kill for the item's
+        # thread finds it.
+        t = threading.Thread(target=attributed_to_current(run, "process"),
+                             name=f"swarm-process-{spec.get('label', '')[:24]}", daemon=True)
+        handle._thread = t  # type: ignore[attr-defined]
+        t.start()
+        return handle
+
+    def poll(self, handle: WorkerHandle) -> dict:
+        return handle.snapshot()
+
+    def cancel(self, handle: WorkerHandle) -> None:
+        if handle.cancel_event.is_set():
+            return
+        handle.cancel_event.set()
+        if handle.thread_id is not None:
+            from ...executors import kill_subprocesses_for_thread
+            kill_subprocesses_for_thread(handle.thread_id)
+
+    def wait(self, handle: WorkerHandle, poll_s: float = _POLL_S) -> dict:
+        """Poll until the handle is terminal; the calling thread's own cancel
+        (the item's budget, the guard, the coordinator's Stop) cancels the
+        worker. Returns the final ``poll``."""
+        from ...utils.log_context import cancel_requested
+        while handle.state not in TERMINAL:
+            if cancel_requested() and not handle.cancel_event.is_set():
+                handle.stop_reason = handle.stop_reason or "cancelled"
+                self.cancel(handle)
+            time.sleep(poll_s)
+        t = getattr(handle, "_thread", None)
+        if t is not None:
+            t.join(timeout=5.0)
+        return self.poll(handle)

@@ -217,12 +217,24 @@ def _available_memory() -> Optional[float]:
 
 def _admit_branch(key: str, est: float, label: str) -> None:
     """Hold a branch until its estimated working set fits in available
-    memory alongside the branches already running. Progress guarantee: a
-    branch is ALWAYS admitted when nothing else is running, so the guard
-    can only delay work, never deadlock or drop it."""
+    memory alongside the branches already running, and while the provider
+    circuit breaker is open (``llm_limiter``: failures across every worker
+    pause new work, never running work). Progress guarantee: a branch is
+    ALWAYS admitted when nothing else is running and the breaker is closed,
+    so the guard can only delay work, never deadlock or drop it."""
+    from ...wrappers.llm_limiter import provider_tripped
     with _mem_cv:
-        held_logged = False
+        held_logged = breaker_logged = False
         while True:
+            open_for = provider_tripped()
+            if open_for is not None:
+                if not breaker_logged:
+                    print(f"  ⏸  holding '{label}': the provider circuit breaker is open "
+                          f"(retryable failures across workers); admission resumes in "
+                          f"~{open_for:.0f} s or on the next successful call")
+                    breaker_logged = True
+                _mem_cv.wait(timeout=min(5.0, max(open_for, 0.5)))
+                continue
             avail = _available_memory()
             if (not _mem_running or avail is None
                     or avail >= est + _BRANCH_MEM_MARGIN):
@@ -241,6 +253,149 @@ def _release_branch(key: str) -> None:
     with _mem_cv:
         _mem_running.pop(key, None)
         _mem_cv.notify_all()
+
+
+# --- Capacity: what the machine can run, and the guard while it runs -------
+# Shared by the swarm and the fan-out (stage 4): one refusal of work larger
+# than the host, one guard against overcommitting, in one place.
+
+#: Below this much free memory the guard cancels the running item that holds
+#: the most.
+MEMORY_FLOOR_BYTES = 7.5e8
+#: How long a coordinator waits for a cancelled worker to end before it gives
+#: up that item's rerun (a hung call never prints, so the cancel may never
+#: land).
+DRAIN_TIMEOUT_S = 600.0
+# A planning or simulation item's own working set, beside the imports every
+# worker thread already shares with the process.
+MODE_MEM_FLOOR = {"analysis": _BRANCH_MEM_FLOOR, "planning": 5e8, "simulation": 5e8}
+
+
+def estimate_item(item: dict) -> float:
+    """What one item (a swarm item, a fan-out branch) is planned at: its
+    class's MEASURED peak when a process worker of that class has run
+    (``peaks.py``, with its headroom), else the input-based estimate
+    (``_branch_mem_estimate``), else the mode's floor. Stamps the class and
+    whether the figure was measured on the item (``_mem_class``,
+    ``_mem_measured``), for the gate and the ledger."""
+    from . import peaks
+    mode = item.get("mode") or "analysis"
+    cls = peaks.item_class({**item, "mode": mode})
+    item["_mem_class"] = cls
+    measured = peaks.peak_estimate(cls)
+    item["_mem_measured"] = measured is not None
+    if measured is not None:
+        return measured
+    if mode == "analysis" and item.get("data_path"):
+        return _branch_mem_estimate({"data_path": item["data_path"], "pattern": item.get("pattern")})
+    return MODE_MEM_FLOOR.get(mode, _BRANCH_MEM_FLOOR)
+
+
+def plan_capacity(items: List[dict], memory: Optional[Dict[str, Optional[float]]] = None,
+                  *, max_workers: int) -> dict:
+    """Which items this machine can run, and whether together or in turn.
+
+    An item that needs more than the machine has in total, less a margin for
+    the system, can never run here and is not started. The rest are admitted
+    by free memory as they go, so items that do not fit together wait for
+    each other instead of overcommitting.
+    """
+    mem = memory or machine_memory()
+    total, avail = mem.get("total"), mem.get("available")
+    margin = _BRANCH_MEM_MARGIN
+    ceiling = (total - margin) if total else None
+    run, refused = [], []
+    for it in items:
+        est = estimate_item(it)
+        it["_mem_est"] = est
+        if ceiling is not None and est > ceiling:
+            refused.append({"label": it["label"], "reason": (
+                f"needs about {est / 1e9:.1f} GB"
+                + (" (measured for its class)" if it.get("_mem_measured") else "")
+                + f"; this machine has {total / 1e9:.1f} GB in all")})
+        else:
+            run.append(it)
+    need = sum(it["_mem_est"] for it in run)
+    together = avail is None or need + margin <= avail
+    return {"run": run, "refused": refused, "estimated_bytes": need,
+            "available_bytes": avail, "total_bytes": total, "together": together,
+            "workers": min(len(run), max_workers) if run else 0}
+
+
+def machine_memory() -> Dict[str, Optional[float]]:
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        return {"total": float(vm.total), "available": float(vm.available)}
+    except Exception:  # noqa: BLE001
+        return {"total": None, "available": None}
+
+
+def guard_memory(running: Dict[Any, dict], *, available: Optional[float], floor: float,
+                 est_of, rss_of, on_cancel) -> Optional[Any]:
+    """Cancel the running item that holds the most memory when
+    ``available`` (free memory, as the caller read it) is below ``floor``:
+    it frees the most. What an item holds is what its process worker was
+    last SAMPLED at (``rss_of``), else its estimate (``est_of``); the newest
+    of equals. ``on_cancel(fut, entry, reason)`` does the cancelling (the
+    caller's stop event, handle, subprocesses and ledger). Returns the
+    cancelled item's future, which the caller watches until that worker has
+    let go of its memory. One item alone is never cancelled: the guard is
+    against overcommitting by several items at once, and cancelling the
+    only one to run it alone again would change nothing."""
+    avail = available
+    if avail is None or avail >= floor:
+        return None
+    live = [(f, e) for f, e in running.items()
+            if e.get("status") == "running" and e.get("_started_at") and not e.get("_cancelled")]
+    if len(live) < 2:
+        return None
+
+    def holds(fe):
+        rss = rss_of(fe[0])
+        return (rss if rss is not None else est_of(fe[0]), fe[1]["_started_at"])
+    fut, entry = max(live, key=holds)
+    held = rss_of(fut)
+    entry["_cancelled"] = True
+    reason = (f"memory_pressure: {avail / 1e9:.2f} GB free, below the "
+              f"{floor / 1e9:.2f} GB floor"
+              + (f"; this item held {held / 1e9:.2f} GB" if held is not None else ""))
+    entry["_cancel_reason"] = reason
+    on_cancel(fut, entry, reason)
+    return fut
+
+
+class Drain:
+    """One memory cancellation at a time: memory is read again only once the
+    cancelled worker has actually ended and let go of what it held. A hung
+    worker (a call that never returns, compute that never prints) never
+    lets go: after ``timeout_s`` it is given up — ``tick`` returns it, and
+    the caller abandons its rerun."""
+
+    def __init__(self, timeout_s: float = DRAIN_TIMEOUT_S):
+        self.futs: set = set()
+        self.since: Optional[float] = None
+        self.timeout_s = timeout_s
+
+    def add(self, fut) -> None:
+        self.futs.add(fut)
+
+    @property
+    def active(self) -> bool:
+        return bool(self.futs)
+
+    def tick(self) -> list:
+        self.futs = {f for f in self.futs if not f.done()}
+        if self.futs and self.since is None:
+            self.since = time.monotonic()
+        elif not self.futs:
+            self.since = None
+        if self.futs and time.monotonic() - self.since > self.timeout_s:
+            hung = list(self.futs)
+            self.futs.clear()
+            self.since = None
+            return hung
+        return []
 
 
 # --- Cooperative branch cancellation ---------------------------------------
@@ -1147,6 +1302,87 @@ def _cancel_overdue_branches(orch, pending, fut_entry, fut_stop, fut_label,
         pending.discard(f)
 
 
+def _guard_step(orch, pending, fut_entry, fut_stop, fut_label, drain: "Drain",
+                rerun: List[dict]) -> None:
+    """One poll of the memory guard for a fan-out loop (``run_fanout`` and
+    ``resume_fanout``): the drain's bookkeeping, then — with no cancelled
+    worker still winding down — the shared rule (``guard_memory``). A
+    cancelled branch is closed ``memory_pressure`` and queued to run again
+    alone, once; a hung one is given up after the drain's timeout.
+    Mutates ``pending`` in place."""
+    for f in drain.tick():
+        e = fut_entry[f]
+        for r in list(rerun):
+            if r is e:
+                rerun.remove(r)
+                print(f"  ⚠️  giving up the rerun of '{fut_label[f]}': its cancelled "
+                      "branch has not ended.")
+        if e.get("_mem_key"):
+            _release_branch(e["_mem_key"])
+    if drain.active:
+        return
+
+    def on_cancel(fut, entry, reason):
+        avail = _available_memory() or 0.0
+        again = not entry.get("memory_retried")
+        print(f"  🧯 free memory is low ({avail / 1e9:.2f} GB) — cancelling branch "
+              f"'{fut_label[fut]}' " + ("and running it again alone afterwards"
+                                         if again else "(already run again once)"))
+        logger.warning(f"fan-out branch {entry['index']} ('{fut_label[fut]}') cancelled: {reason}")
+        fut_stop[fut].set()
+        tid = entry.get("_branch_tid")
+        if tid:
+            try:
+                from ...executors import kill_subprocesses_for_thread
+                kill_subprocesses_for_thread(tid)
+            except Exception:  # noqa: BLE001 - best-effort cleanup
+                pass
+        entry["memory_pressure"] = True
+        orch._close_delegation(entry, {
+            "status": "error", "error": reason, "summary": "", "key_findings": [],
+            "files_produced": [], "suggested_followups": [],
+            "warnings": [f"cancelled under memory pressure ({reason})"]})
+        if again:
+            entry["memory_retried"] = True
+            rerun.append(entry)
+
+    cancelled = guard_memory({f: fut_entry[f] for f in pending}, available=_available_memory(),
+                             floor=MEMORY_FLOOR_BYTES,
+                             est_of=lambda f: float(fut_entry[f].get("_mem_est") or _BRANCH_MEM_FLOOR),
+                             rss_of=lambda f: None, on_cancel=on_cancel)
+    if cancelled is not None:
+        drain.add(cancelled)
+        pending.discard(cancelled)
+
+
+def _relaunch_alone(orch, pool, entry: dict, queue_channel=None, branch_autonomy=None):
+    """Run a memory-cancelled branch again in its own session, alone: the
+    resume path's retry shape (its recorded task with a retry note, restored
+    where the first attempt left a checkpoint). Returns ``(future, stop)``."""
+    slug = _slug(entry.get("label") or "branch")
+    has_ckpt = (orch.fanout_dir / f"{entry['index']:02d}_{slug}" / "checkpoint.json").exists()
+    branch = {
+        "task": (entry.get("task") or "") + _RETRY_NOTE.format(
+            error=str(entry.get("error") or "memory pressure")[:300]),
+        "label": entry.get("label"), "data_path": entry.get("data_path"),
+        "pattern": entry.get("pattern"), "metadata": entry.get("metadata"),
+        "_premeshed": True, "_resume": has_ckpt, "_mem_est": entry.get("_mem_est"),
+        **(entry.get("depth") or {}),
+    }
+    with orch._fanout_lock:
+        entry["retry_of_error"] = str(entry.get("error") or "")[:300]
+        entry["retries"] = int(entry.get("retries") or 0) + 1
+        entry["status"] = "running"
+        entry.pop("completed_at", None)
+        entry.pop("error", None)
+        entry.pop("_cancelled", None)
+    print(f"  🔁 running branch '{entry.get('label')}' again, alone")
+    stop_ev = _threading.Event()
+    fut = pool.submit(_attributed_branch(_run_one_branch), orch, branch, [], entry,
+                      queue_channel, branch_autonomy, stop_ev)
+    return fut, stop_ev
+
+
 def _run_one_branch(orch, branch: dict, companions: List[dict],
                     entry: dict, queue_channel=None,
                     branch_autonomy=None, stop_event=None) -> None:
@@ -1168,8 +1404,12 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
     slug = _slug(branch.get("label") or Path(branch["data_path"]).stem)
     base_dir = orch.fanout_dir / f"{index:02d}_{slug}"
     mem_key = f"{index}:{slug}"
-    _admit_branch(mem_key, _branch_mem_estimate(branch),
-                  branch.get("label") or slug)
+    # Admitted at what the capacity plan sized it at (a measured class's
+    # peak, else the input-based estimate); a resumed branch is sized here.
+    est = branch.get("_mem_est") or estimate_item(branch)
+    _admit_branch(mem_key, est, branch.get("label") or slug)
+    entry["_mem_key"] = mem_key
+    entry["_mem_est"] = est
     entry["_started_at"] = time.monotonic()
     entry.pop("_human_wait_s", None)          # a resumed entry may carry stale waits
     entry.pop("_waiting_since", None)
@@ -1279,11 +1519,12 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
                     from ...hitl import set_thread_channel
                     set_thread_channel(None)
                 _release_branch(mem_key)
-    if entry.get("timed_out"):
+    if entry.get("timed_out") or entry.get("_cancelled"):
         logger.warning(
-            f"fan-out branch {index} finished AFTER its wall-clock budget "
-            f"expired (late status: {result.get('status')}); the timeout "
-            "verdict stands — late outcome recorded for audit only.")
+            f"fan-out branch {index} finished AFTER it was "
+            f"{'abandoned on its wall-clock budget' if entry.get('timed_out') else 'cancelled'} "
+            f"(late status: {result.get('status')}); the verdict stands — late outcome "
+            "recorded for audit only.")
         entry["late_result"] = {
             "status": result.get("status"),
             "summary_head": (result.get("summary") or "")[:300],
@@ -1519,18 +1760,31 @@ def resume_fanout(orch, retry_failed: bool = False) -> str:
             fut_label[fut] = e.get("label") or f"branch {e['index']}"
         pending = set(fut_entry)
         since_tick = 0.0
-        while pending:
+        drain, rerun = Drain(), []
+        while pending or rerun:
             t0 = time.monotonic()
-            done, pending = wait(pending, timeout=_FANOUT_POLL_S)
+            if pending:
+                done, pending = wait(pending, timeout=_FANOUT_POLL_S)
+            else:
+                done = set()
+                wait(drain.futs, timeout=_FANOUT_POLL_S)
+                print(f"  ⏳ waiting for the cancelled branch to end before the rerun "
+                      f"({int(time.monotonic() - (drain.since or t0))} s) ...")
             since_tick += time.monotonic() - t0
             for f in done:
                 f.result()
                 print(f"  ✅ resumed branch finished: {fut_label[f]} "
                       f"(status: {fut_entry[f].get('status')})")
                 since_tick = 0.0
+            _guard_step(orch, pending, fut_entry, fut_stop, fut_label, drain, rerun)
             if budget > 0:
                 _cancel_overdue_branches(orch, pending, fut_entry, fut_stop,
                                          fut_label, budget)
+            if not pending and rerun and not drain.active:
+                e = rerun.pop(0)
+                fut, stop_ev = _relaunch_alone(orch, pool, e)
+                fut_label[fut], fut_entry[fut], fut_stop[fut] = e.get("label") or f"branch {e['index']}", e, stop_ev
+                pending = {fut}
             if pending and since_tick >= _FANOUT_HEARTBEAT_S:
                 since_tick = 0.0
                 print(f"  ⏳ {len(pending)} resumed branch(es) still "
@@ -1828,6 +2082,27 @@ def run_fanout(orch, branches: List[dict],
         _ran = _already_ran_decline(orch, [by_id[i] for i in fanout_set])
         if _ran:
             return _ran
+
+    # --- capacity: a branch larger than this machine is not started ---
+    # The swarm's rule (plan_capacity): an item that needs more than the
+    # host has in all can never run here, and admission alone would still
+    # have started it when nothing else was running — the 8 GB analysis that
+    # froze an 8 GB laptop. The rest run; fewer than two left is a decline.
+    cap = plan_capacity([by_id[i] for i in fanout_set], max_workers=FANOUT_MAX_WORKERS)
+    not_started = cap["refused"]
+    if not_started:
+        for r in not_started:
+            print(f"  ⛔ not started: {r['label']} — {r['reason']}")
+        fanout_set = [i for i in fanout_set if any(by_id[i] is b for b in cap["run"])]
+        if len(fanout_set) < 2:
+            return json.dumps({
+                "status": "declined", "reason": "does_not_fit_host",
+                "not_started": not_started,
+                "message": ("Fewer than two branches fit this machine, so no parallel "
+                            "analysis was run. A branch that does not fit here needs a "
+                            "larger machine (or a smaller input); the others can be "
+                            "analysed one at a time with delegate_to_analysis.")},
+                indent=2, default=str)
 
     # --- confirmation ---
     if _user_already_declined(orch, fanout_set):
@@ -2128,7 +2403,7 @@ def run_fanout(orch, branches: List[dict],
     if server is not None:
         server.__enter__()
     try:
-        fut_label, fut_entry, fut_stop = {}, {}, {}
+        fut_label, fut_entry, fut_stop, fut_branch = {}, {}, {}, {}
         for i in range(follower_start, n_total):
             entries[i]["_budget_s"] = resolve_branch_budget(
                 run_branches[i], budget, explicit=branch_time_budget_s is not None)
@@ -2140,6 +2415,9 @@ def run_fanout(orch, branches: List[dict],
             fut_label[fut] = run_branches[i]["label"]
             fut_entry[fut] = entries[i]
             fut_stop[fut] = stop_ev
+            fut_branch[fut] = run_branches[i]
+        drain = Drain()                   # cancelled for memory, not yet ended
+        rerun: List[dict] = []            # entries to run again alone, once
         # Wait with a periodic heartbeat so the user can see the parallel run is
         # alive (a slow branch can otherwise look like a hang). Each branch is
         # announced as it finishes; the rest get a "still running" tick.
@@ -2152,9 +2430,15 @@ def run_fanout(orch, branches: List[dict],
         pending = set(fut_label)
         start = time.monotonic()
         since_tick = 0.0
-        while pending:
+        while pending or rerun:
             t0 = time.monotonic()
-            done, pending = wait(pending, timeout=_FANOUT_POLL_S)
+            if pending:
+                done, pending = wait(pending, timeout=_FANOUT_POLL_S)
+            else:                 # only a rerun is left, waiting for the cancelled worker to end
+                done = set()
+                wait(drain.futs, timeout=_FANOUT_POLL_S)
+                print(f"  ⏳ waiting for the cancelled branch to end before the rerun "
+                      f"({int(time.monotonic() - (drain.since or t0))} s) ...")
             since_tick += time.monotonic() - t0
             if server is not None and server.error is not None:
                 from ...ui.output_capture import AgentStoppedError
@@ -2169,6 +2453,10 @@ def run_fanout(orch, branches: List[dict],
                 print(f"  ✅ analysis branch finished: {fut_label[f]}  "
                       f"({n_total - len(pending)}/{n_total} done)")
                 since_tick = 0.0  # a completion already shows the run is alive
+            # The memory guard (stage 4, the swarm's rule): under pressure the
+            # branch holding the most is cancelled, recorded memory_pressure,
+            # and run again alone once the others are done.
+            _guard_step(orch, pending, fut_entry, fut_stop, fut_label, drain, rerun)
             # Branch wall-clock budget (#358): cancel a branch that has run
             # past its deadline — record it degraded (the existing
             # degraded-branch machinery excludes it from fusion), fire its
@@ -2176,6 +2464,11 @@ def run_fanout(orch, branches: List[dict],
             if budget > 0:
                 _cancel_overdue_branches(orch, pending, fut_entry, fut_stop,
                                          fut_label, budget)
+            if not pending and rerun and not drain.active:
+                e = rerun.pop(0)
+                fut, stop_ev = _relaunch_alone(orch, pool, e, queue_channel, branch_autonomy)
+                fut_label[fut], fut_entry[fut], fut_stop[fut] = e["label"], e, stop_ev
+                pending = {fut}
             if pending and since_tick >= _FANOUT_HEARTBEAT_S:
                 since_tick = 0.0
                 elapsed = int(time.monotonic() - start)
@@ -2228,14 +2521,18 @@ def run_fanout(orch, branches: List[dict],
                "whole fan-out." if degraded and productive else "")
         ),
     }
+    if not_started:
+        out["not_started"] = not_started
     if degraded:
         n_err = sum(1 for r in degraded if r["status"] != "success")
         n_timeout = sum(1 for e in entries if e.get("timed_out"))
+        n_memory = sum(1 for e in entries if e.get("memory_pressure") and not _productive(e))
         out["warning"] = (
             f"{len(degraded)} branch(es) produced no usable output "
             f"({n_err} errored"
             + (f", of which {n_timeout} abandoned on the "
                f"branch wall-clock budget" if n_timeout else "")
+            + (f", {n_memory} cancelled for memory pressure" if n_memory else "")
             + f", {len(degraded) - n_err} succeeded-but-empty, "
             "e.g. analysis code could not execute). Do not treat these as "
             "completed analyses or fuse them; report the gap to the user."

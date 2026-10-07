@@ -174,6 +174,14 @@ def cancel_requested(thread_id: Optional[int] = None) -> bool:
     return ev is not None and ev.is_set()
 
 
+def is_cancelled() -> bool:
+    """Whether the current thread's work should stop: its own cancel (a
+    budget, memory or coordinator cancel) or its turn's Stop. The default
+    ``cancel_check`` of anything that waits on work elsewhere (a scheduler
+    job), so a cancelled item ends what it submitted."""
+    return cancel_requested() or worker_stopped(threading.get_ident())
+
+
 def raise_if_stopped_worker() -> None:
     """The turn's Stop, for a print or a log record (every log record passes
     through here; a worker's own cancel is deliberately NOT raised on the

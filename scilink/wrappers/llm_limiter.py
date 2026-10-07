@@ -17,16 +17,64 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
+from collections import deque
 from contextlib import contextmanager
-from typing import Dict, Iterator, Optional, Tuple
+from typing import Deque, Dict, Iterator, Optional, Tuple
 
 LLM_MAX_INFLIGHT = 16
 _WAIT_LOG_S = 10.0
 _WAIT_SLICE_S = 1.0
+#: The circuit breaker: this many retryable provider failures (rate limits,
+#: overloads, timeouts) across every worker of the process within the window
+#: trip it, and a tripped breaker pauses ADMISSION of new work for the hold
+#: — the work already running keeps its own retries. A success closes it.
+BREAKER_FAILURES = 6
+BREAKER_WINDOW_S = 60.0
+BREAKER_HOLD_S = 30.0
 
 _logger = logging.getLogger(__name__)
 _slots: Dict[Tuple[str, int], threading.BoundedSemaphore] = {}
 _slots_lock = threading.Lock()
+_breaker_lock = threading.Lock()
+_failures: Deque[float] = deque()
+_tripped_until = 0.0
+
+
+def note_provider_failure(model: Optional[str] = None) -> None:
+    """One retryable failure from the provider (called where the retry
+    policy decides to retry). Trips the breaker at ``BREAKER_FAILURES``
+    within ``BREAKER_WINDOW_S``."""
+    global _tripped_until
+    now = time.monotonic()
+    with _breaker_lock:
+        _failures.append(now)
+        while _failures and now - _failures[0] > BREAKER_WINDOW_S:
+            _failures.popleft()
+        if len(_failures) >= BREAKER_FAILURES and now >= _tripped_until:
+            _tripped_until = now + BREAKER_HOLD_S
+            _logger.warning(
+                f"Provider circuit breaker tripped: {len(_failures)} retryable failures"
+                f"{f' ({model})' if model else ''} within {BREAKER_WINDOW_S:.0f} s; "
+                f"new work is held for {BREAKER_HOLD_S:.0f} s.")
+
+
+def note_provider_ok() -> None:
+    """A call that succeeded: the provider answers again, the breaker closes."""
+    global _tripped_until
+    with _breaker_lock:
+        _failures.clear()
+        _tripped_until = 0.0
+
+
+def provider_tripped() -> Optional[float]:
+    """Seconds the breaker stays open, or ``None`` when it is closed."""
+    left = _tripped_until - time.monotonic()
+    return left if left > 0 else None
+
+
+def reset_breaker() -> None:
+    note_provider_ok()
 
 
 def llm_max_inflight() -> Optional[int]:

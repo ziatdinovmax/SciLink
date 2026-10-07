@@ -60,6 +60,8 @@ def _mode_modules():
 @pytest.fixture()
 def meta(tmp_path, monkeypatch):
     monkeypatch.setenv("SCILINK_HOME", str(tmp_path / "home"))
+    # The stand-in workers live in this process: every item runs as a thread.
+    monkeypatch.setenv("SCILINK_SWARM_PLACEMENT", "thread")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setattr(swarm, "_POLL_S", 0.05)
     monkeypatch.setattr(swarm.fo, "_available_memory", lambda: 8e9)
@@ -523,9 +525,9 @@ def test_the_swarm_gate_shows_the_rules_and_the_bound(meta):
     assert "Reactions" not in json.dumps(swarm.swarm_plan_subject(plan, True))       # no rules, no block
     # the per-subject cap is clamped to the item limit; the item limit to 8
     assert swarm.swarm_budget({"max_triggers_per_subject": 1000, "max_items": 50}) == {
-        "max_items": 8, "max_reactions": 8, "max_triggers_per_subject": 8}
+        "max_items": 8, "max_reactions": 8, "max_triggers_per_subject": 8, "max_tokens": 0}
     assert swarm.swarm_budget({"max_items": 3, "max_reactions": 7, "max_triggers_per_subject": 9}) == {
-        "max_items": 3, "max_reactions": 3, "max_triggers_per_subject": 3}
+        "max_items": 3, "max_reactions": 3, "max_triggers_per_subject": 3, "max_tokens": 0}
 
 
 def test_a_workers_followups_are_typed_before_they_post():

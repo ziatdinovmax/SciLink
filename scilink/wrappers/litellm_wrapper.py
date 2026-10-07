@@ -460,14 +460,22 @@ def call_with_retries(call, retries: Optional[int], *, model: Optional[str] = No
     above), inside the model's in-flight slot for the request only, never
     across the backoff sleep. Shared by the LiteLLM path and the internal
     proxy's client, whose own SDK retries are turned off."""
+    from .llm_limiter import note_provider_failure, note_provider_ok
     retries = llm_retries() if retries is None else max(0, int(retries))
     once_used = False
     for attempt in range(retries + 1):
         try:
             with llm_slot(model):
-                return call()
+                result = call()
+            note_provider_ok()
+            return result
         except Exception as exc:
             kind = _retry_class(exc)
+            if kind is not None:
+                # Counted whether or not a retry is left: the breaker reads
+                # the provider's state across every worker, not one call's
+                # budget.
+                note_provider_failure(model)
             if attempt >= retries or kind is None:
                 raise
             if kind == "once":

@@ -661,7 +661,7 @@ def _sandbox_preexec():
 
 def _run_tracked(argv, *, timeout=None, input=None, text=True, cwd=None, env=None,
                  shell=False, preexec=None, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                 stdin=None, encoding=None, errors=None):
+                 stdin=None, encoding=None, errors=None, on_start=None):
     """``subprocess.run``'s shape for a process SciLink must be able to end:
     its own session and process group (a Job on Windows), registered for the
     user's Stop, and its whole tree killed on a timeout or an interrupt, so a
@@ -673,7 +673,11 @@ def _run_tracked(argv, *, timeout=None, input=None, text=True, cwd=None, env=Non
     Stop) is checked before the process starts and after it ends: the kill
     that ends a running engine returns as an ordinary result, and without the
     check the worker went on to start its next engine run, which no one-shot
-    kill covers."""
+    kill covers.
+
+    ``on_start(proc)`` is called once the process is registered, for a caller
+    that watches it while it runs (a process worker's memory sampler); it
+    must return quickly and never raise."""
     from scilink.utils.log_context import raise_if_cancelled
     raise_if_cancelled()
     proc = subprocess.Popen(argv, stdin=subprocess.PIPE if input is not None else stdin,
@@ -683,6 +687,8 @@ def _run_tracked(argv, *, timeout=None, input=None, text=True, cwd=None, env=Non
     _mark_own_group(proc)
     _register_subprocess(proc)
     try:
+        if on_start is not None:
+            on_start(proc)
         try:
             out, err = proc.communicate(input=input, timeout=timeout)
             _end_leftover_group(proc)

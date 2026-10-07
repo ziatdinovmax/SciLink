@@ -77,10 +77,17 @@ class ClusterExecutor(Executor):
         self.poll_interval = poll_interval
         self.timeout = timeout
         self.job_script_name = job_script_name
-        # Optional "should I stop?" hook. When it returns True mid-poll, the
-        # submitted job is cancelled on the scheduler instead of being left to
-        # run — so a Stop does not orphan the allocation. A KeyboardInterrupt
-        # during the wait is handled the same way.
+        # "Should I stop?" hook. When it returns True mid-poll, the submitted
+        # job is cancelled on the scheduler instead of being left to run — so
+        # a Stop does not orphan the allocation. A KeyboardInterrupt during
+        # the wait is handled the same way. By default it is the waiting
+        # thread's own cancel (``log_context.is_cancelled``: a swarm item's
+        # budget or memory cancel, a fan-out branch's, the turn's Stop), so
+        # a cancelled item never leaves its jobs running on the cluster; a
+        # caller's own hook replaces it.
+        if cancel_check is None:
+            from scilink.utils.log_context import is_cancelled
+            cancel_check = is_cancelled
         self.cancel_check = cancel_check
 
     @classmethod

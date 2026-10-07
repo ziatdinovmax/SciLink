@@ -317,3 +317,34 @@ def test_a_package_in_the_working_directory_does_not_shadow_the_parents(tmp_path
     assert proc.returncode == 0, proc.stderr[-3000:]
     assert f"PARENT {REPO / 'scilink' / '__init__.py'}" in proc.stdout
     assert "CHILD c.txt" in proc.stdout, (proc.stdout, proc.stderr[-3000:])
+
+
+def test_a_cancelled_waiting_thread_ends_the_child():
+    """Stage 4: the child runs through the tracked runner, so the waiting
+    thread's own cancel (an item's budget or memory cancel, the turn's
+    Stop) kills its whole tree and the wait ends with the thread's stop —
+    with a plain ``Popen`` neither Stop nor the guard reached it (#730)."""
+    import threading
+    import time
+    from scilink.executors import kill_subprocesses_for_thread
+    from scilink.ui.output_capture import AgentStoppedError
+    from scilink.utils.log_context import register_cancel, unregister_cancel
+    ev, out = threading.Event(), {}
+
+    def waiter():
+        register_cancel(ev)
+        try:
+            t0 = time.monotonic()
+            try:
+                run_in_child("time:sleep", 60)
+            except AgentStoppedError:
+                out["stopped_after_s"] = time.monotonic() - t0
+        finally:
+            unregister_cancel()
+    t = threading.Thread(target=waiter)
+    t.start()
+    time.sleep(1.5)
+    ev.set()
+    kill_subprocesses_for_thread(t.ident)
+    t.join(15)
+    assert 0 < out["stopped_after_s"] < 10, out

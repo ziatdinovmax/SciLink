@@ -22,6 +22,19 @@ from typing import Any, Optional
 MODES = ("analysis", "planning", "simulation")
 
 
+def autonomy_for(mode: str, name: str):
+    """The mode's autonomy enum member named ``name`` (``"AUTONOMOUS"``,
+    ``"AUTOPILOT"``, ...): what a worker's ``run_task`` is pinned to."""
+    if mode == "analysis":
+        from ..exp_agents.analysis_orchestrator import AnalysisMode
+        return AnalysisMode[name]
+    if mode == "planning":
+        from ..planning_agents.planning_orchestrator import AutonomyLevel
+        return AutonomyLevel[name]
+    from ..sim_agents.simulation_orchestrator import SimulationMode
+    return SimulationMode[name]
+
+
 def _worker_knowledge_dir(orch: Any, base_dir: Path, persistent: bool) -> Path:
     """The knowledge directory a planning child is built with.
 

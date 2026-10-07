@@ -1565,11 +1565,17 @@ class ReplayPool:
         self.logger.info(f"⚡ Replay pool: {self.workers} {self.kind} worker(s)")
 
     def submit(self, spec: Dict[str, Any]) -> None:
+        # The pool thread is attributed to the submitting thread: it carries
+        # the series' own cancel (an item's budget or memory cancel, the
+        # turn's Stop), and the child it waits on is registered where
+        # ``kill_subprocesses_for_thread`` of that thread finds it.
+        from scilink.utils.log_context import attributed_to_current
         if self.kind == "thread":
-            fut = self._pool.submit(replay_worker, spec)
+            fut = self._pool.submit(attributed_to_current(replay_worker, "replay"), spec)
         else:
             from scilink.utils.child_process import run_in_child
-            fut = self._pool.submit(run_in_child, _REPLAY_TARGET, spec)
+            fut = self._pool.submit(attributed_to_current(run_in_child, "replay"),
+                                    _REPLAY_TARGET, spec)
         self._futures[spec["index"]] = fut
         self.logger.info(f"   ⚡ replay dataset {spec['index']} submitted to the pool")
 
@@ -1590,6 +1596,14 @@ class ReplayPool:
                 st = results[idx].get("status")
                 self.logger.info(f"   {'✅' if st in ('success', 'partial') else '❌'} replay "
                                  f"dataset {idx} finished: {st}")
+        except BaseException:
+            # A Stop or an interrupt while replays run: the children lead
+            # their own sessions, so the terminal's signal no longer reaches
+            # them — end them here, then let the pool wind down.
+            import threading
+            from scilink.executors import kill_subprocesses_for_thread
+            kill_subprocesses_for_thread(threading.get_ident())
+            raise
         finally:
             self._pool.shutdown(wait=True)
         return results
