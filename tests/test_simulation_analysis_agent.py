@@ -157,3 +157,176 @@ class TestRealSkills:
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+class TestResolveOutputs:
+    """Deck-grounded output resolution: a superset of the static filename match
+    that also recovers an output written to a self-named file."""
+
+    def _write_run(self, d):
+        (d / "run.lammps").write_text(
+            "units real\n"
+            "fix stresslog all ave/time 5 1 5 v_pxy v_pxz v_pyz v_temp v_vol "
+            "file stress.dat\n"
+            "thermo 1000\nrun 5000\n")
+        (d / "log.lammps").write_text("Step Temp Press\n0 298 1.0\n")
+        (d / "stress.dat").write_text("# TimeStep v_pxy v_pxz v_pyz\n5 0.1 0.2 0.3\n")
+
+    def test_adds_deck_named_output_to_static_floor(self, agent, tmp_path):
+        self._write_run(tmp_path)
+        agent._llm = lambda prompt: '{"thermo_log": ["stress.dat"]}'
+        by = agent.resolve_outputs(str(tmp_path))
+        names = {Path(p).name for p in by["thermo_log"]}
+        assert "log.lammps" in names        # static floor kept
+        assert "stress.dat" in names        # LLM-added, deck-grounded
+
+    def test_no_llm_call_when_nothing_unclassified(self, agent, tmp_path):
+        (tmp_path / "log.lammps").write_text("Step Temp\n0 298\n")
+        (tmp_path / "vasprun.xml").write_text("<modeling/>")
+        called = {"n": 0}
+        def _boom(prompt):
+            called["n"] += 1
+            raise AssertionError("LLM must not be called when static is complete")
+        agent._llm = _boom
+        by = agent.resolve_outputs(str(tmp_path))
+        assert called["n"] == 0
+        assert set(by) == {"thermo_log", "dft_output"}
+
+    def test_falls_back_to_static_on_llm_error(self, agent, tmp_path):
+        self._write_run(tmp_path)
+        def _raise(prompt):
+            raise RuntimeError("api down")
+        agent._llm = _raise
+        by = agent.resolve_outputs(str(tmp_path))
+        names = {Path(p).name for p in by.get("thermo_log", [])}
+        assert "log.lammps" in names        # static floor survived
+        assert "stress.dat" not in names    # the LLM add never happened
+
+    def test_ignores_unknown_kinds_and_missing_paths(self, agent, tmp_path):
+        self._write_run(tmp_path)
+        agent._llm = lambda p: '{"not_a_kind": ["stress.dat"], "thermo_log": ["ghost.dat"]}'
+        by = agent.resolve_outputs(str(tmp_path))
+        assert "not_a_kind" not in by
+        assert all(Path(p).name != "ghost.dat" for p in by.get("thermo_log", []))
+        assert any(Path(p).name == "log.lammps" for p in by["thermo_log"])
+
+
+class TestInputDecks:
+    """The run deck is handed to the analysis as INPUT_DECKS so column identity
+    comes from the deck (fix ave/time / variable / compute), not header guessing."""
+
+    def test_inputs_frontmatter_declares_lammps_deck(self, agent):
+        pats = agent._input_deck_patterns()
+        assert "run.lammps" in pats and "in.*" in pats     # from the lammps skill
+
+    def test_gather_reads_deck_and_skips_dryrun(self, agent, tmp_path):
+        (tmp_path / "run.lammps").write_text(
+            "fix s all ave/time 5 1 5 v_pxy v_pxz v_pyz file stress.dat\n")
+        (tmp_path / "_dryrun").mkdir()
+        (tmp_path / "_dryrun" / "run.lammps").write_text("DRYRUN\n")
+        decks = agent._gather_input_decks(str(tmp_path))
+        assert "run.lammps" in decks and "v_pxy" in decks["run.lammps"]
+        assert not any("dryrun" in k.lower() for k in decks)
+
+    def test_run_analysis_passes_input_decks_to_codegen(self, agent, tmp_path, monkeypatch):
+        (tmp_path / "log.lammps").write_text("Step Temp\n0 298\n")
+        (tmp_path / "run.lammps").write_text(
+            "units real\nfix s all ave/time 5 1 5 v_pxy v_pxz v_pyz file stress.dat\n")
+        captured = {}
+        def fake_compute(task, data_files, *, recipe="", output_type="scalar",
+                         input_decks=None, **kw):
+            captured["input_decks"] = input_decks
+            return {"status": "success", "value": 1.0}
+        monkeypatch.setattr(agent, "compute_property", fake_compute)
+        monkeypatch.setattr(agent, "_skill_catalog",
+                            lambda: [_skill("gk", ["shear_viscosity"], ["thermo_log"])])
+        monkeypatch.setattr(agent, "_select_properties", lambda g, e: e)
+        agent._llm = lambda p: "{}"          # resolver LLM add -> nothing (static floor)
+        agent.run_analysis("compute viscosity", run_dir=str(tmp_path))
+        assert captured["input_decks"] and "run.lammps" in captured["input_decks"]
+        assert "v_pxy" in captured["input_decks"]["run.lammps"]
+
+    def test_run_analysis_resolves_relative_run_dir_to_absolute(self, agent, tmp_path, monkeypatch):
+        import os
+        (tmp_path / "log.lammps").write_text("Step Temp\n0 298\n")
+        captured = {}
+        def fake_compute(task, data_files, **kw):
+            captured["data_files"] = data_files
+            return {"status": "success", "value": 1.0}
+        monkeypatch.setattr(agent, "compute_property", fake_compute)
+        monkeypatch.setattr(agent, "_skill_catalog",
+                            lambda: [_skill("gk", ["shear_viscosity"], ["thermo_log"])])
+        monkeypatch.setattr(agent, "_select_properties", lambda g, e: e)
+        agent._llm = lambda p: "{}"
+        monkeypatch.chdir(tmp_path.parent)
+        agent.run_analysis("x", run_dir=tmp_path.name)        # RELATIVE run_dir
+        assert captured["data_files"]
+        assert all(os.path.isabs(v) for v in captured["data_files"].values())
+
+
+class TestInputDecksReachCodegen:
+    """The blocker Maxim flagged: INPUT_DECKS must reach the code-gen prompts,
+    not just the runtime preamble — otherwise the model keeps header-guessing."""
+
+    def _capture_llm(self, agent):
+        box = {}
+        def fake(prompt):
+            box["prompt"] = prompt
+            return "print('{\"status\": \"success\", \"value\": 1.0}')"
+        agent._llm = fake
+        return box
+
+    def test_generate_code_prompt_shows_input_decks(self, agent):
+        box = self._capture_llm(agent)
+        agent._generate_code(
+            task="shear viscosity", data_files={"stress.dat": "/run/stress.dat"},
+            recipe="read the pressure tensor", packages=["numpy"],
+            input_decks={"run.lammps":
+                         "fix s all ave/time 5 1 5 v_pxy v_pxz v_pyz file stress.dat\n"})
+        p = box["prompt"]
+        assert "INPUT_DECKS" in p and "v_pxy" in p and "run.lammps" in p
+
+    def test_refine_code_prompt_shows_input_decks(self, agent):
+        box = self._capture_llm(agent)
+        agent._refine_code(
+            code="bad()", error_info={"message": "boom"}, task="t",
+            recipe="", packages=["numpy"],
+            input_decks={"run.lammps": "variable pxy equal pxy\n"})
+        assert "INPUT_DECKS" in box["prompt"] and "variable pxy equal pxy" in box["prompt"]
+
+
+class TestResolveOutputsReviewFixes:
+    def test_gather_decks_ignores_dryrun_in_parent_path(self, agent, tmp_path):
+        run = tmp_path / "dryrun_vs_prod" / "run1"        # parent contains "dryrun"
+        run.mkdir(parents=True)
+        (run / "run.lammps").write_text(
+            "fix s all ave/time 5 1 5 v_pxy v_pxz v_pyz file stress.dat\n")
+        decks = agent._gather_input_decks(str(run))
+        assert "run.lammps" in decks                       # not skipped by the parent name
+
+    def test_gather_marks_truncation(self, agent, tmp_path):
+        (tmp_path / "run.lammps").write_text("units real\n" * 5000)
+        decks = agent._gather_input_decks(str(tmp_path), max_chars=800)
+        assert decks["run.lammps"].rstrip().endswith("[deck truncated]")
+
+    def test_no_llm_call_when_only_decks_unclassified(self, agent, tmp_path):
+        (tmp_path / "log.lammps").write_text("Step Temp\n0 298\n")     # classified
+        (tmp_path / "run.lammps").write_text("units real\nrun 10\n")   # a deck (not a candidate)
+        called = {"n": 0}
+        def boom(p):
+            called["n"] += 1
+            raise AssertionError("no model call when only input decks are unclassified")
+        agent._llm = boom
+        by = agent.resolve_outputs(str(tmp_path))
+        assert called["n"] == 0 and "thermo_log" in by
+
+    def test_rejects_model_path_outside_run_dir(self, agent, tmp_path):
+        (tmp_path / "run.lammps").write_text(
+            "fix s all ave/time 5 1 5 v_pxy v_pxz v_pyz file stress.dat\n")
+        (tmp_path / "stress.dat").write_text("# TimeStep v_pxy v_pxz v_pyz\n5 0.1 0.2 0.3\n")
+        (tmp_path.parent / "evil.log").write_text("outside the run\n")
+        agent._llm = lambda p: '{"thermo_log": ["../evil.log", "stress.dat"]}'
+        by = agent.resolve_outputs(str(tmp_path))
+        allp = [p for paths in by.values() for p in paths]
+        assert any(Path(p).name == "stress.dat" for p in allp)         # legit, kept
+        assert all("evil.log" not in p for p in allp)                  # escaped, rejected

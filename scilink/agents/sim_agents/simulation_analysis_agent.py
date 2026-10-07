@@ -92,6 +92,128 @@ class SimulationAnalysisAgent(BaseAnalysisAgent):
                     break
         return dict(present)
 
+    @staticmethod
+    def _peek(path: Path, n_lines: int = 10, max_chars: int = 2000):
+        """First ``n_lines`` of a text file (or ``None`` if binary/unreadable)."""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = []
+                for _ in range(n_lines):
+                    ln = f.readline()
+                    if not ln:
+                        break
+                    lines.append(ln.rstrip("\n"))
+        except (OSError, UnicodeDecodeError):
+            return None
+        return "\n".join(lines)[:max_chars]
+
+    def resolve_outputs(self, run_dir: str) -> Dict[str, List[str]]:
+        """Map output files to data kinds by reading the run, deck-grounded.
+
+        :meth:`classify_outputs` only matches fixed filename patterns, so an
+        output the engine wrote to a self-named file -- e.g. a
+        ``fix ave/time ... v_pxy v_pxz v_pyz ... file stress.dat`` pressure-
+        tensor series -- is missed and never reaches the analysis. This
+        generalizes it without putting any filename in code: the LLM reads a
+        header peek of every file (the input deck included) and maps the OUTPUT
+        files to the skills' data-kind vocabulary, using the deck as ground
+        truth for what each file holds. The static classification is the floor;
+        the LLM can only ADD files (existing, non-empty) to it, and the method
+        falls back to the static map when there is nothing unrecognized to
+        resolve or the LLM step errors -- so it is a strict superset of
+        :meth:`classify_outputs` and never loses a match.
+        """
+        import fnmatch
+        import json
+
+        static = self.classify_outputs(run_dir)
+        root = Path(run_dir)
+        vocab = sorted(self._output_format_map().keys())
+        if not root.exists() or not vocab:
+            return static
+        root_resolved = root.resolve()
+        classified = {p for paths in static.values() for p in paths}
+        deck_pats = self._input_deck_patterns()
+
+        def _rel(p: Path) -> str:
+            try:
+                return str(p.relative_to(root))
+            except ValueError:
+                return p.name
+
+        # Input decks are CONTEXT (ground truth for mapping), never candidates to
+        # classify; already-classified outputs need no resolving. So the model is
+        # asked only about the UNCLASSIFIED, non-deck files — which is also what
+        # decides whether a model call is worth making at all.
+        deck_peeks: List[tuple] = []
+        candidate_peeks: List[tuple] = []
+        for p in sorted(root.rglob("*")):
+            if not p.is_file():
+                continue
+            rel = _rel(p)
+            is_deck = any(fnmatch.fnmatch(p.name, pat) for pat in deck_pats)
+            if is_deck:
+                if "dryrun" in rel.lower():
+                    continue                       # dry-run deck: ignore entirely
+                head = self._peek(p, n_lines=400, max_chars=8000)
+                if head is not None:
+                    deck_peeks.append((rel, head))
+                continue
+            if str(p) in classified:
+                continue                           # already mapped by the floor
+            head = self._peek(p)
+            if head is None:                       # binary / unreadable
+                continue
+            candidate_peeks.append((rel, head))
+
+        # Nothing unrecognized (input decks don't count) -> no reason to call the model.
+        if not candidate_peeks:
+            return static
+
+        context = "\n\n".join(f"### {rel} (INPUT DECK)\n{head}"
+                              for rel, head in deck_peeks)
+        listing = "\n\n".join(f"### {rel}\n{head}"
+                              for rel, head in candidate_peeks[:200])
+        prompt = (
+            "A simulation run produced the OUTPUT files below (path, then first "
+            "lines). Use the INPUT DECKS as ground truth for what each output "
+            "holds -- e.g. a line `fix ... ave/time ... v_pxy v_pxz v_pyz ... "
+            "file stress.dat` means stress.dat is the pressure-tensor time "
+            "series. Map each OUTPUT file to data kinds, using ONLY these kinds: "
+            f"{json.dumps(vocab)}. A file may map to more than one kind; omit "
+            "files that fit no kind. Respond with JSON: "
+            "{\"<data_kind>\": [\"<relative path>\", ...]}.\n\n"
+            f"INPUT DECKS (context):\n\n{context}\n\n"
+            f"OUTPUT FILES to map:\n\n{listing}"
+        )
+        try:
+            mapping = self._extract_json(self._llm(prompt)) or {}
+        except Exception as exc:        # LLM/parse failure -> static is the floor
+            self.logger.warning("resolve_outputs LLM step failed: %s", exc)
+            return static
+
+        out = {k: list(v) for k, v in static.items()}
+        for kind, rels in mapping.items():
+            if kind not in vocab or not isinstance(rels, list):
+                continue
+            for rel in rels:
+                try:
+                    p = (root / rel).resolve()
+                except (OSError, RuntimeError, ValueError):
+                    continue
+                # Keep the model inside run_dir — an absolute or ../ path would
+                # otherwise pull in a file outside the run and collide on basename.
+                if p != root_resolved and root_resolved not in p.parents:
+                    continue
+                try:
+                    if p.is_file() and p.stat().st_size > 0:
+                        bucket = out.setdefault(kind, [])
+                        if str(p) not in bucket:
+                            bucket.append(str(p))
+                except OSError:
+                    continue
+        return out
+
     def _skill_catalog(self) -> List[Dict[str, Any]]:
         """Return the loaded analysis skills (``{name, meta, sections}``).
 
@@ -161,6 +283,78 @@ class SimulationAnalysisAgent(BaseAnalysisAgent):
         # everything available rather than nothing).
         return selected or eligible
 
+    def _input_deck_patterns(self) -> set:
+        """fnmatch patterns for engine input decks, from skills' ``inputs:``.
+
+        Mirrors :meth:`_output_format_map` for inputs: the analysis needs the run
+        deck (the ground truth for what each output column is) and learns the
+        deck's filename convention from the engine skill, not from code. Cached.
+        """
+        if getattr(self, "_input_pat_cache", None) is not None:
+            return self._input_pat_cache
+        from ...skills.loader import list_all_skills, load_skill
+
+        pats: set = set()
+        for domain, names in list_all_skills().items():
+            for name in names:
+                try:
+                    meta = load_skill(name, domain=domain).get("meta") or {}
+                except Exception:
+                    continue
+                inp = meta.get("inputs")
+                groups = (inp.values() if isinstance(inp, dict)
+                          else [inp] if inp else [])
+                for g in groups:
+                    if isinstance(g, str):
+                        g = [g]
+                    pats.update(str(p) for p in g)
+        self._input_pat_cache = pats
+        return pats
+
+    def _gather_input_decks(self, run_dir: str, *, max_decks: int = 10,
+                            max_chars: int = 20000) -> Dict[str, str]:
+        """Read the run's input deck files (text), keyed by path relative to run_dir.
+
+        Fed to :meth:`compute_property` as ``INPUT_DECKS`` so the analysis maps
+        output columns to physical quantities by reading the deck -- e.g. follow
+        a ``fix ave/time ... v_pxy ... file stress.dat`` line back to
+        ``variable pxy equal pxy`` -- instead of guessing from a column header.
+        Dry-run decks are skipped.
+        """
+        import fnmatch
+
+        pats = self._input_deck_patterns()
+        root = Path(run_dir)
+        if not pats or not root.exists():
+            return {}
+        decks: Dict[str, str] = {}
+        for p in sorted(root.rglob("*")):
+            if len(decks) >= max_decks:
+                break
+            if not p.is_file():
+                continue
+            try:
+                rel = str(p.relative_to(root))
+            except ValueError:
+                rel = p.name
+            # Match "dryrun" on the path RELATIVE to run_dir — a parent folder
+            # that happens to contain "dryrun" must not skip every real deck.
+            if "dryrun" in rel.lower():
+                continue
+            if not any(fnmatch.fnmatch(p.name, pat) for pat in pats):
+                continue
+            try:
+                text = p.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if not text.strip():
+                continue
+            # Mark a cut so a lost `fix`/`variable`/`file` line is visible, not silent.
+            if len(text) > max_chars:
+                text = text[:max_chars] + "\n# ... [deck truncated]\n"
+            decks[rel] = text
+        return decks
+
     def run_analysis(self, research_goal: str, run_dir: Optional[str] = None,
                      **kwargs) -> Dict[str, Any]:
         """Compute the goal's properties from the run output in ``run_dir``.
@@ -171,8 +365,14 @@ class SimulationAnalysisAgent(BaseAnalysisAgent):
         when no output data is recognized, else ``"success"`` even if individual
         analyses fail (their per-property error is recorded).
         """
-        run_dir = run_dir or str(self.output_dir)
-        by_kind = self.classify_outputs(run_dir)
+        # Resolve to an ABSOLUTE path up front: DATA_FILES paths must be openable
+        # from the sandbox's own working directory, not the caller's CWD, so a
+        # relative run_dir (what a tool call often passes) would otherwise yield
+        # relative, unopenable paths in the generated code.
+        run_dir = str(Path(run_dir or self.output_dir).resolve())
+        # Deck-grounded resolution (superset of the static filename match) so an
+        # output written to a self-named file still reaches the analysis.
+        by_kind = self.resolve_outputs(run_dir)
         if not by_kind:
             return {"status": "error", "message": f"no recognized output in {run_dir}",
                     "results": {}, "output_directory": str(self.output_dir)}
@@ -193,6 +393,9 @@ class SimulationAnalysisAgent(BaseAnalysisAgent):
                 except ValueError:
                     key = Path(p).name
                 data_files[key] = p
+        # The run deck(s): ground truth for what each output column is, so the
+        # analysis maps columns by reading the deck rather than guessing headers.
+        input_decks = self._gather_input_decks(run_dir)
         results: Dict[str, Any] = {}
         for skill in selected:
             meta = skill.get("meta") or {}
@@ -205,7 +408,7 @@ class SimulationAnalysisAgent(BaseAnalysisAgent):
                 results[prop] = self.compute_property(
                     task=f"{prop} for the research goal: {research_goal}",
                     data_files=data_files, recipe=recipe,
-                    output_type=output_type)
+                    output_type=output_type, input_decks=input_decks)
 
         return {"status": "success", "results": results,
                 "output_directory": str(self.output_dir),
