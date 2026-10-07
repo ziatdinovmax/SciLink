@@ -31,6 +31,7 @@ import re
 import base64
 import json
 import logging
+import threading
 import time
 from .tool_schema import normalize_tools, openai_tools_need_no_reasoning as _openai_tools_need_no_reasoning
 from types import SimpleNamespace
@@ -513,15 +514,74 @@ def _sleep_unless_cancelled(seconds: float) -> None:
         time.sleep(min(1.0, left))
 
 
+# Providers are retiring the sampling knobs: a model that refuses them answers
+# a request that sets one with a 400, which an agent reads as a failed step (a
+# verifier's 0.0). The name rules above know some of these models; this is the
+# rule for the rest, whatever their name: a request refused BECAUSE it names a
+# sampling parameter is sent again once without them, and the model is
+# remembered for the process, so later requests omit them up front. A model
+# that accepts them never sees a different request.
+_SAMPLING_PARAMS = ("temperature", "top_p", "top_k")
+_SAMPLING_WORD = r"(?:temperature|top_p|top_k|topP|topK)"
+_REFUSAL_WORD = (r"(?:deprecated|not supported|unsupported|does not support|"
+                 r"is not allowed|not allowed|only the default|no longer supported)")
+_SAMPLING_REFUSAL_RE = re.compile(
+    rf"\b{_SAMPLING_WORD}\b.{{0,120}}?{_REFUSAL_WORD}|{_REFUSAL_WORD}.{{0,120}}?\b{_SAMPLING_WORD}\b",
+    re.IGNORECASE | re.DOTALL)
+_sampling_refused: set = set()
+_sampling_lock = threading.Lock()
+
+
+def _sampling_refusal(exc: BaseException) -> bool:
+    """True when ``exc`` is a bad request whose message refuses a sampling
+    parameter (an unsupported VALUE of one counts: only the default is left)."""
+    chain = list(_chain(exc))
+    bad_request = any(_http_status(e) == 400 for e in chain)
+    if not bad_request and litellm is not None:
+        cls = getattr(litellm, "BadRequestError", None)
+        bad_request = isinstance(cls, type) and isinstance(exc, cls)
+    return bad_request and any(_SAMPLING_REFUSAL_RE.search(str(e) or "") for e in chain)
+
+
+def call_dropping_refused_sampling(call, kwargs: dict, retries: Optional[int],
+                                   model: Optional[str]):
+    """``call(kwargs)`` under :func:`call_with_retries`, omitting the sampling
+    parameters for a model known to refuse them, and learning that from the
+    refusal itself (see the note above ``_SAMPLING_PARAMS``)."""
+    key = str(model or "")
+    if key in _sampling_refused:
+        kwargs = {k: v for k, v in kwargs.items() if k not in _SAMPLING_PARAMS}
+    try:
+        return call_with_retries(lambda: call(kwargs), retries, model=model)
+    except Exception as exc:
+        sent = [p for p in _SAMPLING_PARAMS if p in kwargs]
+        if not sent or not _sampling_refusal(exc):
+            raise
+        kwargs = {k: v for k, v in kwargs.items() if k not in _SAMPLING_PARAMS}
+        result = call_with_retries(lambda: call(kwargs), retries, model=model)
+        # Learned from a resend that WORKED, never from a message that only
+        # matched: a 400 about something else that happens to quote a
+        # sampling parameter fails the resend too, and the model keeps its
+        # parameters.
+        with _sampling_lock:
+            first = key not in _sampling_refused
+            _sampling_refused.add(key)
+        if first:
+            _logger.warning(f"{key} refused {', '.join(sent)}; sending its requests "
+                            "without sampling parameters from now on")
+        return result
+
+
 def _completion_with_retries(retries: Optional[int], **kwargs):
-    """``litellm.completion`` under :func:`call_with_retries`.
+    """``litellm.completion`` under :func:`call_with_retries`, with a refused
+    sampling parameter dropped (:func:`call_dropping_refused_sampling`).
 
     Only creating a stream is retried; an error while iterating one is the
     caller's (no SciLink caller streams today).
     """
     kwargs["num_retries"] = 0
-    return call_with_retries(lambda: litellm.completion(**kwargs), retries,
-                             model=kwargs.get("model"))
+    return call_dropping_refused_sampling(lambda kw: litellm.completion(**kw), kwargs,
+                                          retries, kwargs.get("model"))
 
 
 def litellm_completion(*args, **kwargs):
@@ -847,7 +907,7 @@ class LiteLLMGenerativeModel:
             omit_sampling = (_is_openai_reasoning_model(self.model)
                              or _model_deprecates_sampling(self.model))
             for old, new in mapping.items():
-                if omit_sampling and old in ("temperature", "top_p"):
+                if omit_sampling and old in _SAMPLING_PARAMS:
                     continue
                 val = cfg.get(old)
                 if val is not None:
