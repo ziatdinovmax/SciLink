@@ -1,4 +1,5 @@
-"""How many LLM calls one process has in flight, per model.
+"""How many LLM calls one process has in flight, per model — and when the
+provider is failing, how new work is held.
 
 Every worker of a fan-out or a swarm, and every best-of-N candidate inside
 one, calls the provider from its own thread. Nothing bounded how many did so
@@ -10,6 +11,17 @@ to one model run at a time in this process, and the rest wait their turn.
 The default sits above what today's largest in-process parallelism reaches
 (four fan-out branches, each with a best-of-N of three), so ordinary runs
 never wait; it bounds what a swarm can put on one provider at once.
+
+The circuit breaker (stage 4) is per model: the retry policy reports every
+provider call's outcome (``note_provider_failure`` for a retryable failure,
+``note_provider_ok`` for a success), and a model is TRIPPED when its last
+``BREAKER_WINDOW_S`` hold at least ``BREAKER_FAILURES`` failures AND the
+failures are at least half of its calls in that window. A tripped model holds
+ADMISSION of new work (``fanout._admit_branch``) for ``BREAKER_HOLD_S``;
+running work keeps its own retries. A brown-out is the case: the running
+work keeps succeeding now and then, so a success must not close the breaker
+on its own — the hold runs its course, and the ratio decides whether the
+next window trips again. One model's throttling never holds another's items.
 """
 
 from __future__ import annotations
@@ -25,56 +37,69 @@ from typing import Deque, Dict, Iterator, Optional, Tuple
 LLM_MAX_INFLIGHT = 16
 _WAIT_LOG_S = 10.0
 _WAIT_SLICE_S = 1.0
-#: The circuit breaker: this many retryable provider failures (rate limits,
-#: overloads, timeouts) across every worker of the process within the window
-#: trip it, and a tripped breaker pauses ADMISSION of new work for the hold
-#: — the work already running keeps its own retries. A success closes it.
 BREAKER_FAILURES = 6
 BREAKER_WINDOW_S = 60.0
 BREAKER_HOLD_S = 30.0
+_UNKNOWN = "unknown"
 
 _logger = logging.getLogger(__name__)
 _slots: Dict[Tuple[str, int], threading.BoundedSemaphore] = {}
 _slots_lock = threading.Lock()
 _breaker_lock = threading.Lock()
-_failures: Deque[float] = deque()
-_tripped_until = 0.0
+#: Per model: the window's outcomes as ``(time, ok)``, and when its hold ends.
+_outcomes: Dict[str, Deque[Tuple[float, bool]]] = {}
+_tripped_until: Dict[str, float] = {}
+
+
+def _note(model: Optional[str], ok: bool) -> None:
+    key = str(model or _UNKNOWN)
+    now = time.monotonic()
+    with _breaker_lock:
+        window = _outcomes.setdefault(key, deque())
+        window.append((now, ok))
+        while window and now - window[0][0] > BREAKER_WINDOW_S:
+            window.popleft()
+        if ok:
+            return
+        failures = sum(1 for _, good in window if not good)
+        if (failures >= BREAKER_FAILURES and 2 * failures >= len(window)
+                and now >= _tripped_until.get(key, 0.0)):
+            _tripped_until[key] = now + BREAKER_HOLD_S
+            _logger.warning(
+                f"Provider circuit breaker tripped for {key}: {failures} retryable failures in "
+                f"{len(window)} calls within {BREAKER_WINDOW_S:.0f} s; new work on it is held for "
+                f"{BREAKER_HOLD_S:.0f} s.")
 
 
 def note_provider_failure(model: Optional[str] = None) -> None:
-    """One retryable failure from the provider (called where the retry
-    policy decides to retry). Trips the breaker at ``BREAKER_FAILURES``
-    within ``BREAKER_WINDOW_S``."""
-    global _tripped_until
+    """One retryable failure from the provider (rate limit, overload, a
+    server fault, a timeout), as the retry policy sees it."""
+    _note(model, False)
+
+
+def note_provider_ok(model: Optional[str] = None) -> None:
+    """One call that succeeded. It counts toward the window's ratio; it does
+    not end a hold early."""
+    _note(model, True)
+
+
+def provider_tripped(model: Optional[str] = None) -> Optional[float]:
+    """Seconds the model's hold has left, or ``None`` when it is closed. With
+    no model, the longest hold of any model (an admission that does not know
+    which model its item will call)."""
     now = time.monotonic()
     with _breaker_lock:
-        _failures.append(now)
-        while _failures and now - _failures[0] > BREAKER_WINDOW_S:
-            _failures.popleft()
-        if len(_failures) >= BREAKER_FAILURES and now >= _tripped_until:
-            _tripped_until = now + BREAKER_HOLD_S
-            _logger.warning(
-                f"Provider circuit breaker tripped: {len(_failures)} retryable failures"
-                f"{f' ({model})' if model else ''} within {BREAKER_WINDOW_S:.0f} s; "
-                f"new work is held for {BREAKER_HOLD_S:.0f} s.")
-
-
-def note_provider_ok() -> None:
-    """A call that succeeded: the provider answers again, the breaker closes."""
-    global _tripped_until
-    with _breaker_lock:
-        _failures.clear()
-        _tripped_until = 0.0
-
-
-def provider_tripped() -> Optional[float]:
-    """Seconds the breaker stays open, or ``None`` when it is closed."""
-    left = _tripped_until - time.monotonic()
-    return left if left > 0 else None
+        if model is not None:
+            left = _tripped_until.get(str(model), 0.0) - now
+            return left if left > 0 else None
+        left = max((until - now for until in _tripped_until.values()), default=0.0)
+        return left if left > 0 else None
 
 
 def reset_breaker() -> None:
-    note_provider_ok()
+    with _breaker_lock:
+        _outcomes.clear()
+        _tripped_until.clear()
 
 
 def llm_max_inflight() -> Optional[int]:

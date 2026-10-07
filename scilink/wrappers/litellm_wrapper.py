@@ -467,7 +467,7 @@ def call_with_retries(call, retries: Optional[int], *, model: Optional[str] = No
         try:
             with llm_slot(model):
                 result = call()
-            note_provider_ok()
+            note_provider_ok(model)
             return result
         except Exception as exc:
             kind = _retry_class(exc)

@@ -14,9 +14,12 @@ type), that unit's in-memory size bucket (powers of two of a megabyte) and
 how many units there are. Two cubes of the same size and kind are one
 class whatever the agent then chooses to do with them, which is the
 granularity the measurement can honestly support. The table keeps the MAX
-seen per class: a class is sized by its worst run, never by its average, and
-only runs that did the class's work are recorded (a run that failed before
-it started would measure its imports).
+seen per class: a class is sized by its worst run, never by its average.
+Recorded: a run that did its class's work (peak and tokens), and a run that
+ended on memory — killed by the system, or cancelled by the guard — whose
+peak is a fact about this machine and a lower bound of what the class
+needs (peak only; it can only raise the max). A run that failed before it
+started would measure its imports, and is not.
 
 One table per SciLink home (``measured_items.json``), written under the
 same file lock as the other shared stores; a thread item, whose peak cannot
@@ -68,19 +71,26 @@ def _units_bucket(n: int) -> str:
 
 
 def item_class(item: dict) -> str:
-    """``mode[:kind:largest-unit-bucket:units]`` — see the module docstring.
-    An analysis item with data it cannot read is ``analysis:unreadable``."""
+    """``mode[:kind:largest-unit-bucket:units[:wN]]`` — see the module
+    docstring. ``:wN`` is the series' replay workers when more than one
+    (#750's own resolver and cap: a series' peak is its units in flight at
+    once, so a four-worker run and a one-worker run of the same cubes are
+    two classes). An analysis item with data it cannot read is
+    ``analysis:unreadable``."""
     mode = str(item.get("mode") or "")
     if mode != "analysis" or not item.get("data_path"):
         return mode
+    from ...utils.workers import resolve_workers
     from . import fanout as fo
     try:
         files = fo._data_files(Path(str(item["data_path"])).expanduser(), item.get("pattern"))
         if not files:
             return f"{mode}:nodata"
         largest = max(files, key=fo._in_memory_bytes)
+        workers = min(resolve_workers(item.get("series_workers"), "SCILINK_HS_SERIES_WORKERS", 1),
+                      max(len(files) - 1, 1))
         return (f"{mode}:{_kind(largest.suffix.lower())}:{_bucket_mb(fo._in_memory_bytes(largest))}"
-                f":{_units_bucket(len(files))}")
+                f":{_units_bucket(len(files))}" + (f":w{workers}" if workers > 1 else ""))
     except Exception:  # noqa: BLE001 - a class must never break an item
         return f"{mode}:unreadable"
 
@@ -120,6 +130,30 @@ def record(cls: str, *, peak_rss_bytes: Optional[float] = None, tokens: Optional
         tmp.write_text(json.dumps(table, indent=1, sort_keys=True), encoding="utf-8")
         tmp.replace(path)
     return row
+
+
+def forget(cls: str, path: Optional[Path] = None) -> bool:
+    """Drop a class's record (a fixed leak, a new version, a home shared
+    across machines): the next run of the class is sized from the input
+    again and measured afresh. Returns whether there was one."""
+    from ...utils.file_lock import path_lock
+    path = path or table_path()
+    with path_lock(path, label="the measured-items table"):
+        table = _load(path)
+        if cls not in table:
+            return False
+        del table[cls]
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(table, indent=1, sort_keys=True), encoding="utf-8")
+        tmp.replace(path)
+    return True
+
+
+def measured_peak(cls: str, path: Optional[Path] = None) -> Optional[float]:
+    """The raw peak a class was measured at (no headroom): what a refusal
+    is judged on — a class that ran here must not be refused here."""
+    row = measured(cls, path)
+    return float(row["peak_rss_bytes"]) if row and row.get("peak_rss_bytes") else None
 
 
 def peak_estimate(cls: str, path: Optional[Path] = None) -> Optional[float]:

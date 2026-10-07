@@ -172,7 +172,8 @@ class TreeSampler:
 
 
 def run_child(target: str, payload: Any, *,
-              watch: Optional[Callable[[float, float], None]] = None) -> ChildOutcome:
+              watch: Optional[Callable[[float, float], None]] = None,
+              log_path: Optional[str] = None) -> ChildOutcome:
     """Call ``target`` (``"package.module:function"``) with ``payload`` in a
     fresh interpreter and return what it returned, with what the child cost.
 
@@ -190,6 +191,10 @@ def run_child(target: str, payload: Any, *,
     (``AgentStoppedError``) once the child is gone. Raises ``ChildLost``
     when no result comes back — including when the target itself raised (the
     exception is the reason, the traceback the detail).
+
+    With ``log_path`` the child's console (stdout and stderr, unbuffered)
+    goes to that file instead of the caller's console, for a caller that
+    relays it (a swarm item's turn) or keeps it as the run's log.
     """
     from scilink.executors import _run_tracked
     fd, result_path = tempfile.mkstemp(prefix="scilink_child_", suffix=".pkl")
@@ -198,14 +203,21 @@ def run_child(target: str, payload: Any, *,
     env["PYTHONPATH"] = os.pathsep.join(os.path.abspath(p or os.curdir) for p in sys.path)
     caller_pythonpath = json.dumps(os.environ.get("PYTHONPATH"))
     sampler = TreeSampler(watch)
+    log_fh = None
+    if log_path:
+        env["PYTHONUNBUFFERED"] = "1"          # a line reaches the file as it is printed
+        log_fh = open(log_path, "ab")
     try:
         try:
             proc = _run_tracked([sys.executable, "-P", "-m", _MODULE, target, result_path,
                                  caller_pythonpath],
-                                input=pickle.dumps(payload), text=False, stdout=None, stderr=None,
+                                input=pickle.dumps(payload), text=False,
+                                stdout=log_fh, stderr=subprocess.STDOUT if log_fh else None,
                                 env=env, on_start=sampler.start)
         finally:
             sampler.stop()
+            if log_fh is not None:
+                log_fh.close()
         returncode = proc.returncode
         try:
             with open(result_path, "rb") as f:

@@ -215,18 +215,19 @@ def _available_memory() -> Optional[float]:
         return None
 
 
-def _admit_branch(key: str, est: float, label: str) -> None:
+def _admit_branch(key: str, est: float, label: str, model: Optional[str] = None) -> None:
     """Hold a branch until its estimated working set fits in available
     memory alongside the branches already running, and while the provider
-    circuit breaker is open (``llm_limiter``: failures across every worker
-    pause new work, never running work). Progress guarantee: a branch is
-    ALWAYS admitted when nothing else is running and the breaker is closed,
-    so the guard can only delay work, never deadlock or drop it."""
+    circuit breaker is open for ``model`` (``llm_limiter``: failures across
+    every worker pause new work, never running work; with no model named,
+    any tripped model holds). Progress guarantee: a branch is ALWAYS
+    admitted when nothing else is running and the breaker is closed, so
+    the guard can only delay work, never deadlock or drop it."""
     from ...wrappers.llm_limiter import provider_tripped
     with _mem_cv:
         held_logged = breaker_logged = False
         while True:
-            open_for = provider_tripped()
+            open_for = provider_tripped(model)
             if open_for is not None:
                 if not breaker_logged:
                     print(f"  ⏸  holding '{label}': the provider circuit breaker is open "
@@ -282,23 +283,29 @@ def estimate_item(item: dict) -> float:
     mode = item.get("mode") or "analysis"
     cls = peaks.item_class({**item, "mode": mode})
     item["_mem_class"] = cls
-    measured = peaks.peak_estimate(cls)
-    item["_mem_measured"] = measured is not None
-    if measured is not None:
-        return measured
+    peak = peaks.measured_peak(cls)
+    item["_mem_measured"] = peak is not None
+    item["_mem_peak"] = peak                     # raw: what a refusal is judged on
+    if peak is not None:
+        return peak * peaks.PEAK_HEADROOM        # with headroom: what admission plans for
     if mode == "analysis" and item.get("data_path"):
-        return _branch_mem_estimate({"data_path": item["data_path"], "pattern": item.get("pattern")})
+        return _branch_mem_estimate({"data_path": item["data_path"], "pattern": item.get("pattern"),
+                                     "series_workers": item.get("series_workers")})
     return MODE_MEM_FLOOR.get(mode, _BRANCH_MEM_FLOOR)
 
 
 def plan_capacity(items: List[dict], memory: Optional[Dict[str, Optional[float]]] = None,
-                  *, max_workers: int) -> dict:
+                  *, max_workers: int, refuse_unmeasured: bool = True) -> dict:
     """Which items this machine can run, and whether together or in turn.
 
     An item that needs more than the machine has in total, less a margin for
     the system, can never run here and is not started. The rest are admitted
     by free memory as they go, so items that do not fit together wait for
-    each other instead of overcommitting.
+    each other instead of overcommitting. A measured class is refused on its
+    RAW peak (the headroom is for admission: a class that ran here must not
+    be refused here from then on); with ``refuse_unmeasured=False`` an
+    input-based estimate never refuses (the fan-out's rule, whose estimate
+    is coarse by design and must never refuse what the machine can run).
     """
     mem = memory or machine_memory()
     total, avail = mem.get("total"), mem.get("available")
@@ -308,9 +315,11 @@ def plan_capacity(items: List[dict], memory: Optional[Dict[str, Optional[float]]
     for it in items:
         est = estimate_item(it)
         it["_mem_est"] = est
-        if ceiling is not None and est > ceiling:
+        basis = it["_mem_peak"] if it.get("_mem_measured") else est
+        if (ceiling is not None and basis > ceiling
+                and (it.get("_mem_measured") or refuse_unmeasured)):
             refused.append({"label": it["label"], "reason": (
-                f"needs about {est / 1e9:.1f} GB"
+                f"needs about {basis / 1e9:.1f} GB"
                 + (" (measured for its class)" if it.get("_mem_measured") else "")
                 + f"; this machine has {total / 1e9:.1f} GB in all")})
         else:
@@ -1407,7 +1416,7 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
     # Admitted at what the capacity plan sized it at (a measured class's
     # peak, else the input-based estimate); a resumed branch is sized here.
     est = branch.get("_mem_est") or estimate_item(branch)
-    _admit_branch(mem_key, est, branch.get("label") or slug)
+    _admit_branch(mem_key, est, branch.get("label") or slug, getattr(orch, "model_name", None))
     entry["_mem_key"] = mem_key
     entry["_mem_est"] = est
     entry["_started_at"] = time.monotonic()
@@ -1515,6 +1524,7 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
             finally:
                 set_thread_event_log(None)
                 _usage_tag.__exit__(None, None, None)
+                tracing.forget_worker_usage(f"fanout:{index:02d}_{slug}")
                 if queue_channel is not None:
                     from ...hitl import set_thread_channel
                     set_thread_channel(None)
@@ -2088,7 +2098,8 @@ def run_fanout(orch, branches: List[dict],
     # host has in all can never run here, and admission alone would still
     # have started it when nothing else was running — the 8 GB analysis that
     # froze an 8 GB laptop. The rest run; fewer than two left is a decline.
-    cap = plan_capacity([by_id[i] for i in fanout_set], max_workers=FANOUT_MAX_WORKERS)
+    cap = plan_capacity([by_id[i] for i in fanout_set], max_workers=FANOUT_MAX_WORKERS,
+                        refuse_unmeasured=False)
     not_started = cap["refused"]
     if not_started:
         for r in not_started:

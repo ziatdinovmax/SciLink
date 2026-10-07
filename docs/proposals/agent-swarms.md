@@ -1817,10 +1817,41 @@ scheduler"). What it is, by the five points of that section:
 reserved per item at admission from the class's measured spend (else a
 per-mode placeholder), reconciled on completion from the per-worker usage
 counter (`tracing.worker_usage`), an item or a reaction the remainder cannot
-cover refused with the figures — and the circuit breaker
-(`llm_limiter.note_provider_failure/ok`, fed by `call_with_retries`): six
-retryable failures across workers within a minute hold admission for 30 s
-or until the next successful call; running work keeps its own retries.
+cover refused with the figures; a cancelled item is charged for what it
+spends while it winds down (a thread item, from its own thread when it
+ends; a process item, from the usage file its child keeps on every call, so
+a killed worker is charged too) — and the circuit breaker
+(`llm_limiter.note_provider_failure/ok`, fed by `call_with_retries`), per
+model: a model whose last minute holds at least six retryable failures that
+are at least half of its calls is tripped, and admission of new work on
+that model is held for 30 s (a success counts toward the ratio and does not
+end a hold early — in a brown-out the running work keeps succeeding now and
+then, and a breaker any success closed never tripped); running work keeps
+its own retries, and one model's throttling never holds another's items.
+
+**What the first review changed (round 1).** A cancel kills the
+descendants that lead their own sessions too (`_kill_process_tree`
+snapshots the tree and kills the survivors: a worker in one long C call
+runs no SIGTERM handler, so its generated script outlived it). A process
+item's console goes to `<item dir>/worker.log` and is relayed line by line
+into the turn (the web UI and the shell see it; before, it went to the raw
+console under the shell's display). A key the child would not find keeps
+the item a thread: on the proxy path the child reads `SCILINK_API_KEY`
+only, so the meta's key must be that variable's value; the embedding and
+FutureHouse keys are held to the same rule. A measured class is refused on
+its RAW peak (the ×1.2 headroom is for admission: a class that ran here
+must not be refused here from then on), and the class key names the
+series' replay workers (`:wN`), so a four-worker measurement never sizes a
+one-worker run or the reverse. A fan-out branch is refused only on a
+measured peak — its input-based estimate is coarse by design and must
+never refuse what the machine can run; the swarm refuses on the estimate
+as it did before. The cluster executor's default cancel ends the caller
+(`raise_if_cancelled` before a submit, the thread's stop after cancelling
+a job), so a cancelled campaign item does not critique and resubmit; the
+poll sleep reads the cancel every second. A run that ends on memory
+records its peak. `peaks.forget(class)` resets a class. A question in a
+worker process is marked unanswered (`mark_timed_out`), so no gate records
+it as a decision.
 
 **Left for the AWS PR, as scoped:** the ECS placement (`RunTask` /
 `DescribeTasks` / `StopTask`, the task's memory metric, Spot and OOM
@@ -1849,20 +1880,32 @@ guards, budgets and stops. The limits that remain, in one place:
   `ClusterExecutor.submit/poll` (#766) with `run_many` as its batch form —
   is the HPC-job placement of the contract, which answers #767 and waits on
   #696 (the connection) and #745 (concurrent dispatch). What stage 4 gives
-  that path today: the contract's HPC row, a cancelled item cancelling its
-  jobs (`cancel_check` defaults to the thread's own cancel), the tracked
-  engine runner, the token budget and the breaker.
+  that path today: the row of the contract it will implement, a cancelled
+  item cancelling its jobs (`cancel_check` defaults to the thread's own
+  cancel, and a turn's Stop now cancels a running cluster job, within a
+  second), the tracked engine runner, the token budget and the breaker. An
+  open decision for that placement: whether queue wait counts against the
+  item's wall-clock budget — today a job still queued when the budget runs
+  out is cancelled with the item.
 - *Attended swarms.* Heavy items stay threads, because a worker process
   has no channel to the person; a Stop reaches them cooperatively (on a
   print or a wait), not by a kill.
 - *Measurement.* A thread item's memory is not measured; a class's first
   run is sized by the input-based estimate, and a class is as coarse as
-  `mode:kind:size:units` (two very different analyses of same-sized cubes
-  share a row, sized by the larger).
+  `mode:kind:size:units[:wN]` (two very different analyses of same-sized
+  cubes share a row, sized by the larger). The guard compares a process
+  item's LIVE RSS with a thread item's ESTIMATE, so it can cancel a process
+  worker while a thread item holds more. A tree-summed peak counts shared
+  libraries once per process, so it leans high. `Drain` gives up a hung
+  branch's admission after its timeout while the thread may still hold its
+  memory.
 - *Tokens.* The per-mode reservations are placeholders until a class is
   measured; the counter is exact for tagged threads and for a process
-  worker's own calls, not for an untagged helper thread an agent starts
-  without `attributed_to_current` / `inherited_context`.
+  worker's own calls (its final report, or the usage file it keeps when it
+  is killed), not for an untagged helper thread an agent starts without
+  `attributed_to_current` / `inherited_context`, and a thread item that
+  keeps calling after the swarm returned is charged to the ledger when its
+  thread ends, after the result the caller already has.
 - *Independence and taint.* Independence is the read graph (no common
   ancestry); taint stays on the board, unread by fusion and scheduling.
 - *Subjects* are strings; *persistent specialists* read nothing from the

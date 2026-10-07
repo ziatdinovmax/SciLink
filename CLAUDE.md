@@ -951,10 +951,13 @@ Settled rules, each learned from a live run or a review:
   that cancels the running item that HOLDS the most (what its process worker
   was last sampled at, else its estimate; never one running alone) and reruns
   it alone once, a wall-clock budget per item, a token budget reserved per
-  item at admission and reconciled on completion (`budget.max_tokens`), a
-  provider circuit breaker that pauses admission (never running work) after
-  repeated retryable failures across workers (`wrappers/llm_limiter.py`), no
-  item starting another. The capacity refusal and the guard are the fan-out's
+  item at admission and reconciled on completion (`budget.max_tokens`; a
+  cancelled item is charged for what it spends while it winds down), a
+  provider circuit breaker per model that pauses admission (never running
+  work) while a model's last minute holds at least six retryable failures
+  that are at least half its calls — a success counts toward the ratio and
+  does not end the hold, since in a brown-out running work keeps succeeding
+  now and then (`wrappers/llm_limiter.py`) — no item starting another. The capacity refusal and the guard are the fan-out's
   too (`fanout.plan_capacity`, `fanout.guard_memory`): a branch larger than
   the host is not started, a branch cancelled for memory reruns alone once.
   The model decides between swarm runs and inside each item, never within a
@@ -966,15 +969,20 @@ Settled rules, each learned from a live run or a review:
   interrupted). An analysis item with data runs as a PROCESS when nobody
   attends the swarm — a fresh interpreter through `run_in_child`, which now
   goes through the executor's tracked runner, so the item's cancel, the
-  guard and the turn's Stop end its whole tree, and its memory is measured
-  while it runs (the tree's sampled sum, else the child's `ru_maxrss`); a
-  worker killed with nothing returned and no cancel asked is
-  `out_of_memory` and runs again alone, once. Planning and simulation items,
-  and every item of an attended swarm (its questions need the person's
-  channel), stay threads in the coordinator's process and measure nothing.
-  The spec is plain data with no secret: a key the meta holds that is not
-  in the environment, or a callable tool extension, keeps the item a thread
-  with the reason on its entry. `SCILINK_SWARM_PLACEMENT=thread|process`
+  guard and the turn's Stop end its whole tree (descendants in their own
+  sessions included), its console goes to `<item dir>/worker.log` and is
+  relayed into the turn, and its memory is measured while it runs (the
+  tree's sampled sum, else the child's `ru_maxrss`); a worker killed with
+  nothing returned and no cancel asked is `out_of_memory` and runs again
+  alone, once. Planning and simulation items, and every item of an attended
+  swarm (its questions need the person's channel), stay threads in the
+  coordinator's process and measure nothing. The spec is plain data with no
+  secret: a key the child would not find in the environment it inherits
+  (on the proxy path it reads `SCILINK_API_KEY` only; the embedding and
+  FutureHouse keys count too), or a callable tool extension, keeps the item
+  a thread with the reason on its entry. A measured class is refused on its
+  raw peak and admitted with ×1.2 headroom; a fan-out branch is refused only
+  on a measured peak. `SCILINK_SWARM_PLACEMENT=thread|process`
   overrides the rule (the offline tests pin threads). An HPC job
   (`ClusterExecutor.submit/poll`, whose `cancel_check` now defaults to the
   waiting thread's own cancel) and an ECS task are the later placements of

@@ -336,7 +336,7 @@ def _run_item(orch, item: dict, entry: dict, channel, autonomy: str, stop_event)
     index = entry["index"]
     base_dir = Path(orch.base_dir) / "swarm" / f"{index:02d}_{item['slug']}"
     mem_key = f"swarm:{index}"
-    fo._admit_branch(mem_key, item["_mem_est"], item["label"])
+    fo._admit_branch(mem_key, item["_mem_est"], item["label"], getattr(orch, "model_name", None))
     entry["_started_at"] = time.monotonic()
     entry.pop("_human_wait_s", None)          # a restored entry may carry stale waits
     entry.pop("_waiting_since", None)
@@ -401,6 +401,13 @@ def _run_item(orch, item: dict, entry: dict, channel, autonomy: str, stop_event)
                 set_thread_event_log(None)
                 set_thread_channel(None)
                 fo._release_branch(mem_key)
+                # The thread's own end: whatever this item spent after it was
+                # settled (a cancelled item winding down, past the swarm's
+                # return) is charged now, to the budget and the ledger.
+                budget_obj = item.get("_tokens_budget")
+                if budget_obj is not None and item.get("_settled"):
+                    budget_obj.charge_late(item, entry, _worker_tag(entry, item))
+                    tracing.forget_worker_usage(_worker_tag(entry, item))
     if entry.get("timed_out") or entry.get("_cancelled"):
         entry["late_result"] = {"status": result.get("status")}
         return
@@ -460,6 +467,8 @@ def _guard_memory(orch, running: Dict[Any, dict], fut_item: Dict[Any, dict], fut
         handle = item.get("_handle")
         if handle is not None:
             LocalProcess().cancel(handle)          # the child's whole tree, through the contract
+            if handle.peak_rss_bytes:
+                entry["peak_rss_bytes"] = float(handle.peak_rss_bytes)
         tid = entry.get("_branch_tid")
         if tid:
             try:
@@ -511,6 +520,22 @@ class TokenBudget:
         self.max = int(max_tokens or 0)
         self.spent = 0
         self.reserved = 0
+        self._lock = threading.Lock()
+
+    def charge_late(self, item: dict, entry: dict, tag: str) -> int:
+        """Charge what ``tag`` spent beyond the item's settlement (and put
+        the total on the entry); the item's own thread calls it when it
+        ends, the coordinator when the swarm returns. Returns the extra."""
+        from ... import tracing
+        use = tracing.worker_usage(tag)
+        total = int(use.get("prompt_tokens", 0)) + int(use.get("completion_tokens", 0))
+        with self._lock:
+            extra = total - int(item.get("_tokens_settled") or 0)
+            if extra > 0:
+                self.spent += extra
+                item["_tokens_settled"] = total
+                entry["tokens"] = total
+        return max(extra, 0)
 
     def admit(self, item: dict) -> Optional[str]:
         reserve = _token_reserve(item)
@@ -643,6 +668,7 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
                                  on_wait=fo.note_human_wait(entry))
                    if queue is not None else _Unattended())
         stop_ev = threading.Event()
+        item["_tokens_budget"] = tokens
         fut = pool.submit(fo._attributed_branch(_run_item), orch, item, entry, channel,
                           autonomy, stop_ev)
         return fut, entry, stop_ev
@@ -846,6 +872,7 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
     finally:
         server.__exit__(None, None, None)
         pool.shutdown(wait=False, cancel_futures=True)
+        _settle_late(tokens, fut_item, fut_entry)
         orch._auto_checkpoint(verbose=False)
 
     results = [{"delegation_index": e["index"], "label": e.get("label"), "mode": e.get("mode"),
@@ -902,14 +929,37 @@ def _settle(tokens: "TokenBudget", item: dict, entry: dict) -> None:
     use = tracing.worker_usage(_worker_tag(entry, item))
     spent = int(use.get("prompt_tokens", 0)) + int(use.get("completion_tokens", 0))
     tokens.settle(item, spent)
-    tracing.forget_worker_usage(_worker_tag(entry, item))
+    # The tag stays: a cancelled item winds down and keeps spending; what it
+    # spends beyond this is charged when the swarm returns (_settle_late).
+    item["_tokens_settled"] = spent
     entry["tokens"] = spent
-    if entry.get("status") in ("success", "partial"):
-        try:
-            peaks.record(item.get("_mem_class") or peaks.item_class(item),
-                         peak_rss_bytes=entry.get("peak_rss_bytes"), tokens=spent or None)
-        except Exception as exc:  # noqa: BLE001 - the table never fails a swarm
-            fo.logger.warning(f"measured-items table not updated: {exc}")
+    cls = item.get("_mem_class") or peaks.item_class(item)
+    try:
+        if entry.get("status") in ("success", "partial"):
+            peaks.record(cls, peak_rss_bytes=entry.get("peak_rss_bytes"), tokens=spent or None)
+        elif entry.get("out_of_memory") or "memory_pressure" in str(entry.get("error") or ""):
+            # Ended on memory: its peak is a lower bound of what the class
+            # needs on this machine (it can only raise the max).
+            peaks.record(cls, peak_rss_bytes=entry.get("peak_rss_bytes"))
+    except Exception as exc:  # noqa: BLE001 - the table never fails a swarm
+        fo.logger.warning(f"measured-items table not updated: {exc}")
+
+
+def _settle_late(tokens: "TokenBudget", fut_item: Dict[Any, dict], fut_entry: Dict[Any, dict]) -> None:
+    """When the swarm returns: every item's spend beyond what was settled
+    (a cancelled item that kept calling while it wound down) is charged and
+    put on its entry, and the tags are released. A process worker's usage
+    reached the parent in its final report, or from the file it kept while
+    it ran, so a killed worker is charged too."""
+    from ... import tracing
+    for f, item in fut_item.items():
+        entry = fut_entry[f]
+        tag = _worker_tag(entry, item)
+        if not item.get("_settled"):
+            _settle(tokens, item, entry)
+        tokens.charge_late(item, entry, tag)
+        if f.done():
+            tracing.forget_worker_usage(tag)      # a thread still winding down keeps its tag
 
 
 def _task_requests(orch, entries: List[dict]) -> List[dict]:

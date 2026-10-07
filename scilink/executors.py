@@ -240,6 +240,13 @@ def _kill_process_tree(proc: subprocess.Popen, grace: float = 2.0) -> None:
         job.close()
         return
     group = _group_of(proc)
+    # The descendants as they stand now: a grandchild that leads a session
+    # of its own (a worker process's generated script, a replay child) is
+    # not in this group, and its parent's SIGTERM handler — the only thing
+    # that would end it — does not run while that parent sits in one long C
+    # call. Whatever of the snapshot is still alive after the group is gone
+    # is killed by pid.
+    descendants = _descendants_of(proc.pid)
 
     def send(sig):
         if group is not None:
@@ -266,6 +273,33 @@ def _kill_process_tree(proc: subprocess.Popen, grace: float = 2.0) -> None:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
         pass
+    _kill_survivors(descendants)
+
+
+def _descendants_of(pid: int) -> list:
+    """The process's descendants (``psutil``), or ``[]`` without it."""
+    try:
+        import psutil
+        return psutil.Process(pid).children(recursive=True)
+    except Exception:  # noqa: BLE001 - no psutil, or the process already gone
+        return []
+
+
+def _kill_survivors(descendants: list) -> None:
+    """SIGKILL what is left of a snapshot taken before the tree was
+    signalled, and reap. A pid reused since the snapshot is recognised by
+    psutil's creation-time check and left alone."""
+    for p in descendants:
+        try:
+            if p.is_running() and p.status() != "zombie":
+                p.kill()
+        except Exception:  # noqa: BLE001 - gone, or not ours any more
+            continue
+    for p in descendants:
+        try:
+            p.wait(timeout=2)
+        except Exception:  # noqa: BLE001
+            continue
 
 
 def _kill_all_registered() -> None:

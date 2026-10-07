@@ -26,6 +26,7 @@ from scilink.agents.meta_agent import fanout as fo
 from scilink.agents.meta_agent import peaks, placements, swarm
 from scilink.agents.meta_agent.meta_orchestrator import MetaMode, MetaOrchestratorAgent
 from scilink.agents.meta_agent.placements import LocalProcess, WorkerHandle
+from scilink.ui.output_capture import AgentStoppedError
 from scilink.utils.log_context import is_cancelled, register_cancel, unregister_cancel
 from scilink.wrappers import llm_limiter
 
@@ -34,10 +35,18 @@ TARGET = f"{__name__}:child_target"
 
 # ------------------------------------------------------------ the stand-in child
 
+USAGE = {"m": {"calls": 2, "prompt_tokens": 100, "completion_tokens": 10, "seconds": 0.5}}
+
+
 def child_target(spec):
     """What the child runs instead of ``run_item``: behaviour read from the
     task text. Returns the shape ``run_item`` returns."""
+    import json as _json
+    import subprocess
     task = str(spec.get("task") or "")
+    base = Path(spec.get("base_dir") or ".")
+    base.mkdir(parents=True, exist_ok=True)
+    (base / placements.WORKER_USAGE).write_text(_json.dumps(USAGE))     # as the real sink keeps it
     marker = os.environ.get("SCILINK_TEST_KILL_ONCE_MARKER")
     if "kill once" in task and marker and not Path(marker).exists():
         Path(marker).write_text("killed")
@@ -46,6 +55,15 @@ def child_target(spec):
         os.kill(os.getpid(), 9)
     if "raise" in task:
         raise RuntimeError("the target failed")
+    if "grandchild" in task:
+        # a grandchild in its own session (as a generated script runs), and
+        # the worker busy in one long C call, where no SIGTERM handler runs
+        import hashlib
+        g = subprocess.Popen(["sleep", "300"], start_new_session=True)
+        (base / "grandchild.pid").write_text(str(g.pid))
+        hashlib.pbkdf2_hmac("sha256", b"x", b"y", 300_000_000)
+    for i in range(3):
+        print(f"worker line {i}", flush=True)
     held = None
     if "hold" in task:
         held = bytearray(300 * (1 << 20))          # 300 MB the sampler must see
@@ -62,8 +80,9 @@ def child_target(spec):
 
 
 def _spec(task, **extra):
-    return {"mode": "analysis", "task": task, "label": task, "base_dir": "/tmp/x", "autonomy": "AUTONOMOUS",
-            "host": {}, **extra}
+    import tempfile
+    return {"mode": "analysis", "task": task, "label": task, "base_dir": tempfile.mkdtemp(prefix="swarm-item-"),
+            "autonomy": "AUTONOMOUS", "host": {}, **extra}
 
 
 # ------------------------------------------------------- the worker contract
@@ -92,6 +111,7 @@ def test_a_killed_worker_nobody_cancelled_is_out_of_memory_and_a_failed_target_i
     killed, failed = pl.submit(_spec("kill")), pl.submit(_spec("raise"))
     assert pl.wait(killed, poll_s=0.05)["state"] == "out_of_memory"
     assert "SIGKILL" in killed.stop_reason
+    assert killed.usage == USAGE                 # what it spent before the kill, from its file
     assert pl.wait(failed, poll_s=0.05)["state"] == "failed"
     assert "the target failed" in failed.stop_reason
 
@@ -108,7 +128,7 @@ def test_cancel_ends_the_child_and_is_idempotent():
     pl.cancel(h)
     final = pl.wait(h, poll_s=0.05)
     assert final["state"] == "cancelled" and time.time() - t0 < 5.0
-    assert h.stop_reason
+    assert h.stop_reason == "cancelled"           # the cancel's reason, not the signal's
 
 
 def test_the_waiting_threads_own_cancel_cancels_the_worker():
@@ -264,20 +284,29 @@ def test_estimate_item_prefers_the_measured_peak(tmp_path, monkeypatch):
 
 # --------------------------------------------------------------- the breaker
 
-def test_the_breaker_trips_on_failures_across_workers_and_a_success_closes_it(monkeypatch):
-    llm_limiter.reset_breaker()
+def test_the_breaker_trips_on_a_failing_model_and_a_success_does_not_close_it(monkeypatch):
     monkeypatch.setattr(llm_limiter, "BREAKER_HOLD_S", 5.0)
     for _ in range(llm_limiter.BREAKER_FAILURES - 1):
         llm_limiter.note_provider_failure("m")
-    assert llm_limiter.provider_tripped() is None
+    assert llm_limiter.provider_tripped("m") is None
     llm_limiter.note_provider_failure("m")
-    assert 0 < llm_limiter.provider_tripped() <= 5.0
-    llm_limiter.note_provider_ok()
-    assert llm_limiter.provider_tripped() is None
-
-
-def test_an_open_breaker_holds_admission_not_running_work(monkeypatch):
+    assert 0 < llm_limiter.provider_tripped("m") <= 5.0
+    assert llm_limiter.provider_tripped() is not None and llm_limiter.provider_tripped("other") is None
+    llm_limiter.note_provider_ok("m")
+    assert llm_limiter.provider_tripped("m") is not None     # the hold runs its course
     llm_limiter.reset_breaker()
+    # a brown-out: failures beside successes still trip (half the calls)...
+    for ok in [False, True] * llm_limiter.BREAKER_FAILURES:
+        llm_limiter.note_provider_ok("m") if ok else llm_limiter.note_provider_failure("m")
+    assert llm_limiter.provider_tripped("m") is not None
+    llm_limiter.reset_breaker()
+    # ... a healthy run with a few failures does not
+    for i in range(60):
+        llm_limiter.note_provider_failure("m") if i % 10 == 0 else llm_limiter.note_provider_ok("m")
+    assert llm_limiter.provider_tripped("m") is None
+
+
+def test_an_open_breaker_holds_admission_for_that_model_not_running_work(monkeypatch):
     monkeypatch.setattr(llm_limiter, "BREAKER_HOLD_S", 1.0)
     monkeypatch.setattr(fo, "_available_memory", lambda: 8e9)
     for _ in range(llm_limiter.BREAKER_FAILURES):
@@ -285,13 +314,14 @@ def test_an_open_breaker_holds_admission_not_running_work(monkeypatch):
     admitted = threading.Event()
 
     def admit():
-        fo._admit_branch("t:breaker", 1e6, "held one")
+        fo._admit_branch("t:breaker", 1e6, "held one", "m")
         admitted.set()
     t = threading.Thread(target=admit, daemon=True)
     t.start()
-    assert not admitted.wait(0.3)                # held while the breaker is open
-    llm_limiter.note_provider_ok()
-    assert admitted.wait(3.0)                    # admitted as soon as it closes
+    assert not admitted.wait(0.3)                # held while the breaker is open for its model
+    fo._admit_branch("t:other", 1e6, "another model's item", "other")   # not held
+    fo._release_branch("t:other")
+    assert admitted.wait(3.0)                    # admitted once the hold ran out
     fo._release_branch("t:breaker")
 
 
@@ -312,12 +342,12 @@ def test_the_retry_policy_feeds_the_breaker(monkeypatch):
         return "ok"
     assert call_with_retries(call, 3, model="m") == "ok"
     assert calls["n"] == 3
-    assert llm_limiter.provider_tripped() is None         # the success closed what two failures opened
+    assert llm_limiter.provider_tripped("m") is not None  # two failures of three calls tripped it
+    llm_limiter.reset_breaker()
     calls["n"] = -10
     with pytest.raises(Throttled):
         call_with_retries(call, 1, model="m")
-    assert llm_limiter.provider_tripped() is not None
-    llm_limiter.reset_breaker()
+    assert llm_limiter.provider_tripped("m") is not None
 
 
 # -------------------------------------------------------- the cluster's cancel
@@ -336,6 +366,8 @@ def test_the_cluster_executor_cancels_its_job_on_the_threads_own_cancel(tmp_path
         register_cancel(ev)
         try:
             out["r"] = ex.run({"in.lj": "S"}, "lmp -in in.lj", str(tmp_path / "m"))
+        except AgentStoppedError as exc:
+            out["stop"] = exc
         finally:
             unregister_cancel()
     t = threading.Thread(target=item)
@@ -343,8 +375,16 @@ def test_the_cluster_executor_cancels_its_job_on_the_threads_own_cancel(tmp_path
     time.sleep(0.2)
     ev.set()
     t.join(10)
-    assert out["r"]["status"] == "error" and "cancelled" in out["r"]["error"].lower()
+    # the job is cancelled AND the caller is ended (so a campaign loop does
+    # not critique and resubmit); a caller's own hook keeps the result
+    assert "r" not in out and isinstance(out["stop"], AgentStoppedError)
     assert sched.cancelled == ["12345"] and (tmp_path / "m" / _RC).read_text() == "cancelled"
+    # with the cancel already set, nothing is submitted at all
+    out.clear()
+    t = threading.Thread(target=item)
+    t.start()
+    t.join(10)
+    assert isinstance(out["stop"], AgentStoppedError) and sched.cancelled == ["12345"]
 
 
 def test_is_cancelled_reads_the_threads_cancel():
@@ -435,7 +475,7 @@ def test_a_worker_killed_by_the_system_runs_again_alone_once(meta, monkeypatch, 
     assert by == [("heavy", "error"), ("light", "success"), ("heavy", "success")]
     assert "out_of_memory" in res["results"][0]["error"] and "SIGKILL" in res["results"][0]["error"]
     # the rerun is settled on its own: the killed attempt spent nothing
-    assert [r["tokens"] for r in res["results"]] == [0, 101, 110] and res["tokens"]["spent"] == 211
+    assert [r["tokens"] for r in res["results"]] == [110, 101, 110] and res["tokens"]["spent"] == 321
     first = next(e for e in meta._delegation_ledger if e.get("label") == "heavy")
     assert first["worker_state"] == "out_of_memory" and first.get("out_of_memory")
 
@@ -557,16 +597,21 @@ def test_a_fan_out_branch_larger_than_the_host_is_not_started_and_the_rest_run(t
         np.save(p, np.zeros((8, 8)))
     _fanout_fakes(monkeypatch, {p: ["good"] for p in paths})
     monkeypatch.setattr(fo, "machine_memory", lambda: {"total": 8e9, "available": 6e9})
-    real = fo.estimate_item
-    monkeypatch.setattr(fo, "estimate_item", lambda it: 40e9 if it.get("label") == "B.npy" else real(it))
+    # the input-based estimate never refuses a fan-out branch; a MEASURED class does
+    cls = {p: peaks.item_class({"mode": "analysis", "data_path": p}) for p in paths}
+    assert len(set(cls.values())) == 1          # same files, one class: measure through a copy
+    monkeypatch.setattr(fo, "_branch_mem_estimate", lambda b: 40e9)
+    peaks.record("B-class", peak_rss_bytes=40e9)
+    real_class = peaks.item_class
+    monkeypatch.setattr(peaks, "item_class", lambda it: "B-class" if str(it.get("data_path", "")).endswith("B.npy") else real_class(it))
     ag = _fanout_meta(tmp_path)
     out = json.loads(ag._run_fanout([{"data_path": p, "task": f"Analyze {p}", "label": os.path.basename(p)}
                                      for p in paths]))
     assert out["status"] == "success" and out["branches_run"] == 2
-    assert out["not_started"] == [{"label": "B.npy", "reason": "needs about 40.0 GB; this machine has 8.0 GB in all"}]
+    assert out["not_started"] == [{"label": "B.npy", "reason": "needs about 40.0 GB (measured for its class); this machine has 8.0 GB in all"}]
     assert sorted(e["label"] for e in ag._delegation_ledger if e.get("fanout")) == ["A.npy", "C.npy"]
     # with one branch left there is nothing to fan out
-    monkeypatch.setattr(fo, "estimate_item", lambda it: 40e9 if it.get("label") != "A.npy" else real(it))
+    monkeypatch.setattr(peaks, "item_class", lambda it: "B-class" if not str(it.get("data_path", "")).endswith("A.npy") else real_class(it))
     ag2 = _fanout_meta(tmp_path / "second")
     out = json.loads(ag2._run_fanout([{"data_path": p, "task": f"Analyze {p}", "label": os.path.basename(p)}
                                       for p in paths]))
@@ -604,3 +649,184 @@ def test_the_fan_out_guard_cancels_the_heaviest_branch_and_reruns_it_alone(tmp_p
     assert b["late_result"]["status"] == "cancelled"        # the first attempt wound down
     assert time.monotonic() - t0 < 25.0
     assert not fo._mem_running
+
+
+# ---------------------------------------------------- after the review (round 1)
+
+def test_cancel_ends_a_grandchild_in_its_own_session(tmp_path):
+    """A generated script leads its own session, and the worker's SIGTERM
+    handler does not run while the worker sits in one long C call: the
+    tree kill snapshots the descendants and kills the survivors."""
+    pl = LocalProcess(target=TARGET)
+    h = pl.submit(_spec("grandchild slow"))
+    base = Path(h.spec["base_dir"])
+    deadline = time.time() + 20
+    while not (base / "grandchild.pid").exists() and time.time() < deadline:
+        time.sleep(0.1)
+    gpid = int((base / "grandchild.pid").read_text())
+    import psutil
+    assert psutil.pid_exists(gpid)
+    time.sleep(0.5)
+    pl.cancel(h)
+    assert pl.wait(h, poll_s=0.05)["state"] == "cancelled"
+    deadline = time.time() + 5
+    while psutil.pid_exists(gpid) and psutil.Process(gpid).status() != "zombie" and time.time() < deadline:
+        time.sleep(0.1)
+    assert not psutil.pid_exists(gpid) or psutil.Process(gpid).status() == "zombie"
+
+
+def test_the_workers_console_reaches_the_turn_and_its_log(capsys):
+    pl = LocalProcess(target=TARGET)
+    h = pl.submit(_spec("plain"))
+    pl.wait(h, poll_s=0.05)
+    out = capsys.readouterr().out
+    assert all(f"worker line {i}" in out for i in range(3)), out[-500:]
+    log = (Path(h.spec["base_dir"]) / placements.WORKER_LOG).read_text()
+    assert "worker line 2" in log
+
+
+def test_a_key_the_child_would_not_find_keeps_the_item_a_thread(monkeypatch):
+    monkeypatch.delenv(placements.PLACEMENT_ENV, raising=False)
+    monkeypatch.delenv("SCILINK_API_KEY", raising=False)
+    heavy = {"mode": "analysis", "data_path": "/d"}
+
+    class Proxy:
+        api_key, base_url, _shared_extensions = "pk", "http://proxy", []
+    assert "SCILINK_API_KEY" in placements.placement_for(Proxy(), heavy, attended=False)[1]
+    monkeypatch.setenv("SCILINK_API_KEY", "pk")
+    assert placements.placement_for(Proxy(), heavy, attended=False)[0] == "process"
+    monkeypatch.setenv("OTHER_KEY", "pk")
+    monkeypatch.setenv("SCILINK_API_KEY", "a-different-one")
+    assert placements.placement_for(Proxy(), heavy, attended=False)[0] == "thread"
+
+    class Direct:
+        api_key, base_url, _shared_extensions = None, None, []
+        embedding_api_key, futurehouse_api_key = "ek", None
+    assert "embedding API key" in placements.placement_for(Direct(), heavy, attended=False)[1]
+    monkeypatch.setenv("OPENAI_API_KEY", "ek")
+    assert placements.placement_for(Direct(), heavy, attended=False)[0] == "process"
+
+
+def test_a_measured_class_is_refused_on_its_raw_peak_and_admitted_with_headroom(tmp_path, monkeypatch):
+    np.save(tmp_path / "a.npy", np.zeros((1000, 1000)))
+    item = {"mode": "analysis", "task": "t", "label": "ran here", "data_path": str(tmp_path / "a.npy")}
+    peaks.record(peaks.item_class(item), peak_rss_bytes=12.5e9)        # a run that succeeded on this machine
+    plan = fo.plan_capacity([dict(item)], {"total": 16e9, "available": 8e9}, max_workers=3)
+    assert plan["refused"] == [] and plan["run"][0]["_mem_peak"] == 12.5e9
+    assert plan["run"][0]["_mem_est"] == 12.5e9 * peaks.PEAK_HEADROOM     # admission plans with headroom
+    peaks.record(peaks.item_class(item), peak_rss_bytes=15e9)
+    plan = fo.plan_capacity([dict(item)], {"total": 16e9, "available": 8e9}, max_workers=3)
+    assert "15.0 GB (measured for its class)" in plan["refused"][0]["reason"]
+    # the fan-out's rule: an estimate never refuses, a measurement does
+    monkeypatch.setattr(fo, "_branch_mem_estimate", lambda b: 40e9)
+    assert fo.plan_capacity([{"mode": "analysis", "label": "guess", "data_path": str(tmp_path / "missing.npy")}],
+                            {"total": 16e9, "available": 8e9}, max_workers=3, refuse_unmeasured=False)["refused"] == []
+    assert peaks.forget(peaks.item_class(item)) and peaks.measured(peaks.item_class(item)) is None
+    assert not peaks.forget("never-seen")
+
+
+def test_the_class_names_the_series_replay_workers(tmp_path, monkeypatch):
+    for i in range(6):
+        np.save(tmp_path / f"cube_{i}.npy", np.zeros((10, 10, 10)))
+    item = {"mode": "analysis", "data_path": str(tmp_path)}
+    monkeypatch.delenv("SCILINK_HS_SERIES_WORKERS", raising=False)
+    monkeypatch.delenv("SCILINK_MAX_WORKERS", raising=False)
+    one = peaks.item_class(item)
+    monkeypatch.setenv("SCILINK_HS_SERIES_WORKERS", "4")
+    four = peaks.item_class(item)
+    assert four == one + ":w4" and ":w" not in one
+    assert peaks.item_class({**item, "series_workers": 2}) == one + ":w2"
+    monkeypatch.setenv("SCILINK_HS_SERIES_WORKERS", "16")
+    assert peaks.item_class(item) == one + ":w5"              # never more than the units to replay
+    assert ":w" not in peaks.item_class({"mode": "analysis", "data_path": str(tmp_path / "cube_0.npy")})
+
+
+def test_a_cancelled_items_spend_is_charged_when_its_thread_ends(meta, monkeypatch):
+    """A thread item cancelled on its budget winds down cooperatively and
+    may keep calling the model: five calls of 11,000 tokens, cancelled after
+    the second, are charged in full — to the budget and the ledger."""
+    class Talker:
+        def __init__(self, mode, base_dir):
+            self.base_dir = Path(base_dir)
+
+        def run_task(self, task, context=None, autonomy=None):
+            for _ in range(5):
+                tracing.note_llm_call(prompt_tokens=10_000, completion_tokens=1_000, model="m")
+                time.sleep(0.3)                  # no print: the cancel is never noticed
+            return {"status": "success", "summary": task, "key_findings": ["f"], "files_produced": []}
+
+    def build(orch, mode, base_dir, **kw):
+        Path(base_dir).mkdir(parents=True, exist_ok=True)
+        return Talker(mode, base_dir)
+    monkeypatch.setattr(swarm, "build_child", build)
+    res = json.loads(swarm.run_swarm(meta, [{"mode": "planning", "task": "a", "label": "a"},
+                                            {"mode": "planning", "task": "b", "label": "b"}],
+                                     item_time_budget_s=0.5, budget={"max_tokens": 1_000_000}))
+    assert all(r["status"] == "error" for r in res["results"])
+    entries = [e for e in meta._delegation_ledger if e.get("label") in ("a", "b")]
+    deadline = time.time() + 10
+    while any(e.get("tokens") != 55_000 for e in entries) and time.time() < deadline:
+        time.sleep(0.1)
+    assert [e["tokens"] for e in entries] == [55_000, 55_000]
+    assert all(tracing.worker_usage(f"swarm:{e['index']:02d}_{e['label']}")["calls"] == 0 for e in entries)
+
+
+def test_the_real_run_item_runs_in_a_real_child_on_a_failing_model(tmp_path, monkeypatch):
+    """Pins the spec's pickling, the child's imports and the result shape:
+    the real ``run_item`` builds a real analysis worker, whose one model
+    call fails on a model that does not exist (no tokens spent)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("SCILINK_LLM_RETRIES", "0")
+    spec = {"mode": "analysis", "task": "say hello", "context": None, "label": "real", "autonomy": "AUTONOMOUS",
+            "base_dir": str(tmp_path / "real"), "budget_s": 60, "sandbox_approved": False,
+            "host": {"model_name": "anthropic/claude-no-such-model-0", "base_url": None,
+                     "embedding_model": None, "embedding_api_key": None, "embedding_base_url": None,
+                     "futurehouse_api_key": None, "knowledge_dir": None, "file_roots": [str(tmp_path)],
+                     "extensions": []}}
+    pl = LocalProcess()
+    h = pl.submit(spec)
+    final = pl.wait(h, poll_s=0.2)
+    assert final["state"] == "done", (final, h.stop_reason)
+    assert isinstance(h.result, dict) and h.result.get("status") in ("error", "success")
+    assert set(h.result) >= {"status", "summary", "key_findings", "files_produced", "warnings"}
+    assert (tmp_path / "real" / placements.WORKER_LOG).exists()
+    assert final["peak_rss_bytes"] > 1e8
+
+
+def slow_replay(spec):
+    time.sleep(60)
+    return {"index": spec["index"], "result": {"status": "success"}}
+
+
+def test_a_cancelled_series_ends_its_replay_children_within_seconds(monkeypatch):
+    """The replay pool's wait reads the series' own cancel (an item's budget,
+    the guard, a Stop) and kills the children it recorded, instead of
+    letting the cancel land only when the next replay finishes."""
+    import logging
+    from scilink.agents.exp_agents.controllers import hyperspectral_series as hs
+    monkeypatch.setattr(hs, "_REPLAY_TARGET", f"{__name__}:slow_replay")
+    monkeypatch.delenv("SCILINK_HS_SERIES_POOL", raising=False)
+    ev, out = threading.Event(), {}
+
+    def series_item():
+        register_cancel(ev)
+        try:
+            pool = hs.ReplayPool(2, logging.getLogger("t"))
+            pool.submit({"index": 0})
+            pool.submit({"index": 1})
+            t0 = time.monotonic()
+            try:
+                pool.collect()
+            except AgentStoppedError:
+                out["after_s"] = time.monotonic() - t0
+            out["children"] = [p.pid for p in __import__("psutil").Process().children(recursive=True)
+                               if any("child_process" in a for a in (p.cmdline() or []))]
+        finally:
+            unregister_cancel()
+    t = threading.Thread(target=series_item)
+    t.start()
+    time.sleep(3.0)                              # the children are up
+    ev.set()
+    t.join(30)
+    assert out.get("after_s") is not None and out["after_s"] < 12, out
+    assert out["children"] == [], out
