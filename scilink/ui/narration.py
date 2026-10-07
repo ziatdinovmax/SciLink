@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-from .vocabulary import ACTIVITY_LABELS, HANDOFF_PREFIXES, THOUGHT_MARK
+from .vocabulary import ACTIVITY_LABELS, COORDINATOR_MARK, HANDOFF_PREFIXES, THOUGHT_MARK
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _RULE_RE = re.compile(r"^[-=_*—─═]+$")
@@ -32,21 +32,13 @@ _CAND_RE = re.compile(r"^\[cand[_-]?0*(\d+)\]\s*(.*)$")
 # write is always what this reads.
 WORKER_TAG_MAX = 48
 _WORKER_RE = re.compile(r"^\[(?!cand[_-]?\d)([^\[\]\n]{1,48})\]\s?(.*)$", re.S)
-# The swarm and fan-out coordinators' own lines, by their wording — the
-# launch, an item held for memory or the breaker, the guard, a rerun, a
-# budget, a refusal, the heartbeat, an item finished. An agent's own line
-# that opens with the same emoji ("⏱ Nobody answered the review in time",
-# "🔁 Diagram render error") is not one.
-_COORDINATOR_RE = re.compile(
-    r"^(?:🐝 |"
-    r"⏸\s+holding (?:branch )?'|"
-    r"🧯 (?:free memory is low|'[^']*' ran out of memory)|"
-    r"🔁 (?:running (?:branch )?'[^']*' again|Resuming \d+ fan-out branch)|"
-    r"⛔ (?:not started:|reaction refused|not running '[^']*' again)|"
-    r"⏱️?\s+(?:swarm item|analysis branch|resumed branch|raw-instrument branch\(es\)) |"
-    r"⏳ (?:\d+ swarm item\(s\) still running|\d+ of \d+ parallel analyses still|"
-    r"\d+ resumed branch\(es\) still|waiting for the cancelled (?:worker|branch) to end)|"
-    r"✅ (?:swarm item|analysis branch|resumed branch) finished)")
+# The swarm and fan-out coordinators' own lines carry COORDINATOR_MARK
+# (``fanout.coordinator_line``): the launch, an item held for memory or the
+# breaker, the guard, a rerun, a budget, a refusal, the heartbeat, an item
+# finished. The mark, not the wording, makes them the visible fan-out kind,
+# so a reworded or new coordinator line needs nothing here and an agent's
+# own line that opens with the same emoji ("⏱ Nobody answered the review
+# in time", "🔁 Diagram render error") is never one.
 
 
 def worker_tag(label: object) -> str:
@@ -133,6 +125,8 @@ class LineClassifier:
         clean = strip_ansi(raw.rstrip("\n"))
         specialist = THOUGHT_MARK in clean
         clean = clean.replace(THOUGHT_MARK, "")
+        coordinator = COORDINATOR_MARK in clean
+        clean = clean.replace(COORDINATOR_MARK, "")
         worker, clean = split_worker_tag(clean)
         s = clean.strip()
         st = self._state(worker)
@@ -160,8 +154,8 @@ class LineClassifier:
         kind = None
         if s.startswith("🔧 Calling tool:"):
             kind = "tool_call"
-        elif s.startswith("🔀") or _COORDINATOR_RE.match(s):
-            kind = "fanout"              # the coordinators' own lines, by their wording
+        elif coordinator or s.startswith("🔀"):
+            kind = "fanout"              # the coordinators' own lines, by their mark
         elif s.startswith("⏳"):
             kind = "waiting"
         elif s.startswith("⚠"):
@@ -229,7 +223,7 @@ def current_activity(log: str) -> Optional[str]:
     the tail is recognisable (the caller shows ``DEFAULT_ACTIVITY``)."""
     lines = strip_ansi(log[-6000:]).split("\n")
     for raw in reversed(lines):
-        line = raw.replace(THOUGHT_MARK, "").strip()
+        line = raw.replace(THOUGHT_MARK, "").replace(COORDINATOR_MARK, "").strip()
         if not line:
             continue
         # Bare rules frame headers in the narration; the "--- title ---"

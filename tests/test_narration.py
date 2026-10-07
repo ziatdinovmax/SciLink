@@ -111,6 +111,7 @@ def test_a_swarm_items_tag_is_read_off_the_line_and_the_coordinators_lines_are_v
     plain = c.push("[XRD 300 K] 2026-10-07 10:04:27,563 - INFO -   Points: 3000")
     assert (plain.kind, plain.worker, plain.verbose) == ("plain", "XRD 300 K", True)
     assert c.push("  💭 the meta's own thought").worker is None
+    from scilink.agents.meta_agent.fanout import coordinator_line
     for text in ("  🐝 swarm_x: 2 item(s), up to 2 at a time",
                  "  ⏸  holding branch 'purity plan' for memory headroom",
                  "  🧯 free memory is low (0.10 GB) — cancelling 'heavy'",
@@ -119,7 +120,7 @@ def test_a_swarm_items_tag_is_read_off_the_line_and_the_coordinators_lines_are_v
                  "  ✅ swarm item finished: XRD 300 K (success)",
                  "  ⛔ not started: big cube — needs about 40.0 GB",
                  "  ⏱️  swarm item 'slow one' exceeded its wall-clock budget (0s)"):
-        ln = c.push(text)
+        ln = c.push(coordinator_line(text))              # as the coordinators print them
         assert (ln.kind, ln.verbose) == ("fanout", False), text
     assert c.push("  ⏳ Waiting for orchestrator response ...").kind == "waiting"
     assert c.push("  ✅ Sandbox approval already granted this session").kind == "bookkeeping"
@@ -144,38 +145,60 @@ def test_the_writers_label_is_always_one_the_reader_accepts():
     assert (ln.kind, ln.verbose) == ("thought", False) and ln.worker == worker_tag(long)
 
 
-def test_coordinator_lines_are_matched_by_wording_not_emoji():
-    """Item 4: an agent's own line that opens with the same emoji stays
-    plain (verbose); the coordinators' lines are the visible fan-out kind."""
+def test_coordinator_lines_are_known_by_their_mark_not_their_wording():
+    """Item 4 (round 2): the coordinators mark their own lines
+    (``fanout.coordinator_line``); the reader shows a marked line and nothing
+    by its emoji, so an agent's "⏱ Nobody answered…" stays plain and a
+    reworded coordinator print needs no change here."""
+    from scilink.agents.meta_agent.fanout import coordinator_line
+    from scilink.ui.vocabulary import COORDINATOR_MARK
     c = LineClassifier()
-    for text in ("  ⏱ Nobody answered the review in time; the plan is marked unattended",
-                 "    🔁 Diagram render error (attempt 2): …",
-                 "  ⏱️ Deep literature searches take a few minutes",
-                 "  ⏳ Waiting for orchestrator response ...",
-                 "  ✅ Sandbox approval already granted this session",
-                 "  ⛔ Fan-out over this dataset set was already declined"):
+    agents = ("  ⏱ Nobody answered the review in time; the plan is marked unattended",
+              "    🔁 Diagram render error (attempt 2): …",
+              "  ⏱️ Deep literature searches take a few minutes",
+              "  ⏳ Waiting for orchestrator response ...",
+              "  ✅ Sandbox approval already granted this session",
+              "  ⛔ Fan-out over this dataset set was already declined")
+    for text in agents:
         ln = c.push(text)
-        assert ln.kind in ("plain", "waiting", "bookkeeping") and ln.verbose, text
-    for text in ("  🐝 swarm_x: 2 item(s), up to 2 at a time",
-                 "  ⏸  holding branch 'purity plan' for memory headroom (needs ~0.5 GB)",
-                 "  ⏸  holding 'x': the provider circuit breaker is open",
-                 "  🧯 free memory is low (0.10 GB) — cancelling 'heavy'",
-                 "  🧯 'heavy' ran out of memory — running it again alone afterwards",
-                 "  🔁 running 'heavy' again, alone",
-                 "  🔁 running branch 'B.npy' again, alone",
-                 "  🔁 Resuming 2 fan-out branch(es) in their original sessions...",
-                 "  ⛔ not started: big cube — needs about 40.0 GB",
-                 "  ⛔ reaction refused (sim on f0001): max_reactions (2) reached",
-                 "  ⏱️  swarm item 'slow one' exceeded its wall-clock budget (0s)",
-                 "  ⏱️  analysis branch 'B' exceeded its wall-clock budget (5s)",
-                 "  ⏳ 2 swarm item(s) still running ...",
-                 "  ⏳ 1 of 3 parallel analyses still running ... (~60s elapsed)",
-                 "  ⏳ waiting for the cancelled worker to end before the rerun (3 s) ...",
-                 "  ✅ swarm item finished: XRD 300 K (success)",
-                 "  ✅ analysis branch finished: A.npy  (1/2 done)",
-                 "  ✅ resumed branch finished: B.npy (status: success)"):
-        ln = c.push(text)
-        assert (ln.kind, ln.verbose) == ("fanout", False), text
+        assert ln.kind != "fanout" and ln.verbose, text
+    coordinators = ("  🐝 swarm_x: 2 item(s), up to 2 at a time",
+                    "  ⏸  holding branch 'purity plan' for memory headroom (needs ~0.5 GB)",
+                    "  🧯 free memory is low (0.10 GB) — cancelling 'heavy'",
+                    "  🔁 running 'heavy' again, alone",
+                    "  ⛔ not started: big cube — needs about 40.0 GB",
+                    "  ⛔ Fan-out declined: 'x' is a RAW instrument container",      # a refusal, whatever its words
+                    "  ⏱️  swarm item 'slow one' exceeded its wall-clock budget (0s)",
+                    "  ⏳ 2 swarm item(s) still running ...",
+                    "  ✅ swarm item finished: XRD 300 K (success)",
+                    "  🔁 Resuming fan-out branches in their original sessions")
+    for text in coordinators:
+        raw = c.push(text)
+        assert raw.kind != "fanout", text                        # the same words unmarked: an agent's line
+        marked = coordinator_line(text)
+        assert marked.startswith("  " + COORDINATOR_MARK) and COORDINATOR_MARK not in marked[3:]
+        ln = c.push(marked)
+        assert (ln.kind, ln.verbose, ln.text) == ("fanout", False, text.strip()), text
+    assert coordinator_line("🐝 SWARM — 2 item(s)") == COORDINATOR_MARK + "🐝 SWARM — 2 item(s)"
+    assert current_activity(coordinator_line("  🐝 swarm_x: 2 item(s), up to 2 at a time")) == "Swarm · 2 items"
+
+
+def test_every_coordinator_print_goes_through_the_marking_helper():
+    """The guard against drift: a new or reworded coordinator line printed
+    raw would be hidden again. No ``print`` of a line that opens with a
+    coordinator emoji is left in the coordinator modules; they all go
+    through ``_cprint`` (the meta's tools included)."""
+    import re
+    from pathlib import Path
+    import scilink.agents.meta_agent as pkg
+    root = Path(pkg.__file__).parent
+    raw = re.compile(r'(?<![\w.])print\((?=f?"\s*(?:🐝|⏸|🧯|🔁|⛔|⏱|⏳|✅|🔀))')
+    offenders = []
+    for name in ("fanout.py", "swarm.py", "meta_orchestrator_tools.py"):
+        for i, line in enumerate((root / name).read_text(encoding="utf-8").splitlines(), 1):
+            if raw.search(line):
+                offenders.append(f"{name}:{i}: {line.strip()[:80]}")
+    assert not offenders, "\n".join(offenders)
 
 
 def test_thought_and_answer_continuation_is_kept_per_worker():

@@ -32,7 +32,8 @@ check("answer body follows", cl.push("the fit converged").kind === "answer_body"
 check("simulation handoff", cl.push("  ⚛️ Delegating to simulation specialist: x").kind === "handoff");
 check("worker tag read off the line", (() => { const l = cl.push("[XRD 300 K]   💭 first"); return l.kind === "thought" && l.worker === "XRD 300 K"; })());
 check("continuation is per worker", (() => { cl.push("[A]   💭 a thinks"); const b = cl.push("[B]      indented but B's"); return b.kind === "plain" && b.worker === "B"; })());
-check("coordinator line is visible", (() => { const l = cl.push("  🐝 swarm_x: 2 item(s), up to 2 at a time"); return l.kind === "fanout" && !l.verbose; })());
+check("a marked coordinator line is visible", (() => { const l = cl.push(`  ${VOCAB.coordinator_mark}🐝 swarm_x: 2 item(s), up to 2 at a time`); return l.kind === "fanout" && !l.verbose; })());
+check("an unmarked look-alike is not", cl.push("  🐝 swarm_x: 2 item(s), up to 2 at a time").kind !== "fanout");
 check("an agent's ⏱ line is not a coordinator line", cl.push("  ⏱ Nobody answered the review in time").kind === "plain");
 
 console.log("vocabulary:");

@@ -304,7 +304,7 @@ def _memory_line(plan: dict) -> str:
 def _confirm(orch, plan: dict, attended: bool, subscriptions: Optional[List[dict]] = None,
              budget: Optional[dict] = None) -> bool:
     print("\n" + "=" * 78)
-    print(f"🐝 SWARM — {len(plan['run'])} item(s), {plan['workers']} at a time")
+    fo._cprint(f"🐝 SWARM — {len(plan['run'])} item(s), {plan['workers']} at a time")
     for it in plan["run"]:
         print(f"    • {it['label']}  [{it['mode']}]  {_mem_tag(it)}"
               + ("  (own process)" if it.get("_placement") == "process" else ""))
@@ -314,7 +314,7 @@ def _confirm(orch, plan: dict, attended: bool, subscriptions: Optional[List[dict
         for sub in subscriptions:
             print(f"    {_subscription_line(sub)[2:]}")
     for r in plan["refused"]:
-        print(f"  ⛔ not started: {r['label']} — {r['reason']}")
+        fo._cprint(f"  ⛔ not started: {r['label']} — {r['reason']}")
     print("=" * 78)
     try:
         ans = request_human_feedback(
@@ -465,7 +465,7 @@ def _guard_memory(orch, running: Dict[Any, dict], fut_item: Dict[Any, dict], fut
     def on_cancel(fut, entry, reason):
         item = fut_item[fut]
         avail = _memory().get("available")
-        print(f"  🧯 free memory is low ({(avail or 0) / 1e9:.2f} GB) — cancelling '{item['label']}' "
+        fo._cprint(f"  🧯 free memory is low ({(avail or 0) / 1e9:.2f} GB) — cancelling '{item['label']}' "
               + ("and running it again alone afterwards" if not item.get("_retried") else "(already run again once)"))
         fut_stop[fut].set()
         handle = item.get("_handle")
@@ -685,7 +685,7 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
                           autonomy, stop_ev)
         return fut, entry, stop_ev
 
-    print(f"  🐝 {swarm_id}: {len(plan['run'])} item(s), up to {plan['workers']} at a time"
+    fo._cprint(f"  🐝 {swarm_id}: {len(plan['run'])} item(s), up to {plan['workers']} at a time"
           + (f", {len(subs)} subscription(s)" if subs else ""))
     orch._auto_checkpoint(verbose=False)
     requeue: List[dict] = []
@@ -730,7 +730,7 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
                         with orch._fanout_lock:
                             entry.setdefault("refused_reactions", []).append(
                                 {k: v for k, v in note.items() if k != "chain"})
-                        print(f"  ⛔ reaction refused ({sub['enqueue']['label']} on {fid}): {why}")
+                        fo._cprint(f"  ⛔ reaction refused ({sub['enqueue']['label']} on {fid}): {why}")
                     continue
                 ok, bad = normalize_items([new_item], coordinator=True)
                 if not ok:
@@ -789,7 +789,7 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
                 done = set()
                 wait(drain.futs, timeout=_POLL_S)
                 # This print is also where a user's Stop lands on this thread.
-                print(f"  ⏳ waiting for the cancelled worker to end before the rerun "
+                fo._cprint(f"  ⏳ waiting for the cancelled worker to end before the rerun "
                       f"({int(time.monotonic() - (drain.since or t_poll))} s) ...")
             since_tick += time.monotonic() - t_poll
             if server is not None and getattr(server, "error", None) is not None:
@@ -805,12 +805,12 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
             for f in done:
                 f.result()
                 _settle(tokens, fut_item[f], fut_entry[f])
-                print(f"  ✅ swarm item finished: {fut_label[f]} ({fut_entry[f].get('status')})")
+                fo._cprint(f"  ✅ swarm item finished: {fut_label[f]} ({fut_entry[f].get('status')})")
                 since_tick = 0.0
                 if fut_entry[f].get("out_of_memory") and not fut_item[f].get("_retried"):
                     # Killed with nothing returned and nobody asked for it:
                     # the operating system's killer. Once more, alone.
-                    print(f"  🧯 '{fut_label[f]}' ran out of memory — running it again alone afterwards")
+                    fo._cprint(f"  🧯 '{fut_label[f]}' ran out of memory — running it again alone afterwards")
                     requeue.append({**fut_item[f], "_retried": True, "_handle": None, "_settled": False, "_tokens_settled": 0})
                 for nf in react(pool, fut_entry[f], fut_item[f]):
                     pending.add(nf)
@@ -852,16 +852,16 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
                 why = tokens.admit(item)
                 if why:
                     refused.append({"label": item["label"], "reason": f"rerun not started: {why}"})
-                    print(f"  ⛔ not running '{item['label']}' again: {why}")
+                    fo._cprint(f"  ⛔ not running '{item['label']}' again: {why}")
                     continue
-                print(f"  🔁 running '{item['label']}' again, alone")
+                fo._cprint(f"  🔁 running '{item['label']}' again, alone")
                 fut, entry, stop_ev = launch(pool, item)
                 fut_entry[fut], fut_stop[fut], fut_label[fut] = entry, stop_ev, item["label"]
                 fut_item[fut] = item
                 pending = {fut}
             if pending and since_tick >= _HEARTBEAT_S:
                 since_tick = 0.0
-                print(f"  ⏳ {len(pending)} swarm item(s) still running ...")
+                fo._cprint(f"  ⏳ {len(pending)} swarm item(s) still running ...")
     except BaseException:
         # A Stop (or any failure of the coordinator): the items still running
         # are cancelled the way a budget cancels them, so they wind down and

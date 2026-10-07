@@ -1135,9 +1135,13 @@ readers strip the tag (`split_worker_tag`), classify what follows with a
 continuation state kept PER worker (item B's indented line is never item
 A's thought), and keep the label on the line and in the activity ("XRD 300
 K · Curve Fitting Planning"). The swarm and fan-out coordinators' own lines
-are the visible `fanout` kind — matched by their wording, never by an
-emoji an agent may print too — with activity labels of their own. A
-fan-out branch's lines carry no tag.
+are the visible `fanout` kind by a MARK the coordinators put on them
+(`vocabulary.COORDINATOR_MARK`, through `fanout.coordinator_line` /
+`_cprint` — every coordinator print in `fanout.py`, `swarm.py` and
+`meta_orchestrator_tools.py` goes through it, and a test scans the source
+for one that does not), never by wording or by an emoji an agent may print
+too; the readers give them activity labels of their own. A fan-out
+branch's lines carry no tag.
 
 **A human-feedback gate declares what is under review; it does not print
 it for the surfaces to parse.** Every gate holds a structured object at ask

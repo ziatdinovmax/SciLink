@@ -32,6 +32,7 @@ export const VOCAB = {
     "writing_response": "Writing response…"
   },
   "consent_text": "I understand that the agent will execute generated Python code on my machine",
+  "coordinator_mark": "⁤",
   "default_activity": "Agent is working…",
   "enter_accepts_hint": "Enter = {accept}",
   "handoff_prefixes": [

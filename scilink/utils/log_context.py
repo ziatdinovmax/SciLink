@@ -57,20 +57,37 @@ _CANCEL_EVENTS: Dict[int, threading.Event] = {}
 #: through ``inherited_context`` / ``attributed_to_current`` as it inherits
 #: the cancel, so two items' candidates can be told apart.
 _LABELS: Dict[int, str] = {}
+#: Whether a labelled thread's next write begins a line (the tag goes only
+#: at line starts). Kept beside the label and cleared with it, so a reused
+#: thread id never inherits a mid-line state from a thread that ended.
+_LINE_START: Dict[int, bool] = {}
 
 
 def register_label(label: Optional[str]) -> None:
     """Make ``label`` the CURRENT thread's worker label (``None`` clears)."""
+    tid = threading.get_ident()
     with _LOCK:
         if label:
-            _LABELS[threading.get_ident()] = str(label)
+            _LABELS[tid] = str(label)
+            _LINE_START[tid] = True
         else:
-            _LABELS.pop(threading.get_ident(), None)
+            _LABELS.pop(tid, None)
+            _LINE_START.pop(tid, None)
 
 
 def unregister_label() -> None:
+    tid = threading.get_ident()
     with _LOCK:
-        _LABELS.pop(threading.get_ident(), None)
+        _LABELS.pop(tid, None)
+        _LINE_START.pop(tid, None)
+
+
+def line_start(thread_id: int) -> bool:
+    return _LINE_START.get(thread_id, True)
+
+
+def set_line_start(thread_id: int, value: bool) -> None:
+    _LINE_START[thread_id] = value
 
 
 def current_label(thread_id: Optional[int] = None) -> Optional[str]:

@@ -258,5 +258,15 @@
     "name": "worker-tagged candidate",
     "log": "[fit A] [cand_02] Verification 1/7\n",
     "expected": "fit A · Candidate 2 · Verification 1/7…"
+  },
+  {
+    "name": "marked swarm launched",
+    "log": "  🔧 Calling tool: run_swarm\n  ⁤🐝 swarm_x: 2 item(s), up to 2 at a time\n",
+    "expected": "Swarm · 2 items"
+  },
+  {
+    "name": "marked worker-tagged heartbeat",
+    "log": "  ⁤⏳ 2 swarm item(s) still running ...\n[XRD 300 K]   💭 still fitting\n",
+    "expected": "XRD 300 K · 💭 still fitting"
   }
 ]

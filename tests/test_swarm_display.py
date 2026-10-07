@@ -91,8 +91,9 @@ def test_a_swarm_items_prints_carry_its_label_in_the_turn(tmp_path, monkeypatch,
     out = capsys.readouterr().out
     assert "[plan A] 💭 working on a" in out and "[plan B] 💭 working on b" in out
     assert "[plan A] [plan" not in out                      # never tagged twice
-    assert "\n🐝" in out or "  🐝" in out                    # the coordinator's own lines carry no tag
-    assert "[plan A]   🐝" not in out
+    from scilink.ui.vocabulary import COORDINATOR_MARK
+    assert COORDINATOR_MARK + "🐝" in out                     # the coordinator's own lines are marked, never tagged
+    assert "[plan A]   🐝" not in out and "[plan A] " + COORDINATOR_MARK not in out
 
 
 def test_the_relay_tags_a_process_workers_lines(capsys):
@@ -201,3 +202,20 @@ def test_the_relay_inside_a_labelled_item_does_not_tag_twice(capsys, monkeypatch
         unregister_label()
     out = capsys.readouterr().out
     assert "[XRD 300 K] worker line 1" in out and "[XRD 300 K] [XRD 300 K]" not in out
+
+
+def test_the_line_start_state_goes_with_the_label():
+    """The nit: a child thread that ended mid-line must not leave its state
+    for a later thread with a reused id."""
+    import threading as _t
+    from scilink.utils.log_context import line_start, register_label, unregister_label
+    tid = _t.get_ident()
+    register_label("X")
+    try:
+        text, at_start = fo.tag_lines("X", "partial", line_start(tid))
+        from scilink.utils.log_context import set_line_start
+        set_line_start(tid, at_start)
+        assert line_start(tid) is False
+    finally:
+        unregister_label()
+    assert line_start(tid) is True                 # cleared with the label

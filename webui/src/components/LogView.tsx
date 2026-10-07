@@ -1,5 +1,5 @@
 import { useEffect, useRef, type ReactNode } from "react";
-import { LineClassifier, stripAnsi, THOUGHT_MARK } from "../narration";
+import { COORDINATOR_MARK, LineClassifier, stripAnsi, THOUGHT_MARK } from "../narration";
 
 /** Colorized narration pane — the web twin of the terminal shell's
  * renderer, both reading the shared line classifier (narration.ts):
@@ -14,7 +14,7 @@ export function colorizeLog(text: string): ReactNode[] {
   lines.forEach((line, i) => {
     const key = `l${i}`;
     const ln = classifier.push(line);
-    const clean = line.replaceAll(THOUGHT_MARK, "");
+    const clean = line.replaceAll(THOUGHT_MARK, "").replaceAll(COORDINATOR_MARK, "");
     let cls: string | null = null;
     let shown = clean;
     switch (ln.kind) {

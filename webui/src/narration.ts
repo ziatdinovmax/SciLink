@@ -64,21 +64,7 @@ const CAND_RE = /^\[cand[_-]?0*(\d+)\]\s*(.*)$/;
 // start by the item's own stream or the process worker's relay; never a
 // candidate tag, which has its own rule.
 const WORKER_RE = /^\[(?!cand[_-]?\d)([^[\]\n]{1,48})\]\s?([\s\S]*)$/;
-// The swarm and fan-out coordinators' own lines, by their wording (an agent's
-// line opening with the same emoji — "⏱ Nobody answered…", "🔁 Diagram render
-// error" — is not one).
-const COORDINATOR_RE = new RegExp(
-  "^(?:🐝 |" +
-    "⏸\\s+holding (?:branch )?'|" +
-    "🧯 (?:free memory is low|'[^']*' ran out of memory)|" +
-    "🔁 (?:running (?:branch )?'[^']*' again|Resuming \\d+ fan-out branch)|" +
-    "⛔ (?:not started:|reaction refused|not running '[^']*' again)|" +
-    "⏱️?\\s+(?:swarm item|analysis branch|resumed branch|raw-instrument branch\\(es\\)) |" +
-    "⏳ (?:\\d+ swarm item\\(s\\) still running|\\d+ of \\d+ parallel analyses still|" +
-    "\\d+ resumed branch\\(es\\) still|waiting for the cancelled (?:worker|branch) to end)|" +
-    "✅ (?:swarm item|analysis branch|resumed branch) finished)",
-  "u",
-);
+export const COORDINATOR_MARK: string = VOCAB.coordinator_mark;
 
 /** ["XRD 300 K", "💭 …"] for a swarm item's tagged line, else [null, clean]. */
 export function splitWorkerTag(clean: string): [string | null, string] {
@@ -118,6 +104,8 @@ export class LineClassifier {
     let clean = stripAnsi(raw.replace(/\n$/, ""));
     const specialist = clean.includes(THOUGHT_MARK);
     clean = clean.replaceAll(THOUGHT_MARK, "");
+    const coordinator = clean.includes(COORDINATOR_MARK);
+    clean = clean.replaceAll(COORDINATOR_MARK, "");
     const [worker, rest] = splitWorkerTag(clean);
     clean = rest;
     const s = clean.trim();
@@ -149,7 +137,7 @@ export class LineClassifier {
 
     let kind: LineKind | null = null;
     if (s.startsWith("🔧 Calling tool:")) kind = "tool_call";
-    else if (s.startsWith("🔀") || COORDINATOR_RE.test(s)) kind = "fanout"; // the coordinators' own lines
+    else if (coordinator || s.startsWith("🔀")) kind = "fanout"; // the coordinators' own lines, by their mark
     else if (s.startsWith("⏳")) kind = "waiting";
     else if (s.startsWith("⚠")) kind = "warning";
     else if (s.startsWith("💾")) kind = "checkpoint";
@@ -186,7 +174,7 @@ const ACTION_RE =
 export function currentActivity(log: string): string | null {
   const lines = stripAnsi(log.slice(-6000)).split("\n");
   for (let i = lines.length - 1; i >= 0; i--) {
-    let line = lines[i].replaceAll(THOUGHT_MARK, "").trim();
+    let line = lines[i].replaceAll(THOUGHT_MARK, "").replaceAll(COORDINATOR_MARK, "").trim();
     if (!line) continue;
     // Bare rules ("-" * 60, "=" * 60) frame headers in the narration; the
     // "--- title ---" pattern below would read one as a title of "-".
