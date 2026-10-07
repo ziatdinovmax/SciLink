@@ -892,11 +892,22 @@ def _parse_script_markers(stdout: Optional[str]) -> dict:
     structure_matching skill. When present, the parsed payload is merged
     in at ``fit_results['db_matches']`` so the synthesis stage and HTML
     report can surface candidates without per-script glue code.
+    ``TOOL_WARNINGS_JSON:`` lines (a JSON list of sentences a skill tool
+    printed about the result the script reports, e.g. a match's fitted
+    lattice scale, #775) are collected at ``fit_results['tool_warnings']``.
     """
     fit_results: dict = {}
     fit_seen = False
     db_matches: Optional[dict] = None
+    tool_warnings: list = []
     for line in (stdout or "").splitlines():
+        if line.startswith("TOOL_WARNINGS_JSON:"):
+            try:
+                got = json.loads(line.replace("TOOL_WARNINGS_JSON:", "", 1).strip())
+            except json.JSONDecodeError:
+                got = None
+            tool_warnings.extend(w for w in (got if isinstance(got, list) else []) if isinstance(w, str))
+            continue
         if line.startswith("FIT_RESULTS_JSON:") and not fit_seen:
             fit_seen = True
             try:
@@ -910,7 +921,27 @@ def _parse_script_markers(stdout: Optional[str]) -> dict:
                 pass
     if db_matches is not None:
         fit_results.setdefault("db_matches", db_matches)
+    if tool_warnings:
+        fit_results.setdefault("tool_warnings", tool_warnings)
     return fit_results
+
+
+#: At most this many reported warnings become caveats, each clipped.
+_REPORTED_WARNINGS_MAX, _REPORTED_WARNING_CHARS = 5, 400
+
+
+def _reported_warnings(fit_results: dict) -> list:
+    """The sentences a script or its skill tools reported as warnings about
+    the result (``warnings`` in FIT_RESULTS_JSON, ``TOOL_WARNINGS_JSON:``
+    lines), deduplicated and bounded: they become the run's caveats (#775)."""
+    raw = fit_results.get("warnings")
+    items = ([raw] if isinstance(raw, str) else list(raw) if isinstance(raw, list) else [])
+    items += list(fit_results.get("tool_warnings") or [])
+    out = []
+    for w in items:
+        if isinstance(w, str) and w.strip() and w.strip() not in out:
+            out.append(w.strip())
+    return [w[:_REPORTED_WARNING_CHARS] for w in out[:_REPORTED_WARNINGS_MAX]]
 
 
 def _resolve_parallel_workers(value: Optional[int]) -> int:
@@ -5063,6 +5094,11 @@ Your guidance: '''
         }
         if fit_results.get("bounds"):
             result["bounds"] = fit_results["bounds"]
+        reported = _reported_warnings(fit_results)
+        if reported:
+            # what the script or a skill tool said about this result (a
+            # match's fitted lattice scale, #775) reaches the run's caveats
+            result["caveats"] = list(result.get("caveats") or []) + reported
         if frozen_targets:
             result["targets"] = list(frozen_targets)
         if secondary_pins:

@@ -33,10 +33,12 @@ from ..._shared._spec import ToolSpec
 _logger = logging.getLogger(__name__)
 
 # Source rank order for dedup: when the same structure appears in multiple
-# backends, prefer the more authoritative source. User-registered backends
-# not in this map default to rank 50 (between built-ins and "unknown");
-# tweak ``register_source_preference`` to override.
-_SOURCE_PREFERENCE: dict[str, int] = {"mp": 0, "cod": 1, "local": 2}
+# backends, prefer the more authoritative source. A measured cell (COD) comes
+# before a DFT-relaxed one (MP, typically 1-3 % too large), which a match then
+# has to absorb as a lattice scale (#775); the entry kept carries the other
+# source's id and stability. User-registered backends not in this map default
+# to rank 99; tweak ``register_source_preference`` to override.
+_SOURCE_PREFERENCE: dict[str, int] = {"cod": 0, "mp": 1, "local": 2}
 
 
 def register_source_preference(name: str, rank: int) -> None:
@@ -294,7 +296,10 @@ def _build_backends(
 
 
 def _dedupe(candidates: Iterable[StructureCandidate]) -> list[StructureCandidate]:
-    """Collapse duplicates across backends, preferring the more authoritative source."""
+    """Collapse duplicates across backends, preferring the more authoritative
+    source. The entry kept records the other sources' ids (``also_in``) and
+    keeps the better rank and an energy above hull the other source reported,
+    so a measured cell does not lose the stability ranking a computed one had."""
     bucket: dict[tuple, StructureCandidate] = {}
     for cand in candidates:
         key = (cand.formula, cand.space_group)
@@ -302,8 +307,15 @@ def _dedupe(candidates: Iterable[StructureCandidate]) -> list[StructureCandidate
         if existing is None:
             bucket[key] = cand
             continue
-        if _SOURCE_PREFERENCE.get(cand.source, 99) < _SOURCE_PREFERENCE.get(existing.source, 99):
-            bucket[key] = cand
+        keep, drop = ((cand, existing)
+                      if _SOURCE_PREFERENCE.get(cand.source, 99) < _SOURCE_PREFERENCE.get(existing.source, 99)
+                      else (existing, cand))
+        if drop.source != keep.source:
+            keep.metadata.setdefault("also_in", []).append({"source": drop.source, "id": drop.id})
+        if keep.metadata.get("energy_above_hull") is None and drop.metadata.get("energy_above_hull") is not None:
+            keep.metadata["energy_above_hull"] = drop.metadata["energy_above_hull"]
+        keep.rank_score = max(keep.rank_score, drop.rank_score)
+        bucket[key] = keep
     return list(bucket.values())
 
 

@@ -33,6 +33,7 @@ import numpy as np
 
 from ..._shared._spec import ToolSpec
 from .extract_peaks import extract_peaks
+from .overlay import lattice_scale_warnings, registration_record
 
 try:
     import pulp  # type: ignore
@@ -166,6 +167,10 @@ TOOL_SPEC = ToolSpec(
             "type": "bool",
             "description": "hanawalt only. Default True: fit a single lattice scale (over scale_search) before matching, adopted only if it aligns >=2 reflections so a wrong phase is not force-aligned. Set False to match at the reference lattice as-is (e.g. when the reference is already at experimental conditions).",
         },
+        "reference_cell": {
+            "type": "str",
+            "description": "'experimental' | 'computed' or the candidate's database source ('cod', 'local' — measured cells; 'mp' — DFT-relaxed). Sets the band beyond which the fitted scale is a caveat in 'warnings': 1 % for an experimental or unknown cell, 3 % for a computed one.",
+        },
     },
     required=["sim_two_theta", "sim_intensity"],
     returns=(
@@ -177,6 +182,10 @@ TOOL_SPEC = ToolSpec(
         "1.0 = no scaling / reference already at the experimental lattice, "
         ">1.0 = reference cell larger than experimental, e.g. ~1.02 for a "
         "DFT-relaxed metal — a value near the search bound warrants review), "
+        "'registration' ({lattice_scale, two_theta_scale, zero_shift, "
+        "reference_cell}: the transform the score was computed under — draw "
+        "the overlay through register_overlay with it), 'warnings' (a fitted "
+        "scale beyond the band for the reference cell), "
         "'n_exp_peaks', 'n_sim_peaks'."
     ),
     when_to_use=(
@@ -207,8 +216,35 @@ def score_xrd_match_robust(
     scale_search: tuple = (0.96, 1.04, 0.002),
     shift_search: tuple = (-0.4, 0.4),
     fit_lattice_scale: bool = True,
+    reference_cell: str = "unknown",
 ) -> dict[str, Any]:
     """Robust peak-list scoring. See ``TOOL_SPEC`` for full contract."""
+    return _with_registration(_score_robust(
+        sim_two_theta, sim_intensity, exp_two_theta=exp_two_theta, exp_intensity=exp_intensity,
+        exp_peaks=exp_peaks, algorithm=algorithm, tol_deg=tol_deg, max_exp_peaks=max_exp_peaks,
+        max_sim_peaks=max_sim_peaks, scale_search=scale_search, shift_search=shift_search,
+        fit_lattice_scale=fit_lattice_scale), reference_cell)
+
+
+def _with_registration(result: dict, reference_cell: str) -> dict:
+    """Name the transform the score was computed under (#775): hanawalt fits a
+    lattice scale through Bragg's law, the MIP a linear 2θ scale and a zero
+    shift. ``register_overlay`` draws the overlay with it; a scale beyond the
+    band for the reference cell's kind is a warning."""
+    if result.get("algorithm") == "hanawalt":
+        reg = registration_record(lattice_scale=result.get("fitted_scale", 1.0),
+                                  reference_cell=reference_cell)
+    else:
+        reg = registration_record(two_theta_scale=result.get("fitted_scale", 1.0),
+                                  zero_shift=result.get("fitted_shift", 0.0), reference_cell=reference_cell)
+    result["registration"] = reg
+    result["warnings"] = lattice_scale_warnings(reg)
+    return result
+
+
+def _score_robust(sim_two_theta, sim_intensity, *, exp_two_theta, exp_intensity, exp_peaks, algorithm,
+                  tol_deg, max_exp_peaks, max_sim_peaks, scale_search, shift_search,
+                  fit_lattice_scale) -> dict[str, Any]:
     if algorithm not in {"hanawalt", "mip"}:
         raise ValueError(
             f"Unknown algorithm: {algorithm!r}. Must be 'hanawalt' or 'mip'."
@@ -792,7 +828,9 @@ TOOL_SPEC_MULTIPHASE = ToolSpec(
                 "List of candidate phases. Each entry: {'id': str, "
                 "'formula': str, 'sim_two_theta': list[float], "
                 "'sim_intensity': list[float]}. The same shape "
-                "simulate_xrd_pattern returns, plus an id and formula."
+                "simulate_xrd_pattern returns, plus an id and formula, and "
+                "optionally 'source' (the search_structures source: 'cod', "
+                "'mp', ...) or 'reference_cell' for the scale caveat."
             ),
         },
         "tol_deg": {
@@ -827,9 +865,11 @@ TOOL_SPEC_MULTIPHASE = ToolSpec(
         "higher-better mirror so the same quality gate as the single-phase "
         "scorer reads a multi-phase result), 'verdict', 'active_phases' (list of {id, "
         "formula, coverage, matched_peaks, mean_residual_deg, lattice_scale "
-        "— the per-phase fitted lattice scale, ~1.02 for a DFT-relaxed metal}), "
+        "— the per-phase fitted lattice scale, ~1.02 for a DFT-relaxed metal, "
+        "registration — that phase's transform for register_overlay, warnings}), "
         "'unmatched_exp' (peak indices not explained by any phase), "
         "'fitted_shift', 'fitted_scale' (shared instrument terms), "
+        "'warnings' (every active phase's scale caveat), "
         "'n_exp_peaks', 'n_phases_considered'."
     ),
     when_to_use=(
@@ -928,10 +968,19 @@ def score_xrd_match_multiphase(
         verdict = "reject"
 
     active_phases = []
+    warnings: list[str] = []
     for p_idx, cand in enumerate(candidates):
         per_phase = best["per_phase"][p_idx]
         if not per_phase["active"]:
             continue
+        # the transform this phase was scored under (#775): its own lattice
+        # scale, then the shared 2θ scale and zero shift
+        reg = registration_record(
+            lattice_scale=per_phase_scale[p_idx], two_theta_scale=best["fitted_scale"],
+            zero_shift=best["fitted_shift"],
+            reference_cell=cand.get("reference_cell") or cand.get("source") or "unknown")
+        phase_warnings = lattice_scale_warnings(reg, cand.get("formula", ""))
+        warnings.extend(phase_warnings)
         active_phases.append({
             "id": cand.get("id", str(p_idx)),
             "formula": cand.get("formula", ""),
@@ -940,6 +989,8 @@ def score_xrd_match_multiphase(
             "matched_peaks": per_phase["matched_peaks"],
             "mean_residual_deg": per_phase["mean_residual_deg"],
             "lattice_scale": float(per_phase_scale[p_idx]),
+            "registration": reg,
+            "warnings": phase_warnings,
         })
 
     return {
@@ -956,6 +1007,9 @@ def score_xrd_match_multiphase(
         "unmatched_exp": best["unmatched_exp"],
         "fitted_shift": float(best["fitted_shift"]),
         "fitted_scale": float(best["fitted_scale"]),
+        "registration": registration_record(two_theta_scale=best["fitted_scale"],
+                                            zero_shift=best["fitted_shift"]),
+        "warnings": warnings,
         "n_exp_peaks": exp_pl.n,
         "n_phases_considered": len(candidates),
     }
