@@ -420,12 +420,21 @@ class Drain:
 # (#358) stands either way, so cancellation only shortens the waste.
 _branch_stop_events: Dict[int, "_threading.Event"] = {}
 _branch_stop_lock = _threading.Lock()
+#: A swarm item's label, by its thread: its lines are tagged "[label] " at
+#: the line start so the surfaces can tell whose narration it is when
+#: several items print at once (``ui.narration.split_worker_tag`` reads it
+#: back). Fan-out branches set none: their console output stays as it was.
+_branch_labels: Dict[int, str] = {}
+_at_line_start: Dict[int, bool] = {}
 
 
-def _register_branch_stop(event) -> None:
+def _register_branch_stop(event, label: Optional[str] = None) -> None:
     from ...utils.log_context import register_cancel
     with _branch_stop_lock:
         _branch_stop_events[_threading.get_ident()] = event
+        if label:
+            _branch_labels[_threading.get_ident()] = str(label)
+            _at_line_start[_threading.get_ident()] = True
     register_cancel(event)          # waits (a parked question, an LLM slot) poll it
 
 
@@ -433,7 +442,27 @@ def _unregister_branch_stop() -> None:
     from ...utils.log_context import unregister_cancel
     with _branch_stop_lock:
         _branch_stop_events.pop(_threading.get_ident(), None)
+        _branch_labels.pop(_threading.get_ident(), None)
+        _at_line_start.pop(_threading.get_ident(), None)
     unregister_cancel()
+
+
+def tag_lines(label: str, data: str, at_start: bool) -> "tuple[str, bool]":
+    """``data`` with ``[label] `` before every line that begins in it (and
+    before its first character when ``at_start``); returns the text and
+    whether the next write begins a line."""
+    if not data:
+        return data, at_start
+    prefix = f"[{label}] "
+    pieces = data.split("\n")
+    out = []
+    for i, piece in enumerate(pieces):
+        begins = at_start if i == 0 else True
+        last = i == len(pieces) - 1
+        if begins and (piece or not last):
+            piece = prefix + piece
+        out.append(piece)
+    return "\n".join(out), data.endswith("\n")
 
 
 class _ThreadStopStream:
@@ -448,11 +477,15 @@ class _ThreadStopStream:
         self._original = original
 
     def write(self, data: str) -> int:
-        ev = _branch_stop_events.get(_threading.get_ident())
+        tid = _threading.get_ident()
+        ev = _branch_stop_events.get(tid)
         if ev is not None and ev.is_set():
             from ...ui.output_capture import AgentStoppedError
             raise AgentStoppedError(
                 "fan-out branch cancelled (wall-clock budget exceeded)")
+        label = _branch_labels.get(tid)
+        if label is not None:
+            data, _at_line_start[tid] = tag_lines(label, data, _at_line_start.get(tid, True))
         return self._original.write(data)
 
     def flush(self) -> None:

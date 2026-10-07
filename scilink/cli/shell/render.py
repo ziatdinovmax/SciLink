@@ -32,7 +32,7 @@ from rich.table import Table
 from rich.text import Text
 
 from scilink.ui import vocabulary as V
-from scilink.ui.narration import LineClassifier
+from scilink.ui.narration import LineClassifier, split_worker_tag
 
 # Styles per line kind (rich markup); the web's tokens.css is the twin.
 _STYLES = {
@@ -205,11 +205,17 @@ class Renderer:
 
     def _entry_for(self, raw: str) -> Optional[_Entry]:
         ln = self._classifier.push(raw)
+        # A swarm item's line carries its label; shown dim before the text,
+        # so two items' narration can be told apart.
+        tag = Text(f"[{ln.worker}] ", style="dim") if ln.worker else None
         if ln.kind in ("answer_header", "answer_body"):
             if not ln.specialist:
                 return None  # the return value is rendered once, at the end
             text = ln.text if ln.kind == "answer_header" else raw.replace(V.THOUGHT_MARK, "")
-            return _Entry(Text("  " + text, style=_STYLES["answer_specialist"]), verbose=False)
+            if ln.worker and ln.kind == "answer_body":
+                text = split_worker_tag(text)[1]
+            return _Entry(Text("  ") + (tag or Text()) + Text(text, style=_STYLES["answer_specialist"]),
+                          verbose=False)
         if ln.kind == "blank":
             return None
         if ln.kind == "thought":
@@ -218,7 +224,7 @@ class Renderer:
             style = _STYLES[ln.kind]
         else:
             style = _STYLES["verbose"]
-        return _Entry(Text("  " + ln.text, style=style), verbose=ln.verbose)
+        return _Entry(Text("  ") + (tag or Text()) + Text(ln.text, style=style), verbose=ln.verbose)
 
     def _render_line(self, raw: str) -> None:
         entry = self._entry_for(raw)

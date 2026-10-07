@@ -1122,7 +1122,15 @@ The narration reader (`scilink/ui/narration.py`, TS twin
 the activity label; the web runner emits it as an `activity` event, the
 shell shows it on its status row, and one fixture pins both readers.
 **When a chat-surface label or behaviour changes, change it in the
-vocabulary or the narration reader, not in one surface.**
+vocabulary or the narration reader, not in one surface.** A swarm item's
+lines carry its label at the line start (`[XRD 300 K] 💭 …`, put there by
+the item's own stream wrapper or the process worker's relay); both readers
+strip the tag (`split_worker_tag`), classify what follows, and keep the
+label on the line and in the activity ("XRD 300 K · Curve Fitting
+Planning"), so two items' narration can be told apart. The swarm and
+fan-out coordinators' own lines (🐝 ⏸ 🧯 🔁 ⛔ ⏱ and the "still running" /
+"item finished" lines) are the visible `fanout` kind with their own
+activity labels, never plain. A fan-out branch's lines carry no tag.
 
 **A human-feedback gate declares what is under review; it does not print
 it for the surfaces to parse.** Every gate holds a structured object at ask

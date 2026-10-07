@@ -231,6 +231,14 @@ ACTIVITY_LABELS = {
     "analyzing": "Analyzing {target}",
     "attempt": "Attempt {n} · {label}",
     "candidate": "Candidate {n} · {label}",
+    # a swarm item's line, by its label; the coordinators' own milestones
+    "worker": "{worker} · {label}",
+    "swarm_started": "Swarm · {n} items",
+    "swarm_running": "Swarm · {n} item(s) running",
+    "swarm_holding": "Holding '{label}' (memory or provider)",
+    "swarm_guard": "Memory guard · cancelling '{label}'",
+    "swarm_rerun": "Running '{label}' again, alone",
+    "swarm_item_done": "Swarm item finished · {label} ({status})",
 }
 
 

@@ -39,7 +39,7 @@ from .._locked_exec import (
 )
 from .._qc_engine import CodegenQCEngine, QCEngineSpec, QCItemContext
 from .base_controllers import (bestofn_join_subject, consensus_subject, consistency_subject,
-                               run_plan_refinement_gate, steps_block)
+                               run_plan_refinement_gate, steps_block, steps_text)
 from ....utils.codegen_parse import parse_codegen_response
 from ....utils.synthesis_parse import salvage_synthesis_from_response
 from ....hitl import request_human_feedback
@@ -2640,13 +2640,10 @@ class CurveFittingPlanningController:
         print(f"\n📊 Approach:\n   {state.get('analysis_approach', 'N/A')}")
         print(f"\n📐 Physical Model:\n   {state.get('physical_model', 'N/A')}")
         print(f"\n🎯 Parameters to Extract:\n   {', '.join(state.get('parameters_to_extract', [])) or 'N/A'}")
-        import re as _re
-        _strategy = state.get("fitting_strategy", "N/A")
-        # Put each numbered step on its own line with consistent indentation.
-        # Only split on step numbers that follow a sentence-ending ". " to
-        # avoid mangling numbers in text (e.g. "cm-1.", "8.7").
-        _strategy = _re.sub(r"\. (\d+)\. ", r".\n   \1. ", _strategy)
-        print(f"\n⚙️  Fitting Strategy:\n   {_strategy}")
+        # One numbered step per line (the same rule the gate's steps block
+        # uses, #701): a step number only in sequence and after a sentence
+        # end, so "cm-1." and "8.7" are never split.
+        print(f"\n⚙️  Fitting Strategy:\n   {steps_text(state.get('fitting_strategy') or 'N/A')}")
 
         # Display regime plan if present
         series_plan = state.get("series_analysis_plan")

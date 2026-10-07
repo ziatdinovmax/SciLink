@@ -345,7 +345,7 @@ def _run_item(orch, item: dict, entry: dict, channel, autonomy: str, stop_event)
     entry.pop("_human_wait_s", None)          # a restored entry may carry stale waits
     entry.pop("_waiting_since", None)
     entry["_branch_tid"] = threading.get_ident()
-    fo._register_branch_stop(stop_event)
+    fo._register_branch_stop(stop_event, label=item["label"])     # its lines carry "[label] "
     set_thread_channel(channel)
     set_thread_event_log(Path(orch.base_dir) / "events.jsonl")
     tag = tracing.attributed(worker=_worker_tag(entry, item))

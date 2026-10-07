@@ -91,3 +91,36 @@ def test_bookkeeping_lines_close_a_specialist_answer():
     assert c.push("     Human feedback enabled: True").kind == "bookkeeping"
     assert c.push("      ✅ Auto-checkpoint saved").kind == "bookkeeping"
     assert c.push("plain after").kind == "plain"
+
+
+def test_a_swarm_items_tag_is_read_off_the_line_and_the_coordinators_lines_are_visible():
+    """A swarm item's lines carry "[label] "; the kind is read from what
+    follows, the label kept on the line. The coordinators' own lines (the
+    launch, a hold, the guard, a rerun, the heartbeat, an item finished)
+    are the visible fan-out kind, not plain."""
+    from scilink.ui.narration import split_worker_tag
+    c = LineClassifier()
+    th = c.push("[XRD 300 K]   💭 I'll examine the data first")
+    assert (th.kind, th.worker, th.text, th.verbose) == ("thought", "XRD 300 K", "💭 I'll examine the data first", False)
+    cont = c.push("[XRD 300 K]      and then fit")
+    assert (cont.kind, cont.worker, cont.text) == ("thought", "XRD 300 K", "and then fit")
+    tool = c.push("[purity plan]   🔧 Calling tool: generate_initial_plan")
+    assert (tool.kind, tool.worker) == ("tool_call", "purity plan")
+    cand = c.push("[fit A] [cand_02] Verification 1/7")
+    assert (cand.kind, cand.worker, cand.text) == ("candidate", "fit A", "[cand_02] Verification 1/7")
+    plain = c.push("[XRD 300 K] 2026-10-07 10:04:27,563 - INFO -   Points: 3000")
+    assert (plain.kind, plain.worker, plain.verbose) == ("plain", "XRD 300 K", True)
+    assert c.push("  💭 the meta's own thought").worker is None
+    for text in ("  🐝 swarm_x: 2 item(s), up to 2 at a time",
+                 "  ⏸  holding branch 'purity plan' for memory headroom",
+                 "  🧯 free memory is low (0.10 GB) — cancelling 'heavy'",
+                 "  🔁 running 'heavy' again, alone",
+                 "  ⏳ 2 swarm item(s) still running ...",
+                 "  ✅ swarm item finished: XRD 300 K (success)",
+                 "  ⛔ not started: big cube — needs about 40.0 GB",
+                 "  ⏱️  swarm item 'slow one' exceeded its wall-clock budget (0s)"):
+        ln = c.push(text)
+        assert (ln.kind, ln.verbose) == ("fanout", False), text
+    assert c.push("  ⏳ Waiting for orchestrator response ...").kind == "waiting"
+    assert c.push("  ✅ Sandbox approval already granted this session").kind == "bookkeeping"
+    assert split_worker_tag("[cand_01] x") == (None, "[cand_01] x")       # a candidate tag is not a worker

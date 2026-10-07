@@ -25,6 +25,13 @@ from .vocabulary import ACTIVITY_LABELS, HANDOFF_PREFIXES, THOUGHT_MARK
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _RULE_RE = re.compile(r"^[-=_*—─═]+$")
 _CAND_RE = re.compile(r"^\[cand[_-]?0*(\d+)\]\s*(.*)$")
+# A swarm item's lines carry its label, "[XRD 300 K] …", inserted at the
+# line start by the item's own stream (fanout._ThreadStopStream) or the
+# process worker's relay; never a candidate tag, which has its own rule.
+_WORKER_RE = re.compile(r"^\[(?!cand[_-]?\d)([^\[\]\n]{1,48})\]\s?(.*)$", re.S)
+# The swarm and fan-out coordinators' own lines: the launch, an item held
+# for memory or the breaker, the guard, a rerun, a budget, a refusal.
+_COORDINATOR_RE = re.compile(r"^(?:🐝|⏸|🧯|🔁|⛔|⏱)")
 # The atom emoji may or may not carry its variation selector (U+FE0F).
 _HANDOFF_RE = re.compile(
     r"^(?:\U0001F9EA|\U0001F4CB|⚛️?)\s+Delegating to"
@@ -47,9 +54,20 @@ VISIBLE_KINDS = frozenset({
 @dataclass(frozen=True)
 class Line:
     kind: str
-    text: str                  # ANSI- and mark-stripped, indentation removed
+    text: str                  # ANSI- and mark-stripped, indentation and worker tag removed
     specialist: bool = False   # printed by a meta-delegated specialist
     verbose: bool = True       # hidden unless verbose output is shown
+    worker: Optional[str] = None   # the swarm item whose line this is ("[label] …")
+
+
+def split_worker_tag(clean: str) -> tuple:
+    """``("XRD 300 K", "💭 …")`` for a swarm item's tagged line, else
+    ``(None, clean)``. The tag sits before the indentation the line had, so
+    a thought's continuation keeps its five spaces after the tag."""
+    m = _WORKER_RE.match(clean.lstrip())
+    if not m:
+        return None, clean
+    return m.group(1), m.group(2)
 
 
 class LineClassifier:
@@ -71,30 +89,35 @@ class LineClassifier:
         clean = strip_ansi(raw.rstrip("\n"))
         specialist = THOUGHT_MARK in clean
         clean = clean.replace(THOUGHT_MARK, "")
+        worker, clean = split_worker_tag(clean)
         s = clean.strip()
+
+        def line(kind, text, spec=False, verbose=True):
+            return Line(kind, text, spec, verbose, worker)
 
         if s.startswith("🤖"):
             self._in_thought = False
             self._in_answer = True
             self._answer_specialist = specialist
-            return Line("answer_header", s, specialist, verbose=False)
+            return line("answer_header", s, specialist, verbose=False)
         if _HANDOFF_RE.match(s):
             self._reset()
-            return Line("handoff", s, verbose=False)
+            return line("handoff", s, verbose=False)
         if s.startswith("💭"):
             self._in_thought = True
             self._in_answer = False
             self._thought_specialist = specialist
-            return Line("thought", s, specialist, verbose=False)
+            return line("thought", s, specialist, verbose=False)
         if self._in_thought and clean.startswith("     "):
-            return Line("thought", s, self._thought_specialist, verbose=False)
+            return line("thought", s, self._thought_specialist, verbose=False)
         self._in_thought = False
 
         kind = None
         if s.startswith("🔧 Calling tool:"):
             kind = "tool_call"
         elif s.startswith("⏳"):
-            kind = "waiting"
+            # the coordinator's heartbeat is its line; any other wait is verbose
+            kind = "fanout" if re.search(r"swarm item\(s\) still running|parallel analyses still", s) else "waiting"
         elif s.startswith("⚠"):
             kind = "warning"
         elif s.startswith("💾"):
@@ -103,7 +126,9 @@ class LineClassifier:
             kind = "files"
         elif s.startswith("🧠 Memory:"):
             kind = "memory"
-        elif s.startswith("🔀"):
+        elif s.startswith("🔀") or _COORDINATOR_RE.match(s):
+            kind = "fanout"
+        elif s.startswith("✅") and re.match(r"^✅ (?:swarm item|analysis branch|resumed branch) finished", s):
             kind = "fanout"
         elif s.startswith(("🔄", "✅", "⚡", "🙋", "📊", "🧠", "📚", "🖼", "📄", "🗑")):
             kind = "bookkeeping"     # the agents' own housekeeping / tool banners
@@ -115,14 +140,14 @@ class LineClassifier:
             kind = "rule"
         if kind is not None:
             self._in_answer = False
-            return Line(kind, s, verbose=kind not in VISIBLE_KINDS)
+            return line(kind, s, verbose=kind not in VISIBLE_KINDS)
 
         if self._in_answer:
-            return Line("answer_body", clean, self._answer_specialist,
+            return line("answer_body", clean, self._answer_specialist,
                         verbose=False)
         if not s:
-            return Line("blank", "")
-        return Line("plain", s)
+            return line("blank", "")
+        return line("plain", s)
 
 
 def classify(text: str) -> list:
@@ -169,6 +194,13 @@ def current_activity(log: str) -> Optional[str]:
         # pattern below would read one as a title of "-".
         if _RULE_RE.match(line):
             continue
+        # A swarm item's line carries its label, "[XRD 300 K] <milestone>":
+        # strip it, classify the milestone, prefix the label back on — so the
+        # activity says WHOSE stage this is when several items run at once.
+        worker, line = split_worker_tag(line)
+        line = line.strip()
+        if not line:
+            continue
         # Best-of-N candidates narrate as "[cand_NN] <milestone>": strip the
         # tag, classify the milestone, prefix the candidate back on.
         cand = None
@@ -180,7 +212,28 @@ def current_activity(log: str) -> Optional[str]:
                 continue
 
         def tag(s: str) -> str:
-            return _L["candidate"].format(n=cand, label=s) if cand else s
+            s = _L["candidate"].format(n=cand, label=s) if cand else s
+            return _L["worker"].format(worker=worker, label=s) if worker else s
+
+        # The coordinators' own milestones (a swarm's, a fan-out's).
+        m = re.match(r"^🐝 .*?(\d+) item\(s\)(?:, up to (\d+) at a time)?", line)
+        if m:
+            return tag(_L["swarm_started"].format(n=m.group(1)))
+        m = re.match(r"^⏳ (\d+) swarm item\(s\) still running", line)
+        if m:
+            return tag(_L["swarm_running"].format(n=m.group(1)))
+        m = re.match(r"^⏸\s+holding (?:branch )?'([^']+)'", line)
+        if m:
+            return tag(_clip(_L["swarm_holding"].format(label=m.group(1))))
+        m = re.match(r"^🧯 .*?cancelling (?:branch )?'([^']+)'", line)
+        if m:
+            return tag(_clip(_L["swarm_guard"].format(label=m.group(1))))
+        m = re.match(r"^🔁 running (?:branch )?'([^']+)' again", line)
+        if m:
+            return tag(_clip(_L["swarm_rerun"].format(label=m.group(1))))
+        m = re.match(r"^✅ swarm item finished: (.+?) \((\w+)\)", line)
+        if m:
+            return tag(_clip(_L["swarm_item_done"].format(label=m.group(1), status=m.group(2))))
 
         if re.match(r"^Candidate\s+\d+\s+finished\s+\(\d+/\d+\)", line):
             return tag(_clip(line))

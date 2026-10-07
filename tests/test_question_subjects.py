@@ -455,3 +455,26 @@ def test_fanout_confirm_subject_and_gate(monkeypatch):
     assert proceed is True
     assert seen["kind"] == "confirm" and seen["origin"] == {"stage": "fanout_confirm"}
     assert seen["subject"]["blocks"][2]["label"] == "🔀 Branches (2)"
+
+
+def test_numbered_steps_recognise_the_formats_plans_are_written_in():
+    """#701: the pipeline printed as one paragraph — "N)" numbering, an
+    unnumbered first step, "(N)" with semicolons, arrows of either kind —
+    while decimals, "sigma=2." and "n_cage=4)" are never split, and a
+    number out of sequence is not a step."""
+    one_line = ("Calibrate at 0.15 nm/px. 2) measure_lattice_constant(window=0.2) with sigma=2. "
+                "3) detect_atoms_dcnn(n_cage=4) then refine.")
+    assert base.numbered_steps(one_line) == [
+        "Calibrate at 0.15 nm/px.", "measure_lattice_constant(window=0.2) with sigma=2.",
+        "detect_atoms_dcnn(n_cage=4) then refine."]
+    assert base.numbered_steps("(1) flatten; (2) segment with threshold 0.5; (3) measure areas") == [
+        "flatten.", "segment with threshold 0.5.", "measure areas."]
+    assert base.numbered_steps("flatten → segment → measure") == ["flatten.", "segment.", "measure."]
+    assert base.numbered_steps("Set n_cage=4) and sigma=2. Then fit.") == ["Set n_cage=4) and sigma=2. Then fit."]
+    assert base.numbered_steps("Flatten the image. 2. Segment. 4. Measure.") == ["Flatten the image.", "Segment. 4. Measure."]
+    assert base.numbered_steps("1) load 2) crop 3) fit") == ["1) load 2) crop 3) fit"]   # no boundary: whole
+    # the console form: one step per line under the label, as the gate's steps block
+    assert base.steps_text(one_line) == ("1. Calibrate at 0.15 nm/px.\n   2. measure_lattice_constant(window=0.2) "
+                                         "with sigma=2.\n   3. detect_atoms_dcnn(n_cage=4) then refine.")
+    assert base.steps_text("Threshold and label.") == "Threshold and label."
+    assert base.steps_block("⚙️ Pipeline", one_line)["items"] == base.numbered_steps(one_line)

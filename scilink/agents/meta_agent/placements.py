@@ -304,10 +304,12 @@ def run_item(spec: dict) -> dict:
 class _LogRelay:
     """Tails the worker's log and prints each line on a thread attributed to
     the item's turn, so the child's narration reaches the turn (the routed
-    capture, the shell's status row) as a thread item's prints do."""
+    capture, the shell's status row) as a thread item's prints do — each
+    line tagged ``[label] `` like a thread item's (``fanout.tag_lines``)."""
 
-    def __init__(self, path: Path, interval_s: float = 0.3):
+    def __init__(self, path: Path, label: str, interval_s: float = 0.3):
         self.path = path
+        self.label = str(label)
         self._interval = interval_s
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -333,13 +335,13 @@ class _LogRelay:
             buf = lines.pop()
             try:
                 for line in lines:
-                    print(line.decode("utf-8", "replace"))
+                    print(f"[{self.label}] {line.decode('utf-8', 'replace')}")
             except BaseException:  # noqa: BLE001 - the turn was stopped: nothing to relay to
                 return
             if self._stop.is_set():
                 if buf:
                     try:
-                        print(buf.decode("utf-8", "replace"))
+                        print(f"[{self.label}] {buf.decode('utf-8', 'replace')}")
                     except BaseException:  # noqa: BLE001
                         pass
                 return
@@ -363,7 +365,7 @@ class LocalProcess:
         base_dir = Path(spec["base_dir"])
         base_dir.mkdir(parents=True, exist_ok=True)
         log_path = base_dir / WORKER_LOG
-        relay = _LogRelay(log_path)
+        relay = _LogRelay(log_path, spec.get("label") or "worker")
 
         def watch(current: float, peak: float) -> None:
             handle.current_rss_bytes, handle.peak_rss_bytes = current, peak
