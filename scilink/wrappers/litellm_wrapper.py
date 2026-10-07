@@ -557,14 +557,19 @@ def call_dropping_refused_sampling(call, kwargs: dict, retries: Optional[int],
         sent = [p for p in _SAMPLING_PARAMS if p in kwargs]
         if not sent or not _sampling_refusal(exc):
             raise
+        kwargs = {k: v for k, v in kwargs.items() if k not in _SAMPLING_PARAMS}
+        result = call_with_retries(lambda: call(kwargs), retries, model=model)
+        # Learned from a resend that WORKED, never from a message that only
+        # matched: a 400 about something else that happens to quote a
+        # sampling parameter fails the resend too, and the model keeps its
+        # parameters.
         with _sampling_lock:
             first = key not in _sampling_refused
             _sampling_refused.add(key)
         if first:
             _logger.warning(f"{key} refused {', '.join(sent)}; sending its requests "
                             "without sampling parameters from now on")
-        kwargs = {k: v for k, v in kwargs.items() if k not in _SAMPLING_PARAMS}
-        return call_with_retries(lambda: call(kwargs), retries, model=model)
+        return result
 
 
 def _completion_with_retries(retries: Optional[int], **kwargs):
@@ -902,7 +907,7 @@ class LiteLLMGenerativeModel:
             omit_sampling = (_is_openai_reasoning_model(self.model)
                              or _model_deprecates_sampling(self.model))
             for old, new in mapping.items():
-                if omit_sampling and old in ("temperature", "top_p"):
+                if omit_sampling and old in _SAMPLING_PARAMS:
                     continue
                 val = cfg.get(old)
                 if val is not None:

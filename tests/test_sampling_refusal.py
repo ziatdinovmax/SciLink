@@ -26,8 +26,8 @@ class _Provider:
     completions, refusing any request that sets a sampling parameter when
     ``refuses`` is on. Records every request body."""
 
-    def __init__(self, refuses: bool, message: str = REFUSAL):
-        self.refuses, self.message, self.bodies = refuses, message, []
+    def __init__(self, refuses: bool, message: str = REFUSAL, always: bool = False):
+        self.refuses, self.message, self.always, self.bodies = refuses, message, always, []
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -35,7 +35,8 @@ class _Provider:
                 body = json.loads(self.rfile.read(int(self.headers.get("content-length", 0))) or b"{}")
                 outer.bodies.append(body)
                 anthropic = self.path.endswith("/messages")
-                if outer.refuses and any(k in body for k in ("temperature", "top_p", "top_k")):
+                if outer.always or (outer.refuses
+                                    and any(k in body for k in ("temperature", "top_p", "top_k"))):
                     err = ({"type": "error", "error": {"type": "invalid_request_error",
                                                        "message": outer.message}}
                            if anthropic else
@@ -122,9 +123,24 @@ def test_another_bad_request_is_raised_and_not_resent(provider):
     assert litellm_wrapper._sampling_refused == set()
 
 
-def test_a_request_without_sampling_parameters_is_not_resent(provider):
-    provider.refuses = True
-    provider.message = "`temperature` is deprecated for this model."
+@pytest.mark.parametrize("provider", [{"refuses": True, "always": True,
+                                       "message": "Parameter 'temperature' echoed: tool schema not "
+                                                  "supported for this deployment"}], indirect=True)
+def test_a_match_whose_resend_also_fails_is_raised_and_not_remembered(provider):
+    """A 400 about something else that quotes a sampling parameter passes the
+    wording check; the resend fails the same way, the error is raised, and
+    the model keeps its parameters on the next request."""
+    m = _model(provider)
+    with pytest.raises(Exception):
+        m.generate_content("hi", generation_config={"temperature": 0.0})
+    assert len(provider.bodies) == 2 and "temperature" not in provider.bodies[1]
+    assert litellm_wrapper._sampling_refused == set()
+    with pytest.raises(Exception):
+        m.generate_content("again", generation_config={"temperature": 0.0})
+    assert provider.bodies[2]["temperature"] == 0.0
+
+
+def test_a_request_without_sampling_parameters_is_not_resent():
     # Nothing to drop: a 400 for a request that set no knob is raised as is.
     from scilink.wrappers.litellm_wrapper import call_dropping_refused_sampling
 
@@ -140,7 +156,6 @@ def test_a_request_without_sampling_parameters_is_not_resent(provider):
 
 
 def test_the_proxy_client_drops_a_refused_parameter_too(provider):
-    import openai
     from scilink.wrappers.openai_wrapper import OpenAIAsGenerativeModel
 
     provider.message = ("Unsupported value: 'temperature' does not support 0.0 with this model. "
@@ -150,7 +165,20 @@ def test_the_proxy_client_drops_a_refused_parameter_too(provider):
     assert m.generate_content(["hi"], generation_config=cfg).text == "ok"
     assert len(provider.bodies) == 2 and "temperature" not in provider.bodies[1]
     assert "next-model" in litellm_wrapper._sampling_refused
-    assert isinstance(openai.BadRequestError, type)
+
+
+@pytest.mark.parametrize("model", ["anthropic/claude-opus-4-8", "openai/gpt-5.5"])
+def test_the_name_rules_omit_every_sampling_parameter(model):
+    params = LiteLLMGenerativeModel(model, api_key="x")._build_params(
+        {"temperature": 0.0, "top_p": 0.9, "top_k": 5, "max_output_tokens": 100}, None)
+    assert not {"temperature", "top_p", "top_k"} & set(params)
+    assert params["max_tokens"] == 100
+
+
+def test_a_model_without_a_name_rule_keeps_its_sampling_parameters():
+    params = LiteLLMGenerativeModel("anthropic/claude-sonnet-4-5", api_key="x")._build_params(
+        {"temperature": 0.0, "top_p": 0.9, "top_k": 5}, None)
+    assert (params["temperature"], params["top_p"], params["top_k"]) == (0.0, 0.9, 5)
 
 
 def _bad_request(message):
