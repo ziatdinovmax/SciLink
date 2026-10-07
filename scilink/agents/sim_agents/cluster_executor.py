@@ -25,7 +25,7 @@ import logging
 import stat as _stat
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from .refinement import Executor, LocalExecutor
 
@@ -67,6 +67,7 @@ class ClusterExecutor(Executor):
         poll_interval: int = 30,
         timeout: int = 86400,
         job_script_name: str = "scilink_job.sh",
+        cancel_check: Optional[Callable[[], bool]] = None,
     ):
         self.conn = connection
         self._scheduler = scheduler
@@ -76,6 +77,11 @@ class ClusterExecutor(Executor):
         self.poll_interval = poll_interval
         self.timeout = timeout
         self.job_script_name = job_script_name
+        # Optional "should I stop?" hook. When it returns True mid-poll, the
+        # submitted job is cancelled on the scheduler instead of being left to
+        # run — so a Stop does not orphan the allocation. A KeyboardInterrupt
+        # during the wait is handled the same way.
+        self.cancel_check = cancel_check
 
     @classmethod
     def connect(
@@ -179,11 +185,21 @@ class ClusterExecutor(Executor):
             except Exception as exc:  # noqa: BLE001 — one bad file shouldn't abort
                 logger.warning("ClusterExecutor: could not download %s: %s", name, exc)
 
-    # ── Executor contract ─────────────────────────────────────
+    # ── submit / poll (the non-blocking seam) ─────────────────
 
-    def run(
+    def submit(
         self, input_files: Dict[str, str], run_command: str, run_dir: str
     ) -> Dict[str, Any]:
+        """Materialize + upload inputs, submit the batch job, return a handle.
+
+        The handle carries what :meth:`poll` / :meth:`run` need to follow the
+        job up later: ``{"job_id", "remote_dir", "run_path"}``. On a submission
+        failure it returns ``{"error", "remote_dir", "run_path"}`` with no
+        ``job_id`` and has already persisted the engine-neutral stderr/rc files.
+        This is the seam a non-blocking caller (one scheduler, many in-flight
+        members) submits through; :meth:`run` keeps the submit-then-wait
+        contract on top of it.
+        """
         from scilink.hpc.batch import build_batch_script
 
         run_path = Path(run_dir)
@@ -219,33 +235,26 @@ class ClusterExecutor(Executor):
             (run_path / _STDERR).write_text(f"Job submission failed: {exc}", encoding="utf-8")
             (run_path / _RC).write_text("submit_error", encoding="utf-8")
             return {
-                "status": "error", "output_dir": str(run_path),
-                "returncode": None, "error": f"Job submission failed: {exc}",
+                "error": f"Job submission failed: {exc}",
+                "remote_dir": remote_dir, "run_path": run_path,
             }
         logger.info("ClusterExecutor: submitted job %s in %s", job_id, remote_dir)
+        return {"job_id": job_id, "remote_dir": remote_dir, "run_path": run_path}
 
-        elapsed = 0
-        while True:
-            job = sched.status(job_id)
-            if job.status.is_terminal:
-                break
-            if elapsed >= self.timeout:
-                sched.cancel(job_id)
-                self._download_outputs(remote_dir, run_path)
-                (run_path / _STDERR).write_text(
-                    f"Job {job_id} exceeded {self.timeout}s wall-clock; cancelled.", encoding="utf-8"
-                )
-                (run_path / _RC).write_text("timeout", encoding="utf-8")
-                return {
-                    "status": "error", "output_dir": str(run_path),
-                    "returncode": None,
-                    "error": f"Job timed out after {self.timeout}s",
-                }
-            time.sleep(self.poll_interval)
-            elapsed += self.poll_interval
+    def poll(self, handle: Dict[str, Any]) -> Dict[str, Any]:
+        """One status check for a submitted job — no sleep, no download.
 
+        Returns ``{"terminal": bool, "job": <job status object>}``. The caller
+        decides cadence and when to download; :meth:`run` polls in a loop.
+        """
+        self._ensure_connected()
+        sched = self._resolve_scheduler()
+        job = sched.status(handle["job_id"])
+        return {"terminal": job.status.is_terminal, "job": job}
+
+    def _finalize(self, remote_dir: str, run_path: Path, job: Any) -> Dict[str, Any]:
+        """Download outputs and build the completed-run record for a terminal job."""
         self._download_outputs(remote_dir, run_path)
-
         # Prefer the returncode the wrapper recorded; fall back to the
         # scheduler's reported exit code.
         returncode: Optional[int] = None
@@ -257,9 +266,71 @@ class ClusterExecutor(Executor):
                 returncode = None
         if returncode is None:
             returncode = job.exit_code
-
         return {
             "status": "completed",
             "output_dir": str(run_path),
             "returncode": returncode,
         }
+
+    def _cancel_and_report(
+        self, job_id: str, remote_dir: str, run_path: Path, why: str, rc: str,
+    ) -> Dict[str, Any]:
+        """Cancel the scheduler job, retrieve what landed, and report an error."""
+        try:
+            self._resolve_scheduler().cancel(job_id)
+        except Exception as exc:  # noqa: BLE001 — best-effort cancel
+            logger.warning("ClusterExecutor: cancel of %s failed: %s", job_id, exc)
+        self._download_outputs(remote_dir, run_path)
+        (run_path / _STDERR).write_text(why, encoding="utf-8")
+        (run_path / _RC).write_text(rc, encoding="utf-8")
+        return {
+            "status": "error", "output_dir": str(run_path),
+            "returncode": None, "error": why,
+        }
+
+    # ── Executor contract ─────────────────────────────────────
+
+    def run(
+        self, input_files: Dict[str, str], run_command: str, run_dir: str
+    ) -> Dict[str, Any]:
+        handle = self.submit(input_files, run_command, run_dir)
+        run_path: Path = handle["run_path"]
+        if "job_id" not in handle:        # submission failed in submit()
+            return {
+                "status": "error", "output_dir": str(run_path),
+                "returncode": None, "error": handle["error"],
+            }
+        job_id = handle["job_id"]
+        remote_dir = handle["remote_dir"]
+
+        elapsed = 0
+        try:
+            while True:
+                status = self.poll(handle)
+                job = status["job"]
+                if status["terminal"]:
+                    break
+                # A Stop mid-wait cancels the job instead of orphaning it.
+                if self.cancel_check is not None and self.cancel_check():
+                    return self._cancel_and_report(
+                        job_id, remote_dir, run_path,
+                        f"Job {job_id} cancelled on request.", "cancelled",
+                    )
+                if elapsed >= self.timeout:
+                    return self._cancel_and_report(
+                        job_id, remote_dir, run_path,
+                        f"Job {job_id} timed out after {self.timeout}s wall-clock; cancelled.",
+                        "timeout",
+                    )
+                time.sleep(self.poll_interval)
+                elapsed += self.poll_interval
+        except KeyboardInterrupt:
+            # Ctrl-C / Stop during the wait must not leave the allocation
+            # running on the cluster.
+            self._cancel_and_report(
+                job_id, remote_dir, run_path,
+                f"Job {job_id} cancelled (interrupted).", "cancelled",
+            )
+            raise
+
+        return self._finalize(remote_dir, run_path, job)

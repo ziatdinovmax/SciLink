@@ -298,6 +298,34 @@ class TestStages:
         assert [p["phase"] for p in result["phases"]] == ["equil", "prod"]
         assert len(result["stages"]) == 1
 
+    def test_one_member_fanout_matches_sequential_history(self):
+        # Guard (#745 step A): a one-worker fan-out reproduces the sequential
+        # (pre-change) path's history and member record exactly — the
+        # per-member context + merge is behavior-preserving for serial dispatch.
+        def run_one(parallel):
+            ex = FakeExecutor()
+            critic = ScriptedCritic([_needs_fixes({"in.sim": "f"}), _good()])
+            ctx = _ctx()
+            stage = Stage(name="s", parallel=parallel, phases=[self._member("m")])
+            result = run_campaign([stage], ex, critic, AutonomousPolicy(), ctx)
+            return ctx.history, result
+        seq_hist, seq_res = run_one(False)
+        fan_hist, fan_res = run_one(True)
+        assert fan_hist == seq_hist and len(fan_hist) == 2
+        assert seq_res["phases"][0] == fan_res["phases"][0]
+
+    def test_fanout_history_merged_in_member_order(self):
+        # Per-member histories are merged back in member order, so with serial
+        # dispatch the shared history is identical to appending as we go.
+        ex = FakeExecutor()
+        critic = ScriptedCritic([_good()])   # repeats -> one good cycle per member
+        ctx = _ctx()
+        fanout = Stage(name="sweep", parallel=True, phases=[
+            self._member("s1"), self._member("s2"), self._member("s3")])
+        run_campaign([fanout], ex, critic, AutonomousPolicy(), ctx)
+        assert [h["phase"] for h in ctx.history] == ["s1", "s2", "s3"]
+        assert all(h["cycle"] == 0 for h in ctx.history)
+
     def test_fanout_members_are_independent(self):
         # 3 independent members: A good, B needs a fix then good, C poor with no
         # fix (stops). B's refinement and C's failure must not disturb A.
