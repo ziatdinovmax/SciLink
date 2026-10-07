@@ -19,6 +19,32 @@ detect:
     HPC clusters with Lmod or similar, the binary may only be on
     $PATH after `module load vasp/<version>`. Detection should
     consider any of the above as a positive hit.
+# Numerical parameters whose value must be converged before a result is
+# trustworthy. The engine-neutral convergence sweep reads this block, runs each
+# ladder (least->most accurate order) as a fan-out via the skill hooks
+# set_convergence_param / read_convergence_observable, and adopts the cheapest
+# setting past which the observable stops changing within tolerance.
+convergence:
+  - parameter: ENCUT
+    ladder: [300, 400, 500, 600, 700]     # eV
+    direction: ascending                   # higher ENCUT = more accurate; floor the
+                                           # ladder at (>=) the base deck's ENCUT so the
+                                           # sweep never adopts below the validated
+                                           # 1.3x-ENMAX minimum (see Quality checks below)
+    skip_without_floor: true               # if the deck leaves ENCUT unset there is no
+                                           # safe floor (the 300 eV rung may be < ENMAX),
+                                           # so skip the sweep rather than run it blind
+    observable: energy_per_atom           # eV/atom
+    tolerance: 0.001
+  - parameter: k-points
+    ladder: [0.5, 0.4, 0.3, 0.25, 0.2, 0.15, 0.12, 0.1]  # KSPACING Å^-1, descending = denser
+    direction: descending                  # smaller KSPACING = more accurate; floor the
+                                           # ladder at (<=) the base deck's KSPACING
+    observable: energy_per_atom           # eV/atom
+    tolerance: 0.005                       # judge at the meaningful energy scale (~few
+                                           # meV); a metal's k-sampling wobbles sub-5-meV
+                                           # even at dense meshes, and the properties the
+                                           # benchmark scores need far less than 1 meV
 ---
 # VASP Input Generation Skill
 

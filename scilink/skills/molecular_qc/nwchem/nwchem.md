@@ -12,6 +12,15 @@ detect:
     module). Detection should treat the `nwchem` binary on $PATH, or any
     of these env vars, as a positive hit. Unlike PySCF (a python module),
     NWChem is an external executable, so python_modules is empty.
+# No `convergence:` block here. A plateau-style sweep fits a parameter whose
+# value FLATTENS as the knob increases (plane-wave ENCUT / k-points — see
+# vasp.md). A Gaussian basis sweep on the *absolute* energy does not flatten: it
+# approaches the CBS limit only slowly (~L^-3), so "adopt the smallest basis
+# past which the energy stops changing" is not a practical target. Basis
+# adequacy for QC belongs to a property / energy-difference target or a CBS
+# extrapolation (a different mechanism); until that exists, QC declares no
+# convergence sweep. The NWChem output reader
+# (nwchem_convergence.read_convergence_observable) stays as a reusable hook.
 ---
 # NWChem Molecular Quantum Chemistry Skill
 
