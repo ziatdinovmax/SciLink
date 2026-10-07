@@ -80,12 +80,18 @@ TOOL_SPEC = ToolSpec(
             "type": "str",
             "description": "Background handling: 'subtract_min' (default) or 'none'.",
         },
+        "reference_cell": {
+            "type": "str",
+            "description": "'experimental' | 'computed' or the candidate's database source ('cod' — measured cells; 'mp' — DFT-relaxed; 'local' — a user's CIF, either, so unknown). Sets the band beyond which the fitted scale is a caveat in 'warnings': 1 % for an experimental or unknown cell, 3 % for a computed one.",
+        },
     },
     required=["exp_two_theta", "exp_intensity", "sim_two_theta", "sim_intensity"],
     returns=(
         "dict with 'correlation' (float in [-1, 1], higher is better), "
         "'fitted_shift' (degrees), 'fitted_scale' (dimensionless), "
-        "'verdict' ('accept' | 'marginal' | 'reject'), 'fwhm_used' (echo)."
+        "'verdict' ('accept' | 'marginal' | 'reject'), 'fwhm_used' (echo), "
+        "'registration' (the 2θ scale and zero shift the correlation was "
+        "computed under, for register_overlay), 'warnings'."
     ),
     when_to_use=(
         "Fast triage of candidates from search_structures — on-the-fly "
@@ -105,8 +111,23 @@ def score_xrd_match_fast(
     shift_search: tuple = (-0.5, 0.5),
     scale_search: tuple | None = (0.98, 1.02, 0.002),
     background: str = "subtract_min",
+    reference_cell: str = "unknown",
 ) -> dict[str, Any]:
     """Cross-correlation fast scoring. See ``TOOL_SPEC`` for full contract."""
+    from .overlay import lattice_scale_warnings, registration_record
+    result = _score_fast(exp_two_theta, exp_intensity, sim_two_theta, sim_intensity, fwhm=fwhm,
+                         shift_search=shift_search, scale_search=scale_search, background=background)
+    # the transform the correlation was computed under (#775): a linear 2θ
+    # scale, then a zero shift
+    reg = registration_record(two_theta_scale=result.get("fitted_scale", 1.0),
+                              zero_shift=result.get("fitted_shift", 0.0), reference_cell=reference_cell)
+    result["registration"] = reg
+    result["warnings"] = lattice_scale_warnings(reg)
+    return result
+
+
+def _score_fast(exp_two_theta, exp_intensity, sim_two_theta, sim_intensity, *, fwhm, shift_search,
+                scale_search, background) -> dict[str, Any]:
     exp_x = np.asarray(exp_two_theta, dtype=float)
     exp_y = np.asarray(exp_intensity, dtype=float)
     sim_x = np.asarray(sim_two_theta, dtype=float)

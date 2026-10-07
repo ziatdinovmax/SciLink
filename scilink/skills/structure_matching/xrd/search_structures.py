@@ -33,10 +33,12 @@ from ..._shared._spec import ToolSpec
 _logger = logging.getLogger(__name__)
 
 # Source rank order for dedup: when the same structure appears in multiple
-# backends, prefer the more authoritative source. User-registered backends
-# not in this map default to rank 50 (between built-ins and "unknown");
-# tweak ``register_source_preference`` to override.
-_SOURCE_PREFERENCE: dict[str, int] = {"mp": 0, "cod": 1, "local": 2}
+# backends, prefer the more authoritative source. A measured cell (COD) comes
+# before a DFT-relaxed one (MP, typically 1-3 % too large), which a match then
+# has to absorb as a lattice scale (#775); the entry kept carries the other
+# source's id and stability. User-registered backends not in this map default
+# to rank 99; tweak ``register_source_preference`` to override.
+_SOURCE_PREFERENCE: dict[str, int] = {"cod": 0, "mp": 1, "local": 2}
 
 
 def register_source_preference(name: str, rank: int) -> None:
@@ -294,17 +296,47 @@ def _build_backends(
 
 
 def _dedupe(candidates: Iterable[StructureCandidate]) -> list[StructureCandidate]:
-    """Collapse duplicates across backends, preferring the more authoritative source."""
+    """Collapse duplicates across backends, preferring the more authoritative
+    source. The entry kept records the other sources' ids (``also_in``) and
+    keeps the better rank and an energy above hull the other source reported,
+    so a measured cell does not lose the stability ranking a computed one had."""
     bucket: dict[tuple, StructureCandidate] = {}
     for cand in candidates:
-        key = (cand.formula, cand.space_group)
+        key = _dedupe_key(cand)
         existing = bucket.get(key)
         if existing is None:
             bucket[key] = cand
             continue
-        if _SOURCE_PREFERENCE.get(cand.source, 99) < _SOURCE_PREFERENCE.get(existing.source, 99):
-            bucket[key] = cand
+        keep, drop = ((cand, existing)
+                      if _SOURCE_PREFERENCE.get(cand.source, 99) < _SOURCE_PREFERENCE.get(existing.source, 99)
+                      else (existing, cand))
+        if drop.source != keep.source:
+            keep.metadata.setdefault("also_in", []).append({"source": drop.source, "id": drop.id})
+        if keep.metadata.get("energy_above_hull") is None and drop.metadata.get("energy_above_hull") is not None:
+            keep.metadata["energy_above_hull"] = drop.metadata["energy_above_hull"]
+        keep.rank_score = max(keep.rank_score, drop.rank_score)
+        bucket[key] = keep
     return list(bucket.values())
+
+
+def _dedupe_key(cand: StructureCandidate) -> tuple:
+    """One key per structure whatever the backend's notation (#775 review):
+    COD writes a spaced Hill formula and a spaced symbol with its origin
+    setting ('O2 Sn', 'P 42/m n m'), MP ``formula_pretty`` and the compact
+    symbol ('SnO2', 'P4_2/mnm'). The reduced formula and the space-group
+    NUMBER, falling back to the strings as given."""
+    formula = cand.formula
+    try:
+        from pymatgen.core import Composition
+        formula = Composition(str(cand.formula).replace(" ", "")).reduced_formula
+    except Exception:  # noqa: BLE001 - an unparseable formula keys as written
+        pass
+    number = (cand.metadata or {}).get("spacegroup_number")
+    try:
+        number = int(number)
+    except (TypeError, ValueError):
+        number = None
+    return (formula, number if number and number > 0 else cand.space_group)
 
 
 def _materialize_cifs(

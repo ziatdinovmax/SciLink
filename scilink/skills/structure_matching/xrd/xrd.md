@@ -444,6 +444,20 @@ must follow this exact sequence:
   For the visualization, overlay the best-match **simulated** pattern (broadened
   sticks) on the experimental data — do not `curve_fit` a profile for the plot
   or compute an R² for it.
+- **Draw the overlay where the score was computed.** Every scorer registers
+  the simulated pattern (zero shift, lattice scale, 2θ scale) before scoring
+  it and returns that as `registration`; the raw simulated pattern sits beside
+  the data by exactly what the score absorbed. Draw each overlay through
+  `register_overlay(simulated, match_result, ...)` — it applies the
+  registration and returns the legend label that states it — and draw the
+  figure with `plot_match_overlay` (labelled axes, data-width broadening, a
+  sum only for two or more phases). Name a multiphase phase by its
+  candidate `id` (`phase=`), the one name that means the same on every frame
+  of a locked recipe: a candidate a frame did not match is drawn on the shared
+  2θ terms and labelled as not matched. Pass each candidate's database `source`
+  as the scorer's `reference_cell` (a candidate dict's `source` for the
+  multiphase scorer): a fitted scale beyond the band for that kind of cell is
+  reported as a caveat, never explained away as an artifact.
 - **Plot legends must name what is actually drawn.** An identification
   overlay is NOT a fit — label it `"Simulated <formula> (match overlay)"`,
   and label its difference trace `"Data − overlay"`, never `"Fit"` /

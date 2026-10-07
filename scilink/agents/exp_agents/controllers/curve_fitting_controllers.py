@@ -892,11 +892,22 @@ def _parse_script_markers(stdout: Optional[str]) -> dict:
     structure_matching skill. When present, the parsed payload is merged
     in at ``fit_results['db_matches']`` so the synthesis stage and HTML
     report can surface candidates without per-script glue code.
+    ``TOOL_WARNINGS_JSON:`` lines (a JSON list of sentences a skill tool
+    printed about the result the script reports, e.g. a match's fitted
+    lattice scale, #775) are collected at ``fit_results['tool_warnings']``.
     """
     fit_results: dict = {}
     fit_seen = False
     db_matches: Optional[dict] = None
+    tool_warnings: list = []
     for line in (stdout or "").splitlines():
+        if line.startswith("TOOL_WARNINGS_JSON:"):
+            try:
+                got = json.loads(line.replace("TOOL_WARNINGS_JSON:", "", 1).strip())
+            except json.JSONDecodeError:
+                got = None
+            tool_warnings.extend(w for w in (got if isinstance(got, list) else []) if isinstance(w, str))
+            continue
         if line.startswith("FIT_RESULTS_JSON:") and not fit_seen:
             fit_seen = True
             try:
@@ -910,7 +921,27 @@ def _parse_script_markers(stdout: Optional[str]) -> dict:
                 pass
     if db_matches is not None:
         fit_results.setdefault("db_matches", db_matches)
+    if tool_warnings:
+        fit_results.setdefault("tool_warnings", tool_warnings)
     return fit_results
+
+
+#: At most this many reported warnings become caveats, each clipped.
+_REPORTED_WARNINGS_MAX, _REPORTED_WARNING_CHARS = 5, 400
+
+
+def _reported_warnings(fit_results: dict) -> list:
+    """The sentences a script or its skill tools reported as warnings about
+    the result (``warnings`` in FIT_RESULTS_JSON, ``TOOL_WARNINGS_JSON:``
+    lines), deduplicated and bounded: they become the run's caveats (#775)."""
+    raw = fit_results.get("warnings")
+    items = ([raw] if isinstance(raw, str) else list(raw) if isinstance(raw, list) else [])
+    items += list(fit_results.get("tool_warnings") or [])
+    out = []
+    for w in items:
+        if isinstance(w, str) and w.strip() and w.strip() not in out:
+            out.append(w.strip())
+    return [w[:_REPORTED_WARNING_CHARS] for w in out[:_REPORTED_WARNINGS_MAX]]
 
 
 def _resolve_parallel_workers(value: Optional[int]) -> int:
@@ -5060,6 +5091,11 @@ Your guidance: '''
         }
         if fit_results.get("bounds"):
             result["bounds"] = fit_results["bounds"]
+        reported = _reported_warnings(fit_results)
+        if reported:
+            # what the script or a skill tool said about this result (a
+            # match's fitted lattice scale, #775) reaches the run's caveats
+            result["caveats"] = list(result.get("caveats") or []) + reported
         if frozen_targets:
             result["targets"] = list(frozen_targets)
         if secondary_pins:
@@ -10301,12 +10337,15 @@ same trend.
                 "Note: Alternative models were attempted but this was the best fit achieved."
             )
 
-        # Why a fitted value is reported as no value (a band not measured, a
-        # secondary pin): an empty value is not a zero or a missing band.
+        # What the checks and the analysis tools said about this fit: why a
+        # value is reported as no value (a band not measured, a secondary
+        # pin; an empty value is not a zero or a missing band), and what a
+        # tool reported about the result (a match's fitted scale, #775).
         _fit_caveats = (series_results[0].get("caveats") if series_results else None) or []
         if _fit_caveats:
             prompt_parts.append(
-                "\n## Fit caveats (a value reported as null is not a measurement)\n"
+                "\n## Fit caveats (from the fit's checks and its analysis tools; a value reported "
+                "as null is not a measurement)\n"
                 + "\n".join(f"- {c}" for c in _fit_caveats))
 
         if series_results and series_results[0].get("quality_history"):

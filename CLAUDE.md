@@ -1381,6 +1381,20 @@ changes behavior. This complements the "adaptive logic in the tool, not prompt
 prose" rule: the tool *defaults* are the adaptation, the *exposed knobs* are
 the escape hatch when the data needs them.
 
+**A skill tool states a caveat about the result itself** (#775). What a tool
+knows about the result the script reports (a match that needed a fitted
+lattice scale beyond what its reference cell allows) is printed as a
+`TOOL_WARNINGS_JSON:` line, a JSON list of sentences, beside the
+`DB_MATCHES_JSON:` marker `search_structures` prints; the curve agent lifts
+those, and a `warnings` list in the script's own `FIT_RESULTS_JSON`, into the
+unit's `caveats` (deduplicated, at most five), so the caveat does not depend
+on the generated script copying it. Print it from the call that serves the
+result reported (the XRD skill's `register_overlay`, for the plotted match),
+not from a call made for every candidate. The figure drawn for a result is
+drawn where its number was computed: an identification overlay goes through
+the registration the scorer fitted (`register_overlay`), never the raw
+reference pattern.
+
 Note the packaging boundary: `TOOL_SPEC` tools are discovered only from
 skills *inside the installed package* (`_registry` walks `_SKILLS_DIR`
 and imports them as `scilink.skills.…` modules). Skills added via the UI
