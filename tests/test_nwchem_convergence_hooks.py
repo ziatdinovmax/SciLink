@@ -179,14 +179,14 @@ class TestReadTotalEnergyFromRealLogs:
 
 
 class TestConvergenceFrontmatter:
-    def test_nwchem_skill_declares_basis_convergence(self):
+    def test_nwchem_declares_no_convergence_sweep(self):
+        # Deliberately NO `convergence:` block: a plateau sweep on the absolute
+        # QC energy is not a practical target (it approaches CBS only slowly, so
+        # it never flattens). The output reader stays available as a hook, but
+        # the skill must not advertise a basis sweep to converge toward.
         from scilink.skills.loader import load_skill
         conv = load_skill("nwchem", domain="molecular_qc")["meta"].get("convergence")
-        assert isinstance(conv, list) and conv
-        spec = conv[0]
-        assert spec["parameter"] == "basis"
-        assert isinstance(spec["ladder"], list) and len(spec["ladder"]) >= 2
-        assert spec["observable"] and spec["tolerance"] > 0
+        assert not conv
 
 
 class TestRegistryResolution:
