@@ -96,9 +96,13 @@ _MODE_MEM_FLOOR = fo.MODE_MEM_FLOOR
 
 
 class _Unattended:
-    """Workers of an autonomous swarm: every question gets its default."""
+    """Workers of an autonomous swarm: every question gets its default, and
+    is marked unanswered (``hitl.mark_timed_out``), as in a worker process,
+    so no gate records the default as a human decision."""
 
     def ask(self, req) -> str:
+        from ...hitl import mark_timed_out
+        mark_timed_out()
         return req.default or ""
 
 
@@ -478,7 +482,7 @@ def _guard_memory(orch, running: Dict[Any, dict], fut_item: Dict[Any, dict], fut
                 pass
         orch._close_delegation(entry, _error_result(reason, status="cancelled"))
         if not item.get("_retried"):
-            requeue.append({**item, "_retried": True, "_handle": None, "_settled": False})
+            requeue.append({**item, "_retried": True, "_handle": None, "_settled": False, "_tokens_settled": 0})
 
     return fo.guard_memory(
         running, available=_memory().get("available"), floor=floor,
@@ -522,20 +526,28 @@ class TokenBudget:
         self.reserved = 0
         self._lock = threading.Lock()
 
-    def charge_late(self, item: dict, entry: dict, tag: str) -> int:
-        """Charge what ``tag`` spent beyond the item's settlement (and put
-        the total on the entry); the item's own thread calls it when it
-        ends, the coordinator when the swarm returns. Returns the extra."""
+    def charge(self, item: dict, entry: dict, tag: str, *, release: bool = False) -> int:
+        """Charge what ``tag`` has spent beyond what this item was already
+        charged (``_tokens_settled``, read and written under the budget's
+        lock, so the coordinator's settlement and the item's own late
+        charge never count the same tokens twice), put the total on the
+        entry, and with ``release`` give its reservation back. Returns what
+        was charged now."""
         from ... import tracing
         use = tracing.worker_usage(tag)
         total = int(use.get("prompt_tokens", 0)) + int(use.get("completion_tokens", 0))
         with self._lock:
-            extra = total - int(item.get("_tokens_settled") or 0)
-            if extra > 0:
-                self.spent += extra
-                item["_tokens_settled"] = total
-                entry["tokens"] = total
-        return max(extra, 0)
+            extra = max(total - int(item.get("_tokens_settled") or 0), 0)
+            self.spent += extra
+            if release:
+                self.reserved -= int(item.pop("_tokens_reserved", 0) or 0)
+            if extra or "tokens" not in entry:
+                item["_tokens_settled"] = max(total, int(item.get("_tokens_settled") or 0))
+                entry["tokens"] = item["_tokens_settled"]
+        return extra
+
+    def charge_late(self, item: dict, entry: dict, tag: str) -> int:
+        return self.charge(item, entry, tag)
 
     def admit(self, item: dict) -> Optional[str]:
         reserve = _token_reserve(item)
@@ -799,7 +811,7 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
                     # Killed with nothing returned and nobody asked for it:
                     # the operating system's killer. Once more, alone.
                     print(f"  🧯 '{fut_label[f]}' ran out of memory — running it again alone afterwards")
-                    requeue.append({**fut_item[f], "_retried": True, "_handle": None, "_settled": False})
+                    requeue.append({**fut_item[f], "_retried": True, "_handle": None, "_settled": False, "_tokens_settled": 0})
                 for nf in react(pool, fut_entry[f], fut_item[f]):
                     pending.add(nf)
             # One cancellation at a time: memory is read again only once the
@@ -925,14 +937,10 @@ def _settle(tokens: "TokenBudget", item: dict, entry: dict) -> None:
     if item.get("_settled"):
         return
     item["_settled"] = True
-    from ... import tracing
-    use = tracing.worker_usage(_worker_tag(entry, item))
-    spent = int(use.get("prompt_tokens", 0)) + int(use.get("completion_tokens", 0))
-    tokens.settle(item, spent)
     # The tag stays: a cancelled item winds down and keeps spending; what it
-    # spends beyond this is charged when the swarm returns (_settle_late).
-    item["_tokens_settled"] = spent
-    entry["tokens"] = spent
+    # spends beyond this is charged when its thread ends or the swarm returns.
+    tokens.charge(item, entry, _worker_tag(entry, item), release=True)
+    spent = int(item.get("_tokens_settled") or 0)
     cls = item.get("_mem_class") or peaks.item_class(item)
     try:
         if entry.get("status") in ("success", "partial"):

@@ -1853,6 +1853,21 @@ records its peak. `peaks.forget(class)` resets a class. A question in a
 worker process is marked unanswered (`mark_timed_out`), so no gate records
 it as a decision.
 
+**Round 2.** Two key-name mismatches: the breaker recorded outcomes under
+the wrapper's prefixed model name and admission asked with the meta's bare
+one (`claude-opus-4-6`), so it never held — one normalised key on both
+sides now; and on the direct path the child read only the vendor's
+conventional variable, so a key held under another name failed every
+process item — the spec now carries the NAME of the variable holding each
+key (API, embedding, FutureHouse), never the key, and the child reads it;
+a key under no variable keeps the item a thread. Also: the coordinator's
+settlement and an item's own late charge go through one method under the
+budget's lock (a double charge was possible in a narrow race); a rerun copy
+starts its charge from zero; the descendant snapshot is skipped for a pid
+already reaped; the thread path's unattended channel marks its defaults
+unanswered too, so both placements record them alike; the real-child test
+reaches a closed local port instead of the network.
+
 **Left for the AWS PR, as scoped:** the ECS placement (`RunTask` /
 `DescribeTasks` / `StopTask`, the task's memory metric, Spot and OOM
 reconciliation), per-campaign quotas, the board across tasks. **Not built,
@@ -1906,6 +1921,15 @@ guards, budgets and stops. The limits that remain, in one place:
   `attributed_to_current` / `inherited_context`, and a thread item that
   keeps calling after the swarm returned is charged to the ledger when its
   thread ends, after the result the caller already has.
+- *The breaker* holds admission for the meta's model only (the name an
+  item will call with, normalised to the wrapper's prefixed key); a trip on
+  an embedding model, or on another model an agent chooses for a stage,
+  does not hold admission — deliberately, since an item's model is what
+  admission can know.
+- *The class key's `:wN`* applies to a datacube series only (the one series
+  whose replays fan out to workers), and its cap counts the series' files
+  where #750's estimate counts analysis units (a raw file beside the cubes
+  would count here and not there).
 - *Independence and taint.* Independence is the read graph (no common
   ancestry); taint stays on the board, unread by fusion and scheduling.
 - *Subjects* are strings; *persistent specialists* read nothing from the

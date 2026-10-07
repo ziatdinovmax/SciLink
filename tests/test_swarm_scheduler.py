@@ -219,6 +219,7 @@ def test_the_placement_rule(monkeypatch):
     foreign = Orch()
     foreign.api_key = "not-in-the-environment"
     assert "not in the environment" in placements.placement_for(foreign, heavy, attended=False)[1]
+    assert placements.host_spec(Orch())["api_key_env"] == "ANTHROPIC_API_KEY"   # the name travels, never the key
     monkeypatch.setenv(placements.PLACEMENT_ENV, "thread")
     assert placements.placement_for(Orch(), heavy, attended=False) == ("thread", "SCILINK_SWARM_PLACEMENT=thread")
     monkeypatch.setenv(placements.PLACEMENT_ENV, "process")
@@ -292,6 +293,17 @@ def test_the_breaker_trips_on_a_failing_model_and_a_success_does_not_close_it(mo
     llm_limiter.note_provider_failure("m")
     assert 0 < llm_limiter.provider_tripped("m") <= 5.0
     assert llm_limiter.provider_tripped() is not None and llm_limiter.provider_tripped("other") is None
+    # the retry policy records under the wrapper's PREFIXED name; admission
+    # asks with the meta's name, which may be bare: one key
+    llm_limiter.reset_breaker()
+    for _ in range(llm_limiter.BREAKER_FAILURES):
+        llm_limiter.note_provider_failure("anthropic/claude-opus-4-6")
+    assert llm_limiter.provider_tripped("claude-opus-4-6") is not None
+    assert llm_limiter.provider_tripped("anthropic/claude-opus-4-6") is not None
+    assert llm_limiter.provider_tripped("gemini-2.0-flash") is None
+    llm_limiter.reset_breaker()
+    for _ in range(llm_limiter.BREAKER_FAILURES):
+        llm_limiter.note_provider_failure("m")
     llm_limiter.note_provider_ok("m")
     assert llm_limiter.provider_tripped("m") is not None     # the hold runs its course
     llm_limiter.reset_breaker()
@@ -685,26 +697,33 @@ def test_the_workers_console_reaches_the_turn_and_its_log(capsys):
     assert "worker line 2" in log
 
 
-def test_a_key_the_child_would_not_find_keeps_the_item_a_thread(monkeypatch):
+def test_a_key_travels_as_the_name_of_its_variable_and_a_key_under_no_name_keeps_a_thread(monkeypatch):
     monkeypatch.delenv(placements.PLACEMENT_ENV, raising=False)
-    monkeypatch.delenv("SCILINK_API_KEY", raising=False)
+    for var in ("SCILINK_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "MY_KEY", "MY_EMB"):
+        monkeypatch.delenv(var, raising=False)
     heavy = {"mode": "analysis", "data_path": "/d"}
 
     class Proxy:
         api_key, base_url, _shared_extensions = "pk", "http://proxy", []
-    assert "SCILINK_API_KEY" in placements.placement_for(Proxy(), heavy, attended=False)[1]
-    monkeypatch.setenv("SCILINK_API_KEY", "pk")
+    assert "API key is not in the environment" in placements.placement_for(Proxy(), heavy, attended=False)[1]
+    monkeypatch.setenv("MY_KEY", "pk")                      # any name: the child reads that one
     assert placements.placement_for(Proxy(), heavy, attended=False)[0] == "process"
-    monkeypatch.setenv("OTHER_KEY", "pk")
-    monkeypatch.setenv("SCILINK_API_KEY", "a-different-one")
-    assert placements.placement_for(Proxy(), heavy, attended=False)[0] == "thread"
+    spec = placements.host_spec(Proxy())
+    assert spec["api_key_env"] == "MY_KEY" and "pk" not in json.dumps(spec)
+    assert placements._Host(spec).api_key == "pk"
 
     class Direct:
         api_key, base_url, _shared_extensions = None, None, []
         embedding_api_key, futurehouse_api_key = "ek", None
     assert "embedding API key" in placements.placement_for(Direct(), heavy, attended=False)[1]
-    monkeypatch.setenv("OPENAI_API_KEY", "ek")
+    monkeypatch.setenv("MY_EMB", "ek")
     assert placements.placement_for(Direct(), heavy, attended=False)[0] == "process"
+    spec = placements.host_spec(Direct())
+    assert spec["embedding_api_key_env"] == "MY_EMB" and spec["api_key_env"] is None
+    host = placements._Host(spec)
+    assert host.embedding_api_key == "ek" and host.api_key is None     # none named: the constructor resolves
+    monkeypatch.delenv("MY_EMB")
+    assert placements._Host(spec).embedding_api_key is None           # the name no longer holds it
 
 
 def test_a_measured_class_is_refused_on_its_raw_peak_and_admitted_with_headroom(tmp_path, monkeypatch):
@@ -739,6 +758,11 @@ def test_the_class_names_the_series_replay_workers(tmp_path, monkeypatch):
     monkeypatch.setenv("SCILINK_HS_SERIES_WORKERS", "16")
     assert peaks.item_class(item) == one + ":w5"              # never more than the units to replay
     assert ":w" not in peaks.item_class({"mode": "analysis", "data_path": str(tmp_path / "cube_0.npy")})
+    curves = tmp_path / "curves"
+    curves.mkdir()
+    for i in range(6):
+        (curves / f"s{i}.csv").write_text("1,2\n")
+    assert ":w" not in peaks.item_class({"mode": "analysis", "data_path": str(curves)})   # not a datacube series
 
 
 def test_a_cancelled_items_spend_is_charged_when_its_thread_ends(meta, monkeypatch):
@@ -775,13 +799,14 @@ def test_the_real_run_item_runs_in_a_real_child_on_a_failing_model(tmp_path, mon
     """Pins the spec's pickling, the child's imports and the result shape:
     the real ``run_item`` builds a real analysis worker, whose one model
     call fails on a model that does not exist (no tokens spent)."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("SCILINK_API_KEY", "test-key")
     monkeypatch.setenv("SCILINK_LLM_RETRIES", "0")
     spec = {"mode": "analysis", "task": "say hello", "context": None, "label": "real", "autonomy": "AUTONOMOUS",
             "base_dir": str(tmp_path / "real"), "budget_s": 60, "sandbox_approved": False,
-            "host": {"model_name": "anthropic/claude-no-such-model-0", "base_url": None,
-                     "embedding_model": None, "embedding_api_key": None, "embedding_base_url": None,
-                     "futurehouse_api_key": None, "knowledge_dir": None, "file_roots": [str(tmp_path)],
+            "host": {"model_name": "claude-opus-4-6", "base_url": "http://127.0.0.1:9",   # a closed port
+                     "api_key_env": "SCILINK_API_KEY", "embedding_model": None,
+                     "embedding_api_key_env": None, "embedding_base_url": None,
+                     "futurehouse_api_key_env": None, "knowledge_dir": None, "file_roots": [str(tmp_path)],
                      "extensions": []}}
     pl = LocalProcess()
     h = pl.submit(spec)
@@ -844,3 +869,52 @@ def test_a_cancelled_series_ends_its_replay_children_within_seconds(monkeypatch)
     t.join(30)
     assert out.get("after_s") is not None and out["after_s"] < 12, out
     assert out["children"] == [], out
+
+
+# ---------------------------------------------------- after the review (round 2)
+
+def test_settlement_and_a_late_charge_never_count_the_same_tokens_twice(tmp_path, monkeypatch):
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path / "home"))
+    b = swarm.TokenBudget(1_000_000)
+    for order in ("settle-then-late", "late-then-settle"):
+        item, entry, tag = {"mode": "planning", "label": order}, {}, f"swarm:99_{order}"
+        assert b.admit(item) is None
+        with tracing.attributed(worker=tag):
+            for _ in range(5):
+                tracing.note_llm_call(prompt_tokens=10_000, completion_tokens=1_000, model="m")
+        before = b.spent
+        if order == "settle-then-late":
+            b.charge(item, entry, tag, release=True)
+            b.charge_late(item, entry, tag)
+        else:
+            b.charge_late(item, entry, tag)
+            b.charge(item, entry, tag, release=True)
+        assert b.spent - before == 55_000 and entry["tokens"] == 55_000 and b.reserved == 0
+        tracing.forget_worker_usage(tag)
+    # a rerun copy starts from zero
+    copy = {**item, "_retried": True, "_handle": None, "_settled": False, "_tokens_settled": 0}
+    assert copy["_tokens_settled"] == 0
+
+
+def test_a_reaped_pid_is_not_snapshotted(monkeypatch):
+    import subprocess
+    from scilink import executors
+    proc = subprocess.Popen([__import__("sys").executable, "-c", "pass"])
+    proc.wait()
+    called = {"n": 0}
+
+    def descendants(pid):
+        called["n"] += 1
+        return []
+    monkeypatch.setattr(executors, "_descendants_of", descendants)
+    executors._kill_process_tree(proc)
+    assert called["n"] == 0
+
+
+def test_both_placements_mark_a_default_answer_unanswered():
+    from scilink import hitl
+    req = hitl.FeedbackRequest(prompt="ok?", kind="confirm", default="n") if hasattr(hitl, "FeedbackRequest") else None
+    for channel in (swarm._Unattended(), placements._Defaults()):
+        hitl._thread_local.last_timed_out = False
+        assert channel.ask(req) == "n"
+        assert hitl.last_question_timed_out()

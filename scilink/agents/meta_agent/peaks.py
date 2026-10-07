@@ -87,8 +87,13 @@ def item_class(item: dict) -> str:
         if not files:
             return f"{mode}:nodata"
         largest = max(files, key=fo._in_memory_bytes)
-        workers = min(resolve_workers(item.get("series_workers"), "SCILINK_HS_SERIES_WORKERS", 1),
-                      max(len(files) - 1, 1))
+        workers = 1
+        if fo.datacube_series_branches([{"data_path": str(item["data_path"]), "pattern": item.get("pattern")}]):
+            # Only a datacube series fans its replays out to workers; a curve
+            # or image series runs its units one at a time whatever the
+            # setting says, and keeps one row.
+            workers = min(resolve_workers(item.get("series_workers"), "SCILINK_HS_SERIES_WORKERS", 1),
+                          max(len(files) - 1, 1))
         return (f"{mode}:{_kind(largest.suffix.lower())}:{_bucket_mb(fo._in_memory_bytes(largest))}"
                 f":{_units_bucket(len(files))}" + (f":w{workers}" if workers > 1 else ""))
     except Exception:  # noqa: BLE001 - a class must never break an item

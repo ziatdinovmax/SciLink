@@ -7,10 +7,13 @@ One interface, so the local scheduler already stamps what a later placement
     poll(handle) -> {state, result?, peak_rss_bytes?, stop_reason?}
     cancel(handle) -> None          # idempotent
 
-``spec`` is plain data and carries no secrets: the mode, the task, its
+``spec`` is plain data and carries no provider key: the mode, the task, its
 context, the item's directory and budgets, and what the host the item runs
 for looks like (model, endpoints, file roots, the skills and MCP servers it
-shares). The keys live in the environment the worker inherits. A state is
+shares). A key travels as the NAME of the environment variable that holds
+it; the worker inherits the environment and reads that variable. (An MCP
+server's ``env`` and ``headers`` do travel in the spec, as the meta holds
+them: over stdin, never written to disk.) A state is
 one of ``STATES``: ``done`` means the worker returned a result (the result's
 own ``status`` says how the work went); ``failed`` that the worker itself
 failed with nothing returned; ``out_of_memory`` that it was killed with
@@ -104,32 +107,36 @@ def placement_for(orch, item: dict, attended: bool) -> Tuple[str, str]:
                        if forced != "process" else f"{PLACEMENT_ENV}=process")
 
 
+#: The keys a host may hold, each with the spec field that names the
+#: environment variable carrying it.
+_KEYS = (("api_key", "api_key_env", "API key"),
+         ("embedding_api_key", "embedding_api_key_env", "embedding API key"),
+         ("futurehouse_api_key", "futurehouse_api_key_env", "FutureHouse API key"))
+
+
+def _env_name_of(value: str) -> Optional[str]:
+    """The environment variable whose value is ``value`` (the first of them
+    in the environment's order), or ``None``."""
+    for name, held in os.environ.items():
+        if held == value:
+            return name
+    return None
+
+
 def host_refusal(orch) -> Optional[str]:
     """Why a fresh process could not stand in for ``orch``: an extension a
-    process cannot inherit (a callable tool factory), or a credential the
-    meta holds that the child would not find — the spec carries no secrets,
-    so a key travels only through the environment the child inherits. On
-    the proxy path the child reads ``SCILINK_API_KEY`` and nothing else, so
-    the meta's key must be that variable's value; on the direct path it must
-    be in the environment under some name. The embedding and FutureHouse
-    keys are held to the same rule: a child that silently ran without them
-    would run with literature and embeddings off."""
+    process cannot inherit (a callable tool factory), or a key the meta
+    holds that is under no variable of the environment the child inherits —
+    the spec carries the variable's NAME, never the key, so a key under no
+    name cannot travel. The embedding and FutureHouse keys are held to the
+    same rule: a child that silently ran without them would run with
+    literature and embeddings off."""
     for ext in getattr(orch, "_shared_extensions", None) or []:
         if ext.get("kind") == "tools":
             return "the meta shares custom tools (callables), which a process cannot inherit"
-    key = getattr(orch, "api_key", None)
-    if key:
-        if getattr(orch, "base_url", None):
-            from ...auth import get_internal_proxy_key
-            if get_internal_proxy_key() != key:
-                return ("the meta's proxy key is not SCILINK_API_KEY in the environment a worker "
-                        "process inherits")
-        elif key not in os.environ.values():
-            return "the meta's API key is not in the environment a worker process inherits"
-    for attr, name in (("embedding_api_key", "embedding API key"),
-                       ("futurehouse_api_key", "FutureHouse API key")):
+    for attr, _field, name in _KEYS:
         value = getattr(orch, attr, None)
-        if value and value not in os.environ.values():
+        if value and _env_name_of(value) is None:
             return f"the meta's {name} is not in the environment a worker process inherits"
     return None
 
@@ -145,17 +152,19 @@ def host_spec(orch) -> dict:
         elif ext.get("kind") == "mcp":
             exts.append({k: v for k, v in ext.items()
                          if k in ("kind", "server_name", "command", "url", "env", "transport", "headers")})
-    return {
+    spec = {
         "model_name": getattr(orch, "model_name", None),
         "base_url": getattr(orch, "base_url", None),
         "embedding_model": getattr(orch, "embedding_model", None),
-        "embedding_api_key": None,
         "embedding_base_url": getattr(orch, "embedding_base_url", None),
-        "futurehouse_api_key": None,
         "knowledge_dir": (str(orch.knowledge_dir) if getattr(orch, "knowledge_dir", None) else None),
         "file_roots": [str(r) for r in fence.roots] if fence is not None else None,
         "extensions": exts,
     }
+    for attr, field_, _name in _KEYS:
+        value = getattr(orch, attr, None)
+        spec[field_] = _env_name_of(value) if value else None      # the name, never the key
+    return spec
 
 
 class _Host:
@@ -166,13 +175,16 @@ class _Host:
             self.roots = [Path(r) for r in roots] if roots else []
 
     def __init__(self, spec: dict):
-        self.api_key = None
         self.model_name = spec.get("model_name")
         self.base_url = spec.get("base_url")
         self.embedding_model = spec.get("embedding_model")
-        self.embedding_api_key = spec.get("embedding_api_key")
         self.embedding_base_url = spec.get("embedding_base_url")
-        self.futurehouse_api_key = spec.get("futurehouse_api_key")
+        # Each key is read from the variable the spec NAMES (the meta held it
+        # under that name); a spec that names none leaves the constructor to
+        # its own resolution from the conventional variables.
+        for attr, field_, _name in _KEYS:
+            name = spec.get(field_)
+            setattr(self, attr, os.environ.get(name) if name else None)
         self.knowledge_dir = spec.get("knowledge_dir")
         self.path_fence = self._Fence(spec.get("file_roots")) if spec.get("file_roots") is not None else None
         self._extensions = list(spec.get("extensions") or [])

@@ -246,7 +246,7 @@ def _kill_process_tree(proc: subprocess.Popen, grace: float = 2.0) -> None:
     # that would end it — does not run while that parent sits in one long C
     # call. Whatever of the snapshot is still alive after the group is gone
     # is killed by pid.
-    descendants = _descendants_of(proc.pid)
+    descendants = _descendants_of(proc.pid) if proc.poll() is None else []
 
     def send(sig):
         if group is not None:

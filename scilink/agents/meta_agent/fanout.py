@@ -232,7 +232,7 @@ def _admit_branch(key: str, est: float, label: str, model: Optional[str] = None)
                 if not breaker_logged:
                     print(f"  ⏸  holding '{label}': the provider circuit breaker is open "
                           f"(retryable failures across workers); admission resumes in "
-                          f"~{open_for:.0f} s or on the next successful call")
+                          f"~{open_for:.0f} s")
                     breaker_logged = True
                 _mem_cv.wait(timeout=min(5.0, max(open_for, 0.5)))
                 continue

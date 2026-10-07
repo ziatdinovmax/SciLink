@@ -958,8 +958,10 @@ Settled rules, each learned from a live run or a review:
   that are at least half its calls — a success counts toward the ratio and
   does not end the hold, since in a brown-out running work keeps succeeding
   now and then (`wrappers/llm_limiter.py`) — no item starting another. The capacity refusal and the guard are the fan-out's
-  too (`fanout.plan_capacity`, `fanout.guard_memory`): a branch larger than
-  the host is not started, a branch cancelled for memory reruns alone once.
+  too (`fanout.plan_capacity`, `fanout.guard_memory`): a branch whose
+  MEASURED class is larger than the host is not started (an input-based
+  estimate never refuses a fan-out branch; the swarm refuses on it), a
+  branch cancelled for memory reruns alone once.
   The model decides between swarm runs and inside each item, never within a
   run.
 - **Where an item runs is a placement behind one contract**
@@ -977,10 +979,11 @@ Settled rules, each learned from a live run or a review:
   alone, once. Planning and simulation items, and every item of an attended
   swarm (its questions need the person's channel), stay threads in the
   coordinator's process and measure nothing. The spec is plain data with no
-  secret: a key the child would not find in the environment it inherits
-  (on the proxy path it reads `SCILINK_API_KEY` only; the embedding and
-  FutureHouse keys count too), or a callable tool extension, keeps the item
-  a thread with the reason on its entry. A measured class is refused on its
+  provider key: each key travels as the NAME of the environment variable
+  that holds it and the child reads that variable (an MCP server's `env`
+  and `headers` do travel, over stdin, never on disk); a key under no
+  variable (the API, embedding or FutureHouse key), or a callable tool
+  extension, keeps the item a thread with the reason on its entry. A measured class is refused on its
   raw peak and admitted with ×1.2 headroom; a fan-out branch is refused only
   on a measured peak. `SCILINK_SWARM_PLACEMENT=thread|process`
   overrides the rule (the offline tests pin threads). An HPC job

@@ -51,8 +51,22 @@ _outcomes: Dict[str, Deque[Tuple[float, bool]]] = {}
 _tripped_until: Dict[str, float] = {}
 
 
+def _key(model: Optional[str]) -> str:
+    """The breaker's key for a model: the wrapper's PREFIXED name, so the
+    name an admission asks with (the meta's ``claude-opus-4-6``) and the
+    name the retry policy records under (``anthropic/claude-opus-4-6``) are
+    one key."""
+    if not model:
+        return _UNKNOWN
+    try:
+        from .litellm_wrapper import _normalize_model_name
+        return str(_normalize_model_name(str(model)) or model)
+    except Exception:  # noqa: BLE001 - the wrapper is not importable here: the bare name
+        return str(model)
+
+
 def _note(model: Optional[str], ok: bool) -> None:
-    key = str(model or _UNKNOWN)
+    key = _key(model)
     now = time.monotonic()
     with _breaker_lock:
         window = _outcomes.setdefault(key, deque())
@@ -90,7 +104,7 @@ def provider_tripped(model: Optional[str] = None) -> Optional[float]:
     now = time.monotonic()
     with _breaker_lock:
         if model is not None:
-            left = _tripped_until.get(str(model), 0.0) - now
+            left = _tripped_until.get(_key(model), 0.0) - now
             return left if left > 0 else None
         left = max((until - now for until in _tripped_until.values()), default=0.0)
         return left if left > 0 else None
