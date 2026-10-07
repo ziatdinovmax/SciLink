@@ -4979,6 +4979,11 @@ Your guidance: '''
                     yy = cd.ravel()
                     xx = np.arange(yy.shape[0], dtype=float)
                 fit_arr = np.load(fit_path)
+                # the saved fit's offset-free R² as the replay check reads it —
+                # from the array as loaded, before the realignment below,
+                # which also flips an order that fits in neither direction
+                # (#762 review) — what a follower's replay is held to
+                saved_fit_r2 = _saved_fit_mismatch(curve_data, fit_arr)[1]
                 # The generated script can save fit.npy in a different x-ordering
                 # than the data it was given (NMR ppm is usually DESCENDING, but
                 # a script that sorts ascending for fitting saves the fit on that
@@ -5018,8 +5023,6 @@ Your guidance: '''
                 # the two. None (length mismatch / no signal) also keeps the
                 # self-report.
                 recomputed_r2 = _canonical_r2(yy, fit_arr)
-                # read as a follower's replay will be read, whatever the layout
-                saved_fit_r2 = _saved_fit_mismatch(curve_data, fit_arr)[1]
                 self_r2 = fit_quality.get("r_squared")
                 if recomputed_r2 is not None:
                     if isinstance(self_r2, (int, float)) and abs(recomputed_r2 - self_r2) > 0.05:
@@ -8155,19 +8158,6 @@ Return JSON with:
                                        "before relying on them."),
                 })
                 continue
-            # A replay that does not fit this unit's data is withheld and
-            # flagged regardless of its R² (#762 review): the recipe was kept
-            # and is not refit — the flag is not a refit reason.
-            misfit = (r.get("fit_quality") or {}).get("replay_misfit")
-            if misfit:
-                flagged.append({
-                    "index": r["index"], "name": r["name"], "reason": "replay_misfit",
-                    "r_squared": float(r2) if r2 is not None else None,
-                    "series_mean": median_r2, "series_std": robust_scale,
-                    "deviation_sigma": None,
-                    "recommendation": "Withheld: " + str(misfit[0]) + ". " + REPLAY_MISFIT_NOTE,
-                })
-                continue
             # A pinned-at-bound fit is flagged regardless of its R² (#592):
             # the gate metric can stay high while the extracted value is
             # wrong, which is exactly how the degeneracy hid before.
@@ -8187,7 +8177,22 @@ Return JSON with:
                                           "feature the data shows) before trusting the extracted values.")),
                 })
                 continue
+            # A replay that does not fit this unit's data where its gate
+            # passed is withheld and flagged, not refit (#762 review): the
+            # recipe is kept. Where its gate failed too, it is refit as on
+            # ``main``; the misfit stays on ``fit_quality``, so the unit is
+            # still withheld if no refit replaces it.
+            misfit = (r.get("fit_quality") or {}).get("replay_misfit")
+            misfit_flag = {
+                "index": r["index"], "name": r["name"], "reason": "replay_misfit",
+                "r_squared": float(r2) if r2 is not None else None,
+                "series_mean": median_r2, "series_std": robust_scale,
+                "deviation_sigma": None,
+                "recommendation": "Withheld: " + str(misfit[0]) + ". " + REPLAY_MISFIT_NOTE,
+            } if misfit else None
             if r2 is None:
+                if misfit_flag:
+                    flagged.append(misfit_flag)
                 continue
 
             g = _gate_of(r)
@@ -8201,7 +8206,10 @@ Return JSON with:
             # outlier (a better-than-typical fit is never flagged).
             deviation_sigma = worse / robust_scale
             is_outlier = deviation_sigma > self.outlier_sigma
-            
+            if misfit_flag and not below_threshold:
+                flagged.append(misfit_flag)
+                continue
+
             if below_threshold or is_outlier:
                 if is_outlier and not below_threshold:
                     reason = "statistical_outlier"

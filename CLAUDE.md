@@ -178,7 +178,9 @@ wrong column of that unit's data, it did not merely rail a bound. A REPLAY
 whose saved fit does not follow its data even up to a constant offset (R² < −1:
 a misfit more than twice the data's variance) where its anchor was not below
 zero only WITHHOLDS the unit (`replay_misfit`, a non-refit flag, read by a
-follower's and a reuse's verdict): the recipe is kept, nothing is repaired. A
+follower's and a reuse's verdict): the recipe is kept, nothing is repaired —
+unless its gate failed too, which refits it as on `main` (the misfit stays on
+`fit_quality`, so the unit is still withheld if no refit replaces it). A
 windowed recipe's local baseline carried across the whole axis can land there
 on a healthy unit, and in live A/B runs (real series, reuse across a phase
 change, the wrong-column replay) the x-axis rule caught every wrong replay

@@ -262,6 +262,58 @@ def test_a_follower_whose_replay_does_not_fit_its_data_is_withheld_not_repaired(
     assert not v["verified"] and "does not follow this unit's data" in v["reason"]
 
 
+def test_a_follower_that_misfits_and_fails_its_gate_is_refit_as_on_main(tmp_path, monkeypatch):
+    """The misfit only withholds where the gate passed: a follower whose
+    replay also fails its gate keeps main's refit reason and is refit; with no
+    refit to replace it, it stays withheld for the misfit."""
+    import test_series_verdict_path as sv
+    real_canned = sv._canned_anchor
+    monkeypatch.setattr(sv, "_canned_anchor", lambda *a, **k: {**real_canned(*a, **k), "saved_fit_r2": 0.6})
+
+    class Ex(sv.FakeExecutor):
+        def execute_script(self, script, working_dir=None, timeout=None, **kw):
+            res = super().execute_script(script, working_dir=working_dir, timeout=timeout, **kw)
+            wd = Path(working_dir)
+            y = cc._extract_xy(np.load(wd / "data.npy"))[1]
+            bad = "spectrum_0002" in wd.as_posix()
+            np.save(wd / "fit.npy", y.mean() - 3.0 * (y - y.mean()) if bad else y)
+            return res
+
+    follower_r2 = {"spectrum_0001": 0.97, "spectrum_0002": 0.60, "spectrum_0003": 0.97}
+    names = sv.NAMES + ["spectrum_0003"]
+    state, _ = sv.run_series(tmp_path / "refit", monkeypatch, names=names, anchors={"spectrum_0000": sv.OK},
+                             follower_r2=follower_r2, executor=Ex(follower_r2),
+                             refits={"spectrum_0002": {"r2": 0.98, "approved": True, "script": "M2"}})
+    unit = {u["name"]: u for u in state["series_results"]}["spectrum_0002"]
+    assert unit.get("adaptively_refitted") and "replay_misfit" not in (unit.get("fit_quality") or {})
+    assert analysis_verdict(sv.compile_results(tmp_path / "refit", state))["verified"]
+    # no refit replaces it: still withheld, for the misfit
+    state, _ = sv.run_series(tmp_path / "norefit", monkeypatch, names=names, anchors={"spectrum_0000": sv.OK},
+                             follower_r2=follower_r2, executor=Ex(follower_r2))
+    flags = {f["name"]: f["reason"] for f in state.get("flagged_spectra") or []}
+    assert flags["spectrum_0002"] in cc.AdaptiveRefitController.REFIT_REASONS      # main's refit reason
+    unit = {u["name"]: u for u in state["series_results"]}["spectrum_0002"]
+    assert not unit["unit_verdict"]["verified"] and "does not follow this unit's data" in unit["unit_verdict"]["reason"]
+
+
+def test_the_recorded_saved_fit_r2_is_the_one_the_replay_check_reads(tmp_path):
+    """An order that fits in neither direction is still flipped by the
+    finaliser's realignment; the recorded reference is read before it."""
+    y = Y.copy()
+    f = 3.0 * np.exp(-0.5 * ((X - 1500.0) / 30.0) ** 2) + 0.2 * (X - X[0]) / (X[-1] - X[0])
+    fwd, rev = cc._canonical_r2(y, f), cc._canonical_r2(y, f[::-1])
+    assert fwd < 0 and rev < 0 and rev > fwd + 0.05                         # the finaliser flips it
+
+    class Writes(_FitWriter):
+        def execute_script(self, script, working_dir=None, timeout=None, **kw):
+            res = super().execute_script(script, working_dir=working_dir, timeout=timeout, **kw)
+            np.save(Path(working_dir) / "fit.npy", f)
+            return res
+    res = _fit(tmp_path, Writes(), _Model(), np.column_stack([X, y]), base_script=GOOD)
+    assert res["success"] and res["saved_fit_r2"] == cc._saved_fit_mismatch(np.column_stack([X, y]), f)[1]
+    assert abs(res["saved_fit_r2"] - cc._offset_free_r2(y, f)) < 1e-12
+
+
 def test_a_peaks_only_recipe_under_a_rising_background_stays_mains_path(tmp_path, monkeypatch):
     """The anchor's saved fit leaves out a small background; the followers'
     background rises. Nothing fires: no correction, every unit verified."""
