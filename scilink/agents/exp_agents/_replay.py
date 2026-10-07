@@ -809,14 +809,20 @@ NO_INTERPRETATION_CHECK = "this modality has no interpretation check; a replay's
 
 
 def curve_certification_reference(drift_state: Optional[Dict[str, Any]], x_range: Optional[float],
-                                  samples: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+                                  samples: Sequence[Dict[str, Any]],
+                                  saved_fit_r2: Optional[float] = None) -> Optional[Dict[str, Any]]:
     """A curve regime's reference: the state its units occupy (the drift
     monitor's stamp), the axis span, and what its units found (the identity
-    reference). None when there is neither a state nor a sample."""
+    reference). None when there is neither a state nor a sample.
+    ``saved_fit_r2``, when known: the anchor's saved fit against its own data,
+    which a replay of the recipe on new data is held to (#762)."""
     identity = identity_reference(samples, x_range=x_range) if samples else None
     if drift_state is None and identity is None:
         return None
-    return {"kind": "curve", "drift_state": drift_state, "x_range": x_range, "identity": identity}
+    ref = {"kind": "curve", "drift_state": drift_state, "x_range": x_range, "identity": identity}
+    if isinstance(saved_fit_r2, (int, float)) and not isinstance(saved_fit_r2, bool):
+        ref["saved_fit_r2"] = float(saved_fit_r2)
+    return ref
 
 
 def no_interpretation_check() -> Dict[str, Any]:
