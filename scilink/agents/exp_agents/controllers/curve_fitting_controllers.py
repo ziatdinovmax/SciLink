@@ -10340,12 +10340,15 @@ same trend.
                 "Note: Alternative models were attempted but this was the best fit achieved."
             )
 
-        # Why a fitted value is reported as no value (a band not measured, a
-        # secondary pin): an empty value is not a zero or a missing band.
+        # What the checks and the analysis tools said about this fit: why a
+        # value is reported as no value (a band not measured, a secondary
+        # pin; an empty value is not a zero or a missing band), and what a
+        # tool reported about the result (a match's fitted scale, #775).
         _fit_caveats = (series_results[0].get("caveats") if series_results else None) or []
         if _fit_caveats:
             prompt_parts.append(
-                "\n## Fit caveats (a value reported as null is not a measurement)\n"
+                "\n## Fit caveats (from the fit's checks and its analysis tools; a value reported "
+                "as null is not a measurement)\n"
                 + "\n".join(f"- {c}" for c in _fit_caveats))
 
         if series_results and series_results[0].get("quality_history"):

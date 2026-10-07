@@ -28,8 +28,9 @@ from ..._shared._spec import ToolSpec
 #: thermal expansion, strain or composition — rarely 1 % (an inorganic solid
 #: expands ~1e-5 /K); a computed (DFT-relaxed) cell is typically 1–3 % off.
 SCALE_BAND = {"experimental": 0.01, "computed": 0.03, "unknown": 0.01}
-#: Database sources whose cells are measured, and those whose cells are computed.
-EXPERIMENTAL_SOURCES = frozenset({"cod", "local", "icsd"})
+#: Database sources whose cells are measured, and those whose cells are
+#: computed. A user's local CIF can be either, so it is 'unknown'.
+EXPERIMENTAL_SOURCES = frozenset({"cod", "icsd"})
 COMPUTED_SOURCES = frozenset({"mp", "oqmd", "aflow"})
 
 WARNINGS_MARKER = "TOOL_WARNINGS_JSON:"
@@ -110,11 +111,12 @@ def register_overlay(simulated: Any, match_result: dict, *, phase: Any = None, f
     formula = formula or _formula_of(match_result, phase)
     moved = apply_registration(two_theta, reg)
     terms = []
-    if reg["zero_shift"]:
+    # each term as it is printed: a shift that rounds to 0.00° is no term
+    if round(reg["zero_shift"], 2):
         terms.append(f"zero shift {reg['zero_shift']:+.2f}°")
-    if reg["lattice_scale"] != 1.0:
+    if round(reg["lattice_scale"], 3) != 1.0:
         terms.append(f"lattice scale ×{reg['lattice_scale']:.3f}")
-    if reg["two_theta_scale"] != 1.0:
+    if round(reg["two_theta_scale"], 3) != 1.0:
         terms.append(f"2θ scale ×{reg['two_theta_scale']:.3f}")
     label = f"Simulated {formula or 'reference'} (match overlay" + ("; " + ", ".join(terms) if terms else "") + ")"
     # worded exactly as the scorer worded it (the formula only where the
@@ -160,8 +162,7 @@ def plot_match_overlay(ax, exp_two_theta: Sequence[float], exp_intensity: Sequen
     if len(curves) > 1:
         ax.plot(x, base + total, lw=1.0, ls="--", color="gray", label="Sum overlay")
     if log_scale is None:
-        pos = y[y > 0]
-        log_scale = bool(pos.size and np.log10(pos.max() / max(np.percentile(pos, 5), 1e-12)) > 1.5)
+        log_scale = _peaks_span_decades(y - base) > 1.5 and bool(np.all(y > 0))
     if log_scale:
         ax.set_yscale("log")
     ax.set_xlabel("2θ (°)")
@@ -194,28 +195,58 @@ def _background(y: np.ndarray, background: Any) -> np.ndarray:
     return uniform_filter1d(percentile_filter(y, 10, size=size, mode="nearest"), size, mode="nearest")
 
 
-def _registration_of(result: dict, phase: Any) -> Optional[dict]:
-    if not isinstance(result, dict):
+def _peaks_span_decades(y: np.ndarray) -> float:
+    """How many decades the data's peaks span (strongest over weakest, above
+    the noise), the xrd.md rule for a log y axis: never the background's
+    floor, which a background-subtracted pattern puts near zero."""
+    from scipy.signal import find_peaks
+    y = np.asarray(y, dtype=float)
+    if y.size < 8:
+        return 0.0
+    noise = 1.4826 * float(np.median(np.abs(np.diff(y)))) / np.sqrt(2.0)
+    idx, _ = find_peaks(y, prominence=max(5.0 * noise, 1e-12))
+    h = y[idx][y[idx] > 0]
+    return float(np.log10(h.max() / h.min())) if h.size >= 2 else 0.0
+
+
+def _active_phase(result: Any, phase: Any) -> Optional[dict]:
+    """The multiphase active phase ``phase`` names — an index, else an id,
+    else a formula only one active phase has — or the only active phase when
+    ``phase`` is None; None for a single-phase result. Polymorphs share a
+    formula, so an ambiguous name is refused, never the first hit taken."""
+    phases = result.get("active_phases") if isinstance(result, dict) else None
+    if phases is None:
         return None
-    phases = result.get("active_phases")
-    if phases is not None and phase is not None:
-        for i, p in enumerate(phases):
-            if phase in (i, p.get("id"), p.get("formula")):
-                return p.get("registration")
-        raise ValueError(f"phase {phase!r} is not among the match's active phases")
-    if phases and phase is None and len(phases) == 1:
-        return phases[0].get("registration")
-    return result.get("registration")
+    if phase is None:
+        if len(phases) == 1:
+            return phases[0]
+        raise ValueError(f"the match has {len(phases)} active phases: pass phase= (an index or an id)")
+    if isinstance(phase, int) and not isinstance(phase, bool):
+        if 0 <= phase < len(phases):
+            return phases[phase]
+        raise ValueError(f"phase index {phase} is out of range ({len(phases)} active phases)")
+    by_id = [p for p in phases if p.get("id") == phase]
+    if by_id:
+        return by_id[0]
+    by_formula = [p for p in phases if p.get("formula") == phase]
+    if len(by_formula) == 1:
+        return by_formula[0]
+    if by_formula:
+        raise ValueError(f"phase {phase!r} names {len(by_formula)} active phases "
+                         f"(ids {', '.join(str(p.get('id')) for p in by_formula)}): pass the id")
+    raise ValueError(f"phase {phase!r} is not among the match's active phases")
+
+
+def _registration_of(result: dict, phase: Any) -> Optional[dict]:
+    p = _active_phase(result, phase)
+    if p is not None:
+        return p.get("registration")
+    return result.get("registration") if isinstance(result, dict) else None
 
 
 def _formula_of(result: dict, phase: Any) -> str:
-    phases = (result or {}).get("active_phases") or []
-    if phase is None and len(phases) == 1:
-        return str(phases[0].get("formula") or "")
-    for i, p in enumerate(phases):
-        if phase in (i, p.get("id"), p.get("formula")):
-            return str(p.get("formula") or "")
-    return ""
+    p = _active_phase(result, phase)
+    return str(p.get("formula") or "") if p is not None else ""
 
 
 TOOL_SPEC = ToolSpec(
@@ -239,7 +270,9 @@ TOOL_SPEC = ToolSpec(
                          "description": "The result of score_xrd_match_robust, score_xrd_match_multiphase or "
                                         "score_xrd_match_fast for THIS simulated pattern (its 'registration')."},
         "phase": {"type": "int | str",
-                  "description": "Multiphase only: the active phase's index, id or formula."},
+                  "description": "Multiphase only: the active phase's index or id (a formula only when one "
+                                 "active phase has it; polymorphs share one). Required with two or more "
+                                 "active phases."},
         "formula": {"type": "str", "description": "Formula for the legend label (multiphase: read from the phase)."},
         "reference_cell": {"type": "str",
                            "description": "'experimental' | 'computed' or the candidate's database source "
@@ -248,7 +281,7 @@ TOOL_SPEC = ToolSpec(
     },
     required=["simulated", "match_result"],
     returns=("dict with 'two_theta' (registered), 'intensities' (unchanged), 'label' "
-             "(e.g. 'Simulated TiO2 (match overlay; zero shift -0.05°, lattice scale ×1.022)'), "
+             "(e.g. 'Simulated <formula> (match overlay; zero shift -0.05°, lattice scale ×1.02)'), "
              "'registration' and 'warnings'."),
     when_to_use=("Always, for every identification overlay drawn: the raw simulated pattern sits beside "
                  "the data by exactly the registration the score absorbed."),

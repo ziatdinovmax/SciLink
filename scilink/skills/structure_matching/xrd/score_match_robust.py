@@ -169,7 +169,7 @@ TOOL_SPEC = ToolSpec(
         },
         "reference_cell": {
             "type": "str",
-            "description": "'experimental' | 'computed' or the candidate's database source ('cod', 'local' — measured cells; 'mp' — DFT-relaxed). Sets the band beyond which the fitted scale is a caveat in 'warnings': 1 % for an experimental or unknown cell, 3 % for a computed one.",
+            "description": "'experimental' | 'computed' or the candidate's database source ('cod' — measured cells; 'mp' — DFT-relaxed; 'local' — a user's CIF, either, so unknown). Sets the band beyond which the fitted scale is a caveat in 'warnings': 1 % for an experimental or unknown cell, 3 % for a computed one.",
         },
     },
     required=["sim_two_theta", "sim_intensity"],

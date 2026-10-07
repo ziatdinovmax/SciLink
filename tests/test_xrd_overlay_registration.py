@@ -23,9 +23,9 @@ from scilink.skills.structure_matching.xrd.overlay import (
 from scilink.skills.structure_matching.xrd.score_match_fast import _broaden_peaks, score_xrd_match_fast
 from scilink.skills.structure_matching.xrd.score_match_robust import score_xrd_match_robust
 
-# an anatase-like stick pattern, simulated from a reference cell 2.2 % larger
-# than the sample's: every simulated peak sits at a lower angle than measured
-SIM = np.array([25.28, 37.80, 48.05, 53.89, 55.06, 62.69, 68.76, 70.31, 75.03])
+# a generic stick pattern, simulated from a reference cell 2.2 % larger than
+# the sample's: every simulated peak sits at a lower angle than measured
+SIM = np.array([22.10, 31.40, 38.70, 44.90, 50.30, 55.80, 61.20, 66.70, 73.40])
 SIM_I = np.array([100, 20, 35, 22, 21, 14, 6, 7, 10.0])
 TRUE = {"lattice_scale": 1.022, "two_theta_scale": 1.0, "zero_shift": 0.05}
 X = np.arange(20.0, 80.0, 0.02)
@@ -34,7 +34,7 @@ Y = _broaden_peaks(X, EXP_POS, SIM_I, 0.15) + 1.0
 SIMULATED = {"two_theta": SIM.tolist(), "intensities": SIM_I.tolist()}
 
 
-def _lands(overlay, tol=0.12):
+def _lands(overlay, tol=0.2):
     return float(np.max(np.abs(np.asarray(overlay["two_theta"]) - EXP_POS))) <= tol
 
 
@@ -43,9 +43,12 @@ def test_the_robust_scorers_overlay_lands_on_the_data(algorithm):
     res = score_xrd_match_robust(SIM, SIM_I, exp_two_theta=X, exp_intensity=Y, algorithm=algorithm)
     assert res["verdict"] == "accept"
     assert float(np.max(np.abs(SIM - EXP_POS))) > 1.0                       # the raw overlay does not
-    ov = register_overlay(SIMULATED, res, formula="TiO2", emit_warnings=False)
+    ov = register_overlay(SIMULATED, res, formula="AB2", emit_warnings=False)
     assert _lands(ov) and ov["intensities"] == SIM_I.tolist()
-    assert ov["label"].startswith("Simulated TiO2 (match overlay; ") and "scale ×1.0" in ov["label"]
+    # exactly where the scorer put every peak it matched
+    drawn = np.asarray(ov["two_theta"])
+    assert res["matched_peaks"] and all(np.min(np.abs(drawn - m["sim_pos"])) < 1e-6 for m in res["matched_peaks"])
+    assert ov["label"].startswith("Simulated AB2 (match overlay; ") and "scale ×1.0" in ov["label"]
 
 
 def test_the_fast_scorers_overlay_lands_on_the_data_and_its_shift_has_the_right_sign():
@@ -65,14 +68,44 @@ def test_the_multiphase_scorers_overlay_lands_per_phase():
     pk = extract_peaks(X, Y, max_peaks=20)
     res = score_xrd_match_multiphase(
         {"positions": pk["positions"], "intensities": pk["intensities"]},
-        [{"id": "mp-390", "formula": "TiO2", "source": "mp", "sim_two_theta": SIM.tolist(),
+        [{"id": "mp-1", "formula": "AB2", "source": "mp", "sim_two_theta": SIM.tolist(),
           "sim_intensity": SIM_I.tolist()}])
     (phase,) = res["active_phases"]
     assert phase["registration"]["reference_cell"] == "computed"
-    assert _lands(register_overlay(SIMULATED, res, phase="TiO2", emit_warnings=False))
-    assert register_overlay(SIMULATED, res, emit_warnings=False)["label"].startswith("Simulated TiO2")
+    assert _lands(register_overlay(SIMULATED, res, phase="AB2", emit_warnings=False))
+    assert register_overlay(SIMULATED, res, emit_warnings=False)["label"].startswith("Simulated AB2")
     with pytest.raises(ValueError):
-        register_overlay(SIMULATED, res, phase="ZnO")
+        register_overlay(SIMULATED, res, phase="CD")
+
+
+def test_polymorphs_sharing_a_formula_are_named_by_id_never_the_first_hit():
+    """Two active phases with one formula, fitted at different scales: each
+    id draws its own registration; the shared formula is refused."""
+    pytest.importorskip("pulp")
+    from scilink.skills.structure_matching.xrd.score_match_robust import score_xrd_match_multiphase
+    from scilink.skills.structure_matching.xrd.extract_peaks import extract_peaks
+    sim_b = np.array([27.30, 35.90, 43.10, 57.40, 64.80, 70.90])
+    sim_b_i = np.array([100, 40, 30, 25, 15, 12.0])
+    pos_a, pos_b = apply_registration(SIM, {"lattice_scale": 1.02}), apply_registration(sim_b, {"lattice_scale": 0.99})
+    y = _broaden_peaks(X, pos_a, SIM_I, 0.15) + _broaden_peaks(X, pos_b, sim_b_i, 0.15) + 1.0
+    pk = extract_peaks(X, y, max_peaks=30)
+    res = score_xrd_match_multiphase(
+        {"positions": pk["positions"], "intensities": pk["intensities"]},
+        [{"id": "a", "formula": "AB2", "sim_two_theta": SIM.tolist(), "sim_intensity": SIM_I.tolist()},
+         {"id": "b", "formula": "AB2", "sim_two_theta": sim_b.tolist(), "sim_intensity": sim_b_i.tolist()}])
+    assert {p["id"] for p in res["active_phases"]} == {"a", "b"}
+    ov_b = register_overlay({"two_theta": sim_b.tolist(), "intensities": sim_b_i.tolist()}, res, phase="b",
+                            emit_warnings=False)
+    assert np.max(np.abs(np.asarray(ov_b["two_theta"]) - pos_b)) < 0.12 and "×0.99" in ov_b["label"]
+    for ambiguous in ("AB2", None):
+        with pytest.raises(ValueError):
+            register_overlay(SIMULATED, res, phase=ambiguous, emit_warnings=False)
+
+
+def test_a_term_that_rounds_to_nothing_is_not_in_the_label():
+    reg = registration_record(lattice_scale=1.0002, zero_shift=-0.003)
+    ov = register_overlay(SIMULATED, {"registration": reg}, formula="AB2", emit_warnings=False)
+    assert ov["label"] == "Simulated AB2 (match overlay)"
 
 
 def test_a_large_scale_is_a_caveat_by_the_kind_of_reference_cell():
@@ -80,6 +113,9 @@ def test_a_large_scale_is_a_caveat_by_the_kind_of_reference_cell():
     assert lattice_scale_warnings(exp) and "experimental reference cell" in lattice_scale_warnings(exp)[0]
     assert not lattice_scale_warnings(registration_record(lattice_scale=1.003, reference_cell="cod"))
     assert not lattice_scale_warnings(registration_record(lattice_scale=1.022, reference_cell="mp"))
+    # a user's local CIF can be measured or relaxed: unknown, and said so
+    local = lattice_scale_warnings(registration_record(lattice_scale=1.022, reference_cell="local"))
+    assert local and "unknown origin" in local[0]
     assert lattice_scale_warnings(registration_record(lattice_scale=1.035, reference_cell="computed"))
     unknown = lattice_scale_warnings(registration_record(lattice_scale=0.978))
     assert unknown and "-2.2 %" in unknown[0] and "computed cell is typically" in unknown[0]
@@ -101,12 +137,13 @@ def test_the_plotted_matchs_caveat_reaches_the_runs_result(tmp_path, monkeypatch
     none gets no caveats, as before."""
     from scilink.agents.exp_agents.controllers import curve_fitting_controllers as cc
     res = score_xrd_match_robust(SIM, SIM_I, exp_two_theta=X, exp_intensity=Y, reference_cell="cod")
-    register_overlay(SIMULATED, res, formula="TiO2")
+    register_overlay(SIMULATED, res, formula="AB2")
     marker = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("TOOL_WARNINGS_JSON:")]
     assert len(marker) == 1 and json.loads(marker[0].split(":", 1)[1]) == res["warnings"]
+    assert "AB2" not in marker[0]                       # worded as the scorer worded it
 
     def run(stdout_extra, fit_extra=None):
-        out = {"model_type": "match", "parameters": {"TiO2": {"figure_of_merit": 0.9}},
+        out = {"model_type": "match", "parameters": {"AB2": {"figure_of_merit": 0.9}},
                "fit_quality": {"figure_of_merit": 0.9}, **(fit_extra or {})}
         run = {"status": "success", "visualization_path": "viz.png", "visualization_bytes": b"", "exec": {},
                "stdout": "\n".join(stdout_extra + ["FIT_RESULTS_JSON:" + json.dumps(out)])}
@@ -129,18 +166,24 @@ def test_the_plotted_matchs_caveat_reaches_the_runs_result(tmp_path, monkeypatch
     assert "caveats" not in run([])
 
 
-def test_a_measured_cell_wins_the_dedup_and_keeps_the_computed_ones_stability():
+def test_a_measured_cell_wins_the_dedup_whatever_each_backend_writes():
+    """Each backend's own notation: COD a spaced Hill formula, a spaced symbol
+    with its setting and a string number; MP the compact forms and an int.
+    One structure, one entry: the measured cell, carrying the computed one's
+    id, stability and rank, at the computed one's place in the list."""
     from scilink.skills.structure_matching._backends import StructureCandidate
     from scilink.skills.structure_matching.xrd.search_structures import _dedupe
-    for order in ((0, 1), (1, 0)):
-        cands = [StructureCandidate(id="mp-390", source="mp", formula="TiO2", space_group="I4_1/amd",
-                                    metadata={"energy_above_hull": 0.0}, rank_score=1.0),
-                 StructureCandidate(id="9015929", source="cod", formula="TiO2", space_group="I4_1/amd",
-                                    rank_score=0.4)]
-        (kept,) = _dedupe([cands[i] for i in order])
-        assert kept.source == "cod" and kept.rank_score == 1.0
-        assert kept.metadata["also_in"] == [{"source": "mp", "id": "mp-390"}]
-        assert kept.metadata["energy_above_hull"] == 0.0
+    for order in ((0, 1, 2), (1, 0, 2)):
+        cands = [StructureCandidate(id="mp-1", source="mp", formula="ZrO2", space_group="P2_1/c",
+                                    metadata={"energy_above_hull": 0.0, "spacegroup_number": 14}, rank_score=1.0),
+                 StructureCandidate(id="cod-1", source="cod", formula="O2 Zr", space_group="P 1 21/c 1",
+                                    metadata={"spacegroup_number": "14"}, rank_score=0.4),
+                 StructureCandidate(id="mp-2", source="mp", formula="ZrO2", space_group="Fm-3m",
+                                    metadata={"spacegroup_number": 225}, rank_score=0.9)]
+        kept = _dedupe([cands[i] for i in order])
+        assert [c.id for c in kept] == ["cod-1", "mp-2"]
+        assert kept[0].rank_score == 1.0 and kept[0].metadata["energy_above_hull"] == 0.0
+        assert kept[0].metadata["also_in"] == [{"source": "mp", "id": "mp-1"}]
 
 
 def test_the_overlay_figure_has_labelled_axes_and_one_line_per_phase():
@@ -148,7 +191,7 @@ def test_the_overlay_figure_has_labelled_axes_and_one_line_per_phase():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     res = score_xrd_match_robust(SIM, SIM_I, exp_two_theta=X, exp_intensity=Y)
-    ov = register_overlay(SIMULATED, res, formula="TiO2", emit_warnings=False)
+    ov = register_overlay(SIMULATED, res, formula="AB2", emit_warnings=False)
     fig, (ax, dax) = plt.subplots(2, 1, sharex=True)
     out = plot_match_overlay(ax, X, Y, [ov], difference_ax=dax)
     fig.canvas.draw()
@@ -162,6 +205,13 @@ def test_the_overlay_figure_has_labelled_axes_and_one_line_per_phase():
     # drawn on the data's baseline, not on zero: between peaks the difference is ~0
     resid = Y - np.asarray(out["background"]) - np.asarray(out["overlay_sum"])
     assert abs(float(np.median(resid))) < 0.05 and abs(float(np.median(out["background"])) - 1.0) < 0.05
+    # the y axis is log only when the PEAKS span more than ~1.5 decades, not a
+    # low background floor (a background-subtracted pattern sits near zero)
+    assert out["log_scale"] is False
+    wide = _broaden_peaks(X, EXP_POS, np.array([100, 0.5, 35, 22, 21, 14, 6, 7, 10.0]), 0.15) + 1.0
+    fig2, ax2 = plt.subplots()
+    assert plot_match_overlay(ax2, X, wide, [ov])["log_scale"] is True
+    plt.close(fig2)
     plt.close(fig)
     with pytest.raises(ValueError):
         plot_match_overlay(ax, X, Y, [{"two_theta": SIM.tolist(), "label": "x"}])

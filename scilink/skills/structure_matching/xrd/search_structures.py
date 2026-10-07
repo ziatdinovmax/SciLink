@@ -302,7 +302,7 @@ def _dedupe(candidates: Iterable[StructureCandidate]) -> list[StructureCandidate
     so a measured cell does not lose the stability ranking a computed one had."""
     bucket: dict[tuple, StructureCandidate] = {}
     for cand in candidates:
-        key = (cand.formula, cand.space_group)
+        key = _dedupe_key(cand)
         existing = bucket.get(key)
         if existing is None:
             bucket[key] = cand
@@ -317,6 +317,26 @@ def _dedupe(candidates: Iterable[StructureCandidate]) -> list[StructureCandidate
         keep.rank_score = max(keep.rank_score, drop.rank_score)
         bucket[key] = keep
     return list(bucket.values())
+
+
+def _dedupe_key(cand: StructureCandidate) -> tuple:
+    """One key per structure whatever the backend's notation (#775 review):
+    COD writes a spaced Hill formula and a spaced symbol with its origin
+    setting ('O2 Sn', 'P 42/m n m'), MP ``formula_pretty`` and the compact
+    symbol ('SnO2', 'P4_2/mnm'). The reduced formula and the space-group
+    NUMBER, falling back to the strings as given."""
+    formula = cand.formula
+    try:
+        from pymatgen.core import Composition
+        formula = Composition(str(cand.formula).replace(" ", "")).reduced_formula
+    except Exception:  # noqa: BLE001 - an unparseable formula keys as written
+        pass
+    number = (cand.metadata or {}).get("spacegroup_number")
+    try:
+        number = int(number)
+    except (TypeError, ValueError):
+        number = None
+    return (formula, number if number and number > 0 else cand.space_group)
 
 
 def _materialize_cifs(
