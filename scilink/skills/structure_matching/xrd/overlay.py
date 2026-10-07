@@ -105,10 +105,26 @@ def register_overlay(simulated: Any, match_result: dict, *, phase: Any = None, f
                        or simulated.get("sim_intensity") or [])
     else:
         two_theta, intensities = simulated, None
-    reg = dict(_registration_of(match_result, phase) or registration_record())
+    matched, p = _phase_of(match_result, phase)
+    if p is not None:
+        reg = dict(p.get("registration") or registration_record())
+    else:
+        reg = dict((match_result.get("registration") if isinstance(match_result, dict) else None)
+                   or registration_record())
+    if not matched:
+        # a candidate this frame did not match: drawn on the shared terms
+        # alone, named as not matched, with no lattice scale and no caveat
+        reg["lattice_scale"] = 1.0
+        moved = apply_registration(two_theta, reg)
+        out = {"two_theta": [float(v) for v in moved], "registration": reg, "warnings": [], "matched": False,
+               "label": f"Simulated {formula or phase} (not matched in this frame)"}
+        if intensities is not None:
+            out["intensities"] = [float(v) for v in intensities]
+        return out
     if reference_cell is not None:
         reg["reference_cell"] = reference_cell_kind(reference_cell)
-    formula = formula or _formula_of(match_result, phase)
+    phase_formula = str(p.get("formula") or "") if p is not None else ""
+    formula = formula or phase_formula
     moved = apply_registration(two_theta, reg)
     terms = []
     # each term as it is printed: a shift that rounds to 0.00° is no term
@@ -122,12 +138,13 @@ def register_overlay(simulated: Any, match_result: dict, *, phase: Any = None, f
     # worded exactly as the scorer worded it (the formula only where the
     # scorer knew it, a multiphase phase), so the run's caveats hold it once
     # when the script also copies the scorer's warnings
-    warnings = lattice_scale_warnings(reg, _formula_of(match_result, phase))
+    warnings = lattice_scale_warnings(reg, phase_formula)
     if warnings and emit_warnings:
         # the plotted match's caveat reaches the run's result (the curve agent
         # lifts this marker), whatever the script itself prints
         print(WARNINGS_MARKER + json.dumps(warnings), flush=True)
-    out = {"two_theta": [float(v) for v in moved], "label": label, "registration": reg, "warnings": warnings}
+    out = {"two_theta": [float(v) for v in moved], "label": label, "registration": reg, "warnings": warnings,
+           "matched": True}
     if intensities is not None:
         out["intensities"] = [float(v) for v in intensities]
     return out
@@ -156,15 +173,29 @@ def plot_match_overlay(ax, exp_two_theta: Sequence[float], exp_intensity: Sequen
         prof = _broaden_peaks(x, np.asarray(ov["two_theta"], float), np.asarray(ov["intensities"], float), w)
         if prof.max() > 0:
             prof = prof * (ymax / prof.max()) * float(ov.get("weight", 1.0))
-        total += prof
-        curves.append(prof)
-        ax.plot(x, base + prof, lw=1.0, label=ov.get("label") or "Simulated (match overlay)")
+        if ov.get("matched", True):
+            total += prof
+            curves.append(prof)
+            ax.plot(x, base + prof, lw=1.0, label=ov.get("label") or "Simulated (match overlay)")
+        else:
+            # a candidate this frame did not match: shown for comparison,
+            # never part of the sum or the difference
+            ax.plot(x, base + prof, lw=0.8, ls=":", label=ov.get("label") or "Simulated (not matched)")
     if len(curves) > 1:
         ax.plot(x, base + total, lw=1.0, ls="--", color="gray", label="Sum overlay")
+    noise = _noise_sigma(y)
     if log_scale is None:
-        log_scale = _peaks_span_decades(y - base) > 1.5 and bool(np.all(y > 0))
+        log_scale = _peaks_span_decades(y - base, distance=max(1, int(round(w / step))), noise=noise) > 1.5
+    y_scale = "linear"
     if log_scale:
-        ax.set_yscale("log")
+        if np.all(y > 0):
+            y_scale = "log"
+            ax.set_yscale("log")
+        else:
+            # background-subtracted data reaches zero and below, which a log
+            # axis cannot show: log above a few noise widths, linear within
+            y_scale = "symlog"
+            ax.set_yscale("symlog", linthresh=max(3.0 * noise, 1e-6 * abs(ymax), 1e-12))
     ax.set_xlabel("2θ (°)")
     ax.set_ylabel("Intensity")
     ax.set_title(title)
@@ -176,7 +207,8 @@ def plot_match_overlay(ax, exp_two_theta: Sequence[float], exp_intensity: Sequen
         difference_ax.set_ylabel("Data − overlay")
         difference_ax.tick_params(axis="x", labelbottom=True)
         difference_ax.legend(fontsize=8)
-    return {"fwhm_used": w, "log_scale": log_scale, "overlay_sum": total.tolist(), "background": base.tolist()}
+    return {"fwhm_used": w, "log_scale": bool(log_scale), "y_scale": y_scale, "overlay_sum": total.tolist(),
+            "background": base.tolist()}
 
 
 def _background(y: np.ndarray, background: Any) -> np.ndarray:
@@ -195,58 +227,46 @@ def _background(y: np.ndarray, background: Any) -> np.ndarray:
     return uniform_filter1d(percentile_filter(y, 10, size=size, mode="nearest"), size, mode="nearest")
 
 
-def _peaks_span_decades(y: np.ndarray) -> float:
-    """How many decades the data's peaks span (strongest over weakest, above
-    the noise), the xrd.md rule for a log y axis: never the background's
-    floor, which a background-subtracted pattern puts near zero."""
+def _noise_sigma(y: np.ndarray) -> float:
+    """The data's point-to-point noise (MAD of the first differences)."""
+    y = np.asarray(y, dtype=float)
+    return 1.4826 * float(np.median(np.abs(np.diff(y)))) / np.sqrt(2.0) if y.size > 1 else 0.0
+
+
+def _peaks_span_decades(y: np.ndarray, *, distance: int = 1, noise: Optional[float] = None) -> float:
+    """How many decades the data's peaks span (strongest over weakest), the
+    xrd.md rule for a log y axis — never the background's floor, which a
+    background-subtracted pattern puts near zero. A peak counts when it stands
+    above what the noise alone reaches over this many points, and once per
+    ``distance`` samples (the data's peak width), so neither a noise bump nor a
+    bump on a peak's flank is read as the weakest peak."""
     from scipy.signal import find_peaks
     y = np.asarray(y, dtype=float)
     if y.size < 8:
         return 0.0
-    noise = 1.4826 * float(np.median(np.abs(np.diff(y)))) / np.sqrt(2.0)
-    idx, _ = find_peaks(y, prominence=max(5.0 * noise, 1e-12))
-    h = y[idx][y[idx] > 0]
+    sigma = _noise_sigma(y) if noise is None else float(noise)
+    floor = max(max(5.0, np.sqrt(2.0 * np.log(y.size)) + 2.0) * sigma, 1e-12)
+    idx, _ = find_peaks(y, height=floor, prominence=floor, distance=max(1, int(distance)))
+    h = y[idx]
     return float(np.log10(h.max() / h.min())) if h.size >= 2 else 0.0
 
 
-def _active_phase(result: Any, phase: Any) -> Optional[dict]:
-    """The multiphase active phase ``phase`` names — an index, else an id,
-    else a formula only one active phase has — or the only active phase when
-    ``phase`` is None; None for a single-phase result. Polymorphs share a
-    formula, so an ambiguous name is refused, never the first hit taken."""
+def _phase_of(result: Any, phase: Any) -> tuple[bool, Optional[dict]]:
+    """(matched, active phase) for ``phase``. A multiphase result names a
+    phase by its candidate id, the one name that means the same on every
+    frame of a locked recipe: an id this frame did not match is (False,
+    None), drawn on the shared terms; anything but an id (an index, None, a
+    formula a polymorph shares) raises on every frame, so it is fixed before
+    a recipe locks, never by a frame whose phases changed. A single-phase
+    result is (True, None)."""
     phases = result.get("active_phases") if isinstance(result, dict) else None
     if phases is None:
-        return None
-    if phase is None:
-        if len(phases) == 1:
-            return phases[0]
-        raise ValueError(f"the match has {len(phases)} active phases: pass phase= (an index or an id)")
-    if isinstance(phase, int) and not isinstance(phase, bool):
-        if 0 <= phase < len(phases):
-            return phases[phase]
-        raise ValueError(f"phase index {phase} is out of range ({len(phases)} active phases)")
-    by_id = [p for p in phases if p.get("id") == phase]
-    if by_id:
-        return by_id[0]
-    by_formula = [p for p in phases if p.get("formula") == phase]
-    if len(by_formula) == 1:
-        return by_formula[0]
-    if by_formula:
-        raise ValueError(f"phase {phase!r} names {len(by_formula)} active phases "
-                         f"(ids {', '.join(str(p.get('id')) for p in by_formula)}): pass the id")
-    raise ValueError(f"phase {phase!r} is not among the match's active phases")
-
-
-def _registration_of(result: dict, phase: Any) -> Optional[dict]:
-    p = _active_phase(result, phase)
-    if p is not None:
-        return p.get("registration")
-    return result.get("registration") if isinstance(result, dict) else None
-
-
-def _formula_of(result: dict, phase: Any) -> str:
-    p = _active_phase(result, phase)
-    return str(p.get("formula") or "") if p is not None else ""
+        return True, None
+    if not isinstance(phase, str) or not phase:
+        raise ValueError("a multiphase match draws each phase by its candidate id: pass phase=<the "
+                         f"candidate's 'id'> (got {phase!r})")
+    by_id = [p for p in phases if str(p.get("id")) == phase]
+    return (True, by_id[0]) if by_id else (False, None)
 
 
 TOOL_SPEC = ToolSpec(
@@ -269,10 +289,12 @@ TOOL_SPEC = ToolSpec(
         "match_result": {"type": "dict",
                          "description": "The result of score_xrd_match_robust, score_xrd_match_multiphase or "
                                         "score_xrd_match_fast for THIS simulated pattern (its 'registration')."},
-        "phase": {"type": "int | str",
-                  "description": "Multiphase only: the active phase's index or id (a formula only when one "
-                                 "active phase has it; polymorphs share one). Required with two or more "
-                                 "active phases."},
+        "phase": {"type": "str",
+                  "description": "Multiphase only, required: the candidate's 'id' as passed to the scorer "
+                                 "(never an index or a formula: they change meaning between frames, and "
+                                 "polymorphs share a formula). A candidate this frame did not match is drawn "
+                                 "on the shared 2θ terms, labelled 'not matched in this frame', with "
+                                 "'matched': False and no warning."},
         "formula": {"type": "str", "description": "Formula for the legend label (multiphase: read from the phase)."},
         "reference_cell": {"type": "str",
                            "description": "'experimental' | 'computed' or the candidate's database source "
@@ -282,7 +304,7 @@ TOOL_SPEC = ToolSpec(
     required=["simulated", "match_result"],
     returns=("dict with 'two_theta' (registered), 'intensities' (unchanged), 'label' "
              "(e.g. 'Simulated <formula> (match overlay; zero shift -0.05°, lattice scale ×1.02)'), "
-             "'registration' and 'warnings'."),
+             "'registration', 'warnings' and 'matched'."),
     when_to_use=("Always, for every identification overlay drawn: the raw simulated pattern sits beside "
                  "the data by exactly the registration the score absorbed."),
 )
@@ -303,7 +325,8 @@ TOOL_SPEC_PLOT = ToolSpec(
         "exp_intensity": {"type": "list", "description": "Experimental intensity (background-subtracted or raw)."},
         "overlays": {"type": "list[dict]",
                      "description": "register_overlay results; a 'weight' key scales a phase's overlay "
-                                    "(e.g. its fraction) for a mixture."},
+                                    "(e.g. its fraction) for a mixture. One with 'matched': False is drawn "
+                                    "dotted and left out of the sum and the difference."},
         "fwhm": {"type": "float | 'auto'",
                  "description": "Broadening (degrees). 'auto' uses the data's narrowest resolved peak "
                                 "width; RAISE only if the overlay looks spikier than the data, LOWER if it "
@@ -315,11 +338,13 @@ TOOL_SPEC_PLOT = ToolSpec(
         "difference_ax": {"type": "matplotlib Axes",
                           "description": "Optional second Axes for 'Data − overlay'."},
         "log_scale": {"type": "bool",
-                      "description": "Default chooses by dynamic range (log beyond ~1.5 decades); keep "
-                                     "one choice across a series' frames."},
+                      "description": "Default chooses by the dynamic range of the peaks above the noise (log "
+                                     "beyond ~1.5 decades; symlog where the data reaches zero, e.g. "
+                                     "background-subtracted); keep one choice across a series' frames."},
     },
     required=["ax", "exp_two_theta", "exp_intensity", "overlays"],
-    returns="dict with 'fwhm_used', 'log_scale', 'overlay_sum', 'background'.",
+    returns="dict with 'fwhm_used', 'log_scale', 'y_scale' ('linear' | 'log' | 'symlog'), 'overlay_sum', "
+            "'background'.",
     when_to_use="For the identification figure, instead of drawing overlay sticks by hand.",
 )
 

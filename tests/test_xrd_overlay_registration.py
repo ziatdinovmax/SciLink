@@ -72,10 +72,13 @@ def test_the_multiphase_scorers_overlay_lands_per_phase():
           "sim_intensity": SIM_I.tolist()}])
     (phase,) = res["active_phases"]
     assert phase["registration"]["reference_cell"] == "computed"
-    assert _lands(register_overlay(SIMULATED, res, phase="AB2", emit_warnings=False))
-    assert register_overlay(SIMULATED, res, emit_warnings=False)["label"].startswith("Simulated AB2")
-    with pytest.raises(ValueError):
-        register_overlay(SIMULATED, res, phase="CD")
+    ov = register_overlay(SIMULATED, res, phase="mp-1", emit_warnings=False)
+    assert _lands(ov) and ov["matched"] and ov["label"].startswith("Simulated AB2 (match overlay")
+    # by its candidate id only, even with one active phase: an index or no
+    # phase raises on EVERY frame, so the anchor's ladder fixes it before a lock
+    for bad in (None, 0):
+        with pytest.raises(ValueError, match="candidate id"):
+            register_overlay(SIMULATED, res, phase=bad)
 
 
 def test_polymorphs_sharing_a_formula_are_named_by_id_never_the_first_hit():
@@ -97,9 +100,44 @@ def test_polymorphs_sharing_a_formula_are_named_by_id_never_the_first_hit():
     ov_b = register_overlay({"two_theta": sim_b.tolist(), "intensities": sim_b_i.tolist()}, res, phase="b",
                             emit_warnings=False)
     assert np.max(np.abs(np.asarray(ov_b["two_theta"]) - pos_b)) < 0.12 and "×0.99" in ov_b["label"]
-    for ambiguous in ("AB2", None):
-        with pytest.raises(ValueError):
-            register_overlay(SIMULATED, res, phase=ambiguous, emit_warnings=False)
+    # a formula two polymorphs share names neither of them
+    assert register_overlay(SIMULATED, res, phase="AB2", emit_warnings=False)["matched"] is False
+    with pytest.raises(ValueError):
+        register_overlay(SIMULATED, res, phase=None, emit_warnings=False)
+
+
+def test_a_locked_scripts_phase_means_the_same_on_every_frame(capsys):
+    """A locked recipe meets frames its anchor did not have: the phase it
+    draws by id is drawn on every frame, matched or not, and nothing raises
+    because the frame's phases changed."""
+    reg_a = registration_record(lattice_scale=1.03, two_theta_scale=1.001, zero_shift=0.04, reference_cell="cod")
+    reg_b = registration_record(lattice_scale=0.994, two_theta_scale=1.001, zero_shift=0.04)
+    shared = registration_record(two_theta_scale=1.001, zero_shift=0.04)
+    pa = {"id": "a", "formula": "AB2", "registration": reg_a, "warnings": lattice_scale_warnings(reg_a, "AB2")}
+    pb = {"id": "b", "formula": "CD", "registration": reg_b, "warnings": []}
+    frames = {"a and b": {"active_phases": [pa, pb], "registration": shared},
+              "a gone": {"active_phases": [pb], "registration": shared},
+              "nothing matched": {"active_phases": [], "algorithm": "mip_multiphase"}}
+    for name, res in frames.items():
+        for pid, phase in (("a", pa), ("b", pb)):
+            ov = register_overlay(SIMULATED, res, phase=pid, formula=phase["formula"])
+            if phase in res["active_phases"]:
+                assert ov["matched"] and ov["registration"] == phase["registration"], name
+                assert f"Simulated {phase['formula']} (match overlay" in ov["label"]
+            else:
+                # on the shared terms, never another phase's scale or name
+                assert ov["matched"] is False and ov["warnings"] == [], name
+                assert ov["label"] == f"Simulated {phase['formula']} (not matched in this frame)"
+                assert ov["registration"]["lattice_scale"] == 1.0
+                assert np.allclose(ov["two_theta"], apply_registration(SIM, res.get("registration")))
+    # only the matched, out-of-band phase printed a caveat, once per frame it was matched
+    markers = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("TOOL_WARNINGS_JSON:")]
+    assert len(markers) == 1 and "×1.030" in json.loads(markers[0].split(":", 1)[1])[0]
+    # what does not mean the same on every frame raises on every frame
+    for res in frames.values():
+        for bad in (None, 0, 1.0):
+            with pytest.raises(ValueError, match="candidate id"):
+                register_overlay(SIMULATED, res, phase=bad, emit_warnings=False)
 
 
 def test_a_term_that_rounds_to_nothing_is_not_in_the_label():
@@ -207,14 +245,61 @@ def test_the_overlay_figure_has_labelled_axes_and_one_line_per_phase():
     assert abs(float(np.median(resid))) < 0.05 and abs(float(np.median(out["background"])) - 1.0) < 0.05
     # the y axis is log only when the PEAKS span more than ~1.5 decades, not a
     # low background floor (a background-subtracted pattern sits near zero)
-    assert out["log_scale"] is False
-    wide = _broaden_peaks(X, EXP_POS, np.array([100, 0.5, 35, 22, 21, 14, 6, 7, 10.0]), 0.15) + 1.0
+    assert out["log_scale"] is False and out["y_scale"] == "linear"
+    wide_i = np.array([100, 0.5, 35, 22, 21, 14, 6, 7, 10.0])
+    wide = _broaden_peaks(X, EXP_POS, wide_i, 0.15) + 1.0
     fig2, ax2 = plt.subplots()
-    assert plot_match_overlay(ax2, X, wide, [ov])["log_scale"] is True
+    assert plot_match_overlay(ax2, X, wide, [ov])["y_scale"] == "log"
+    plt.close(fig2)
+    # background-subtracted (reaching zero and below): symlog, not a minority
+    # phase hidden on a linear axis
+    rng = np.random.default_rng(0)
+    sub = _broaden_peaks(X, EXP_POS, wide_i, 0.15) + rng.normal(0, 0.02, X.size)
+    fig2, ax2 = plt.subplots()
+    assert plot_match_overlay(ax2, X, sub, [ov], background=None)["y_scale"] == "symlog"
+    assert ax2.get_yscale() == "symlog"
     plt.close(fig2)
     plt.close(fig)
     with pytest.raises(ValueError):
         plot_match_overlay(ax, X, Y, [{"two_theta": SIM.tolist(), "label": "x"}])
+
+
+@pytest.mark.parametrize("step", [0.02, 0.005])
+@pytest.mark.parametrize("sigma", [0.02, 0.2])
+def test_noise_is_not_read_as_the_weakest_peak(step, sigma):
+    """Peaks spanning under a decade stay linear on noisy data (a noise bump,
+    or one on a peak's flank, is not a peak); two decades above the noise go log."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    x = np.arange(20.0, 80.0, step)
+    for seed in range(5):
+        rng = np.random.default_rng(seed)
+        narrow = _broaden_peaks(x, EXP_POS, SIM_I.clip(min=14), 0.15) + 1.0 + rng.normal(0, sigma, x.size)
+        broad = _broaden_peaks(x, EXP_POS, np.array([100, 1.5, 35, 22, 21, 14, 6, 7, 10.0]), 0.15) + 20.0 \
+            + rng.normal(0, sigma, x.size)
+        fig, ax = plt.subplots()
+        assert plot_match_overlay(ax, x, narrow, [])["y_scale"] == "linear"
+        assert plot_match_overlay(ax, x, broad, [])["y_scale"] == "log"
+        plt.close(fig)
+
+
+def test_a_phase_not_matched_in_this_frame_is_drawn_apart_from_the_sum():
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    res = score_xrd_match_robust(SIM, SIM_I, exp_two_theta=X, exp_intensity=Y)
+    ov = register_overlay(SIMULATED, res, formula="AB2", emit_warnings=False)
+    gone = register_overlay(SIMULATED, {"active_phases": [], "registration": registration_record()},
+                            phase="b", formula="CD")
+    fig, ax = plt.subplots()
+    alone = plot_match_overlay(ax, X, Y, [ov])
+    fig2, ax2 = plt.subplots()
+    both = plot_match_overlay(ax2, X, Y, [ov, gone])
+    labels = [t.get_text() for t in ax2.get_legend().get_texts()]
+    assert labels == ["Data", ov["label"], "Simulated CD (not matched in this frame)"]     # no sum
+    assert np.allclose(both["overlay_sum"], alone["overlay_sum"])
+    plt.close(fig); plt.close(fig2)
 
 
 def test_the_tools_are_in_the_skills_inventory():
