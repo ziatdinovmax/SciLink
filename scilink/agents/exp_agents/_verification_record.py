@@ -257,6 +257,17 @@ def _has_record(qh: Any) -> bool:
     return isinstance(qh, dict) and "approved" in qh
 
 
+def nothing_measured(item: Optional[dict]) -> Optional[str]:
+    """Why a fit measured nothing the plan asked for (#762): every target's
+    reported centre lies outside the measured axis, its values are no value.
+    None otherwise. Read by EVERY branch that can verify a curve unit — its
+    own gate, a follower's recipe, a reuse's replay gate."""
+    nothing = ((item or {}).get("fit_quality") or {}).get("no_target_measured")
+    if not nothing:
+        return None
+    return f"no target measured: {', '.join(map(str, nothing))} reported outside the measured axis"
+
+
 def _unit_verdict(item: dict, *, where: str) -> Optional[Dict[str, Any]]:
     """Why one verified-by-record unit (a single run, a series anchor, a
     regime anchor, a refit) is NOT verified, else None."""
@@ -277,13 +288,10 @@ def _unit_verdict(item: dict, *, where: str) -> Optional[Dict[str, Any]]:
         except Exception:  # noqa: BLE001 - a malformed pin list still withholds
             what = "a parameter"
         return {"verified": False, "reason": f"degenerate fit: {what} (pinned at bound){where}"}
-    nothing = (item.get("fit_quality") or {}).get("no_target_measured")
+    nothing = nothing_measured(item)
     if nothing:
-        # #762: every target's reported centre lies outside the measured axis;
-        # its values are no value, and a fit that measured nothing asked for
-        # is withheld, never failed
-        return {"verified": False, "reason": f"no target measured: {', '.join(map(str, nothing))} "
-                                             f"reported outside the measured axis{where}"}
+        # #762: a fit that measured nothing asked for is withheld, never failed
+        return {"verified": False, "reason": nothing + where}
     if item.get("quality_warning"):
         return {"verified": False, "reason": f"salvaged best-available result{where}"}
     if item.get("judge_warning"):
@@ -338,9 +346,11 @@ def unit_verdict_for(unit: Dict[str, Any], *, recipe: Optional[Dict[str, Any]] =
         # a locked-script reuse (a prior run's script, or a script-bank cold
         # start) writes no QC record: the replay gate is its own gate
         good = rv.get("verdict") == "good"
-        return verdict_record(verified=good, decided_by="replay_gate", regime=regime,
+        nothing = nothing_measured(unit)
+        return verdict_record(verified=good and not nothing, decided_by="replay_gate", regime=regime,
                               interpretation_checked=interpretation_checked_by(rv),
-                              reason=("locked-script reuse passed the replay gate" if good
+                              reason=(f"the locked-script reuse passed the replay gate, but {nothing}" if good and nothing
+                                      else "locked-script reuse passed the replay gate" if good
                                       else f"reused script verdict {rv.get('verdict')!r}"))
     if (unit.get("quality_history") or {}).get("unverified"):
         return verdict_record(verified=False, reason="follower unverified (budget)", decided_by="none", regime=regime)
@@ -361,13 +371,12 @@ def unit_verdict_for(unit: Dict[str, Any], *, recipe: Optional[Dict[str, Any]] =
         return verdict_record(verified=False, decided_by="recipe", regime=regime, recipe_of=recipe.get("unit"),
                               reason=f"replayed the locked recipe of unit {recipe.get('unit')}, but this unit's "
                                      f"fit is degenerate: {what} (pinned at bound)")
-    nothing = (unit.get("fit_quality") or {}).get("no_target_measured")
+    nothing = nothing_measured(unit)
     if rv.get("verified") and nothing:
         # the recipe passed, but on THIS unit no target was measured (#762)
         return verdict_record(verified=False, decided_by="recipe", regime=regime, recipe_of=recipe.get("unit"),
                               reason=f"replayed the locked recipe of unit {recipe.get('unit')}, but on this unit "
-                                     f"no target was measured: {', '.join(map(str, nothing))} reported outside "
-                                     f"the measured axis")
+                                     f"{nothing}")
     if rv.get("verified"):
         # a follower is certified by the cheap checks against its regime's
         # anchor (``regime_checks``, the series driver's), when they agree
@@ -560,6 +569,9 @@ def legacy_series_verdict(full: Dict[str, Any]) -> Dict[str, Any]:
                 anchors += 1
                 if rv.get("verdict") != "good":
                     return {"verified": False, "reason": f"reused script verdict {rv.get('verdict')!r}{where}"}
+                if nothing_measured(it):
+                    return {"verified": False, "reason": f"the locked-script reuse passed the replay gate, "
+                                                          f"but {nothing_measured(it)}{where}"}
                 continue
             if _has_record(it.get("quality_history")):
                 if it.get("adaptively_refitted") and it.get("role") != "anchor":
@@ -797,6 +809,9 @@ def _single_run_verdict(full: Dict[str, Any], rv: Dict[str, Any]) -> Dict[str, A
     qh = full.get("quality_history")
     if not _has_record(qh):
         if rv.get("reused") and rv.get("verdict") == "good":
+            nothing = nothing_measured(full)
+            if nothing:
+                return {"verified": False, "reason": f"the locked-script reuse passed the replay gate, but {nothing}"}
             return {"verified": True, "reason": "locked-script reuse passed the replay gate"}
         return {"verified": False, "reason": "no verification record"}
     bad = _unit_verdict(full, where="")

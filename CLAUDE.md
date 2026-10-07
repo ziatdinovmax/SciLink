@@ -165,23 +165,31 @@ features) refuse it. The pick and its reason are `reuse_validity.source`
 (`_verification_record.prior_recipe_scripts`).
 
 **What a curve fit reports is held to the fit and the data** (#762). Code
-generation is told where x and y sit in `data.npy` (from the array staged) and
-that a script replayed on other spectra never chooses a column, a window or
-anything else by matching one spectrum's values. A saved fit that follows the
-x axis, or a replay further from the data than the data's own spread (R² < −1;
-a sign change near zero was a noisy control, seen live) where its anchor was
-not below a flat line (a reuse: the recipe's
-`certification_reference.saved_fit_r2`), is not
-a fit of this data: the ladder is told, and a unit that still shows it FAILS
-(refit-eligible), never verified on its self-reported R² — a saved fit below
-that line on its own is no error (a peaks-only fit saved without its baseline,
-a windowed model evaluated outside its window). A band whose REPORTED centre
-lies outside the axis is not measured like an edge band (a fit with no target
-left measured is withheld, `no_target_measured`, never failed); a band width
-wider than the axis and every uncertainty of a degenerate fit are no value
-(`withheld_values`, a caveat). A band is read by bare names only (`center`,
-`fwhm`, …): a unit suffix, a derived quantity or `mu` (a level's mean as often
-as a position) is not read. All measured on 4,595 saved fits. Declined,
+generation is told where x and y sit in `data.npy` (from the array staged), and
+every prompt that writes, repairs or judges a replayed script says never to
+pick a column, a window or anything else by matching a value read off one
+spectrum; a repair (which never sees the generation prompt) is told the layout
+too. A saved fit that follows the x axis, or a replay that does not follow its
+data even up to a constant offset (R² < −1: its misfit is more than twice the
+data's variance) where its anchor was not below zero, is not a fit of this
+data: the ladder is told, and a unit that still shows it FAILS
+(refit-eligible), never verified on its self-reported R². This repairs a
+follower's locked recipe, a deliberate exception to #726: the recipe broke on
+that unit's data, it did not merely rail a bound. The anchor's reference
+travels with the recipe (`certification_reference.saved_fit_r2`), so a reuse is
+held to it; a bank cold start, a bare recipe file and a run recorded before
+this carry none. A saved fit below a flat line on its own is no error (a
+peaks-only fit saved without its baseline, a background rising along the
+series, a windowed model evaluated outside its window, a level on a flat
+control). A band — read only when a bare position name (`center`, `cen`,
+`loc`, …) AND a bare width name (`fwhm`, `sigma`, …) sit on one component; a
+unit suffix, a derived quantity or `mu` (a level's mean as often as a
+position) is not read — whose REPORTED centre lies outside the axis is not
+measured like an edge band; a fit with no target left measured is withheld
+(`no_target_measured`, read by its own gate, a follower's and a reuse's
+verdict), never failed. A band width wider than the axis, every uncertainty of
+a degenerate fit and a secondary pin's component's uncertainties are no value
+(`withheld_values`, a caveat). All measured on 4,595 saved units. Declined,
 measured: holding a series' claims on fired follower `regime_checks` (they fire
 on 205 of 259 followers, healthy series included).
 
