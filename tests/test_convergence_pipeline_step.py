@@ -6,6 +6,7 @@ tests/test_pipeline_refinement_integration.py's approach. The real VASP
 end-to-end is validated on the cluster.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -169,6 +170,38 @@ def test_adoption_removes_base_file_the_converged_setting_dropped(tmp_path, monk
     assert result["input_generation"]["input_files"]["INCAR"].startswith("KSPACING")
     assert "KPOINTS" not in result["input_generation"]["input_files"]
     assert not (out_dir / "KPOINTS").exists()
+
+
+def test_step_folder_cleared_before_running_a_rung(tmp_path, monkeypatch):
+    # A step folder is reused across a structure retry; a stale vasprun.xml left
+    # from a previous attempt (a different structure) must not survive into the
+    # rung's run, or the reader accepts it as a valid result.
+    seen_at_entry = {}
+
+    class _CapturingExecutor:
+        def run(self, input_files, run_command, run_dir):
+            seen_at_entry[Path(run_dir).name] = set(os.listdir(run_dir))
+            Path(run_dir).mkdir(parents=True, exist_ok=True)
+            for name, contents in (input_files or {}).items():
+                (Path(run_dir) / name).write_text(contents)
+            return {"status": "completed", "output_dir": run_dir, "returncode": 0}
+
+    _install_fakes(
+        monkeypatch,
+        energies={"300": -5.0, "400": -5.401, "500": -5.4012},
+        spec={"parameter": "ENCUT", "ladder": [300, 400, 500],
+              "observable": "energy_per_atom", "tolerance": 0.001},
+    )
+    out_dir = tmp_path / "out"
+    stale = out_dir / "convergence" / "ENCUT" / "400"
+    stale.mkdir(parents=True)
+    (stale / "vasprun.xml").write_text("<previous attempt, different structure/>")
+
+    _run(tmp_path, executor=_CapturingExecutor(), output_dir=str(out_dir))
+
+    # The 400 rung ran against a cleared (empty) folder — the stale file is gone.
+    assert "vasprun.xml" not in seen_at_entry["400"]
+    assert seen_at_entry["400"] == set()
 
 
 if __name__ == "__main__":

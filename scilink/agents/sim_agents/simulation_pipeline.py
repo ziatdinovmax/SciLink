@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -846,6 +847,15 @@ def _run_workflow_once(
                     root = os.path.join(output_dir, "convergence", str(param))
                     for setting, member_inputs in members.items():
                         rdir = os.path.join(root, str(setting))
+                        # Clear the step folder first: it is reused across a
+                        # structure retry (run_complete_workflow -> same
+                        # output_dir), and the observable reader only checks that
+                        # vasprun.xml exists. A step that fails before the engine
+                        # writes output would otherwise read the previous
+                        # attempt's output (a different structure) as valid.
+                        if os.path.isdir(rdir):
+                            shutil.rmtree(rdir, ignore_errors=True)
+                        os.makedirs(rdir, exist_ok=True)
                         cmd = (run_command.format(script=_entry)
                                if _entry and "{script}" in run_command
                                else run_command)
