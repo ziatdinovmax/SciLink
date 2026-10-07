@@ -76,7 +76,61 @@ PINNED_BOUND_FIX = (
 )
 
 
-def validate_bound_pinning(parameters, bounds, rel_tol: float = 0.01) -> list:
+_WIDTH_WORDS = ("sigma", "gamma", "width", "fwhm", "hwhm", "lw")
+_CENTRE_WORDS = ("center", "centre", "cent", "position", "pos", "x0", "mu", "loc")
+_AMPLITUDE_WORDS = ("amp", "height", "area", "intens", "scale", "norm")
+_GAUSS_WORDS = ("sigma", "g", "gauss", "gaussian")
+_LORENTZ_WORDS = ("gamma", "l", "lor", "lorentz", "lorentzian")
+
+
+def _words(name) -> list:
+    return [w for w in str(name).lower().replace("-", "_").split("_") if w]
+
+
+def _is_width(name) -> bool:
+    return any(w in _words(name) for w in _WIDTH_WORDS)
+
+
+def _gl_partner(pv: dict, name):
+    """The other half of ONE line's Gaussian/Lorentzian width pair: the name
+    with its Gaussian word swapped for a Lorentzian one, or the reverse
+    (``sigma``/``gamma``, ``p1_sigma``/``p1_gamma``, ``fwhm_g``/``fwhm_l``,
+    ``gaussian_fwhm``/``lorentzian_fwhm``). None when there is no such pair —
+    another peak's width or the other side of an asymmetric profile is not
+    the same line. The pairing is by name only: another model's ``gamma``
+    beside a ``sigma`` (an exponentially modified Gaussian's rate) or two
+    peaks labelled ``g`` and ``l`` read as a pair too; the floor and ratio
+    tests in ``_pure_lineshape`` are what keep a railed value pinned."""
+    words = _words(name)
+    by_words = {tuple(_words(k)): k for k in (pv or {})}
+    for i, w in enumerate(words):
+        swaps = _LORENTZ_WORDS if w in _GAUSS_WORDS else _GAUSS_WORDS if w in _LORENTZ_WORDS else ()
+        for other in swaps:
+            key = tuple(words[:i] + [other] + words[i + 1:])
+            if key in by_words and by_words[key] != name:
+                return by_words[key]
+    return None
+
+
+def _pure_lineshape(pv: dict, name, value, lo, pb: dict) -> bool:
+    """One width of a Gaussian/Lorentzian pair at its floor while its partner
+    carries the line: the other pure lineshape. The partner must be clear of
+    its own floor and at least ten times this width, and this floor itself
+    small beside it (<= 5 %), so a real floor — an instrument resolution —
+    still pins."""
+    partner = _gl_partner(pv, name)
+    if partner is None:
+        return False
+    v2 = (pv or {}).get(partner)
+    if not isinstance(v2, (int, float)) or isinstance(v2, bool) or not (v2 == v2) or v2 <= 0:
+        return False
+    b2 = (pb or {}).get(partner)
+    floor2 = b2[0] if isinstance(b2, (list, tuple)) and len(b2) == 2 and isinstance(b2[0], (int, float)) else 0.0
+    return (v2 > 10 * max(floor2 or 0.0, 0.0) and v2 >= 10 * abs(value)
+            and max(lo or 0.0, 0.0) <= 0.05 * v2)
+
+
+def validate_bound_pinning(parameters, bounds, rel_tol: float = 0.01, lineshape_limits: bool = False) -> list:
     """Deterministic pinned-at-bound check (#592).
 
     ``bounds`` mirrors ``parameters``: ``{component: {param: [lo, hi]}}`` with
@@ -92,6 +146,11 @@ def validate_bound_pinning(parameters, bounds, rel_tol: float = 0.01) -> list:
     a failed fit. What remains is the failure mode this guards against: a
     feature larger than a ceiling baked from another spectrum, or a
     position / width driven to the edge of its window.
+    ``lineshape_limits`` (curve fits): a mixing fraction at exactly 0 or 1
+    recognised by its [0, 1] bounds, and one width of a Gaussian/Lorentzian
+    pair at its floor while the other carries the line, are pure lineshapes,
+    not pins. Off by default: the hyperspectral scalar check keeps the rule
+    above.
     Returns ``[{component, parameter, value, bound, side}]``; empty when
     compliant or when no bounds were reported. Never raises.
     """
@@ -123,6 +182,24 @@ def validate_bound_pinning(parameters, bounds, rel_tol: float = 0.01) -> list:
             tol = max(tol, 1e-12)
             if any(f in str(name).lower() for f in _FRACTION_KEYS):
                 continue
+            if lineshape_limits:
+                # Curve lineshapes only (#761; the hyperspectral scalar check
+                # keeps main's rule). A mixing fraction is recognised by its
+                # bounds too, not only its name (``fL`` at 1 is a pure
+                # Lorentzian): exactly [0, 1] on a parameter that is not an
+                # amplitude, a position or a width (on a normalised axis those
+                # are real limits).
+                if (lo == 0.0 and hi == 1.0 and not any(
+                        t in str(name).lower() for t in _AMPLITUDE_WORDS + _CENTRE_WORDS + _WIDTH_WORDS)):
+                    continue
+                # One width of ONE line's Gaussian/Lorentzian pair at its floor
+                # while the other carries the line is the other pure lineshape.
+                # A width's floor is non-negative: a value at a negative lower
+                # bound is a skewness or an offset railed at its limit, not a
+                # width at zero (lmfit's skewed Gaussian names its skew gamma).
+                if (lo is not None and lo >= 0.0 and v <= lo + tol and _is_width(name)
+                        and _pure_lineshape(pv, name, v, lo, pb)):
+                    continue
 
             def _at(bound):
                 # Within the span tolerance AND close relative to the numbers

@@ -623,6 +623,29 @@ class OrchestratorTools:
               + ", ".join(f"{r['unit']} ({r['reason']})" for r in rows[:8]))
         return str(dest), rows, []
 
+    # Why an analysis left a value empty, in words, for the flags that are a
+    # caveat on a fit that stands (a missing value there is no extraction gap).
+    _EMPTY_VALUE_REASONS = {
+        "not_measured": "not measured: a band peaking beyond the measured axis",
+        "secondary_pin": "a secondary component at its bound: no value",
+    }
+
+    @staticmethod
+    def _flag_reasons(file_path: str) -> dict:
+        """``{unit: flag_reason}`` of a feature table with ``unit`` and
+        ``flag_reason`` columns, for the flagged rows; ``{}`` otherwise."""
+        if Path(str(file_path)).suffix.lower() != ".csv":
+            return {}
+        try:
+            import pandas as pd
+            df = pd.read_csv(file_path, usecols=lambda c: c in ("unit", "flag_reason"))
+        except Exception:  # noqa: BLE001 - not a readable table
+            return {}
+        if not {"unit", "flag_reason"} <= set(df.columns):
+            return {}
+        return {str(u): str(r) for u, r in zip(df["unit"], df["flag_reason"])
+                if isinstance(r, str) and r.strip()}
+
     @staticmethod
     def _sidecar_scalar_keys(file_path: str) -> set:
         """Scalar keys of the data file's sidecar JSON (``x.csv`` -> ``x.json``)
@@ -4570,11 +4593,22 @@ class OrchestratorTools:
                     if _unit_labels is not None:
                         _skipped_units = [u for u, k in zip(_unit_labels, _keep.tolist())
                                           if not k]
+                    # why the analysis left the value empty, where its table says
+                    _flags = self._flag_reasons(file_path) if _skipped_units else {}
+                    _skipped_reasons = {u: self._EMPTY_VALUE_REASONS.get(_flags[u], _flags[u])
+                                        for u in _skipped_units if u in _flags}
+                    # a value left empty ON PURPOSE (not measured, a secondary
+                    # pin) is no extraction gap; any other flag may still have
+                    # its value under another column, so it keeps the hint
+                    _by_design = {u for u in _skipped_units
+                                  if _flags.get(u) in self._EMPTY_VALUE_REASONS}
+                    _named = [f"{u} ({_skipped_reasons[u]})" if u in _skipped_reasons else u
+                              for u in _skipped_units]
                     df_to_append = df_to_append[_keep]
                     num_new = len(df_to_append)
                     print(f"    ⚠️  Skipping {rows_skipped_missing}/{_n_before} row(s) "
                           f"with missing values in {_bad_cols}"
-                          + (f" (units: {_skipped_units})" if _skipped_units else ""))
+                          + (f" (units: {', '.join(_named)})" if _skipped_units else ""))
                     if df_to_append.empty:
                         return json.dumps({
                             "status": "error",
@@ -4665,13 +4699,18 @@ class OrchestratorTools:
                     _resp["rows_skipped_missing"] = rows_skipped_missing
                     if _skipped_units:
                         _resp["rows_skipped_units"] = _skipped_units
+                    if _skipped_reasons:
+                        _resp["rows_skipped_reasons"] = _skipped_reasons
                     _resp["warning"] = (
                         f"{rows_skipped_missing} row(s) skipped: missing values in "
                         f"{_bad_cols}"
-                        + (f" (units: {_skipped_units})" if _skipped_units else "")
-                        + ". The optimizer will NOT see these units. If they "
-                        f"report the quantity under a different column, re-ingest "
-                        f"a table where it is filled in under the target name.")
+                        + (f" (units: {', '.join(_named)})" if _skipped_units else "")
+                        + ". The optimizer will NOT see these units."
+                        + ("" if _skipped_units and len(_by_design) == len(_skipped_units) else
+                           " If they report the quantity under a different column, re-ingest "
+                           "a table where it is filled in under the target name.")
+                        + (" " + ", ".join(sorted(_by_design)) + " had no value to report: the "
+                           "analysis left it empty on purpose." if _by_design else ""))
                 return json.dumps(_resp)
                 
             except Exception as e:

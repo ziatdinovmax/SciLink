@@ -139,7 +139,7 @@ that withholds neither the unit nor, through its anchor, the regime, and is
 named by a non-refit `secondary_pin` flag; a fit that declares none is judged
 as before. The declaration is FROZEN within a fit — the first stands, a later
 attempt can only add to it, a follower starts from its regime anchor's — so a
-correction cannot shrink `targets` to clear a target pin, #742), then trend codegen and a series synthesis run over the per-unit
+correction cannot shrink `targets` to clear a target pin, #742; in a curve fit a pure lineshape limit is not a pin — a mixing fraction at exactly 0 or 1, one width of ONE line's Gaussian/Lorentzian pair at a floor small beside the width that carries the line — and a centre held at an end of the measured axis (or at a bound past it, on a window that reaches into the data) is a band peaking outside the range: NOT MEASURED, its whole component reported with no value, target or not, while the other bands stand and the unit carries a non-refit `not_measured` flag — only a fit with no target left measured (its declared targets that are fitted components, else every fitted band — a background measures nothing asked for) is withheld, #761), then trend codegen and a series synthesis run over the per-unit
 feature table. The per-unit rows are written to `series_analysis_results.json`
 in one shape, so `feature_table.write_feature_table` and every downstream
 consumer read all three the same way. Every unit is a row of `features.csv`,
