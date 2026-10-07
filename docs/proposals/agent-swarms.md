@@ -1839,8 +1839,19 @@ count as a decision, and a scheduler that refuses, admits, measures,
 guards, budgets and stops. The limits that remain, in one place:
 
 - *Placement.* Only `thread` and `process` exist; the HPC and ECS rows of
-  the contract are the AWS PR's (with per-campaign quotas and the board
-  across tasks).
+  the contract are later PRs' (the ECS row with per-campaign quotas and the
+  board across tasks, in the AWS PR). **Simulation swarms** are complete
+  only for their LLM-bound part (input generation, validation, reading
+  outputs): a simulation item is a thread sized at the mode floor, a heavy
+  local engine run inside it is neither measured nor placed in a process,
+  and the compute part — one scheduler job per member, admitted by the
+  scheduler's resources rather than the coordinator's host, polled through
+  `ClusterExecutor.submit/poll` (#766) with `run_many` as its batch form —
+  is the HPC-job placement of the contract, which answers #767 and waits on
+  #696 (the connection) and #745 (concurrent dispatch). What stage 4 gives
+  that path today: the contract's HPC row, a cancelled item cancelling its
+  jobs (`cancel_check` defaults to the thread's own cancel), the tracked
+  engine runner, the token budget and the breaker.
 - *Attended swarms.* Heavy items stay threads, because a worker process
   has no channel to the person; a Stop reaches them cooperatively (on a
   print or a wait), not by a kill.
