@@ -282,8 +282,33 @@ def test_converge_parameters_never_adopts_below_base():
     assert pc.floors == {"ENCUT": 520}
 
 
+def test_converge_parameters_skips_sweep_when_floor_required_but_unreadable():
+    # ENCUT with skip_without_floor: if the base value can't be read (deck left
+    # ENCUT unset) running the 300 eV ladder blind could adopt below ENMAX, so
+    # the sweep is skipped rather than run.
+    seen = {}
+
+    def run_ladder(param, members):
+        seen[param] = set(members)
+        return {s: f"/run/{param}/{s}" for s in members}
+
+    specs = [{"parameter": "ENCUT", "ladder": [300, 400, 500],
+              "observable": "e", "tolerance": 0.001, "skip_without_floor": True}]
+    pc = converge_parameters(
+        base_inputs={"INCAR": "PREC = Accurate\n"}, specs=specs,
+        set_param=_fake_set_param,
+        read_observable=lambda d, o: -5.0,
+        run_ladder=run_ladder,
+        get_param=lambda inputs, param: None,   # ENCUT unreadable
+    )
+    assert "ENCUT" not in seen                   # ladder never ran
+    assert pc.sweeps[0].convergence.converged is False
+    assert "ENCUT" not in pc.final_inputs        # nothing adopted
+    assert pc.all_converged is False
+
+
 def test_converge_parameters_no_floor_when_base_unreadable():
-    # get_param returns None (e.g. an explicit KPOINTS mesh) -> full ladder.
+    # get_param returns None (no skip_without_floor) -> full ladder.
     energies = {
         "/run/ENCUT/300": -5.20, "/run/ENCUT/400": -5.401,
         "/run/ENCUT/500": -5.4012,

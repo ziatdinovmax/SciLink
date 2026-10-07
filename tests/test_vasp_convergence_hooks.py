@@ -118,6 +118,15 @@ class TestSetConvergenceParam:
         assert "ENCUT = 600" in out
         assert "plane-wave cutoff" in out        # comment survived
 
+    def test_edits_in_place_when_tag_is_not_first_on_its_line(self):
+        # The bug: ^-anchored match missed a trailing-tag ENCUT and APPENDED a
+        # second one; VASP reads the first, so every rung ran at the old value.
+        deck = {"INCAR": "PREC = Accurate; ENCUT = 500\nISMEAR = 0\n"}
+        out = set_convergence_param(deck, "ENCUT", 400)["INCAR"]
+        assert out.count("ENCUT") == 1           # edited in place, not duplicated
+        assert "ENCUT = 400" in out and "ENCUT = 500" not in out
+        assert "PREC = Accurate" in out
+
     def test_unknown_param_raises(self):
         with pytest.raises(ValueError):
             set_convergence_param({"INCAR": ""}, "SIGMA", 0.1)
@@ -138,13 +147,8 @@ class TestGetConvergenceParam:
     def test_encut_absent_returns_none(self):
         assert get_convergence_param({"INCAR": "PREC = Accurate\n"}, "ENCUT") is None
 
-    def test_reads_kspacing(self):
+    def test_reads_kspacing_from_incar(self):
         assert get_convergence_param({"INCAR": "KSPACING = 0.25\n"}, "k-points") == 0.25
-
-    def test_kspacing_none_when_explicit_kpoints_present(self):
-        # No scalar to floor against when density is an explicit mesh.
-        deck = {"INCAR": "PREC = Accurate\n", "KPOINTS": "mesh\n0\nG\n4 4 4\n"}
-        assert get_convergence_param(deck, "k-points") is None
 
     def test_missing_incar_returns_none(self):
         assert get_convergence_param({"POSCAR": "..."}, "ENCUT") is None
@@ -154,9 +158,36 @@ class TestGetConvergenceParam:
             get_convergence_param({"INCAR": "ENCUT = 400\n"}, "SIGMA")
 
     def test_reads_encut_with_trailing_tag_on_same_line(self):
-        # The reader stops at the first non-numeric char, so a shared line is ok.
         deck = {"INCAR": "ENCUT = 500 ; PREC = Accurate\n"}
         assert get_convergence_param(deck, "ENCUT") == 500.0
+
+    def test_reads_encut_when_it_is_the_SECOND_tag_on_a_line(self):
+        # The bug: a regex anchored at ^ missed ENCUT after a ';'. pymatgen reads it.
+        deck = {"INCAR": "PREC = Accurate; ENCUT = 500\nISMEAR = 0\n"}
+        assert get_convergence_param(deck, "ENCUT") == 500.0
+
+    # --- k-point density from an explicit KPOINTS mesh (pymatgen/atomate2 decks) ---
+    _CUBIC_POSCAR = (
+        "Cu\n1.0\n3.5 0 0\n0 3.5 0\n0 0 3.5\nCu\n1\nDirect\n0 0 0\n")
+
+    def test_kspacing_derived_from_kpoints_mesh(self):
+        # |b| = 2*pi/3.5 = 1.7952; Gamma 8x8x8 -> effective KSPACING = 1.7952/8.
+        deck = {"INCAR": "PREC = Accurate\n",
+                "KPOINTS": "Auto\n0\nGamma\n8 8 8\n0 0 0\n",
+                "POSCAR": self._CUBIC_POSCAR}
+        v = get_convergence_param(deck, "k-points")
+        assert v == pytest.approx(1.7952 / 8, abs=1e-3)
+
+    def test_kpoints_mesh_overrides_incar_kspacing(self):
+        # VASP lets a KPOINTS file govern over INCAR KSPACING, so the mesh wins.
+        deck = {"INCAR": "KSPACING = 0.5\n",
+                "KPOINTS": "Auto\n0\nGamma\n8 8 8\n0 0 0\n",
+                "POSCAR": self._CUBIC_POSCAR}
+        assert get_convergence_param(deck, "k-points") == pytest.approx(1.7952 / 8, abs=1e-3)
+
+    def test_kspacing_none_when_kpoints_mesh_but_no_poscar(self):
+        deck = {"INCAR": "PREC = Accurate\n", "KPOINTS": "Auto\n0\nGamma\n4 4 4\n0 0 0\n"}
+        assert get_convergence_param(deck, "k-points") is None
 
 
 class TestKspacingToMesh:

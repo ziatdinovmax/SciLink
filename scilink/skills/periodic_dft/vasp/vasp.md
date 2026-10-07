@@ -31,6 +31,9 @@ convergence:
                                            # ladder at (>=) the base deck's ENCUT so the
                                            # sweep never adopts below the validated
                                            # 1.3x-ENMAX minimum (see Quality checks below)
+    skip_without_floor: true               # if the deck leaves ENCUT unset there is no
+                                           # safe floor (the 300 eV rung may be < ENMAX),
+                                           # so skip the sweep rather than run it blind
     observable: energy_per_atom           # eV/atom
     tolerance: 0.001
   - parameter: k-points

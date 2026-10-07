@@ -267,6 +267,18 @@ def converge_parameters(
                 base_val = get_param(working, param)
             except Exception:
                 base_val = None
+            if base_val is None and spec.get("skip_without_floor", False):
+                # No readable base value and a floor is required (e.g. ENCUT,
+                # whose ladder bottom can sit below the POTCAR's 1.3x ENMAX
+                # minimum): running the ladder blind could adopt an invalid
+                # setting, so skip this parameter rather than guess.
+                sweeps.append(SweepResult(
+                    convergence=ConvergenceResult(
+                        False, None, None, [],
+                        "base value unreadable and a floor is required — "
+                        "parameter not swept"),
+                    observations=[], run_dirs={}, param_name=param))
+                continue
             if base_val is not None:
                 ladder, floored = _floor_ladder(ladder, base_val, direction)
                 if floored:
