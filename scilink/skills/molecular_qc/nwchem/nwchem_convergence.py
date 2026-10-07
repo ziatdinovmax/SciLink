@@ -27,11 +27,27 @@ _LIBRARY_RE = re.compile(r"(\blibrary\s+)(\S+)", re.IGNORECASE)
 
 _HARTREE_EV = 27.211386245988
 
-# NWChem's final energy line: "Total DFT energy = -76.35..." (DFT) or
-# "Total SCF energy = ..." (HF). Parsed directly so the primary observable
+# NWChem's SCF/DFT reference energy line: "Total DFT energy = -76.35..." (DFT)
+# or "Total SCF energy = ..." (HF). Parsed directly so the primary observable
 # needs no cclib (which may be absent).
 _ENERGY_RE = re.compile(
     r"Total\s+(?:DFT|SCF)\s+energy\s*=\s*(-?\d+\.\d+)", re.IGNORECASE)
+
+# Post-HF correlated total-energy lines, highest level of theory first. For an
+# MP2 or CCSD(T) (TCE) run the basis-dependent result is the correlated total,
+# not the SCF/DFT reference _ENERGY_RE matches — judging the sweep on the
+# reference would converge the wrong quantity and adopt too small a basis. The
+# presence of a correlated total is the signal the run was post-HF, so prefer
+# whichever the log holds. Formats vary: TCE uses "= " with an optional
+# "/ hartree"; the direct MP2 module uses a bare value or ":".
+_CORRELATED_ENERGY_RES = (
+    re.compile(r"CCSD\(T\)\s+total\s+energy(?:\s*/\s*hartree)?\s*[=:]?\s+(-?\d+\.\d+)",
+               re.IGNORECASE),
+    re.compile(r"\bCCSD\s+total\s+energy(?:\s*/\s*hartree)?\s*[=:]?\s+(-?\d+\.\d+)",
+               re.IGNORECASE),
+    re.compile(r"(?:Total\s+MP2|MP2\s+total)\s+energy(?:\s*/\s*hartree)?\s*[=:]?\s+(-?\d+\.\d+)",
+               re.IGNORECASE),
+)
 
 
 def _find_nwchem_log(output_dir: str):
@@ -49,14 +65,25 @@ def _find_nwchem_log(output_dir: str):
 
 
 def _read_total_energy_eV(output_dir: str):
-    """Last 'Total DFT/SCF energy' from the NWChem log, in eV (or None)."""
+    """Highest-level total energy from the NWChem log, in eV (or None).
+
+    For a post-HF run (MP2, CCSD(T) via TCE) the basis-dependent result is the
+    correlated total energy; prefer whichever correlated total the log holds
+    (CCSD(T) > CCSD > MP2), falling back to the SCF/DFT reference for an HF/DFT
+    run. Takes the last occurrence so a multi-step deck reads its final result.
+    """
     log = _find_nwchem_log(output_dir)
     if log is None:
         return None
     try:
-        matches = _ENERGY_RE.findall(log.read_text(errors="replace"))
+        text = log.read_text(errors="replace")
     except OSError:
         return None
+    for rx in _CORRELATED_ENERGY_RES:
+        matches = rx.findall(text)
+        if matches:
+            return float(matches[-1]) * _HARTREE_EV
+    matches = _ENERGY_RE.findall(text)
     if not matches:
         return None
     return float(matches[-1]) * _HARTREE_EV

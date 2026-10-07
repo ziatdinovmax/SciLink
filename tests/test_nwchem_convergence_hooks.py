@@ -114,6 +114,33 @@ class TestReadTotalEnergy:
         v = read_convergence_observable(str(tmp_path), "total_energy")
         assert v == pytest.approx(-76.358285 * self._HARTREE_EV)
 
+    def test_mp2_prefers_correlated_total_over_scf(self, tmp_path):
+        # Direct MP2 prints the SCF reference and the correlated total; the
+        # basis-dependent result is the MP2 total, not the SCF reference.
+        (tmp_path / "run_stdout.log").write_text(
+            "          SCF energy                 -76.026000\n"
+            "          correlation energy          -0.270000\n"
+            "          Total MP2 energy           -76.296000\n")
+        v = read_convergence_observable(str(tmp_path), "total_energy")
+        assert v == pytest.approx(-76.296000 * self._HARTREE_EV)
+
+    def test_ccsdt_tce_prefers_ccsdt_total(self, tmp_path):
+        # TCE prints the SCF ref, the CCSD total and the CCSD(T) total; CCSD(T)
+        # (highest level present) is the one the basis sweep must judge.
+        (tmp_path / "run_stdout.log").write_text(
+            " Total SCF energy =   -76.026000\n"
+            " CCSD total energy / hartree       =       -76.280000\n"
+            " CCSD(T) total energy / hartree    =       -76.300000\n")
+        v = read_convergence_observable(str(tmp_path), "total_energy")
+        assert v == pytest.approx(-76.300000 * self._HARTREE_EV)
+
+    def test_dft_run_still_reads_dft_energy(self, tmp_path):
+        # No correlated line present -> fall back to the SCF/DFT reference.
+        (tmp_path / "run_stdout.log").write_text(
+            "   Total DFT energy =      -76.358285492866\n")
+        v = read_convergence_observable(str(tmp_path), "total_energy")
+        assert v == pytest.approx(-76.358285492866 * self._HARTREE_EV)
+
     def test_none_without_log(self, tmp_path):
         assert read_convergence_observable(str(tmp_path), "total_energy") is None
 
