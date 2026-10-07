@@ -17,7 +17,8 @@ sys.path.insert(0, str(REPO_ROOT))
 import types  # noqa: E402
 
 from scilink.skills.periodic_dft.vasp.vasp_convergence import (  # noqa: E402
-    set_convergence_param, kspacing_to_mesh, read_convergence_observable,
+    set_convergence_param, get_convergence_param,
+    kspacing_to_mesh, read_convergence_observable,
 )
 
 
@@ -112,6 +113,38 @@ class TestSetConvergenceParam:
             set_convergence_param({"POSCAR": "..."}, "ENCUT", 500)
 
 
+class TestGetConvergenceParam:
+    def test_reads_encut(self):
+        deck = {"INCAR": "PREC = Accurate\nENCUT = 520\nISMEAR = 0\n"}
+        assert get_convergence_param(deck, "ENCUT") == 520.0
+
+    def test_reads_encut_case_insensitive(self):
+        assert get_convergence_param({"INCAR": "encut = 400\n"}, "ENCUT") == 400.0
+
+    def test_encut_absent_returns_none(self):
+        assert get_convergence_param({"INCAR": "PREC = Accurate\n"}, "ENCUT") is None
+
+    def test_reads_kspacing(self):
+        assert get_convergence_param({"INCAR": "KSPACING = 0.25\n"}, "k-points") == 0.25
+
+    def test_kspacing_none_when_explicit_kpoints_present(self):
+        # No scalar to floor against when density is an explicit mesh.
+        deck = {"INCAR": "PREC = Accurate\n", "KPOINTS": "mesh\n0\nG\n4 4 4\n"}
+        assert get_convergence_param(deck, "k-points") is None
+
+    def test_missing_incar_returns_none(self):
+        assert get_convergence_param({"POSCAR": "..."}, "ENCUT") is None
+
+    def test_unknown_param_raises(self):
+        with pytest.raises(ValueError):
+            get_convergence_param({"INCAR": "ENCUT = 400\n"}, "SIGMA")
+
+    def test_reads_encut_with_trailing_tag_on_same_line(self):
+        # The reader stops at the first non-numeric char, so a shared line is ok.
+        deck = {"INCAR": "ENCUT = 500 ; PREC = Accurate\n"}
+        assert get_convergence_param(deck, "ENCUT") == 500.0
+
+
 class TestKspacingToMesh:
     def _write_run(self, tmp_path, kspacing):
         # Conventional cubic FCC Cu (a=3.61) so the mesh is isotropic and
@@ -165,6 +198,9 @@ class TestRegistryResolution:
         assert "ENCUT = 520" in out["INCAR"]
         # reader returns None for a missing run dir rather than raising
         assert reader(output_dir="/nonexistent", observable="energy_per_atom") is None
+        # getter resolves and reads the deck's current value (the ladder floor)
+        getter = get_tool_function("get_convergence_param", active_skills=["vasp"])
+        assert getter(input_files={"INCAR": "ENCUT = 520\n"}, param="ENCUT") == 520.0
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from scilink.agents.sim_agents.convergence import (  # noqa: E402
     converged_setting, ConvergenceResult, run_convergence_sweep, SweepResult,
-    converge_parameters, ParameterConvergence,
+    converge_parameters, ParameterConvergence, _floor_ladder,
 )
 
 
@@ -226,6 +226,86 @@ def test_converge_parameters_leaves_unconverged_param_unadopted():
     assert "ENCUT" not in pc.final_inputs           # not adopted
     assert pc.final_inputs["k-points"] == 0.4       # cheapest within tol
     assert len(pc.sweeps) == 2
+
+
+# ---------------------------------------------------------------------------
+# Flooring the ladder at the base deck's validated value (bug #1)
+# ---------------------------------------------------------------------------
+
+def test_floor_ladder_ascending_base_between_rungs():
+    # ENCUT 520 (validated) between 500 and 600: drop 300/400/500, base is cheapest.
+    eff, floored = _floor_ladder([300, 400, 500, 600, 700], 520, "ascending")
+    assert eff == [520, 600, 700] and floored is True
+
+
+def test_floor_ladder_ascending_base_on_rung():
+    eff, floored = _floor_ladder([300, 400, 500, 600, 700], 400, "ascending")
+    assert eff == [400, 500, 600, 700] and floored is True   # 300 dropped, no prepend
+
+
+def test_floor_ladder_descending_kspacing():
+    # KSPACING base 0.23 (validated): keep denser-or-equal, base is cheapest.
+    eff, floored = _floor_ladder([0.5, 0.4, 0.3, 0.25, 0.2, 0.15], 0.23, "descending")
+    assert eff == [0.23, 0.2, 0.15] and floored is True
+
+
+def test_floor_ladder_no_change_when_base_at_bottom():
+    eff, floored = _floor_ladder([300, 400, 500], 300, "ascending")
+    assert eff == [300, 400, 500] and floored is False
+
+
+def test_converge_parameters_never_adopts_below_base():
+    # Energy is flat from 400 up, so WITHOUT a floor the sweep would adopt 400.
+    # The base deck validated ENCUT at 520 (>= 1.3x ENMAX), so the sweep must
+    # run only 520/600/700 and adopt no lower than 520.
+    energies = {
+        "/run/ENCUT/520": -5.401, "/run/ENCUT/600": -5.4012,
+        "/run/ENCUT/700": -5.4013,
+    }
+    seen = {}
+
+    def run_ladder(param, members):
+        seen[param] = set(members)
+        return {s: f"/run/{param}/{s}" for s in members}
+
+    specs = [{"parameter": "ENCUT", "ladder": [300, 400, 500, 600, 700],
+              "direction": "ascending", "observable": "e", "tolerance": 0.001}]
+    pc = converge_parameters(
+        base_inputs={"INCAR": "ENCUT = 520"}, specs=specs,
+        set_param=_fake_set_param,
+        read_observable=lambda d, o: energies.get(d),
+        run_ladder=run_ladder,
+        get_param=lambda inputs, param: 520,   # the validated base value
+    )
+    assert seen["ENCUT"] == {520, 600, 700}        # 300/400/500 never run
+    assert pc.final_inputs["ENCUT"] == 520         # cheapest VALID rung, not 400
+    assert pc.floors == {"ENCUT": 520}
+
+
+def test_converge_parameters_no_floor_when_base_unreadable():
+    # get_param returns None (e.g. an explicit KPOINTS mesh) -> full ladder.
+    energies = {
+        "/run/ENCUT/300": -5.20, "/run/ENCUT/400": -5.401,
+        "/run/ENCUT/500": -5.4012,
+    }
+    seen = {}
+
+    def run_ladder(param, members):
+        seen[param] = set(members)
+        return {s: f"/run/{param}/{s}" for s in members}
+
+    specs = [{"parameter": "ENCUT", "ladder": [300, 400, 500],
+              "observable": "e", "tolerance": 0.001}]
+    pc = converge_parameters(
+        base_inputs={"INCAR": "base"}, specs=specs,
+        set_param=_fake_set_param,
+        read_observable=lambda d, o: energies.get(d),
+        run_ladder=run_ladder,
+        get_param=lambda inputs, param: None,
+    )
+    assert seen["ENCUT"] == {300, 400, 500}        # nothing floored
+    assert pc.floors == {}
+    assert pc.final_inputs["ENCUT"] == 400
 
 
 # ---------------------------------------------------------------------------

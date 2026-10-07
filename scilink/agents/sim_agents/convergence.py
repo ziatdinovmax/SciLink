@@ -12,7 +12,7 @@ results here.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 
@@ -170,6 +170,31 @@ def run_convergence_sweep(
     )
 
 
+def _floor_ladder(
+    ladder: Sequence[Any], base: Any, direction: str,
+) -> Tuple[List[Any], bool]:
+    """Restrict a ladder to rungs at least as accurate as the base deck's value.
+
+    The ladder is ordered least- to most-accurate. ``direction`` says how the
+    raw value tracks accuracy: ``"ascending"`` (higher = more accurate, e.g.
+    ENCUT) or ``"descending"`` (smaller = more accurate, e.g. KSPACING). Rungs
+    less accurate than ``base`` are dropped, and ``base`` itself is prepended as
+    the cheapest rung when not already present, so the sweep can never adopt a
+    setting below the one input validation approved (e.g. ENCUT >= 1.3x ENMAX).
+
+    Returns ``(effective_ladder, floored)`` where ``floored`` is True when the
+    ladder changed (a rung dropped or the base prepended).
+    """
+    if direction == "descending":
+        kept = [v for v in ladder if v <= base]
+    else:
+        kept = [v for v in ladder if v >= base]
+    eff = list(kept)
+    if base not in eff:
+        eff = [base] + eff
+    return eff, (eff != list(ladder))
+
+
 @dataclass
 class ParameterConvergence:
     """The result of converging a set of parameters for one calculation.
@@ -179,11 +204,15 @@ class ParameterConvergence:
             parameter that did not converge is left at its base value).
         sweeps: One :class:`SweepResult` per parameter, in the order swept.
         all_converged: True only if every parameter showed a plateau.
+        floors: ``parameter -> base value`` for each parameter whose ladder was
+            floored at the base deck's value (for reporting; empty when no floor
+            applied).
     """
 
     final_inputs: Dict[str, str]
     sweeps: List[SweepResult]
     all_converged: bool
+    floors: Dict[str, Any] = field(default_factory=dict)
 
 
 def converge_parameters(
@@ -193,6 +222,7 @@ def converge_parameters(
     set_param: Callable[[Dict[str, str], str, Any], Dict[str, str]],
     read_observable: Callable[[Optional[str], str], Optional[float]],
     run_ladder: Callable[[str, Dict[Any, Dict[str, str]]], Dict[Any, str]],
+    get_param: Optional[Callable[[Dict[str, str], str], Any]] = None,
     tolerance_default: float = 0.0,
 ) -> ParameterConvergence:
     """Converge several numerical parameters in declared order (adopt-as-you-go).
@@ -219,11 +249,28 @@ def converge_parameters(
     """
     working = dict(base_inputs)
     sweeps: List[SweepResult] = []
+    floors: Dict[str, Any] = {}
     for spec in specs:
         param = spec["parameter"]
-        ladder = spec["ladder"]
+        ladder = list(spec["ladder"])
         observable = spec["observable"]
         tolerance = spec.get("tolerance", tolerance_default)
+        direction = spec.get("direction", "ascending")
+
+        # Floor the ladder at the base deck's value: input validation already
+        # approved it (e.g. ENCUT >= 1.3x ENMAX), and a plateau the observable
+        # reaches at a lower rung must not pull the adopted setting below it.
+        # Rungs below the floor are dropped before running (also a compute
+        # saving). Skipped when the base value is not comparably present.
+        if get_param is not None:
+            try:
+                base_val = get_param(working, param)
+            except Exception:
+                base_val = None
+            if base_val is not None:
+                ladder, floored = _floor_ladder(ladder, base_val, direction)
+                if floored:
+                    floors[param] = base_val
 
         sweep = run_convergence_sweep(
             ladder=ladder,
@@ -241,4 +288,5 @@ def converge_parameters(
         final_inputs=working,
         sweeps=sweeps,
         all_converged=all(s.convergence.converged for s in sweeps),
+        floors=floors,
     )

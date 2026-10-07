@@ -834,6 +834,11 @@ def _run_workflow_once(
                                          active_skills=[software])
                 _read = get_tool_function("read_convergence_observable",
                                           active_skills=[software])
+                try:
+                    _get = get_tool_function("get_convergence_param",
+                                             active_skills=[software])
+                except Exception:
+                    _get = None  # engine without a getter: no ladder floor
                 entry = gen_result.get("entry_file")
 
                 def _run_ladder(param, members, _entry=entry):
@@ -853,6 +858,8 @@ def _run_workflow_once(
                     set_param=lambda i, p, v: _set(input_files=i, param=p, value=v),
                     read_observable=lambda d, o: _read(output_dir=d, observable=o),
                     run_ladder=_run_ladder,
+                    get_param=((lambda i, p: _get(input_files=i, param=p))
+                               if _get is not None else None),
                 )
                 # Adopt converged settings into the deck the production run uses.
                 gen_result["input_files"] = pc.final_inputs
@@ -879,7 +886,13 @@ def _run_workflow_once(
                             "reason": s.convergence.reason,
                         } for s in pc.sweeps
                     },
+                    # parameters whose ladder was floored at the base deck's
+                    # validated value (sweep could not adopt below it).
+                    "floored_at_base": pc.floors,
                 }
+                if pc.floors:
+                    logger.info("Convergence ladders floored at base deck values: %s",
+                                pc.floors)
                 result["steps_completed"].append("parameter_convergence")
             except Exception as e:  # convergence is best-effort; never break the run
                 logger.warning("Parameter convergence skipped: %s", e)

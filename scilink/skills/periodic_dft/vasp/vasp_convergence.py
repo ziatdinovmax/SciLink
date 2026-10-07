@@ -83,6 +83,52 @@ def set_convergence_param(
     return out
 
 
+def get_convergence_param(
+    input_files: Dict[str, str], param: str,
+) -> Optional[float]:
+    """Return the base deck's current value for a convergence parameter.
+
+    The sweep uses this to *floor* its ladder at the value input validation
+    already approved (e.g. ENCUT >= 1.3x max ENMAX, vasp.md:293), so a plateau
+    that the observable happens to reach at a lower rung cannot pull the
+    production run below the validated setting.
+
+    Args:
+        input_files: The base deck as ``{filename: contents}``.
+        param: The frontmatter ``parameter`` name (e.g. ``"ENCUT"``).
+
+    Returns:
+        The current value as a float, or ``None`` when it is not present in a
+        comparable form — a missing INCAR, no such key, or a k-point sweep whose
+        base deck uses an explicit KPOINTS mesh rather than INCAR ``KSPACING``
+        (no scalar to compare). On ``None`` the driver applies no floor for that
+        parameter rather than guessing. Never raises for a readable deck.
+
+    Raises:
+        ValueError: If ``param`` is not a known VASP convergence parameter.
+    """
+    incar_key = _PARAM_TO_INCAR_KEY.get(param)
+    if incar_key is None:
+        raise ValueError(
+            f"unknown VASP convergence parameter {param!r}; "
+            f"known: {sorted(set(_PARAM_TO_INCAR_KEY))}")
+    incar_text = input_files.get(_INCAR)
+    if not incar_text:
+        return None
+    # A k-point floor is comparable only when the base deck expresses density as
+    # KSPACING; with an explicit KPOINTS file present there is no scalar to floor.
+    if incar_key == "KSPACING" and _KPOINTS in input_files:
+        return None
+    m = re.search(rf"^\s*{re.escape(incar_key)}\s*=\s*([0-9.eE+-]+)",
+                  incar_text, re.MULTILINE | re.IGNORECASE)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
+
+
 def read_convergence_observable(
     output_dir: str, observable: str,
 ) -> Optional[float]:
@@ -210,6 +256,28 @@ TOOL_SPECS = [
             "set_convergence_param"),
         agents=["simulation"],
         returns="dict {filename: contents} with the parameter applied.",
+    ),
+    ToolSpec(
+        name="get_convergence_param",
+        description=(
+            "Read a VASP deck's current convergence-parameter value (ENCUT, or "
+            "k-point density via INCAR KSPACING) so the sweep can floor its "
+            "ladder at the validated setting. Returns None if not present in a "
+            "comparable form (e.g. an explicit KPOINTS mesh)."
+        ),
+        parameters={
+            "input_files": {"type": "object",
+                            "description": "Base deck {filename: contents}."},
+            "param": {"type": "string",
+                      "description": "Frontmatter parameter name, e.g. ENCUT."},
+        },
+        required=["input_files", "param"],
+        signature="get_convergence_param(input_files: dict, param: str) -> float | None",
+        import_line=(
+            "from scilink.skills.periodic_dft.vasp.vasp_convergence import "
+            "get_convergence_param"),
+        agents=["simulation"],
+        returns="float current value, or None if not comparably present.",
     ),
     ToolSpec(
         name="read_convergence_observable",
