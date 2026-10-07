@@ -1655,7 +1655,7 @@ class MetaOrchestratorTools:
                             "markdown": _memory.show_memory(domain, name)}, default=str)
                     if act == "promote":
                         res = _memory.promote_memory(domain, name, to_domain=to_domain)
-                        _fanout_cprint(f"  ✅ Promoted '{skill}' (now auto-routable).")
+                        print(f"  ✅ Promoted '{skill}' (now auto-routable).")
                         return json.dumps({"status": "success", "action": "promote", **res}, default=str)
                     res = _memory.prune_memory(domain, name)
                     print(f"  🗑️  Discarded '{skill}'.")
@@ -1677,7 +1677,7 @@ class MetaOrchestratorTools:
                         fresh_template=KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
                         update_template=SKILL_UPDATE_INSTRUCTIONS)
                     if res.get("status") == "success":
-                        _fanout_cprint(f"  ✅ Upgraded '{into}' from staged {sid}.")
+                        print(f"  ✅ Upgraded '{into}' from staged {sid}.")
                     return json.dumps({"action": "upgrade", **res}, default=str)
 
                 if act == "consolidate":
@@ -1693,7 +1693,7 @@ class MetaOrchestratorTools:
                         consolidation_template=T2_CONSOLIDATION_INSTRUCTIONS,
                         update_template=SKILL_UPDATE_INSTRUCTIONS)
                     if res.get("status") == "success":
-                        _fanout_cprint(f"  ✅ Consolidated {res.get('n_examples')} staged → '{cdomain}/auto_{ctech}'.")
+                        print(f"  ✅ Consolidated {res.get('n_examples')} staged → '{cdomain}/auto_{ctech}'.")
                     return json.dumps({"action": "consolidate", **res}, default=str)
             except FileNotFoundError as e:
                 return json.dumps({"status": "error", "message": str(e)})

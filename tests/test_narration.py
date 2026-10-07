@@ -185,20 +185,36 @@ def test_coordinator_lines_are_known_by_their_mark_not_their_wording():
 
 def test_every_coordinator_print_goes_through_the_marking_helper():
     """The guard against drift: a new or reworded coordinator line printed
-    raw would be hidden again. No ``print`` of a line that opens with a
-    coordinator emoji is left in the coordinator modules; they all go
-    through ``_cprint`` (the meta's tools included)."""
+    raw would be hidden again. Scanned: the coordinator modules
+    (``fanout.py``, ``swarm.py``) whole, and in the meta's tools only the
+    three wrappers that front the coordinators (``run_swarm``,
+    ``delegate_to_analyses``, ``resume_fanout``) — the agent's own
+    bookkeeping elsewhere in that module (the skill-memory actions' ✅
+    lines) is not a coordinator's and must stay a plain ``print``."""
+    import ast
     import re
     from pathlib import Path
     import scilink.agents.meta_agent as pkg
     root = Path(pkg.__file__).parent
     raw = re.compile(r'(?<![\w.])print\((?=f?"\s*(?:🐝|⏸|🧯|🔁|⛔|⏱|⏳|✅|🔀))')
-    offenders = []
-    for name in ("fanout.py", "swarm.py", "meta_orchestrator_tools.py"):
-        for i, line in enumerate((root / name).read_text(encoding="utf-8").splitlines(), 1):
-            if raw.search(line):
-                offenders.append(f"{name}:{i}: {line.strip()[:80]}")
+
+    def scan(name, ranges=None):
+        src = (root / name).read_text(encoding="utf-8")
+        for i, line in enumerate(src.splitlines(), 1):
+            if raw.search(line) and (ranges is None or any(a <= i <= b for a, b in ranges)):
+                yield f"{name}:{i}: {line.strip()[:80]}"
+
+    offenders = list(scan("fanout.py")) + list(scan("swarm.py"))
+    tools_src = (root / "meta_orchestrator_tools.py").read_text(encoding="utf-8")
+    wrappers = {"run_swarm", "delegate_to_analyses", "resume_fanout"}
+    ranges = [(n.lineno, n.end_lineno) for n in ast.walk(ast.parse(tools_src))
+              if isinstance(n, ast.FunctionDef) and n.name in wrappers]
+    assert len(ranges) == 3, ranges
+    offenders += list(scan("meta_orchestrator_tools.py", ranges))
     assert not offenders, "\n".join(offenders)
+    # and the agent's own lines in that module are NOT marked
+    assert tools_src.count("_fanout_cprint(") == 3
+    assert 'print(f"  ✅ Promoted' in tools_src
 
 
 def test_thought_and_answer_continuation_is_kept_per_worker():
