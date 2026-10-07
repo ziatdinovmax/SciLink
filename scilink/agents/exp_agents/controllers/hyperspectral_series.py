@@ -1562,23 +1562,62 @@ class ReplayPool:
         self._pool = ThreadPoolExecutor(max_workers=self.workers)
         self._futures: Dict[int, Any] = {}
         self.lost: Dict[int, str] = {}
+        # The pool threads' ids, recorded as they run: an attributed thread
+        # resolves to the TURN's root, not to the series' own thread, so a
+        # kill for the series' thread would not find the children — the
+        # pool kills them by these ids instead.
+        self._tids: set = set()
         self.logger.info(f"⚡ Replay pool: {self.workers} {self.kind} worker(s)")
 
+    def _on_pool_thread(self, fn):
+        def wrapped(*args, **kwargs):
+            import threading
+            self._tids.add(threading.get_ident())
+            return fn(*args, **kwargs)
+        return wrapped
+
+    def kill_children(self) -> None:
+        """End the replay children still running (a Stop, an interrupt, the
+        series' own cancel from its item's thread)."""
+        import threading
+        from scilink.executors import kill_subprocesses_for_thread
+        for tid in {threading.get_ident(), *self._tids}:
+            kill_subprocesses_for_thread(tid)
+
     def submit(self, spec: Dict[str, Any]) -> None:
+        # The pool thread is attributed to the submitting thread: it carries
+        # the series' own cancel (an item's budget or memory cancel, the
+        # turn's Stop), and the child it waits on is registered where
+        # ``kill_subprocesses_for_thread`` of that thread finds it.
+        from scilink.utils.log_context import attributed_to_current
         if self.kind == "thread":
-            fut = self._pool.submit(replay_worker, spec)
+            fut = self._pool.submit(attributed_to_current(self._on_pool_thread(replay_worker), "replay"), spec)
         else:
             from scilink.utils.child_process import run_in_child
-            fut = self._pool.submit(run_in_child, _REPLAY_TARGET, spec)
+            fut = self._pool.submit(attributed_to_current(self._on_pool_thread(run_in_child), "replay"),
+                                    _REPLAY_TARGET, spec)
         self._futures[spec["index"]] = fut
         self.logger.info(f"   ⚡ replay dataset {spec['index']} submitted to the pool")
 
+    def _completed(self, futures):
+        """``as_completed`` that also reads the series' own cancel (an
+        item's budget or memory cancel, the turn's Stop) once a second: the
+        wait itself never prints, so without this a cancel landed only when
+        the next replay finished (observed: a minute)."""
+        from concurrent.futures import FIRST_COMPLETED, wait
+        from scilink.utils.log_context import raise_if_cancelled
+        pending = set(futures)
+        while pending:
+            raise_if_cancelled()
+            done, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
+            for fut in done:
+                yield fut
+
     def collect(self) -> Dict[int, Dict[str, Any]]:
-        from concurrent.futures import as_completed
         results: Dict[int, Dict[str, Any]] = {}
         by_future = {f: i for i, f in self._futures.items()}
         try:
-            for fut in as_completed(list(by_future)):
+            for fut in self._completed(list(by_future)):
                 idx = by_future[fut]
                 try:
                     results[idx] = fut.result()["result"]
@@ -1590,6 +1629,12 @@ class ReplayPool:
                 st = results[idx].get("status")
                 self.logger.info(f"   {'✅' if st in ('success', 'partial') else '❌'} replay "
                                  f"dataset {idx} finished: {st}")
+        except BaseException:
+            # A Stop or an interrupt while replays run: the children lead
+            # their own sessions, so the terminal's signal no longer reaches
+            # them — end them here, then let the pool wind down.
+            self.kill_children()
+            raise
         finally:
             self._pool.shutdown(wait=True)
         return results

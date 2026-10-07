@@ -240,6 +240,13 @@ def _kill_process_tree(proc: subprocess.Popen, grace: float = 2.0) -> None:
         job.close()
         return
     group = _group_of(proc)
+    # The descendants as they stand now: a grandchild that leads a session
+    # of its own (a worker process's generated script, a replay child) is
+    # not in this group, and its parent's SIGTERM handler — the only thing
+    # that would end it — does not run while that parent sits in one long C
+    # call. Whatever of the snapshot is still alive after the group is gone
+    # is killed by pid.
+    descendants = _descendants_of(proc.pid) if proc.poll() is None else []
 
     def send(sig):
         if group is not None:
@@ -266,6 +273,33 @@ def _kill_process_tree(proc: subprocess.Popen, grace: float = 2.0) -> None:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
         pass
+    _kill_survivors(descendants)
+
+
+def _descendants_of(pid: int) -> list:
+    """The process's descendants (``psutil``), or ``[]`` without it."""
+    try:
+        import psutil
+        return psutil.Process(pid).children(recursive=True)
+    except Exception:  # noqa: BLE001 - no psutil, or the process already gone
+        return []
+
+
+def _kill_survivors(descendants: list) -> None:
+    """SIGKILL what is left of a snapshot taken before the tree was
+    signalled, and reap. A pid reused since the snapshot is recognised by
+    psutil's creation-time check and left alone."""
+    for p in descendants:
+        try:
+            if p.is_running() and p.status() != "zombie":
+                p.kill()
+        except Exception:  # noqa: BLE001 - gone, or not ours any more
+            continue
+    for p in descendants:
+        try:
+            p.wait(timeout=2)
+        except Exception:  # noqa: BLE001
+            continue
 
 
 def _kill_all_registered() -> None:
@@ -661,7 +695,7 @@ def _sandbox_preexec():
 
 def _run_tracked(argv, *, timeout=None, input=None, text=True, cwd=None, env=None,
                  shell=False, preexec=None, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                 stdin=None, encoding=None, errors=None):
+                 stdin=None, encoding=None, errors=None, on_start=None):
     """``subprocess.run``'s shape for a process SciLink must be able to end:
     its own session and process group (a Job on Windows), registered for the
     user's Stop, and its whole tree killed on a timeout or an interrupt, so a
@@ -673,7 +707,11 @@ def _run_tracked(argv, *, timeout=None, input=None, text=True, cwd=None, env=Non
     Stop) is checked before the process starts and after it ends: the kill
     that ends a running engine returns as an ordinary result, and without the
     check the worker went on to start its next engine run, which no one-shot
-    kill covers."""
+    kill covers.
+
+    ``on_start(proc)`` is called once the process is registered, for a caller
+    that watches it while it runs (a process worker's memory sampler); it
+    must return quickly and never raise."""
     from scilink.utils.log_context import raise_if_cancelled
     raise_if_cancelled()
     proc = subprocess.Popen(argv, stdin=subprocess.PIPE if input is not None else stdin,
@@ -683,6 +721,8 @@ def _run_tracked(argv, *, timeout=None, input=None, text=True, cwd=None, env=Non
     _mark_own_group(proc)
     _register_subprocess(proc)
     try:
+        if on_start is not None:
+            on_start(proc)
         try:
             out, err = proc.communicate(input=input, timeout=timeout)
             _end_leftover_group(proc)

@@ -232,6 +232,14 @@ def note_llm_call(latency_s: Optional[float] = None,
                     sink(*args)
             except Exception:
                 pass
+        worker = current_worker()
+        if worker is not None:
+            with _lock:
+                row = _worker_usage.setdefault(worker, {"calls": 0, "prompt_tokens": 0,
+                                                        "completion_tokens": 0})
+                row["calls"] += 1
+                row["prompt_tokens"] += int(prompt_tokens or 0)
+                row["completion_tokens"] += int(completion_tokens or 0)
         if getattr(_off_path, "depth", 0):
             with _lock:
                 _counters["off_path_calls"] += 1
@@ -243,6 +251,26 @@ def note_llm_call(latency_s: Optional[float] = None,
             _counters["completion_tokens"] += int(completion_tokens or 0)
     except Exception:
         pass
+
+
+# What each tagged worker's calls moved, process-wide and exact for a worker
+# that runs on tagged threads (a swarm item, a fan-out branch, their
+# candidates): the swarm's token budget reconciles an item's reservation
+# against this when the item ends. A sink is optional; this is not.
+_worker_usage: Dict[str, Dict[str, int]] = {}
+
+
+def worker_usage(worker: str) -> Dict[str, int]:
+    """``{calls, prompt_tokens, completion_tokens}`` charged to ``worker`` so
+    far (zeros for a worker that made no call)."""
+    with _lock:
+        row = _worker_usage.get(worker)
+        return dict(row) if row else {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+
+
+def forget_worker_usage(worker: str) -> None:
+    with _lock:
+        _worker_usage.pop(worker, None)
 
 
 def llm_counters() -> Dict[str, float]:

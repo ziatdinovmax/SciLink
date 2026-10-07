@@ -62,18 +62,20 @@ from ...hitl import (QueueChannel, QuestionServer, WorkerChannel, question_timeo
                      request_human_feedback, set_thread_channel, subject_block, make_subject)
 from ...utils.workers import resolve_workers
 from . import fanout as fo
-from . import reactions
-from .workers import MODES, build_child, release_child
+from . import peaks, reactions
+from .placements import LocalProcess, item_spec, placement_for
+from .workers import MODES, autonomy_for, build_child, release_child
 
 SWARM_MAX_ITEMS = 8
 SWARM_MAX_WORKERS = resolve_workers(None, "SCILINK_SWARM_MAX_WORKERS", 3)
 SWARM_ITEM_TIME_BUDGET_S = 3600.0
-#: Below this much free memory the guard cancels the newest running item.
-SWARM_MEMORY_FLOOR_BYTES = 7.5e8
+#: Below this much free memory the guard cancels the running item that holds
+#: the most (shared with the fan-out: ``fanout.MEMORY_FLOOR_BYTES``).
+SWARM_MEMORY_FLOOR_BYTES = fo.MEMORY_FLOOR_BYTES
 #: How long the coordinator waits for a cancelled worker to end before it
 #: gives up that item's rerun (a hung call never prints, so the cancel may
 #: never land).
-SWARM_DRAIN_TIMEOUT_S = 600.0
+SWARM_DRAIN_TIMEOUT_S = fo.DRAIN_TIMEOUT_S
 _POLL_S = 5
 _HEARTBEAT_S = 60
 #: How many finding ids an item may declare it rests on (a board read shows
@@ -82,33 +84,43 @@ RESTS_ON_MAX = 24
 #: An item's context is kept on its ledger entry (so a re-run can start from
 #: it) when it is small; the ledger is checkpointed, so a large one is not.
 _CONTEXT_KEEP_CHARS = 8000
+#: What an item of a class nobody has measured yet reserves of the swarm's
+#: token budget (``budget.max_tokens``); a measured class reserves what its
+#: largest run spent (``peaks.py``). Placeholders until measured: a full
+#: analysis delegation with a best-of-N runs to a few hundred thousand.
+_TOKEN_RESERVE_DEFAULT = {"analysis": 400_000, "planning": 200_000, "simulation": 200_000}
 
 # A planning or simulation item's own working set, beside the imports every
-# worker thread already shares with the process.
-_MODE_MEM_FLOOR = {"analysis": fo._BRANCH_MEM_FLOOR, "planning": 5e8, "simulation": 5e8}
+# worker thread already shares with the process (shared with the fan-out).
+_MODE_MEM_FLOOR = fo.MODE_MEM_FLOOR
 
 
 class _Unattended:
-    """Workers of an autonomous swarm: every question gets its default."""
+    """Workers of an autonomous swarm: every question gets its default, and
+    is marked unanswered (``hitl.mark_timed_out``), as in a worker process,
+    so no gate records the default as a human decision."""
 
     def ask(self, req) -> str:
+        from ...hitl import mark_timed_out
+        mark_timed_out()
         return req.default or ""
 
 
 def _memory() -> Dict[str, Optional[float]]:
-    try:
-        import psutil
-        vm = psutil.virtual_memory()
-        return {"total": float(vm.total), "available": float(vm.available)}
-    except Exception:  # noqa: BLE001
-        return {"total": None, "available": None}
+    return fo.machine_memory()
 
 
 def _estimate(item: dict) -> float:
-    if item["mode"] == "analysis" and item.get("data_path"):
-        return fo._branch_mem_estimate({"data_path": item["data_path"],
-                                        "pattern": item.get("pattern")})
-    return _MODE_MEM_FLOOR[item["mode"]]
+    return fo.estimate_item(item)
+
+
+def _token_reserve(item: dict) -> int:
+    measured = peaks.token_estimate(item.get("_mem_class") or peaks.item_class(item))
+    return int(measured) if measured else _TOKEN_RESERVE_DEFAULT.get(item["mode"], 200_000)
+
+
+def _worker_tag(entry: dict, item: dict) -> str:
+    return f"swarm:{entry['index']:02d}_{item['slug']}"
 
 
 #: Stamped by the coordinator when it fires a reaction; never taken from a
@@ -215,32 +227,24 @@ def _read_board(orch, item: dict, entry: dict) -> str:
     return "\n".join(board_mod.render(view))
 
 
-def capacity_plan(items: List[dict], memory: Optional[Dict[str, Optional[float]]] = None) -> dict:
-    """Which items this machine can run, and whether together or in turn.
+def capacity_plan(items: List[dict], memory: Optional[Dict[str, Optional[float]]] = None,
+                  *, orch=None, attended: bool = False) -> dict:
+    """Which items this machine can run, whether together or in turn, and
+    WHERE each runs (``placements.placement_for``: a process for an analysis
+    item with data when nobody attends, a thread otherwise).
 
     An item that needs more than the machine has in total, less a margin for
     the system, can never run here and is not started. The rest are admitted
     by free memory as they go, so items that do not fit together wait for
-    each other instead of overcommitting.
+    each other instead of overcommitting. The figure is the class's
+    measured peak when a process worker of that class has run, else the
+    input-based estimate (``fanout.estimate_item``).
     """
-    mem = memory or _memory()
-    total, avail = mem.get("total"), mem.get("available")
-    margin = fo._BRANCH_MEM_MARGIN
-    ceiling = (total - margin) if total else None
-    run, refused = [], []
-    for it in items:
-        est = _estimate(it)
-        it["_mem_est"] = est
-        if ceiling is not None and est > ceiling:
-            refused.append({"label": it["label"], "reason": (
-                f"needs about {est / 1e9:.1f} GB; this machine has {total / 1e9:.1f} GB in all")})
-        else:
-            run.append(it)
-    need = sum(it["_mem_est"] for it in run)
-    together = avail is None or need + margin <= avail
-    return {"run": run, "refused": refused, "estimated_bytes": need,
-            "available_bytes": avail, "total_bytes": total, "together": together,
-            "workers": min(len(run), SWARM_MAX_WORKERS) if run else 0}
+    plan = fo.plan_capacity(items, memory or _memory(), max_workers=SWARM_MAX_WORKERS)
+    for it in plan["run"]:
+        it["_placement"], it["_placement_reason"] = (
+            placement_for(orch, it, attended) if orch is not None else ("thread", "no host"))
+    return plan
 
 
 def _subscription_line(sub: dict) -> str:
@@ -258,7 +262,8 @@ def swarm_plan_subject(plan: dict, attended: bool, subscriptions: Optional[List[
     items, and — because a reaction starts work nobody listed — every
     subscription and the most items the swarm may run in all."""
     rows = [f"- **{it['label']}** ({it['mode']}{', ' + it['subject'] if it.get('subject') else ''}; "
-            f"~{it['_mem_est'] / 1e9:.1f} GB) — {it['task'][:160]}"
+            f"{_mem_tag(it)}{'; own process' if it.get('_placement') == 'process' else ''}) — "
+            f"{it['task'][:160]}"
             for it in plan["run"]]
     blocks = [subject_block("text", label=f"🐝 Items ({len(plan['run'])})", markdown="\n".join(rows))]
     fields = [{"label": "Runs at once", "value": str(plan["workers"])},
@@ -280,6 +285,13 @@ def swarm_plan_subject(plan: dict, attended: bool, subscriptions: Optional[List[
     return make_subject("Launch this swarm?", blocks)
 
 
+def _mem_tag(item: dict) -> str:
+    """``~1.2 GB`` for an estimate, ``1.2 GB measured`` for a class's
+    measured peak."""
+    gb = f"{item['_mem_est'] / 1e9:.1f} GB"
+    return f"{gb} measured" if item.get("_mem_measured") else f"~{gb}"
+
+
 def _memory_line(plan: dict) -> str:
     need = plan["estimated_bytes"] / 1e9
     if plan["available_bytes"] is None:
@@ -294,7 +306,8 @@ def _confirm(orch, plan: dict, attended: bool, subscriptions: Optional[List[dict
     print("\n" + "=" * 78)
     print(f"🐝 SWARM — {len(plan['run'])} item(s), {plan['workers']} at a time")
     for it in plan["run"]:
-        print(f"    • {it['label']}  [{it['mode']}]  ~{it['_mem_est'] / 1e9:.1f} GB")
+        print(f"    • {it['label']}  [{it['mode']}]  {_mem_tag(it)}"
+              + ("  (own process)" if it.get("_placement") == "process" else ""))
     print(f"  Memory: {_memory_line(plan)}")
     if subscriptions:
         print(f"  🔔 Reactions ({len(subscriptions)}), up to {(budget or {}).get('max_items', SWARM_MAX_ITEMS)} items in all:")
@@ -314,17 +327,6 @@ def _confirm(orch, plan: dict, attended: bool, subscriptions: Optional[List[dict
     return ans in ("y", "yes")
 
 
-def _autonomy_enum(mode: str):
-    if mode == "analysis":
-        from ..exp_agents.analysis_orchestrator import AnalysisMode
-        return AnalysisMode
-    if mode == "planning":
-        from ..planning_agents.planning_orchestrator import AutonomyLevel
-        return AutonomyLevel
-    from ..sim_agents.simulation_orchestrator import SimulationMode
-    return SimulationMode
-
-
 def _error_result(message: str, status: str = "error") -> dict:
     return {"status": status, "error": message, "summary": "", "key_findings": [],
             "files_produced": [], "suggested_followups": [], "warnings": []}
@@ -338,7 +340,7 @@ def _run_item(orch, item: dict, entry: dict, channel, autonomy: str, stop_event)
     index = entry["index"]
     base_dir = Path(orch.base_dir) / "swarm" / f"{index:02d}_{item['slug']}"
     mem_key = f"swarm:{index}"
-    fo._admit_branch(mem_key, item["_mem_est"], item["label"])
+    fo._admit_branch(mem_key, item["_mem_est"], item["label"], getattr(orch, "model_name", None))
     entry["_started_at"] = time.monotonic()
     entry.pop("_human_wait_s", None)          # a restored entry may carry stale waits
     entry.pop("_waiting_since", None)
@@ -346,10 +348,15 @@ def _run_item(orch, item: dict, entry: dict, channel, autonomy: str, stop_event)
     fo._register_branch_stop(stop_event)
     set_thread_channel(channel)
     set_thread_event_log(Path(orch.base_dir) / "events.jsonl")
-    tag = tracing.attributed(worker=f"swarm:{index:02d}_{item['slug']}")
+    tag = tracing.attributed(worker=_worker_tag(entry, item))
     tag.__enter__()
     result = _error_result("item aborted before completion")
     child = None
+    placement = item.get("_placement") or "thread"
+    with orch._fanout_lock:
+        entry["placement"] = placement
+        if item.get("_placement_reason"):
+            entry["placement_reason"] = item["_placement_reason"]
     from ...hitl import unattended_questions
     unattended_before = unattended_questions()
     try:
@@ -361,9 +368,12 @@ def _run_item(orch, item: dict, entry: dict, channel, autonomy: str, stop_event)
             if task != item["task"]:
                 with orch._fanout_lock:
                     entry["task"] = task
-            child = build_child(orch, item["mode"], base_dir, label=f"Swarm: {item['label']}")
-            result = child.run_task(task, context=item.get("context"),
-                                    autonomy=_autonomy_enum(item["mode"])[autonomy])
+            if placement == "process":
+                result = _run_in_process(orch, item, entry, task, base_dir, autonomy)
+            else:
+                child = build_child(orch, item["mode"], base_dir, label=f"Swarm: {item['label']}")
+                result = child.run_task(task, context=item.get("context"),
+                                        autonomy=autonomy_for(item["mode"], autonomy))
         except Exception as exc:  # noqa: BLE001
             fo.logger.exception(f"swarm item {index} failed: {exc}")
             result = _error_result(str(exc))
@@ -395,54 +405,98 @@ def _run_item(orch, item: dict, entry: dict, channel, autonomy: str, stop_event)
                 set_thread_event_log(None)
                 set_thread_channel(None)
                 fo._release_branch(mem_key)
+                # The thread's own end: whatever this item spent after it was
+                # settled (a cancelled item winding down, past the swarm's
+                # return) is charged now, to the budget and the ledger.
+                budget_obj = item.get("_tokens_budget")
+                if budget_obj is not None and item.get("_settled"):
+                    budget_obj.charge_late(item, entry, _worker_tag(entry, item))
+                    tracing.forget_worker_usage(_worker_tag(entry, item))
     if entry.get("timed_out") or entry.get("_cancelled"):
         entry["late_result"] = {"status": result.get("status")}
         return
     orch._close_delegation(entry, result)
 
 
+def _run_in_process(orch, item: dict, entry: dict, task: str, base_dir: Path, autonomy: str) -> dict:
+    """The item on the ``process`` placement: submit, wait (the item's own
+    cancel cancels the worker), and turn the handle into a result. The
+    child's usage is charged to this item's worker tag here (one record per
+    model), its unanswered questions become the same warning a thread item
+    gets, and its measured peak goes on the entry."""
+    from ... import tracing
+    placement = LocalProcess()
+    handle = placement.submit(item_spec(orch, item, task, base_dir, autonomy))
+    item["_handle"] = handle
+    final = placement.wait(handle)
+    for model, row in (handle.usage or {}).items():
+        tracing.note_llm_call(latency_s=row.get("seconds"), prompt_tokens=row.get("prompt_tokens"),
+                              completion_tokens=row.get("completion_tokens"), model=model)
+    with orch._fanout_lock:
+        if handle.peak_rss_bytes:
+            entry["peak_rss_bytes"] = float(handle.peak_rss_bytes)
+        entry["worker_state"] = final["state"]
+    if final["state"] == "done":
+        result = handle.result if isinstance(handle.result, dict) else _error_result(
+            "the worker process returned no result")
+        if handle.unattended:
+            result.setdefault("warnings", []).append(
+                f"{handle.unattended} question(s) took their defaults in the worker process "
+                "(unattended; nothing here counts as a human decision)")
+        return result
+    if final["state"] == "cancelled":
+        return _error_result(entry.get("_cancel_reason") or handle.stop_reason or "cancelled",
+                             status="cancelled")
+    if final["state"] == "out_of_memory":
+        with orch._fanout_lock:
+            entry["out_of_memory"] = True
+        return _error_result(f"out_of_memory: the worker process was {handle.stop_reason}")
+    return _error_result(f"the worker process failed: {handle.stop_reason}")
+
+
 def _guard_memory(orch, running: Dict[Any, dict], fut_item: Dict[Any, dict], fut_stop,
                   requeue: List[dict], floor: float) -> Optional[Any]:
-    """Cancel the running item expected to hold the most memory (the newest
-    of equals) when free memory is below ``floor``: it frees the most. It is
-    queued to run again alone, once. Returns the cancelled item's future,
-    which the caller watches until that worker has let go of its memory."""
-    avail = _memory().get("available")
-    if avail is None or avail >= floor:
-        return None
-    live = [(f, e) for f, e in running.items()
-            if e.get("status") == "running" and e.get("_started_at") and not e.get("_cancelled")]
-    if len(live) < 2:
-        # The guard is against overcommitting by several items at once. One
-        # item alone is an ordinary delegation's risk, and cancelling it to
-        # run it alone again would change nothing.
-        return None
-    fut, entry = max(live, key=lambda fe: (fut_item[fe[0]]["_mem_est"], fe[1]["_started_at"]))
-    item = fut_item[fut]
-    entry["_cancelled"] = True
-    reason = (f"memory_pressure: {avail / 1e9:.2f} GB free, below the "
-              f"{floor / 1e9:.2f} GB floor")
-    entry["_cancel_reason"] = reason
-    print(f"  🧯 free memory is low ({avail / 1e9:.2f} GB) — cancelling '{item['label']}' "
-          + ("and running it again alone afterwards" if not item.get("_retried") else "(already run again once)"))
-    fut_stop[fut].set()
-    tid = entry.get("_branch_tid")
-    if tid:
-        try:
-            from ...executors import kill_subprocesses_for_thread
-            kill_subprocesses_for_thread(tid)
-        except Exception:  # noqa: BLE001
-            pass
-    orch._close_delegation(entry, _error_result(reason, status="cancelled"))
-    if not item.get("_retried"):
-        requeue.append({**item, "_retried": True})
-    return fut
+    """Cancel the running item that holds the most memory (what its process
+    worker was last sampled at, else its estimate; the newest of equals)
+    when free memory is below ``floor``: it frees the most. It is queued to
+    run again alone, once. Returns the cancelled item's future, which the
+    caller watches until that worker has let go of its memory. The rule is
+    the fan-out's too (``fanout.guard_memory``)."""
+    def on_cancel(fut, entry, reason):
+        item = fut_item[fut]
+        avail = _memory().get("available")
+        print(f"  🧯 free memory is low ({(avail or 0) / 1e9:.2f} GB) — cancelling '{item['label']}' "
+              + ("and running it again alone afterwards" if not item.get("_retried") else "(already run again once)"))
+        fut_stop[fut].set()
+        handle = item.get("_handle")
+        if handle is not None:
+            LocalProcess().cancel(handle)          # the child's whole tree, through the contract
+            if handle.peak_rss_bytes:
+                entry["peak_rss_bytes"] = float(handle.peak_rss_bytes)
+        tid = entry.get("_branch_tid")
+        if tid:
+            try:
+                from ...executors import kill_subprocesses_for_thread
+                kill_subprocesses_for_thread(tid)
+            except Exception:  # noqa: BLE001
+                pass
+        orch._close_delegation(entry, _error_result(reason, status="cancelled"))
+        if not item.get("_retried"):
+            requeue.append({**item, "_retried": True, "_handle": None, "_settled": False, "_tokens_settled": 0})
+
+    return fo.guard_memory(
+        running, available=_memory().get("available"), floor=floor,
+        est_of=lambda f: fut_item[f]["_mem_est"],
+        rss_of=lambda f: getattr(fut_item[f].get("_handle"), "current_rss_bytes", None),
+        on_cancel=on_cancel)
 
 
 def swarm_budget(raw: Any) -> dict:
     """The swarm's bounds: ``max_items`` (initial and fired together, at most
-    ``SWARM_MAX_ITEMS``), ``max_reactions`` (fired items), and
-    ``max_triggers_per_subject``. The budget is the termination proof."""
+    ``SWARM_MAX_ITEMS``), ``max_reactions`` (fired items),
+    ``max_triggers_per_subject``, and ``max_tokens`` (0: none) — tokens the
+    whole swarm may spend, reserved per item at admission and reconciled
+    when the item ends. The budget is the termination proof."""
     raw = raw if isinstance(raw, dict) else {}
 
     def bounded(key, default, cap=None):
@@ -456,7 +510,61 @@ def swarm_budget(raw: Any) -> dict:
     return {"max_items": max_items,
             "max_reactions": bounded("max_reactions", max_items, max_items),
             "max_triggers_per_subject": bounded("max_triggers_per_subject",
-                                                reactions.MAX_TRIGGERS_PER_SUBJECT, max_items)}
+                                                reactions.MAX_TRIGGERS_PER_SUBJECT, max_items),
+            "max_tokens": bounded("max_tokens", 0)}
+
+
+class TokenBudget:
+    """Tokens are reserved at admission from the item class's measured
+    spend (else a per-mode placeholder) and reconciled on completion; an
+    item that would exceed the remainder is refused with the reason. With
+    no ``max_tokens`` every admission passes and the spend is still kept."""
+
+    def __init__(self, max_tokens: int):
+        self.max = int(max_tokens or 0)
+        self.spent = 0
+        self.reserved = 0
+        self._lock = threading.Lock()
+
+    def charge(self, item: dict, entry: dict, tag: str, *, release: bool = False) -> int:
+        """Charge what ``tag`` has spent beyond what this item was already
+        charged (``_tokens_settled``, read and written under the budget's
+        lock, so the coordinator's settlement and the item's own late
+        charge never count the same tokens twice), put the total on the
+        entry, and with ``release`` give its reservation back. Returns what
+        was charged now."""
+        from ... import tracing
+        use = tracing.worker_usage(tag)
+        total = int(use.get("prompt_tokens", 0)) + int(use.get("completion_tokens", 0))
+        with self._lock:
+            extra = max(total - int(item.get("_tokens_settled") or 0), 0)
+            self.spent += extra
+            if release:
+                self.reserved -= int(item.pop("_tokens_reserved", 0) or 0)
+            if extra or "tokens" not in entry:
+                item["_tokens_settled"] = max(total, int(item.get("_tokens_settled") or 0))
+                entry["tokens"] = item["_tokens_settled"]
+        return extra
+
+    def charge_late(self, item: dict, entry: dict, tag: str) -> int:
+        return self.charge(item, entry, tag)
+
+    def admit(self, item: dict) -> Optional[str]:
+        reserve = _token_reserve(item)
+        if self.max and self.spent + self.reserved + reserve > self.max:
+            return (f"would exceed the swarm's token budget: {self.max:,} in all, "
+                    f"{self.spent:,} spent, {self.reserved:,} reserved by running items, "
+                    f"{reserve:,} needed")
+        item["_tokens_reserved"] = reserve
+        self.reserved += reserve
+        return None
+
+    def settle(self, item: dict, spent: int) -> None:
+        self.reserved -= int(item.pop("_tokens_reserved", 0) or 0)
+        self.spent += int(spent or 0)
+
+    def summary(self) -> dict:
+        return {"max_tokens": self.max or None, "spent": self.spent}
 
 
 def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
@@ -477,12 +585,24 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
         refused += [{"label": it["label"], "reason": f"over the swarm budget of {bounds['max_items']} items"}
                     for it in valid[bounds["max_items"]:]]
         valid = valid[:bounds["max_items"]]
-    plan = capacity_plan(valid)
-    refused += plan["refused"]
-    if not plan["run"]:
-        return json.dumps({"status": "error", "message": "No item fits this machine.",
-                           "not_started": refused})
     attended = bool(getattr(orch, "_enable_human_feedback", False))
+    plan = capacity_plan(valid, orch=orch, attended=attended)
+    refused += plan["refused"]
+    # Tokens are reserved in the plan's order: an item the remainder cannot
+    # cover is not started, and says so, before anything runs.
+    tokens = TokenBudget(bounds["max_tokens"])
+    admitted = []
+    for it in plan["run"]:
+        why = tokens.admit(it)
+        if why:
+            refused.append({"label": it["label"], "reason": why})
+        else:
+            admitted.append(it)
+    plan["run"] = admitted
+    plan["workers"] = min(len(admitted), SWARM_MAX_WORKERS) if admitted else 0
+    if not plan["run"]:
+        return json.dumps({"status": "error", "message": "No item fits this machine and its budget.",
+                           "not_started": refused})
     if attended and not _confirm(orch, plan, attended, subs, bounds):
         return json.dumps({"status": "declined", "message": "The user declined the swarm.",
                            "not_started": refused})
@@ -560,6 +680,7 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
                                  on_wait=fo.note_human_wait(entry))
                    if queue is not None else _Unattended())
         stop_ev = threading.Event()
+        item["_tokens_budget"] = tokens
         fut = pool.submit(fo._attributed_branch(_run_item), orch, item, entry, channel,
                           autonomy, stop_ev)
         return fut, entry, stop_ev
@@ -624,6 +745,12 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
                                                   f"needs about {new_item['_mem_est'] / 1e9:.1f} GB; this "
                                                   f"machine has {plan['total_bytes'] / 1e9:.1f} GB in all")})
                     continue
+                new_item["_placement"], new_item["_placement_reason"] = placement_for(orch, new_item, attended)
+                why = tokens.admit(new_item)
+                if why:
+                    refused_reactions.append({"subscription": sub["index"], "finding_id": fid,
+                                              "from_index": entry["index"], "reason": why})
+                    continue
                 fired_pairs.add((sub["index"], fid))
                 fired_by_sub[sub["index"]] = fired_by_sub.get(sub["index"], 0) + 1
                 subj = reactions._norm_subject(new_item.get("subject"))
@@ -653,18 +780,17 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
             fut_entry[fut], fut_stop[fut], fut_label[fut] = entry, stop_ev, item["label"]
             fut_item[fut] = item
         pending, since_tick = set(fut_entry), 0.0
-        draining: set = set()     # cancelled for memory, not yet ended
-        drain_since: Optional[float] = None
+        drain = fo.Drain(SWARM_DRAIN_TIMEOUT_S)     # cancelled for memory, not yet ended
         while pending or requeue:
             t_poll = time.monotonic()
             if pending:
                 done, pending = wait(pending, timeout=_POLL_S)
             else:                 # only a rerun is left, waiting for the cancelled worker to end
                 done = set()
-                wait(draining, timeout=_POLL_S)
+                wait(drain.futs, timeout=_POLL_S)
                 # This print is also where a user's Stop lands on this thread.
                 print(f"  ⏳ waiting for the cancelled worker to end before the rerun "
-                      f"({int(time.monotonic() - (drain_since or t_poll))} s) ...")
+                      f"({int(time.monotonic() - (drain.since or t_poll))} s) ...")
             since_tick += time.monotonic() - t_poll
             if server is not None and getattr(server, "error", None) is not None:
                 from ...ui.output_capture import AgentStoppedError
@@ -678,18 +804,19 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
                     print(f"  ⚠️  {channel_warnings[-1]}.")
             for f in done:
                 f.result()
+                _settle(tokens, fut_item[f], fut_entry[f])
                 print(f"  ✅ swarm item finished: {fut_label[f]} ({fut_entry[f].get('status')})")
                 since_tick = 0.0
+                if fut_entry[f].get("out_of_memory") and not fut_item[f].get("_retried"):
+                    # Killed with nothing returned and nobody asked for it:
+                    # the operating system's killer. Once more, alone.
+                    print(f"  🧯 '{fut_label[f]}' ran out of memory — running it again alone afterwards")
+                    requeue.append({**fut_item[f], "_retried": True, "_handle": None, "_settled": False, "_tokens_settled": 0})
                 for nf in react(pool, fut_entry[f], fut_item[f]):
                     pending.add(nf)
             # One cancellation at a time: memory is read again only once the
             # cancelled worker has actually ended and let go of what it held.
-            draining = {f for f in draining if not f.done()}
-            if draining and drain_since is None:
-                drain_since = time.monotonic()
-            elif not draining:
-                drain_since = None
-            if draining and time.monotonic() - drain_since > SWARM_DRAIN_TIMEOUT_S:
+            for f in drain.tick():
                 # A hung worker (a call that never returns, compute that never
                 # prints) never lets go: give the rerun up rather than wait forever.
                 for item in requeue:
@@ -698,26 +825,35 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
                         f"{int(SWARM_DRAIN_TIMEOUT_S)} s")})
                     print(f"  ⚠️  giving up the rerun of '{item['label']}': its cancelled "
                           "worker has not ended.")
-                for f in draining:
-                    # Its reservation would otherwise hold later swarms and
-                    # fan-outs for as long as the hung thread lives.
-                    fo._release_branch(f"swarm:{fut_entry[f]['index']}")
                 requeue.clear()
-                draining.clear()
-                drain_since = None
-            if not draining:
+                # Its reservation would otherwise hold later swarms and
+                # fan-outs for as long as the hung thread lives.
+                fo._release_branch(f"swarm:{fut_entry[f]['index']}")
+            if not drain.active:
                 cancelled = _guard_memory(orch, {f: fut_entry[f] for f in pending}, fut_item,
                                           fut_stop, requeue, SWARM_MEMORY_FLOOR_BYTES)
                 if cancelled is not None:
-                    draining.add(cancelled)
+                    _settle(tokens, fut_item[cancelled], fut_entry[cancelled])
+                    drain.add(cancelled)
             pending = {f for f in pending if not fut_entry[f].get("_cancelled")}
             if budget > 0:
+                before = set(pending)
                 fo._cancel_overdue_branches(orch, pending, fut_entry, fut_stop, fut_label,
                                             budget, noun="swarm item")
-            if not pending and requeue and not draining:
+                for f in before - pending:
+                    handle = fut_item[f].get("_handle")
+                    if handle is not None:
+                        LocalProcess().cancel(handle)
+                    _settle(tokens, fut_item[f], fut_entry[f])
+            if not pending and requeue and not drain.active:
                 # A cancelled item runs again once the others are done AND the
                 # cancelled worker has ended: alone.
                 item = requeue.pop(0)
+                why = tokens.admit(item)
+                if why:
+                    refused.append({"label": item["label"], "reason": f"rerun not started: {why}"})
+                    print(f"  ⛔ not running '{item['label']}' again: {why}")
+                    continue
                 print(f"  🔁 running '{item['label']}' again, alone")
                 fut, entry, stop_ev = launch(pool, item)
                 fut_entry[fut], fut_stop[fut], fut_label[fut] = entry, stop_ev, item["label"]
@@ -734,6 +870,9 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
             if not f.done():
                 fut_entry[f]["_cancelled"] = True    # a late end must not overwrite the verdict
                 ev.set()
+                handle = fut_item[f].get("_handle") if f in fut_item else None
+                if handle is not None:
+                    LocalProcess().cancel(handle)
                 tid = fut_entry[f].get("_branch_tid")
                 if tid:
                     try:
@@ -745,6 +884,7 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
     finally:
         server.__exit__(None, None, None)
         pool.shutdown(wait=False, cancel_futures=True)
+        _settle_late(tokens, fut_item, fut_entry)
         orch._auto_checkpoint(verbose=False)
 
     results = [{"delegation_index": e["index"], "label": e.get("label"), "mode": e.get("mode"),
@@ -753,6 +893,9 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
                 "key_findings": (e.get("key_findings") or [])[:6],
                 "files_produced": len(e.get("files_produced") or []),
                 "warnings": list(e.get("warnings") or []),
+                "placement": e.get("placement"),
+                "peak_rss_bytes": e.get("peak_rss_bytes"),
+                "tokens": e.get("tokens"),
                 "reads": list(e.get("reads") or []),
                 "board_read_refused": e.get("board_read_refused"),
                 "posted": list(e.get("posted") or []),
@@ -770,6 +913,7 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
         "fired": fired,
         "refused_reactions": _collapse_refusals(refused_reactions),
         "task_requests": _task_requests(orch, entries),
+        "tokens": tokens.summary(),
         "warnings": channel_warnings,
         "board_version": len(orch.board) if getattr(orch, "board", None) is not None else None,
         "message": (f"{len(ok)} of {len(results)} item(s) succeeded"
@@ -782,6 +926,48 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
                     "verified findings are on the board (get_board); a next swarm's items read "
                     "them with reads_board."),
     }, default=str)
+
+
+def _settle(tokens: "TokenBudget", item: dict, entry: dict) -> None:
+    """When an item ends (finished, cancelled, over budget): what it spent
+    replaces its reservation and goes on its entry, and a run that did its
+    class's work is measured — its peak (a process worker's) and its tokens
+    — for the next item of the class. Idempotent: a second settlement of
+    the same item changes nothing."""
+    if item.get("_settled"):
+        return
+    item["_settled"] = True
+    # The tag stays: a cancelled item winds down and keeps spending; what it
+    # spends beyond this is charged when its thread ends or the swarm returns.
+    tokens.charge(item, entry, _worker_tag(entry, item), release=True)
+    spent = int(item.get("_tokens_settled") or 0)
+    cls = item.get("_mem_class") or peaks.item_class(item)
+    try:
+        if entry.get("status") in ("success", "partial"):
+            peaks.record(cls, peak_rss_bytes=entry.get("peak_rss_bytes"), tokens=spent or None)
+        elif entry.get("out_of_memory") or "memory_pressure" in str(entry.get("error") or ""):
+            # Ended on memory: its peak is a lower bound of what the class
+            # needs on this machine (it can only raise the max).
+            peaks.record(cls, peak_rss_bytes=entry.get("peak_rss_bytes"))
+    except Exception as exc:  # noqa: BLE001 - the table never fails a swarm
+        fo.logger.warning(f"measured-items table not updated: {exc}")
+
+
+def _settle_late(tokens: "TokenBudget", fut_item: Dict[Any, dict], fut_entry: Dict[Any, dict]) -> None:
+    """When the swarm returns: every item's spend beyond what was settled
+    (a cancelled item that kept calling while it wound down) is charged and
+    put on its entry, and the tags are released. A process worker's usage
+    reached the parent in its final report, or from the file it kept while
+    it ran, so a killed worker is charged too."""
+    from ... import tracing
+    for f, item in fut_item.items():
+        entry = fut_entry[f]
+        tag = _worker_tag(entry, item)
+        if not item.get("_settled"):
+            _settle(tokens, item, entry)
+        tokens.charge_late(item, entry, tag)
+        if f.done():
+            tracing.forget_worker_usage(tag)      # a thread still winding down keeps its tag
 
 
 def _task_requests(orch, entries: List[dict]) -> List[dict]:

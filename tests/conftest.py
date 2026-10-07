@@ -23,3 +23,9 @@ def _isolated_scilink_home(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("SCILINK_HOME", str(home))
     monkeypatch.delenv("SCILINK_MEMORY", raising=False)
     monkeypatch.delenv("SCILINK_SCRIPT_BANK", raising=False)
+    # The provider circuit breaker is process-wide: a test that feeds it
+    # failures must not hold a later test's admission.
+    from scilink.wrappers.llm_limiter import reset_breaker
+    reset_breaker()
+    yield
+    reset_breaker()

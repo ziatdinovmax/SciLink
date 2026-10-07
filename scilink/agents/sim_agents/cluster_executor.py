@@ -77,10 +77,23 @@ class ClusterExecutor(Executor):
         self.poll_interval = poll_interval
         self.timeout = timeout
         self.job_script_name = job_script_name
-        # Optional "should I stop?" hook. When it returns True mid-poll, the
-        # submitted job is cancelled on the scheduler instead of being left to
-        # run — so a Stop does not orphan the allocation. A KeyboardInterrupt
-        # during the wait is handled the same way.
+        # "Should I stop?" hook. When it returns True mid-poll, the submitted
+        # job is cancelled on the scheduler instead of being left to run — so
+        # a Stop does not orphan the allocation. A KeyboardInterrupt during
+        # the wait is handled the same way. By default it is the waiting
+        # thread's own cancel (``log_context.is_cancelled``: a swarm item's
+        # budget or memory cancel, a fan-out branch's, the turn's Stop), so
+        # a cancelled item never leaves its jobs running on the cluster; a
+        # caller's own hook replaces it.
+        # Under the default, a cancelled item does not go on: ``run`` refuses
+        # to submit once the cancel is set and raises the thread's stop after
+        # cancelling a job, so the loop that called it (a campaign's critic
+        # and resubmit) ends instead of submitting the next one. A caller's
+        # own hook keeps the result-returning contract.
+        self._default_cancel = cancel_check is None
+        if cancel_check is None:
+            from scilink.utils.log_context import is_cancelled
+            cancel_check = is_cancelled
         self.cancel_check = cancel_check
 
     @classmethod
@@ -290,9 +303,30 @@ class ClusterExecutor(Executor):
 
     # ── Executor contract ─────────────────────────────────────
 
+    def _stopped(self, result: Dict[str, Any]):
+        """Under the default cancel check, a cancelled run ends the caller
+        too (the thread's stop); under a caller's own hook, the result."""
+        if self._default_cancel:
+            from scilink.ui.output_capture import AgentStoppedError
+            raise AgentStoppedError(result.get("error") or "cancelled")
+        return result
+
+    def _sleep_poll(self) -> None:
+        """The wait between polls, in one-second slices that read the cancel,
+        so a Stop lands within a second instead of a poll interval later."""
+        end = time.monotonic() + self.poll_interval
+        while True:
+            left = end - time.monotonic()
+            if left <= 0 or (self.cancel_check is not None and self.cancel_check()):
+                return
+            time.sleep(min(1.0, left))
+
     def run(
         self, input_files: Dict[str, str], run_command: str, run_dir: str
     ) -> Dict[str, Any]:
+        if self._default_cancel:
+            from scilink.utils.log_context import raise_if_cancelled
+            raise_if_cancelled()          # a cancelled item submits nothing more
         handle = self.submit(input_files, run_command, run_dir)
         run_path: Path = handle["run_path"]
         if "job_id" not in handle:        # submission failed in submit()
@@ -312,17 +346,17 @@ class ClusterExecutor(Executor):
                     break
                 # A Stop mid-wait cancels the job instead of orphaning it.
                 if self.cancel_check is not None and self.cancel_check():
-                    return self._cancel_and_report(
+                    return self._stopped(self._cancel_and_report(
                         job_id, remote_dir, run_path,
                         f"Job {job_id} cancelled on request.", "cancelled",
-                    )
+                    ))
                 if elapsed >= self.timeout:
                     return self._cancel_and_report(
                         job_id, remote_dir, run_path,
                         f"Job {job_id} timed out after {self.timeout}s wall-clock; cancelled.",
                         "timeout",
                     )
-                time.sleep(self.poll_interval)
+                self._sleep_poll()
                 elapsed += self.poll_interval
         except KeyboardInterrupt:
             # Ctrl-C / Stop during the wait must not leave the allocation

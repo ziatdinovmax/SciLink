@@ -1560,8 +1560,9 @@ references are to `main` at bed2f7f8.
   record.
 - *Taint stays on the board.* `independent_support_of`, `fuse_delegations`,
   `get_delegation_history` and steering read the ledger, not the fold, so a
-  tainted supporter still counts there; the next consumer of the fold is
-  stage 4's scheduling.
+  tainted supporter still counts there. (Stage 4's scheduling did not consume
+  the fold either — admission reads memory and tokens, not findings; the
+  first consumer is whichever of fusion or the instrument bridge needs it.)
 - *Matching uses the posted status*, not the folded one — unreachable
   within one swarm today (nothing retracts inside a run).
 - *`fired[].delegation_index`* names the first launch; a memory-cancelled
@@ -1752,6 +1753,190 @@ cancel(handle) -> None          # idempotent
 measured-peak table, the scoping (local scheduler first, the AWS placement
 with the hosted-campaigns work), and "nothing in stage 4 adds a judge or a
 new way to decide a verdict".
+
+## Stage 4 on `main`: the local scheduler (2026-10-06)
+
+Built from "Since the stage-4 scoping", as one PR ("Swarm stage 4: the local
+scheduler"). What it is, by the five points of that section:
+
+1. **Process workers are stoppable.** `utils.child_process.run_in_child`
+   runs its child through the executor's tracked runner
+   (`executors._run_tracked`, with an `on_start` hook): own session,
+   registered to the waiting thread, whole tree killed on a cancel, and the
+   wait ends with the thread's stop once the child is gone. `run_child`
+   returns the value with what the child cost. The hyperspectral replay pool
+   submits through `attributed_to_current`, so a series' own cancel reaches
+   its replay children, and an interrupt during `collect` ends them (a child
+   in its own session no longer gets the terminal's signal).
+2. **The measured table** (`meta_agent/peaks.py`, `measured_items.json`
+   under the SciLink home, under `path_lock`). Per item CLASS —
+   `mode:kind:largest-unit-bucket:units`, computable from the spec alone,
+   so it is known before the item runs — the MAX peak and tokens seen and
+   the number of runs; only a run that did its class's work is recorded.
+   A process worker's peak is the SUM over its tree sampled every 0.5 s
+   (what the item holds on the machine; `ru_maxrss` is one process's own
+   peak) or the child's own `ru_maxrss` when sampling is not possible. A
+   thread item records tokens only. `fanout.estimate_item` sizes an item at
+   its class's measured peak × 1.2, else the #750 input-based estimate; the
+   plan gate shows "measured" against "~".
+3. **The worker contract** (`meta_agent/placements.py`), as written in the
+   scoping, with two placements: `thread` (today's path) and `process`
+   (`LocalProcess`: a thread attributed to the item's own runs `run_child`
+   on `placements:run_item`; the handle carries state, result, sampled and
+   final peak, stop reason, the child's usage by model, its unanswered
+   questions). The child's side rebuilds the host from the spec (model,
+   endpoints, file roots, knowledge dir, the skill and MCP extensions; the
+   keys come from the environment it inherits, the sandbox approval travels
+   as a flag), answers every question with its default and counts it, and
+   returns plain data. The item's own thread is the waiter: it submits,
+   polls until terminal (its own cancel cancels the worker) and closes the
+   delegation; the parent charges the child's usage to the item's worker
+   tag (one record per model). State mapping: a cancel asked → `cancelled`;
+   SIGKILL with nothing returned and no cancel → `out_of_memory` (rerun
+   alone once by the coordinator); any other loss → `failed`.
+   *The rule:* an analysis item with data runs as a process when nobody
+   attends the swarm; an attended swarm keeps threads (its questions need
+   the person's channel — a question channel across processes is not built);
+   planning and simulation items are threads. `SCILINK_SWARM_PLACEMENT`
+   overrides. A host whose key is not in the environment, or that shares a
+   callable tool extension, keeps the item a thread, reason on the entry.
+4. **A cancelled item cancels its cluster jobs.** `ClusterExecutor`'s
+   `cancel_check` defaults to `log_context.is_cancelled` (the thread's own
+   cancel or its turn's Stop).
+5. **Fan-out gets the refusal and the guard, shared.** `fanout.plan_capacity`
+   (the swarm's `capacity_plan` body) refuses a branch larger than the host
+   before the confirmation (listed as `not_started`; fewer than two left is
+   a `does_not_fit_host` decline), and `fanout.guard_memory` + `Drain` are
+   the one guard both loops run: the swarm cancels the item that HOLDS the
+   most (the sampled RSS of a process worker, else the estimate) through the
+   placement's `cancel`; the fan-out cancels the heaviest branch, closes it
+   `memory_pressure`, and reruns it alone once in its own session (the
+   resume path's retry shape), in `run_fanout` and `resume_fanout` alike.
+
+**Also from §5, now on `main`:** the token budget — `budget.max_tokens`,
+reserved per item at admission from the class's measured spend (else a
+per-mode placeholder), reconciled on completion from the per-worker usage
+counter (`tracing.worker_usage`), an item or a reaction the remainder cannot
+cover refused with the figures; a cancelled item is charged for what it
+spends while it winds down (a thread item, from its own thread when it
+ends; a process item, from the usage file its child keeps on every call, so
+a killed worker is charged too) — and the circuit breaker
+(`llm_limiter.note_provider_failure/ok`, fed by `call_with_retries`), per
+model: a model whose last minute holds at least six retryable failures that
+are at least half of its calls is tripped, and admission of new work on
+that model is held for 30 s (a success counts toward the ratio and does not
+end a hold early — in a brown-out the running work keeps succeeding now and
+then, and a breaker any success closed never tripped); running work keeps
+its own retries, and one model's throttling never holds another's items.
+
+**What the first review changed (round 1).** A cancel kills the
+descendants that lead their own sessions too (`_kill_process_tree`
+snapshots the tree and kills the survivors: a worker in one long C call
+runs no SIGTERM handler, so its generated script outlived it). A process
+item's console goes to `<item dir>/worker.log` and is relayed line by line
+into the turn (the web UI and the shell see it; before, it went to the raw
+console under the shell's display). A key the child would not find keeps
+the item a thread: on the proxy path the child reads `SCILINK_API_KEY`
+only, so the meta's key must be that variable's value; the embedding and
+FutureHouse keys are held to the same rule. A measured class is refused on
+its RAW peak (the ×1.2 headroom is for admission: a class that ran here
+must not be refused here from then on), and the class key names the
+series' replay workers (`:wN`), so a four-worker measurement never sizes a
+one-worker run or the reverse. A fan-out branch is refused only on a
+measured peak — its input-based estimate is coarse by design and must
+never refuse what the machine can run; the swarm refuses on the estimate
+as it did before. The cluster executor's default cancel ends the caller
+(`raise_if_cancelled` before a submit, the thread's stop after cancelling
+a job), so a cancelled campaign item does not critique and resubmit; the
+poll sleep reads the cancel every second. A run that ends on memory
+records its peak. `peaks.forget(class)` resets a class. A question in a
+worker process is marked unanswered (`mark_timed_out`), so no gate records
+it as a decision.
+
+**Round 2.** Two key-name mismatches: the breaker recorded outcomes under
+the wrapper's prefixed model name and admission asked with the meta's bare
+one (`claude-opus-4-6`), so it never held — one normalised key on both
+sides now; and on the direct path the child read only the vendor's
+conventional variable, so a key held under another name failed every
+process item — the spec now carries the NAME of the variable holding each
+key (API, embedding, FutureHouse), never the key, and the child reads it;
+a key under no variable keeps the item a thread. Also: the coordinator's
+settlement and an item's own late charge go through one method under the
+budget's lock (a double charge was possible in a narrow race); a rerun copy
+starts its charge from zero; the descendant snapshot is skipped for a pid
+already reaped; the thread path's unattended channel marks its defaults
+unanswered too, so both placements record them alike; the real-child test
+reaches a closed local port instead of the network.
+
+**Left for the AWS PR, as scoped:** the ECS placement (`RunTask` /
+`DescribeTasks` / `StopTask`, the task's memory metric, Spot and OOM
+reconciliation), per-campaign quotas, the board across tasks. **Not built,
+deliberately:** a question channel across processes (an attended swarm's
+heavy items stay threads until one exists); a per-item live RSS for thread
+items (the process's own cannot be split). **Measured:** a fresh worker
+interpreter on this package is about 200 MB before it does anything, which
+is the floor every process item pays.
+
+**What "the core is done" means after stage 4, and what it does not.** On
+one machine, §1–§5 of the design are on `main`: ephemeral workers of every
+mode, the board with computed independence, deterministic reactions with
+taint and retraction, one question queue whose unattended gates never
+count as a decision, and a scheduler that refuses, admits, measures,
+guards, budgets and stops. The limits that remain, in one place:
+
+- *Placement.* Only `thread` and `process` exist; the HPC and ECS rows of
+  the contract are later PRs' (the ECS row with per-campaign quotas and the
+  board across tasks, in the AWS PR). **Simulation swarms** are complete
+  only for their LLM-bound part (input generation, validation, reading
+  outputs): a simulation item is a thread sized at the mode floor, a heavy
+  local engine run inside it is neither measured nor placed in a process,
+  and the compute part — one scheduler job per member, admitted by the
+  scheduler's resources rather than the coordinator's host, polled through
+  `ClusterExecutor.submit/poll` (#766) with `run_many` as its batch form —
+  is the HPC-job placement of the contract, which answers #767 and waits on
+  #696 (the connection) and #745 (concurrent dispatch). What stage 4 gives
+  that path today: the row of the contract it will implement, a cancelled
+  item cancelling its jobs (`cancel_check` defaults to the thread's own
+  cancel, and a turn's Stop now cancels a running cluster job, within a
+  second), the tracked engine runner, the token budget and the breaker. An
+  open decision for that placement: whether queue wait counts against the
+  item's wall-clock budget — today a job still queued when the budget runs
+  out is cancelled with the item.
+- *Attended swarms.* Heavy items stay threads, because a worker process
+  has no channel to the person; a Stop reaches them cooperatively (on a
+  print or a wait), not by a kill.
+- *Measurement.* A thread item's memory is not measured; a class's first
+  run is sized by the input-based estimate, and a class is as coarse as
+  `mode:kind:size:units[:wN]` (two very different analyses of same-sized
+  cubes share a row, sized by the larger). The guard compares a process
+  item's LIVE RSS with a thread item's ESTIMATE, so it can cancel a process
+  worker while a thread item holds more. A tree-summed peak counts shared
+  libraries once per process, so it leans high. `Drain` gives up a hung
+  branch's admission after its timeout while the thread may still hold its
+  memory.
+- *Tokens.* The per-mode reservations are placeholders until a class is
+  measured; the counter is exact for tagged threads and for a process
+  worker's own calls (its final report, or the usage file it keeps when it
+  is killed), not for an untagged helper thread an agent starts without
+  `attributed_to_current` / `inherited_context`, and a thread item that
+  keeps calling after the swarm returned is charged to the ledger when its
+  thread ends, after the result the caller already has.
+- *The breaker* holds admission for the meta's model only (the name an
+  item will call with, normalised to the wrapper's prefixed key); a trip on
+  an embedding model, or on another model an agent chooses for a stage,
+  does not hold admission — deliberately, since an item's model is what
+  admission can know.
+- *The class key's `:wN`* applies to a datacube series only (the one series
+  whose replays fan out to workers), and its cap counts the series' files
+  where #750's estimate counts analysis units (a raw file beside the cubes
+  would count here and not there).
+- *Independence and taint.* Independence is the read graph (no common
+  ancestry); taint stays on the board, unread by fusion and scheduling.
+- *Subjects* are strings; *persistent specialists* read nothing from the
+  board; there is no board view in Mission Control and no swarm plan at
+  the web gate (stage 6).
+- *Several instruments* (stage 5): the instrument worker, the log-to-board
+  bridge, priority classes, standing subscriptions across turns.
 
 ## Starting stage 2 (the board)
 
