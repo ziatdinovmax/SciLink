@@ -819,8 +819,22 @@ def test_a_cancelled_series_ends_its_replay_children_within_seconds(monkeypatch)
                 pool.collect()
             except AgentStoppedError:
                 out["after_s"] = time.monotonic() - t0
-            out["children"] = [p.pid for p in __import__("psutil").Process().children(recursive=True)
-                               if any("child_process" in a for a in (p.cmdline() or []))]
+            import psutil
+
+            def live_children():
+                out_ = []
+                for c in psutil.Process().children(recursive=True):
+                    try:                             # a dying child is a zombie for a moment
+                        if c.status() != psutil.STATUS_ZOMBIE and any(
+                                "child_process" in a for a in (c.cmdline() or [])):
+                            out_.append(c.pid)
+                    except psutil.Error:
+                        continue
+                return out_
+            deadline = time.monotonic() + 5
+            while live_children() and time.monotonic() < deadline:
+                time.sleep(0.2)
+            out["children"] = live_children()
         finally:
             unregister_cancel()
     t = threading.Thread(target=series_item)
