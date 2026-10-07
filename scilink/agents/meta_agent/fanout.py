@@ -2403,7 +2403,7 @@ def run_fanout(orch, branches: List[dict],
     if server is not None:
         server.__enter__()
     try:
-        fut_label, fut_entry, fut_stop, fut_branch = {}, {}, {}, {}
+        fut_label, fut_entry, fut_stop = {}, {}, {}
         for i in range(follower_start, n_total):
             entries[i]["_budget_s"] = resolve_branch_budget(
                 run_branches[i], budget, explicit=branch_time_budget_s is not None)
@@ -2415,7 +2415,6 @@ def run_fanout(orch, branches: List[dict],
             fut_label[fut] = run_branches[i]["label"]
             fut_entry[fut] = entries[i]
             fut_stop[fut] = stop_ev
-            fut_branch[fut] = run_branches[i]
         drain = Drain()                   # cancelled for memory, not yet ended
         rerun: List[dict] = []            # entries to run again alone, once
         # Wait with a periodic heartbeat so the user can see the parallel run is

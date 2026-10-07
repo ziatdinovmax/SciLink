@@ -469,7 +469,7 @@ def _guard_memory(orch, running: Dict[Any, dict], fut_item: Dict[Any, dict], fut
                 pass
         orch._close_delegation(entry, _error_result(reason, status="cancelled"))
         if not item.get("_retried"):
-            requeue.append({**item, "_retried": True, "_handle": None})
+            requeue.append({**item, "_retried": True, "_handle": None, "_settled": False})
 
     return fo.guard_memory(
         running, available=_memory().get("available"), floor=floor,
@@ -773,7 +773,7 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
                     # Killed with nothing returned and nobody asked for it:
                     # the operating system's killer. Once more, alone.
                     print(f"  🧯 '{fut_label[f]}' ran out of memory — running it again alone afterwards")
-                    requeue.append({**fut_item[f], "_retried": True, "_handle": None})
+                    requeue.append({**fut_item[f], "_retried": True, "_handle": None, "_settled": False})
                 for nf in react(pool, fut_entry[f], fut_item[f]):
                     pending.add(nf)
             # One cancellation at a time: memory is read again only once the
@@ -902,6 +902,7 @@ def _settle(tokens: "TokenBudget", item: dict, entry: dict) -> None:
     use = tracing.worker_usage(_worker_tag(entry, item))
     spent = int(use.get("prompt_tokens", 0)) + int(use.get("completion_tokens", 0))
     tokens.settle(item, spent)
+    tracing.forget_worker_usage(_worker_tag(entry, item))
     entry["tokens"] = spent
     if entry.get("status") in ("success", "partial"):
         try:

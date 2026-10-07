@@ -1753,6 +1753,83 @@ measured-peak table, the scoping (local scheduler first, the AWS placement
 with the hosted-campaigns work), and "nothing in stage 4 adds a judge or a
 new way to decide a verdict".
 
+## Stage 4 on `main`: the local scheduler (2026-10-06)
+
+Built from "Since the stage-4 scoping", as one PR ("Swarm stage 4: the local
+scheduler"). What it is, by the five points of that section:
+
+1. **Process workers are stoppable.** `utils.child_process.run_in_child`
+   runs its child through the executor's tracked runner
+   (`executors._run_tracked`, with an `on_start` hook): own session,
+   registered to the waiting thread, whole tree killed on a cancel, and the
+   wait ends with the thread's stop once the child is gone. `run_child`
+   returns the value with what the child cost. The hyperspectral replay pool
+   submits through `attributed_to_current`, so a series' own cancel reaches
+   its replay children, and an interrupt during `collect` ends them (a child
+   in its own session no longer gets the terminal's signal).
+2. **The measured table** (`meta_agent/peaks.py`, `measured_items.json`
+   under the SciLink home, under `path_lock`). Per item CLASS —
+   `mode:kind:largest-unit-bucket:units`, computable from the spec alone,
+   so it is known before the item runs — the MAX peak and tokens seen and
+   the number of runs; only a run that did its class's work is recorded.
+   A process worker's peak is the SUM over its tree sampled every 0.5 s
+   (what the item holds on the machine; `ru_maxrss` is one process's own
+   peak) or the child's own `ru_maxrss` when sampling is not possible. A
+   thread item records tokens only. `fanout.estimate_item` sizes an item at
+   its class's measured peak × 1.2, else the #750 input-based estimate; the
+   plan gate shows "measured" against "~".
+3. **The worker contract** (`meta_agent/placements.py`), as written in the
+   scoping, with two placements: `thread` (today's path) and `process`
+   (`LocalProcess`: a thread attributed to the item's own runs `run_child`
+   on `placements:run_item`; the handle carries state, result, sampled and
+   final peak, stop reason, the child's usage by model, its unanswered
+   questions). The child's side rebuilds the host from the spec (model,
+   endpoints, file roots, knowledge dir, the skill and MCP extensions; the
+   keys come from the environment it inherits, the sandbox approval travels
+   as a flag), answers every question with its default and counts it, and
+   returns plain data. The item's own thread is the waiter: it submits,
+   polls until terminal (its own cancel cancels the worker) and closes the
+   delegation; the parent charges the child's usage to the item's worker
+   tag (one record per model). State mapping: a cancel asked → `cancelled`;
+   SIGKILL with nothing returned and no cancel → `out_of_memory` (rerun
+   alone once by the coordinator); any other loss → `failed`.
+   *The rule:* an analysis item with data runs as a process when nobody
+   attends the swarm; an attended swarm keeps threads (its questions need
+   the person's channel — a question channel across processes is not built);
+   planning and simulation items are threads. `SCILINK_SWARM_PLACEMENT`
+   overrides. A host whose key is not in the environment, or that shares a
+   callable tool extension, keeps the item a thread, reason on the entry.
+4. **A cancelled item cancels its cluster jobs.** `ClusterExecutor`'s
+   `cancel_check` defaults to `log_context.is_cancelled` (the thread's own
+   cancel or its turn's Stop).
+5. **Fan-out gets the refusal and the guard, shared.** `fanout.plan_capacity`
+   (the swarm's `capacity_plan` body) refuses a branch larger than the host
+   before the confirmation (listed as `not_started`; fewer than two left is
+   a `does_not_fit_host` decline), and `fanout.guard_memory` + `Drain` are
+   the one guard both loops run: the swarm cancels the item that HOLDS the
+   most (the sampled RSS of a process worker, else the estimate) through the
+   placement's `cancel`; the fan-out cancels the heaviest branch, closes it
+   `memory_pressure`, and reruns it alone once in its own session (the
+   resume path's retry shape), in `run_fanout` and `resume_fanout` alike.
+
+**Also from §5, now on `main`:** the token budget — `budget.max_tokens`,
+reserved per item at admission from the class's measured spend (else a
+per-mode placeholder), reconciled on completion from the per-worker usage
+counter (`tracing.worker_usage`), an item or a reaction the remainder cannot
+cover refused with the figures — and the circuit breaker
+(`llm_limiter.note_provider_failure/ok`, fed by `call_with_retries`): six
+retryable failures across workers within a minute hold admission for 30 s
+or until the next successful call; running work keeps its own retries.
+
+**Left for the AWS PR, as scoped:** the ECS placement (`RunTask` /
+`DescribeTasks` / `StopTask`, the task's memory metric, Spot and OOM
+reconciliation), per-campaign quotas, the board across tasks. **Not built,
+deliberately:** a question channel across processes (an attended swarm's
+heavy items stay threads until one exists); a per-item live RSS for thread
+items (the process's own cannot be split). **Measured:** a fresh worker
+interpreter on this package is about 200 MB before it does anything, which
+is the floor every process item pays.
+
 ## Starting stage 2 (the board)
 
 The design is §2 above; the tests to write are listed under "Build order".

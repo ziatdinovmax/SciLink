@@ -926,10 +926,13 @@ delegation. The design, its stages and what each stage left open are in
 `docs/proposals/agent-swarms.md`; stages 0, 1 (#697) and 2 (the board, #702)
 and 3 (reactions, #708) are on `main`, the replay policies the board's
 "verified" rests on were settled between stages (#712: #713, #714, #717,
-#715), and stage 4 (scheduling) is next — the local scheduler first, the AWS
-worker tasks as their own PR with the hosted-campaigns work (the proposal's
-"Between stage 3 and stage 4" says why; "Since the stage-4 scoping" lists what
-has landed since and the worker contract every placement implements).
+#715), and stage 4's LOCAL scheduler is on `main` (the worker contract and
+its process placement, the measured table per item class, the token budget,
+the circuit breaker, the guard shared with the fan-out — the proposal's "Stage
+4 on `main`: the local scheduler"); the AWS worker tasks are their own later
+PR with the hosted-campaigns work (the proposal's "Between stage 3 and stage
+4" says why; "Since the stage-4 scoping" is the contract every placement
+implements).
 Settled rules, each learned from a live run or a review:
 
 - **A swarm item is a fresh agent.** It does not remember earlier delegations;
@@ -940,11 +943,42 @@ Settled rules, each learned from a live run or a review:
   item is estimated by its LARGEST unit, nested data included — a series runs
   its units one at a time, times the replay workers the agent itself resolves
   plus the parent — and a raw-instrument file, by its own embedded contract or
-  its folder's, by its preparation, #724), a capacity plan that refuses an item larger than the
-  machine, a memory guard
-  that cancels the heaviest running item (never one running alone) and reruns
-  it alone once, a wall-clock budget per item, no item starting another. The
-  model decides between swarm runs and inside each item, never within a run.
+  its folder's, by its preparation, #724 — unless its CLASS was measured: a
+  process worker's peak and tokens are recorded per `mode:kind:size:units`
+  in `measured_items.json` under the SciLink home, and the next item of the
+  class is sized from the largest run seen, `meta_agent/peaks.py`), a
+  capacity plan that refuses an item larger than the machine, a memory guard
+  that cancels the running item that HOLDS the most (what its process worker
+  was last sampled at, else its estimate; never one running alone) and reruns
+  it alone once, a wall-clock budget per item, a token budget reserved per
+  item at admission and reconciled on completion (`budget.max_tokens`), a
+  provider circuit breaker that pauses admission (never running work) after
+  repeated retryable failures across workers (`wrappers/llm_limiter.py`), no
+  item starting another. The capacity refusal and the guard are the fan-out's
+  too (`fanout.plan_capacity`, `fanout.guard_memory`): a branch larger than
+  the host is not started, a branch cancelled for memory reruns alone once.
+  The model decides between swarm runs and inside each item, never within a
+  run.
+- **Where an item runs is a placement behind one contract**
+  (`meta_agent/placements.py`: `submit(spec) -> handle`, `poll(handle) ->
+  {state, result, peak_rss_bytes, stop_reason}`, `cancel(handle)`; states
+  queued · running · done · failed · cancelled · out_of_memory ·
+  interrupted). An analysis item with data runs as a PROCESS when nobody
+  attends the swarm — a fresh interpreter through `run_in_child`, which now
+  goes through the executor's tracked runner, so the item's cancel, the
+  guard and the turn's Stop end its whole tree, and its memory is measured
+  while it runs (the tree's sampled sum, else the child's `ru_maxrss`); a
+  worker killed with nothing returned and no cancel asked is
+  `out_of_memory` and runs again alone, once. Planning and simulation items,
+  and every item of an attended swarm (its questions need the person's
+  channel), stay threads in the coordinator's process and measure nothing.
+  The spec is plain data with no secret: a key the meta holds that is not
+  in the environment, or a callable tool extension, keeps the item a thread
+  with the reason on its entry. `SCILINK_SWARM_PLACEMENT=thread|process`
+  overrides the rule (the offline tests pin threads). An HPC job
+  (`ClusterExecutor.submit/poll`, whose `cancel_check` now defaults to the
+  waiting thread's own cancel) and an ECS task are the later placements of
+  the same contract.
 - **A gate nobody answers is never a human decision.** Worker questions go
   through one queue (`hitl.QueueChannel`), served on a thread of their own
   (`hitl.QuestionServer`) so the coordinator keeps enforcing its rules, tagged

@@ -434,6 +434,8 @@ def test_a_worker_killed_by_the_system_runs_again_alone_once(meta, monkeypatch, 
     by = [(r["label"], r["status"]) for r in res["results"]]
     assert by == [("heavy", "error"), ("light", "success"), ("heavy", "success")]
     assert "out_of_memory" in res["results"][0]["error"] and "SIGKILL" in res["results"][0]["error"]
+    # the rerun is settled on its own: the killed attempt spent nothing
+    assert [r["tokens"] for r in res["results"]] == [0, 101, 110] and res["tokens"]["spent"] == 211
     first = next(e for e in meta._delegation_ledger if e.get("label") == "heavy")
     assert first["worker_state"] == "out_of_memory" and first.get("out_of_memory")
 
