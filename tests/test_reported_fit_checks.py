@@ -3,15 +3,18 @@
 - Code generation is told where x and y sit in ``data.npy`` (from the array
   staged), and every prompt that writes, repairs or judges a script that a
   replay runs carries the rule: never pick a column, a window or anything
-  else by matching a value read off one spectrum. A repair (which never sees
-  the generation prompt) is told the layout too.
-- A saved fit that follows the x axis, or a replay that does not follow its
-  data even up to a constant offset (R² < -1) where its anchor was not below
-  zero, is not a fit of this data: the ladder is told, and a unit that still
-  shows it fails (refit-eligible), never verified on its self-reported R². A
-  saved fit below a flat line on its own is no error (a peaks-only fit saved
-  without its baseline, a rising background along a series, a windowed
-  model evaluated outside its window, a level fitted to a flat control).
+  else by matching a value read off one spectrum (bank adapt: never a
+  column). The repair of a saved-fit mismatch and bank adapt, which never see
+  the generation prompt, are told the layout too.
+- A saved fit that follows the x axis is not a fit of this data: the ladder
+  is told, and a unit that still shows it fails (refit-eligible), never
+  verified on its self-reported R². A saved fit below a flat line on its own
+  is no error (a peaks-only fit saved without its baseline, a rising
+  background along a series, a windowed model evaluated outside its window,
+  a level fitted to a flat control).
+- A replay that does not follow its data even up to a constant offset
+  (R² < -1) where its anchor was not below zero is withheld: the locked
+  recipe is kept, nothing is repaired or refit.
 - A band whose REPORTED centre lies outside the measured axis is not
   measured; a fit left with no target measured is withheld — by its own
   gate, as a follower and as a reuse — never failed.
@@ -29,7 +32,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from scilink.agents.exp_agents.controllers import curve_fitting_controllers as cc
-from scilink.agents.exp_agents._verification_record import analysis_verdict, unit_verdict_for
+from scilink.agents.exp_agents._verification_record import analysis_verdict
 
 X = np.linspace(200.0, 2000.0, 400)
 Y = np.exp(-0.5 * ((X - 900.0) / 30.0) ** 2) + 0.2
@@ -99,7 +102,8 @@ def test_the_bank_adapt_prompt_carries_the_layout_and_the_rule(tmp_path):
         ctx = QCItemContext(state=state, data=data, data_path="d", item_name="s", item_idx=0)
         ctrl._try_bank_edit_adapt(ctx)
         assert f"data.npy layout: {layout}" in model.prompts[-1]
-        assert "reading x and y from their fixed positions in data.npy" in model.prompts[-1]
+        assert ("reading x and y from their fixed positions in data.npy (never a column picked by "
+                "matching a value read off one spectrum)") in model.prompts[-1]
 
 
 # -- the saved fit is a fit of THIS data -----------------------------------
@@ -113,13 +117,15 @@ def test_a_saved_fit_of_the_x_axis_is_not_a_fit_of_the_data():
     assert "follows the x axis" in cc._saved_fit_mismatch(data.T, X.copy())[0]      # (2, N) read the same way
 
 
-def test_a_replay_that_does_not_follow_its_data_up_to_a_constant_is_caught():
+def test_a_replay_that_does_not_follow_its_data_up_to_a_constant_is_a_replay_misfit():
     data = np.column_stack([X, Y])
     wrong = Y.mean() - 3.0 * (Y - Y.mean())          # a shape the data does not have, whatever the offset
     why, r2 = cc._saved_fit_mismatch(data, wrong)
-    assert why is None and r2 < -1                  # alone, no evidence
-    why, _ = cc._saved_fit_mismatch(data, wrong, anchor_r2=0.6)
+    assert why is None and r2 < -1                  # never a repair, and alone no evidence
+    why = cc._replay_misfit(data, wrong, 0.6)
     assert why and "even up to a constant offset" in why and "on its anchor" in why
+    # an anchor that was itself below zero (a windowed recipe) exempts its replays
+    assert cc._replay_misfit(data, wrong, -4.0) is None and cc._replay_misfit(data, wrong, None) is None
 
 
 def test_an_offset_or_a_flat_control_is_no_evidence():
@@ -127,14 +133,14 @@ def test_an_offset_or_a_flat_control_is_no_evidence():
     rng = np.random.default_rng(0)
     for bg in (np.full_like(X, 0.5), np.full_like(X, 2.0), 0.004 * (X - X[0])):
         data = np.column_stack([X, peak + bg + 0.01 * rng.standard_normal(X.size)])
-        assert cc._saved_fit_mismatch(data, peak, anchor_r2=0.96)[0] is None   # a peaks-only recipe
+        assert cc._replay_misfit(data, peak, 0.96) is None                     # a peaks-only recipe
     noise = np.column_stack([X, 0.5 * rng.standard_normal(X.size)])
-    assert cc._saved_fit_mismatch(noise, np.full(X.size, 0.2), anchor_r2=0.02)[0] is None   # a flat control
+    assert cc._replay_misfit(noise, np.full(X.size, 0.2), 0.02) is None        # a flat control
     data = np.column_stack([X, Y])
-    assert cc._saved_fit_mismatch(data, Y - 3.0, anchor_r2=-4.0)[0] is None          # a windowed anchor
-    assert cc._saved_fit_mismatch(data, Y.copy(), anchor_r2=0.9)[0] is None
-    assert cc._saved_fit_mismatch(np.column_stack([X[::-1], Y[::-1]]), Y.copy(), anchor_r2=0.9)[0] is None
-    assert cc._saved_fit_mismatch(data, Y[:-3]) == (None, None)                     # cannot be aligned
+    assert cc._replay_misfit(data, Y.copy(), 0.9) is None
+    assert cc._replay_misfit(np.column_stack([X[::-1], Y[::-1]]), Y.copy(), 0.9) is None
+    assert cc._saved_fit_mismatch(data, Y[:-3]) == (None, None)                 # cannot be aligned
+    assert cc._replay_misfit(data, Y[:-3], 0.9) is None
 
 
 class _FitWriter:
@@ -188,6 +194,22 @@ def test_a_unit_that_still_fits_the_axis_fails_and_a_strict_replay_calls_no_mode
     assert not res["success"] and res["kind"] == "saved_fit_mismatch" and model.prompts == []
 
 
+def test_a_rewrite_within_one_clock_tick_is_still_this_runs_fit(tmp_path):
+    """A repeated x-axis fit rewritten with the earlier file's very timestamp
+    and size (a coarse filesystem clock) is read, and still caught."""
+    import os
+
+    class SameTick(_FitWriter):
+        def execute_script(self, script, working_dir=None, timeout=None, **kw):
+            res = super().execute_script(script, working_dir=working_dir, timeout=timeout, **kw)
+            os.utime(Path(working_dir) / "fit.npy", ns=(10**18, 10**18))
+            return res
+    model = _Model({"script": AXIS + " again", "diagnosis": "d"})
+    res = _fit(tmp_path, SameTick(), model, np.column_stack([X, Y]))
+    assert not res["success"] and res["kind"] == "saved_fit_mismatch"
+    assert len([p for p in model.prompts if "Fix this failed script" in p]) >= 1
+
+
 def test_a_fit_npy_this_run_did_not_write_is_never_read(tmp_path):
     """In the loop and after it: a fit left by an earlier attempt or an
     earlier call is not this script's fit."""
@@ -203,10 +225,11 @@ def test_a_fit_npy_this_run_did_not_write_is_never_read(tmp_path):
     assert res["success"] and "saved_fit_r2" not in res and not res.get("residual_diagnostics")
 
 
-def test_a_follower_whose_replay_does_not_fit_its_data_is_failed_not_verified(tmp_path, monkeypatch):
+def test_a_follower_whose_replay_does_not_fit_its_data_is_withheld_not_repaired(tmp_path, monkeypatch):
     """Through the series: the anchor's saved-fit R² reaches the follower,
-    whose replay does not follow its own data; it fails, is refit-eligible,
-    and reports no number."""
+    whose replay does not follow its own data. The locked recipe is kept
+    (one run, no correction), the unit is withheld with the reason and a
+    non-refit flag, and its values stay on the record."""
     import test_series_verdict_path as sv
     real_canned = sv._canned_anchor
     monkeypatch.setattr(sv, "_canned_anchor", lambda *a, **k: {**real_canned(*a, **k), "saved_fit_r2": 0.6})
@@ -221,15 +244,22 @@ def test_a_follower_whose_replay_does_not_fit_its_data_is_failed_not_verified(tm
             return res
 
     follower_r2 = {"spectrum_0001": 0.97, "spectrum_0002": 0.97, "spectrum_0003": 0.97}
-    state, _ = sv.run_series(tmp_path, monkeypatch, names=sv.NAMES + ["spectrum_0003"],
-                             anchors={"spectrum_0000": sv.OK}, follower_r2=follower_r2, executor=Ex(follower_r2))
+    state, state_ex = sv.run_series(tmp_path, monkeypatch, names=sv.NAMES + ["spectrum_0003"],
+                                    anchors={"spectrum_0000": sv.OK}, follower_r2=follower_r2,
+                                    executor=Ex(follower_r2))
     raw = {u["name"]: u for u in state["series_results"]}
     assert raw["spectrum_0001"]["success"] and raw["spectrum_0001"]["unit_verdict"]["verified"]
     bad = raw["spectrum_0002"]
-    assert not bad["success"] and bad.get("kind") == "saved_fit_mismatch" and "on its anchor" in bad["error"]
-    assert bad["parameters"] == {} and bad["unit_verdict"]["decided_by"] == "excluded"
-    flags = {f["name"]: f["reason"] for f in state.get("flagged_spectra") or []}
-    assert flags.get("spectrum_0002") == "fit_failed"                          # a refit reason
+    assert bad["success"] and bad["parameters"]["peak_1"]["center"] == 144.0
+    assert "on its anchor" in bad["fit_quality"]["replay_misfit"][0] and "kind" not in bad
+    uv = bad["unit_verdict"]
+    assert not uv["verified"] and uv["decided_by"] == "recipe" and "does not follow this unit's data" in uv["reason"]
+    flags = {f["name"]: f for f in state.get("flagged_spectra") or []}
+    assert flags["spectrum_0002"]["reason"] == "replay_misfit"
+    assert "replay_misfit" not in cc.AdaptiveRefitController.REFIT_REASONS
+    assert [n for n, _ in state_ex.calls].count("spectrum_0002") == 1              # kept, never repaired
+    v = analysis_verdict(sv.compile_results(tmp_path, state))
+    assert not v["verified"] and "does not follow this unit's data" in v["reason"]
 
 
 def test_a_peaks_only_recipe_under_a_rising_background_stays_mains_path(tmp_path, monkeypatch):
@@ -307,17 +337,21 @@ class _Wrong(_FitWriter):
 
 def test_a_reuse_is_held_to_the_recipe_it_replays(tmp_path):
     """A board copy carrying its anchor's saved-fit R²: the replay that does
-    not follow the new data is sent to the ladder; with no reference (or a
-    script-bank cold start, which no prior run stands behind) it is not."""
+    not follow the new data is kept verbatim and withheld (no model call);
+    with no reference (or a script-bank cold start, which no prior run stands
+    behind) nothing is recorded."""
     wrong = "np.load('data.npy')  # WRONG shape"
     model = _Model()
     res = _reuse(tmp_path / "a", _Wrong(), model, _board_copy(tmp_path / "a", 0.6, wrong))
-    corr = [p for p in model.prompts if "Fix this failed script" in p]
-    assert corr and "on its anchor" in corr[0] and res["script"] == GOOD
+    assert model.prompts == [] and res["script"] == wrong and res["reuse_validity"]["verdict"] == "good"
+    assert "on its anchor" in res["fit_quality"]["replay_misfit"][0]
+    v = analysis_verdict({"status": "success", "fit_quality": res["fit_quality"],
+                          "reuse_validity": res["reuse_validity"]})
+    assert not v["verified"] and "does not follow this unit's data" in v["reason"]
     for sub, r2, source in (("b", None, None), ("c", 0.6, "script_bank:abc")):
         model = _Model()
         res = _reuse(tmp_path / sub, _Wrong(), model, _board_copy(tmp_path / sub, r2, wrong), source=source)
-        assert model.prompts == [] and res["script"] == wrong, sub
+        assert model.prompts == [] and res["script"] == wrong and "replay_misfit" not in res["fit_quality"], sub
 
 
 def test_a_reuse_that_measured_nothing_is_not_verified(tmp_path):
@@ -332,15 +366,54 @@ def test_a_reuse_that_measured_nothing_is_not_verified(tmp_path):
     full = {"status": "success", "fit_quality": res["fit_quality"], "reuse_validity": res["reuse_validity"]}
     v = analysis_verdict(full)
     assert not v["verified"] and "no target measured" in v["reason"]
-    uv = unit_verdict_for({**res, "success": True})
-    assert not uv["verified"] and uv["decided_by"] == "replay_gate" and "no target measured" in uv["reason"]
 
 
-def test_a_follower_that_measured_nothing_is_not_verified():
-    unit = {"success": True, "fitted_from": "locked_script",
-            "fit_quality": {"no_target_measured": ["peak_1"], "not_measured": [{"component": "peak_1"}]}}
-    uv = unit_verdict_for(unit, recipe={"unit": "a", "verdict": {"verified": True}})
-    assert not uv["verified"] and "no target measured" in uv["reason"]
+def test_a_series_anchor_that_replayed_a_recipe_is_withheld_by_its_fit_checks(tmp_path, monkeypatch):
+    """Through the series driver, for an anchor that replayed a prior recipe
+    (no QC record, the replay gate passed): measuring nothing, or a replay
+    that does not fit, withholds the anchor and the series — in the stamp
+    and in the legacy reconstruction alike."""
+    import test_series_verdict_path as sv
+    from scilink.agents.exp_agents._verification_record import legacy_series_verdict
+    real_canned = sv._canned_anchor
+    for sub, fq, said in (("nothing", {"no_target_measured": ["peak_1"]}, "no target measured"),
+                          ("misfit", {"replay_misfit": ["the replayed recipe's saved fit does not follow this "
+                                                        "unit's data"]}, "does not follow this unit's data")):
+        monkeypatch.setattr(sv, "_canned_anchor", lambda *a, **k: (lambda r: {
+            **r, "fit_quality": {**r["fit_quality"], **fq}})(real_canned(*a, **k)))
+        reuse_ok = {"r2": 0.97, "approved": True, "script": "PRIOR", "reused": "good"}
+        state, _ = sv.run_series(tmp_path / sub, monkeypatch, names=sv.NAMES, anchors={"spectrum_0000": reuse_ok},
+                                 follower_r2={"spectrum_0001": 0.97, "spectrum_0002": 0.96}, cold_start="PRIOR")
+        results = sv.compile_results(tmp_path / sub, state)
+        uv = results["individual_results"][0]["unit_verdict"]
+        assert not uv["verified"] and uv["decided_by"] == "replay_gate" and said in uv["reason"], sub
+        assert not analysis_verdict(results)["verified"], sub
+        legacy = legacy_series_verdict(results)
+        assert not legacy["verified"] and said in legacy["reason"], (sub, legacy)
+
+
+def test_a_follower_that_measured_nothing_is_withheld_through_the_series(tmp_path, monkeypatch):
+    import test_series_verdict_path as sv
+
+    class Ex(sv.FakeExecutor):
+        def execute_script(self, script, working_dir=None, timeout=None, **kw):
+            res = super().execute_script(script, working_dir=working_dir, timeout=timeout, **kw)
+            if "spectrum_0002" in Path(working_dir).as_posix():                # its band left the axis
+                out = json.loads(res["stdout"].split("FIT_RESULTS_JSON:", 1)[1])
+                out["parameters"]["peak_1"]["center"] = 50.0
+                res["stdout"] = "FIT_RESULTS_JSON:" + json.dumps(out)
+            return res
+    follower_r2 = {"spectrum_0001": 0.97, "spectrum_0002": 0.97, "spectrum_0003": 0.97}
+    state, ex = sv.run_series(tmp_path, monkeypatch, names=sv.NAMES + ["spectrum_0003"],
+                              anchors={"spectrum_0000": sv.OK}, follower_r2=follower_r2, executor=Ex(follower_r2))
+    unit = {u["name"]: u for u in state["series_results"]}["spectrum_0002"]
+    uv = unit["unit_verdict"]
+    assert unit["success"] and not uv["verified"] and uv["decided_by"] == "recipe"
+    assert "no target measured" in uv["reason"]
+    flags = {f["name"]: f for f in state.get("flagged_spectra") or []}
+    assert flags["spectrum_0002"]["reason"] == "not_measured"
+    assert flags["spectrum_0002"]["recommendation"].startswith("Withheld: no target measured")
+    assert [n for n, _ in ex.calls].count("spectrum_0002") == 1
 
 
 # -- the reported values ----------------------------------------------------
@@ -431,11 +504,13 @@ def test_names_that_are_not_a_bands_position_are_not_read(tmp_path, monkeypatch)
 
 
 def test_a_width_wider_than_the_axis_is_no_value_and_zero_is_left_alone(tmp_path, monkeypatch):
-    params = {"flat": {"center": 800.0, "fwhm": 1e5, "fwhm_err": 9.0, "amplitude": 0.1},
+    params = {"flat": {"center": 800.0, "fwhm": 1e5, "fwhm_err": 9.0, "fwhm_err_exceeds_fwhm": True,
+                       "amplitude": 0.1},
               "voigt": {"center": 900.0, "sigma": 20.0, "gamma": 0.0, "amplitude": 0.8}}
     res, _ = _run(tmp_path, monkeypatch, params)
     assert res["parameters"]["flat"]["fwhm"] is None and res["parameters"]["flat"]["fwhm_err"] is None
     assert res["parameters"]["flat"]["center"] == 800.0
+    assert res["parameters"]["flat"]["fwhm_err_exceeds_fwhm"] is True          # a flag, not a value
     assert res["parameters"]["voigt"]["gamma"] == 0.0
     assert [(p["component"], p["parameter"]) for p in res["withheld_values"]] == [("flat", "fwhm")]
     assert any("a width wider than the measured axis" in c for c in res["caveats"])
@@ -453,7 +528,16 @@ def test_a_degenerate_fits_uncertainties_are_no_value_and_its_metrics_stay(tmp_p
     assert (res["parameters"]["rms_error"], res["parameters"]["fit_error"]) == (0.03, 0.1)   # fit metrics
     assert any("the reported uncertainties (a degenerate fit's covariance is not a precision)" in c
                for c in res["caveats"])
-    params["main"]["fwhm"] = 30.0                                              # not degenerate: kept
+    # by structure: an uncertainty of a sibling named like a fit metric, an
+    # interval, a bare error beside a value; a flag is never touched
+    params = {"law": {"r2": 1.4, "r2_err": 0.1, "center": 900.0, "center_ci95": [899.0, 901.0],
+                      "fwhm": 40.0, "fwhm_err_exceeds_fwhm": False},
+              "level": {"value": 2.0, "err": 0.2}}
+    res, _ = _run(tmp_path, monkeypatch, params, bounds={"law": {"fwhm": [1.0, 40.0]}})
+    law = res["parameters"]["law"]
+    assert law["r2_err"] is None and law["center_ci95"] is None and res["parameters"]["level"]["err"] is None
+    assert law["r2"] == 1.4 and law["fwhm_err_exceeds_fwhm"] is False and res["parameters"]["level"]["value"] == 2.0
+    params = {"main": {"center": 900.0, "center_err": 0.001, "amplitude": 0.8, "fwhm": 30.0}}   # not degenerate: kept
     res, _ = _run(tmp_path, monkeypatch, params, bounds={"main": {"fwhm": [1.0, 40.0]}})
     assert res["parameters"]["main"]["center_err"] == 0.001 and "withheld_values" not in res
 
@@ -492,6 +576,8 @@ def test_the_caveat_flags_are_non_refit_and_a_secondary_pin_keeps_its_flag(tmp_p
     assert flags["spectrum_0001"]["reason"] == "withheld_values"
     assert "a width wider than the measured axis" in flags["spectrum_0001"]["recommendation"]
     assert flags["spectrum_0002"]["reason"] == "secondary_pin"
+    # one flag per unit, and what it does not name is added to its text
+    assert "Also reported as no value — peak_1.fwhm" in flags["spectrum_0002"]["recommendation"]
     assert [n for n, _ in ex.calls].count("spectrum_0001") == 1                 # nothing refit
     assert analysis_verdict(sv.compile_results(tmp_path, state))["verified"]
 

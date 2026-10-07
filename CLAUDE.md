@@ -168,30 +168,42 @@ features) refuse it. The pick and its reason are `reuse_validity.source`
 generation is told where x and y sit in `data.npy` (from the array staged), and
 every prompt that writes, repairs or judges a replayed script says never to
 pick a column, a window or anything else by matching a value read off one
-spectrum; a repair (which never sees the generation prompt) is told the layout
-too. A saved fit that follows the x axis, or a replay that does not follow its
-data even up to a constant offset (R² < −1: its misfit is more than twice the
-data's variance) where its anchor was not below zero, is not a fit of this
-data: the ladder is told, and a unit that still shows it FAILS
-(refit-eligible), never verified on its self-reported R². This repairs a
-follower's locked recipe, a deliberate exception to #726: the recipe broke on
-that unit's data, it did not merely rail a bound. The anchor's reference
-travels with the recipe (`certification_reference.saved_fit_r2`), so a reuse is
-held to it; a bank cold start, a bare recipe file and a run recorded before
-this carry none. A saved fit below a flat line on its own is no error (a
-peaks-only fit saved without its baseline, a background rising along the
-series, a windowed model evaluated outside its window, a level on a flat
+spectrum (bank adapt, whose rules re-derive windows for the new data: never a
+column); the repair of a saved-fit mismatch and bank adapt, which never see the
+generation prompt, are told the layout too. A saved fit that follows the x axis
+is not a fit of this data: the ladder is told, and a unit that still shows it
+FAILS (refit-eligible), never verified on its self-reported R². This repairs a
+follower's locked recipe, a deliberate exception to #726: the recipe read the
+wrong column of that unit's data, it did not merely rail a bound. A REPLAY
+whose saved fit does not follow its data even up to a constant offset (R² < −1:
+a misfit more than twice the data's variance) where its anchor was not below
+zero only WITHHOLDS the unit (`replay_misfit`, a non-refit flag, read by a
+follower's and a reuse's verdict): the recipe is kept, nothing is repaired. A
+windowed recipe's local baseline carried across the whole axis can land there
+on a healthy unit, and in live A/B runs (real series, reuse across a phase
+change, the wrong-column replay) the x-axis rule caught every wrong replay
+first, so this check withholds a certificate and never decides a repair (#711).
+The anchor's reference travels with the recipe
+(`certification_reference.saved_fit_r2`), so a reuse is held to it; a bank cold
+start, a bare recipe file, a unit script named inside a series run and a run
+recorded before this carry none. A saved fit below a flat line on its own is no
+error (a peaks-only fit saved without its baseline, a background rising along
+the series, a windowed model evaluated outside its window, a level on a flat
 control). A band — read only when a bare position name (`center`, `cen`,
 `loc`, …) AND a bare width name (`fwhm`, `sigma`, …) sit on one component; a
 unit suffix, a derived quantity or `mu` (a level's mean as often as a
 position) is not read — whose REPORTED centre lies outside the axis is not
 measured like an edge band; a fit with no target left measured is withheld
 (`no_target_measured`, read by its own gate, a follower's and a reuse's
-verdict), never failed. A band width wider than the axis, every uncertainty of
-a degenerate fit and a secondary pin's component's uncertainties are no value
-(`withheld_values`, a caveat). All measured on 4,595 saved units. Declined,
-measured: holding a series' claims on fired follower `regime_checks` (they fire
-on 205 of 259 followers, healthy series included).
+verdict), never failed. A band width wider than the axis, the reported
+uncertainties of a degenerate fit and a secondary pin's component's
+uncertainties are no value (`withheld_values`, a caveat). An uncertainty is
+read by structure first (`X_err…` beside a reported `X`, a bare `err` beside a
+`value`), then by a word of its name, never a fit metric or a `_std` (as often
+a measured scatter); a flag is never nulled. A unit keeps one flag, and
+values withheld that the flag does not name are added to its text. All measured on 4,595
+saved units. Declined, measured: holding a series' claims on fired follower
+`regime_checks` (they fire on 205 of 259 followers, healthy series included).
 
 **A series has a second shape: joint** (#754). Whether a set of files is a
 series used to be purely structural (two or more files, one unit each), so a
