@@ -38,13 +38,23 @@ _PARAM_TO_INCAR_KEY = {
 
 
 def _set_incar_key(incar_text: str, key: str, value: Any) -> str:
-    """Return INCAR text with ``key`` set to ``value`` (replaced or appended)."""
-    line = f"{key} = {value}"
-    pattern = re.compile(rf"^\s*{re.escape(key)}\s*=.*$", re.MULTILINE | re.IGNORECASE)
+    """Return INCAR text with ``key`` set to ``value`` (replaced or appended).
+
+    VASP allows several tags on one line separated by ``;`` and trailing ``#`` /
+    ``!`` comments, so the replacement matches only the key's own value and
+    stops at the first ``;``, ``#`` or ``!`` — anything after it (other tags, a
+    comment) is preserved. Matching to end of line would drop them.
+    """
+    newval = f"{key} = {value}"
+    pattern = re.compile(
+        rf"^(?P<indent>\s*){re.escape(key)}\s*=\s*[^;#!\n]*(?P<rest>[;#!].*)?$",
+        re.MULTILINE | re.IGNORECASE)
     if pattern.search(incar_text):
-        return pattern.sub(line, incar_text)
+        return pattern.sub(
+            lambda m: f"{m.group('indent')}{newval}{m.group('rest') or ''}",
+            incar_text)
     sep = "" if incar_text.endswith("\n") or not incar_text else "\n"
-    return f"{incar_text}{sep}{line}\n"
+    return f"{incar_text}{sep}{newval}\n"
 
 
 def set_convergence_param(

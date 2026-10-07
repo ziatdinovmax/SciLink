@@ -104,6 +104,20 @@ class TestSetConvergenceParam:
         assert "ENCUT = 600" in out["INCAR"]
         assert "400" not in out["INCAR"]
 
+    def test_preserves_other_tags_on_the_same_line(self):
+        # VASP allows `A = 1; B = 2`; setting ENCUT must not drop PREC.
+        deck = {"INCAR": "ENCUT = 500; PREC = Accurate\nISMEAR = 0\n"}
+        out = set_convergence_param(deck, "ENCUT", 400)["INCAR"]
+        assert "ENCUT = 400" in out
+        assert "PREC = Accurate" in out          # survived the substitution
+        assert "ENCUT = 500" not in out
+
+    def test_preserves_trailing_comment(self):
+        deck = {"INCAR": "ENCUT = 500  # plane-wave cutoff\n"}
+        out = set_convergence_param(deck, "ENCUT", 600)["INCAR"]
+        assert "ENCUT = 600" in out
+        assert "plane-wave cutoff" in out        # comment survived
+
     def test_unknown_param_raises(self):
         with pytest.raises(ValueError):
             set_convergence_param({"INCAR": ""}, "SIGMA", 0.1)
