@@ -277,6 +277,13 @@ def _unit_verdict(item: dict, *, where: str) -> Optional[Dict[str, Any]]:
         except Exception:  # noqa: BLE001 - a malformed pin list still withholds
             what = "a parameter"
         return {"verified": False, "reason": f"degenerate fit: {what} (pinned at bound){where}"}
+    nothing = (item.get("fit_quality") or {}).get("no_target_measured")
+    if nothing:
+        # #762: every target's reported centre lies outside the measured axis;
+        # its values are no value, and a fit that measured nothing asked for
+        # is withheld, never failed
+        return {"verified": False, "reason": f"no target measured: {', '.join(map(str, nothing))} "
+                                             f"reported outside the measured axis{where}"}
     if item.get("quality_warning"):
         return {"verified": False, "reason": f"salvaged best-available result{where}"}
     if item.get("judge_warning"):
@@ -354,6 +361,13 @@ def unit_verdict_for(unit: Dict[str, Any], *, recipe: Optional[Dict[str, Any]] =
         return verdict_record(verified=False, decided_by="recipe", regime=regime, recipe_of=recipe.get("unit"),
                               reason=f"replayed the locked recipe of unit {recipe.get('unit')}, but this unit's "
                                      f"fit is degenerate: {what} (pinned at bound)")
+    nothing = (unit.get("fit_quality") or {}).get("no_target_measured")
+    if rv.get("verified") and nothing:
+        # the recipe passed, but on THIS unit no target was measured (#762)
+        return verdict_record(verified=False, decided_by="recipe", regime=regime, recipe_of=recipe.get("unit"),
+                              reason=f"replayed the locked recipe of unit {recipe.get('unit')}, but on this unit "
+                                     f"no target was measured: {', '.join(map(str, nothing))} reported outside "
+                                     f"the measured axis")
     if rv.get("verified"):
         # a follower is certified by the cheap checks against its regime's
         # anchor (``regime_checks``, the series driver's), when they agree

@@ -164,6 +164,27 @@ an image strict replay (which need the run's config, fingerprint or reference
 features) refuse it. The pick and its reason are `reuse_validity.source`
 (`_verification_record.prior_recipe_scripts`).
 
+**What a curve fit reports is held to the fit and the data** (#762). Code
+generation is told where x and y sit in `data.npy` (from the array staged) and
+that a script replayed on other spectra never chooses a column, a window or
+anything else by matching one spectrum's values. A saved fit that follows the
+x axis, or a replay further from the data than the data's own spread (R² < −1;
+a sign change near zero was a noisy control, seen live) where its anchor was
+not below a flat line (a reuse: the recipe's
+`certification_reference.saved_fit_r2`), is not
+a fit of this data: the ladder is told, and a unit that still shows it FAILS
+(refit-eligible), never verified on its self-reported R² — a saved fit below
+that line on its own is no error (a peaks-only fit saved without its baseline,
+a windowed model evaluated outside its window). A band whose REPORTED centre
+lies outside the axis is not measured like an edge band (a fit with no target
+left measured is withheld, `no_target_measured`, never failed); a band width
+wider than the axis and every uncertainty of a degenerate fit are no value
+(`withheld_values`, a caveat). A band is read by bare names only (`center`,
+`fwhm`, …): a unit suffix, a derived quantity or `mu` (a level's mean as often
+as a position) is not read. All measured on 4,595 saved fits. Declined,
+measured: holding a series' claims on fired follower `regime_checks` (they fire
+on 205 of 259 followers, healthy series included).
+
 **A series has a second shape: joint** (#754). Whether a set of files is a
 series used to be purely structural (two or more files, one unit each), so a
 method whose result exists only over the set was split into units that could

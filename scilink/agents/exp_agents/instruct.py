@@ -2507,6 +2507,7 @@ plan as specified and let the retry pipeline handle actual runtime failures.
 
 **Data:**
 - Path: `{data_path}` (a numpy array in the CURRENT WORKING DIRECTORY — `np.load` it)
+- Layout: {data_layout}
 - Points: {n_points}
 - X: [{x_min:.6g}, {x_max:.6g}]
 - Y: [{y_min:.6g}, {y_max:.6g}]
@@ -2518,7 +2519,11 @@ plan as specified and let the retry pipeline handle actual runtime failures.
 
 **Requirements:**
 1. Load the data array `data.npy` from the working directory (`np.load`). The data
-   you load is RAW — no preprocessing has been applied upstream.
+   you load is RAW — no preprocessing has been applied upstream. The script is
+   replayed unchanged on other spectra whose values differ, so read x and y from
+   the fixed positions the Layout gives and never choose a column, a window or
+   anything else by matching this spectrum's own values (the X / Y ranges above
+   describe this spectrum only).
 2. Preprocess in-script as appropriate — YOU own this; there is no separate
    preprocessing step. Apply only what is clearly warranted for this data (or
    nothing). HARD CONSTRAINTS:
@@ -2639,7 +2644,7 @@ never as missing keys.
 **Narrow exception — timeout errors ONLY:** if the error says the script timed out, the script is too slow, not wrong. You may change the COMPUTATIONAL strategy — vectorize loops, reduce optimizer restarts/iterations, replace brute-force search with an efficient optimizer — but every rule above still holds: same model, same parameters, same fit domain/window, and ALL of the data.
 **Narrow exception — a parameter PINNED AT ITS BOUND:** if the error names parameters that ended at a bound, the fit is degenerate (the optimizer wanted to go further). You MUST widen exactly those bounds — an amplitude/scale ceiling to a data-relative expression (e.g. `2 * np.max(y)`) or unbounded, a position/width window far enough to contain the feature — and keep everything else (model, components, fit domain, initial-guess logic) unchanged. Report the bounds you use in the results' `"bounds"` field.
 
-**I/O contract (do not deviate):** the data is `data.npy` in the current working directory — load it with `np.load` (do NOT look for .csv/.txt/.dat or glob for other files); save the plot to `visualization.png`; print one line `FIT_RESULTS_JSON:{{...}}` with the fit results. Missing any of these fails the run. Also keep saving `fit.npy` (1-D fitted curve at the `data.npy` x-points, length N, in the same space as `data.npy`, baseline included) if the script you are fixing already did — it feeds the reviewer's residual diagnostics.
+**I/O contract (do not deviate):** the data is `data.npy` in the current working directory — load it with `np.load` (do NOT look for .csv/.txt/.dat or glob for other files), and read x and y from their fixed positions in it, never choosing a column or a window by matching one spectrum's values (the script is replayed on spectra whose values differ); save the plot to `visualization.png`; print one line `FIT_RESULTS_JSON:{{...}}` with the fit results. Missing any of these fails the run. Also keep saving `fit.npy` (1-D fitted curve at the `data.npy` x-points, length N, in the same space as `data.npy`, baseline included) if the script you are fixing already did — it feeds the reviewer's residual diagnostics.
 
 **Plot labels must be neutral** if your fix touches `visualization.png`: \
 use "Data"/"Fit"/"Component N"/"Residuals" only — no material names, no peak assignments, no model names in titles/legends/annotations.
@@ -2670,8 +2675,10 @@ The script fits **exactly one spectrum at a time** — the data file is staged
 as `data.npy` in the current working directory.  When the
 plan is for a series, the agent invokes the same script per spectrum and
 aggregates results at a higher layer; scripts must NOT loop over multiple
-spectrum files, build cross-spectrum trends or comparisons, or
-special-case particular spectra by index/identifier.  Only flag
+spectrum files, build cross-spectrum trends or comparisons,
+special-case particular spectra by index/identifier, or choose a column
+or a window by matching one spectrum's own values (the same script runs
+on spectra whose values differ).  Only flag
 **per-spectrum** deviations from the plan's model, parameters, or skill
 rules.  Do NOT mark a script non-conformant for the absence of
 series-level orchestration that the plan happens to describe.

@@ -27,6 +27,7 @@ import base64
 import copy
 import re
 import shutil
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
@@ -174,7 +175,7 @@ def _canonical_r2(y, fit):
 
 
 # Flags that are caveats on a fit that stands, never failures or refit reasons.
-CAVEAT_FLAGS = frozenset({"secondary_pin", "not_measured"})
+CAVEAT_FLAGS = frozenset({"secondary_pin", "not_measured", "withheld_values"})
 
 # What a reader of a not-measured band is told. A value the script derived
 # from that band elsewhere (a ratio, a relative intensity, a total) cannot be
@@ -186,8 +187,20 @@ NOT_MEASURED_NOTE = (
 
 
 def describe_not_measured(items) -> str:
-    """``edge (centre held at the axis end 374.1); ...``"""
-    return "; ".join(f"{p['component']} (centre held at the axis end {p['bound']:.6g})" for p in items)
+    """``edge (centre held at the axis end 374.1); ...``, or for a centre the
+    fit reported outside the axis, ``edge (centre 96.5 outside the measured
+    axis)``."""
+    return "; ".join(
+        f"{p['component']} (centre held at the axis end {p['bound']:.6g})"
+        if isinstance(p.get("bound"), (int, float)) else
+        f"{p['component']} (centre {p['value']:.6g} outside the measured axis)" for p in items)
+
+
+def describe_withheld(items) -> str:
+    """``peak_3.fwhm (a width wider than the measured axis); every
+    uncertainty (a degenerate fit's covariance is not a precision)``"""
+    return "; ".join((f"every uncertainty ({p['reason']})" if p.get("component") == "all" else
+                      f"{p['component']}.{p['parameter']} ({p['reason']})") for p in items)
 
 
 _CENTRE_TOKENS = ("center", "centre", "position", "pos", "x0", "mu")
@@ -227,6 +240,153 @@ def _beyond_axis(pins, stats, bounds=None):
         else:
             keep.append(p)
     return keep, beyond
+
+
+# A band, read by its names: a component with a position named by the bare
+# word and a width named by the bare word. A name with more words (a unit
+# suffix, ``center_Hz`` on a ppm axis; a derived quantity,
+# ``center_separation``) or an ambiguous one (``mu``, a level's mean as often
+# as a position) is not read: measured on 4,595 saved fits (#762), those are
+# where a centre "outside the axis" is no error.
+_BAND_POSITION_NAMES = ("center", "centre", "position", "pos", "x0", "cen", "loc")
+_BAND_WIDTH_NAMES = ("sigma", "gamma", "width", "fwhm", "hwhm")
+_UNCERTAINTY_WORDS = ("err", "stderr", "error", "uncertainty", "unc")
+
+
+def _number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and bool(np.isfinite(v))
+
+
+def _band_names(values):
+    """``(position_key, [width_keys])`` of a component read as a band, else
+    ``(None, [])``."""
+    if not isinstance(values, dict):
+        return None, []
+    pos = next((k for k in values if str(k).lower() in _BAND_POSITION_NAMES), None)
+    widths = [k for k in values if str(k).lower() in _BAND_WIDTH_NAMES]
+    return (pos, widths) if pos is not None and widths else (None, [])
+
+
+def _reported_outside_axis(params, stats, skip=()):
+    """The bands whose REPORTED centre lies outside the measured axis (#762):
+    a band peaking beyond the range, or a value written into the wrong field
+    (a width reported as the centre). ``skip``: components already decided
+    (a pin, a band held at the axis end)."""
+    lo, hi = (stats or {}).get("x_range") or [None, None]
+    if not _number(lo) or not _number(hi) or hi <= lo or not isinstance(params, dict):
+        return []
+    tol = 5e-3 * (hi - lo)
+    out = []
+    for comp, vals in params.items():
+        if comp in skip:
+            continue
+        pos, _ = _band_names(vals)
+        v = vals.get(pos) if pos is not None else None
+        if _number(v) and (v < lo - tol or v > hi + tol):
+            out.append({"component": comp, "parameter": pos, "value": float(v),
+                        "reason": "centre outside the measured axis"})
+    return out
+
+
+def _wider_than_axis(params, stats, skip=()):
+    """Band widths larger than the whole measured axis: a profile the data
+    cannot show, so the width is no measurement (#762). Zero is a lineshape
+    limit, not an error, and is left alone."""
+    lo, hi = (stats or {}).get("x_range") or [None, None]
+    if not _number(lo) or not _number(hi) or hi <= lo or not isinstance(params, dict):
+        return []
+    out = []
+    for comp, vals in params.items():
+        if comp in skip:
+            continue
+        _, widths = _band_names(vals)
+        for w in widths:
+            if _number(vals.get(w)) and vals[w] > hi - lo:
+                out.append({"component": comp, "parameter": w, "value": float(vals[w]),
+                            "reason": "a width wider than the measured axis"})
+    return out
+
+
+def _is_uncertainty(name) -> bool:
+    words = str(name).lower().replace("-", "_").split("_")
+    return len(words) > 1 and words[-1] in _UNCERTAINTY_WORDS
+
+
+def _withhold_uncertainties(params, components=None) -> int:
+    """Set the reported uncertainties to no value — of ``components``, else of
+    every component — and return how many were withheld. The covariance of a
+    fit with a parameter at its bound is not a precision (#762)."""
+    n = 0
+    if not isinstance(params, dict):
+        return 0
+    for comp, vals in params.items():
+        if components is not None and comp not in components:
+            continue
+        if isinstance(vals, dict):
+            for k in vals:
+                if _is_uncertainty(k) and _number(vals[k]):
+                    vals[k] = None
+                    n += 1
+        elif components is None and _is_uncertainty(comp) and _number(vals):
+            params[comp] = None
+            n += 1
+    return n
+
+
+# What a code-generation retry is told when the saved fit is not a fit of the
+# data (#762).
+SAVED_FIT_MISMATCH_FIX = (
+    "Read x and y from their fixed positions in data.npy, never by matching one spectrum's values "
+    "(a column, a window or a level chosen by its numbers holds only on the spectrum it was read "
+    "from); keep the model, and save fit.npy as the fitted curve of THIS data.")
+
+
+# A replay's saved fit below this R² lies further from the data than the
+# data's own spread around its mean: a recipe that read the wrong thing. A
+# sign change near zero is no evidence — a level fitted to a flat, noisy
+# control lands just below zero where its anchor landed just above (#762,
+# seen live); the wrong-column replays measured at -50 and -68.
+REPLAY_R2_FLOOR = -1.0
+
+
+def _saved_fit_mismatch(curve_data, fit, anchor_r2=None):
+    """``(reason, r2)``: why the SAVED fit (``fit.npy``) is not a fit of this
+    unit's data, else ``reason`` None; ``r2`` is its R² against the data
+    (None when the two cannot be aligned).
+
+    Two signals, each measured on 4,575 saved fits (#762) to fire only on a
+    fit of the wrong data: the saved fit follows the x axis rather than the
+    data (a script that read the wrong column), and — for a replay of a
+    locked recipe — the saved fit lies further from the data than the
+    data's own spread (``REPLAY_R2_FLOOR``) where the same script was not
+    below a flat line on its anchor. A saved fit below that
+    line on its own is no error: a peaks-only fit saved without its baseline
+    or a windowed model evaluated outside its window lands there."""
+    xy = _extract_xy(curve_data)
+    if xy is None:
+        return None, None
+    x, y = (np.asarray(v, float).ravel() for v in xy)
+    f = np.asarray(fit, float)
+    if f.ndim == 2:
+        f = f[:, -1]
+    f = f.ravel()
+    if f.shape != y.shape:
+        return None, None
+    r2 = _canonical_r2(y, f)
+    rev = _canonical_r2(y, f[::-1])
+    if rev is not None and rev > 0 and (r2 is None or rev > r2 + 0.05):
+        r2 = rev                                   # saved in the other x order (the finaliser realigns it)
+    if r2 is None or r2 >= 0:
+        return None, r2
+    rx = _canonical_r2(x, f)                       # the fit as saved, point for point with x
+    if rx is not None and rx > 0.5:
+        return (f"the saved fit follows the x axis (R² {rx:.2f} against x) rather than the data "
+                f"(R² {r2:.3g} against y): the script fitted or reported the wrong column"), r2
+    if _number(anchor_r2) and anchor_r2 >= 0 and r2 < REPLAY_R2_FLOOR:
+        return (f"the saved fit lies further from this spectrum than the data's own spread around its "
+                f"mean (R² {r2:.3g} against the data) where the same script scored R² "
+                f"{anchor_r2:.3g} on its anchor: the locked recipe does not fit this spectrum's data"), r2
+    return None, r2
 
 
 def _format_residual_diagnostics(diag) -> str:
@@ -322,6 +482,18 @@ def _render_region_zoom_panels(x, y, fit, diag, max_panels: int = 3,
         return panels
     except Exception:
         return []
+
+
+def _data_layout(curve_data) -> str:
+    """Where x and y sit in the staged ``data.npy``, in words, by the same
+    rule as ``_extract_xy``: code generation is told the layout so a script
+    reads them by position, never by matching one spectrum's values (#762)."""
+    d = np.asarray(curve_data)
+    if d.ndim == 1:
+        return "a 1-D array of the y values; x is the point index (`y = data`)"
+    if d.ndim == 2 and d.shape[0] == 2:
+        return "shape (2, N): row 0 is x, row 1 is y (`x, y = data[0], data[1]`)"
+    return "shape (N, 2): column 0 is x, column 1 is y (`x, y = data[:, 0], data[:, 1]`)"
 
 
 def _extract_xy(curve_data):
@@ -1165,7 +1337,8 @@ def _restamp_regimes(output_dir, recipe_by_regime: dict, series_results: list) -
         # replay of the run is
         samples = [identity_features(params_of[i]) for i in sorted(units_idx)
                    if isinstance(params_of.get(i), dict)]
-        ref = curve_certification_reference(rec.get("drift_state"), rec.get("x_range"), samples)
+        ref = curve_certification_reference(rec.get("drift_state"), rec.get("x_range"), samples,
+                                            saved_fit_r2=rec.get("saved_fit_r2"))
         if ref is not None:
             rec["certification_reference"] = ref
 
@@ -3790,6 +3963,7 @@ Your guidance: '''
         prior_r2: float = 0.0,
         prior_issues: Optional[list] = None,
         extra_operand_block: str = "",
+        data_layout: Optional[str] = None,
     ) -> str:
         config = state.get("locked_fitting_config", {})
         context_parts = []
@@ -3900,6 +4074,7 @@ Your guidance: '''
             x_max=stats["x_range"][1],
             y_min=stats["y_range"][0],
             y_max=stats["y_range"][1],
+            data_layout=data_layout or _data_layout(np.zeros((stats["n_points"], 2))),
             auxiliary_block=auxiliary_block,
             tool_inventory=_tool_inventory_text(state),
         )
@@ -4230,7 +4405,11 @@ Your guidance: '''
         refine_from_issues: Optional[list] = None,
         hold_recipe: bool = False,
         seed_targets: Optional[list] = None,
+        anchor_saved_fit_r2: Optional[float] = None,
     ) -> dict:
+        # ``anchor_saved_fit_r2``: a follower's regime anchor's saved fit R²
+        # against its own data — a replay worse than a flat line where the
+        # anchor was not is not a fit of this unit's data (#762).
         # ``seed_targets``: the TARGET components a fit is held to from its
         # first attempt (a follower: its regime anchor's). Within a fit the
         # declaration is FROZEN — the first one stands and a later attempt can
@@ -4302,6 +4481,7 @@ Your guidance: '''
         consecutive_timeouts = 0
         used_timeout_escalation = False
         pinned_retries = 0
+        saved_fit_mismatch = None
 
         for attempt in range(1, self.MAX_ATTEMPTS + 1):
             try:
@@ -4314,6 +4494,7 @@ Your guidance: '''
                         prior_r2=refine_from_r2,
                         prior_issues=refine_from_issues,
                         extra_operand_block=operand_block,
+                        data_layout=_data_layout(curve_data),
                     )
                     if not script_uses_canonical_input(script):
                         last_error = (
@@ -4378,10 +4559,12 @@ Your guidance: '''
                 # Adaptive timeout: a slow-but-correct script is retried
                 # verbatim with doubled timeouts before the correction LLM
                 # ever sees a "timed out" error.
+                _started = time.time()
                 run = stage_and_run_adaptive(self.executor, script, curve_data,
                                              item_dir, aux=extra_operands,
                                              logger=self.logger)
                 exec_result = run["exec"]
+                saved_fit_mismatch = None
 
                 if run["status"] == "success":
                     has_fit_results = "FIT_RESULTS_JSON:" in run["stdout"]
@@ -4395,6 +4578,25 @@ Your guidance: '''
                         if has_fit_results else False
 
                     if has_fit_results and has_parameters and has_visualization:
+                        # The saved fit must be a fit of THIS data (#762): one
+                        # that follows the x axis, or a replay worse than a
+                        # flat line where its anchor was not, came from a
+                        # script that read the wrong thing. It is an error the
+                        # ladder repairs, and a unit that still shows it is
+                        # failed, never verified on its self-reported R².
+                        try:
+                            _fp = Path(item_dir) / FIT_NAME
+                            if _fp.exists() and _fp.stat().st_mtime >= _started - 1:
+                                saved_fit_mismatch, _ = _saved_fit_mismatch(
+                                    curve_data, np.load(_fp), anchor_saved_fit_r2)
+                        except Exception:  # noqa: BLE001 - an unreadable fit is the old path
+                            saved_fit_mismatch = None
+                        if saved_fit_mismatch:
+                            last_error = ("THE SAVED FIT IS NOT A FIT OF THIS DATA — "
+                                          + saved_fit_mismatch + ". " + SAVED_FIT_MISMATCH_FIX)
+                            self.logger.warning(f"    ⚠️ Attempt {attempt}: {saved_fit_mismatch}")
+                            consecutive_timeouts = 0
+                            continue
                         # A fit with a parameter pinned at a bound (#592) is
                         # degenerate even when R² clears the gate: another
                         # parameter absorbs the misfit and the extracted value
@@ -4472,13 +4674,15 @@ Your guidance: '''
         ok = (run is not None and run["status"] == "success"
               and run["visualization_path"] is not None
               and "FIT_RESULTS_JSON:" in run["stdout"]
-              and _has_fit_parameters(run["stdout"]))
+              and _has_fit_parameters(run["stdout"])
+              and not saved_fit_mismatch)
         if not ok:
             failure = {
                 "index": spectrum_idx,
                 "name": spectrum_name,
                 "success": False,
-                "error": last_error,
+                "error": (("THE SAVED FIT IS NOT A FIT OF THIS DATA — " + saved_fit_mismatch)
+                          if saved_fit_mismatch else last_error),
                 "parameters": {},
                 "fit_quality": {},
                 "script": script,
@@ -4486,6 +4690,8 @@ Your guidance: '''
             }
             if _is_timeout_error(last_error):
                 failure["kind"] = "timeout"
+            elif saved_fit_mismatch:
+                failure["kind"] = "saved_fit_mismatch"
             return failure
 
         fit_results = _parse_script_markers(run["stdout"])
@@ -4537,6 +4743,16 @@ Your guidance: '''
         if _edge_t and _targets <= {p["component"] for p in _edge_t}:
             pinned, _edge_t = list(pinned) + _edge_t, []
         not_measured = _edge_t + _edge_s
+        # #762: a band whose REPORTED centre lies outside the measured axis
+        # is not measured either — a band peaking beyond the range that no
+        # bound held, or a value written into the wrong field. Its component
+        # goes like an edge band's; a fit left with no target measured is
+        # withheld (``no_target_measured``), never failed: the honest answer
+        # is that nothing asked for was measured.
+        _decided = {p["component"] for p in list(pinned) + list(secondary_pins) + not_measured}
+        _outside = _reported_outside_axis(_params, stats, skip=_decided)
+        not_measured = not_measured + _outside
+        no_target_measured = bool(_outside) and _targets <= {p["component"] for p in not_measured}
         if not_measured:
             # its other pins (a width railed on half a profile) go with it
             _nm = {p["component"] for p in not_measured}
@@ -4563,9 +4779,30 @@ Your guidance: '''
                     comp[p["parameter"]] = None
                     if f"{p['parameter']}_err" in comp:      # its uncertainty is no measurement either
                         comp[f"{p['parameter']}_err"] = None
+            # its other uncertainties are conditioned on a railed parameter (#762)
+            _withhold_uncertainties(_params, {p["component"] for p in secondary_pins})
             self.logger.warning(
                 "    ⚠️ Secondary component pinned at bound — a caveat, not a degenerate fit "
                 "(the declared targets are unaffected): %s", describe_pinned(secondary_pins))
+        # #762: values the data cannot support are reported as no value, with
+        # the reason — a band width wider than the whole axis, and every
+        # uncertainty of a degenerate fit (the covariance of a fit with a
+        # parameter at its bound is not a precision).
+        withheld_values = []
+        for p in _wider_than_axis(_params, stats, skip={q["component"] for q in
+                                                         list(pinned) + list(secondary_pins) + not_measured}):
+            comp = _params.get(p["component"])
+            comp[p["parameter"]] = None
+            for k in list(comp):
+                if _is_uncertainty(k) and str(k).lower().startswith(str(p["parameter"]).lower() + "_"):
+                    comp[k] = None
+            withheld_values.append(p)
+        if pinned and _withhold_uncertainties(_params):
+            withheld_values.append({"component": "all", "parameter": "uncertainties",
+                                    "reason": "a degenerate fit's covariance is not a precision"})
+        if withheld_values:
+            self.logger.warning("    ⚠️ Values reported as no value (the data cannot support them): %s",
+                                describe_withheld(withheld_values))
         if pinned:
             held = bool(hold_recipe)
             script_errors.append({
@@ -4589,8 +4826,15 @@ Your guidance: '''
             fit_quality["secondary_pins"] = secondary_pins
         if not_measured:
             fit_quality["not_measured"] = not_measured
+        if withheld_values:
+            fit_quality["withheld_values"] = withheld_values
+        if no_target_measured:
+            # a list, as every caveat in fit_quality: the feature table takes
+            # scalars only, so this adds no column
+            fit_quality["no_target_measured"] = sorted(_targets)
         residual_diag = None
         residual_zoom_panels = []
+        saved_fit_r2 = None
         try:
             fit_path = Path(item_dir) / FIT_NAME
             if fit_path.exists():
@@ -4640,6 +4884,8 @@ Your guidance: '''
                 # the two. None (length mismatch / no signal) also keeps the
                 # self-report.
                 recomputed_r2 = _canonical_r2(yy, fit_arr)
+                # read as a follower's replay will be read, whatever the layout
+                saved_fit_r2 = _saved_fit_mismatch(curve_data, fit_arr)[1]
                 self_r2 = fit_quality.get("r_squared")
                 if recomputed_r2 is not None:
                     if isinstance(self_r2, (int, float)) and abs(recomputed_r2 - self_r2) > 0.05:
@@ -4693,6 +4939,15 @@ Your guidance: '''
             result["caveats"] = list(result.get("caveats") or []) + [
                 "Not measured: " + describe_not_measured(not_measured)
                 + ". " + NOT_MEASURED_NOTE]
+        if withheld_values:
+            result["withheld_values"] = withheld_values
+            result["caveats"] = list(result.get("caveats") or []) + [
+                "Reported as no value (the data cannot support them): "
+                + describe_withheld(withheld_values) + "."]
+        if saved_fit_r2 is not None:
+            # the saved fit's R² against the data: what a follower's replay is
+            # compared with when this unit anchors a regime (#762)
+            result["saved_fit_r2"] = saved_fit_r2
         if pinned:
             result["pinned_at_bound"] = pinned
             if hold_recipe:
@@ -5623,8 +5878,12 @@ Return JSON with:
                          for r in refs]
             if all(d is None for d in distances):
                 distances = None            # no regime could grid the new curve: lock order, and said
+        # each recipe's own reference (#753): what its replay is held to
+        cref_of = [(c.get("certification_reference") if isinstance(c, dict) else None) for c in extra] \
+            if len(extra) > 1 else [first.get("certification_reference")]
         if len(candidates) == 1:
-            reuse_result = self._run_reuse_candidate(ctx, ctx.reuse_script, ctx.reuse_source, None, 1, 1)
+            reuse_result = self._run_reuse_candidate(ctx, ctx.reuse_script, ctx.reuse_source, None, 1, 1,
+                                                     reference=cref_of[0])
             if reuse_result.get("success"):
                 rv = gate.judge(r2_of(reuse_result))
                 out = self._reuse_verdict(ctx, reuse_result, ctx.reuse_source, rv["score"], rv["verdict"], tried=1, of=1)
@@ -5636,7 +5895,8 @@ Return JSON with:
 
         def run(n: int, script: str, source: Optional[str]) -> dict:
             subdirs[n] = f"{CANDIDATES_DIR_NAME}/recipe_{n:02d}"
-            out = self._run_reuse_candidate(ctx, script, source, subdirs[n], n, len(candidates), verbatim=True)
+            out = self._run_reuse_candidate(ctx, script, source, subdirs[n], n, len(candidates), verbatim=True,
+                                            reference=cref_of[n - 1] if n - 1 < len(cref_of) else None)
             if not out.get("success") and len(subdirs) < len(candidates):
                 self.logger.info("   ↪ this regime's recipe could not execute verbatim; trying the next")
             return out
@@ -5694,7 +5954,8 @@ Return JSON with:
         n = order[0]
         script, source = candidates[n - 1]
         self.logger.info("   ↪ no regime's recipe ran verbatim; repairing the nearest as a single recipe would")
-        reuse_result = self._run_reuse_candidate(ctx, script, source, None, n, len(candidates))
+        reuse_result = self._run_reuse_candidate(ctx, script, source, None, n, len(candidates),
+                                                 reference=cref_of[n - 1] if n - 1 < len(cref_of) else None)
         if reuse_result.get("success"):
             rv = gate.judge(r2_of(reuse_result))
             checks[n] = self._identity_of(reuse_result, refs[n - 1] if n - 1 < len(refs) else None, xy,
@@ -6027,11 +6288,14 @@ Return JSON with:
             return
 
     def _run_reuse_candidate(self, ctx: QCItemContext, script: str, source: Optional[str],
-                             subdir: Optional[str], n: int, of: int, *, verbatim: bool = False) -> dict:
+                             subdir: Optional[str], n: int, of: int, *, verbatim: bool = False,
+                             reference: Optional[dict] = None) -> dict:
         """One replay of ``script`` on the item: in ``subdir`` under the
         spectrum's folder when given (several recipes never share a working
         dir), and with no correction when ``verbatim`` (a raising script is a
-        failure, not a model call)."""
+        failure, not a model call). ``reference``: the recipe's
+        ``certification_reference``, whose anchor saved-fit R² the replay's
+        saved fit is held to (#762)."""
         self.logger.info(
             f"   ♻️  Reusing locked fitting script from prior run "
             f"'{source or 'prior'}'" + (f" ({n} of {of} regime recipes)" if of > 1 else "") + "...")
@@ -6046,6 +6310,7 @@ Return JSON with:
             state=state, curve_data=ctx.data, data_path=ctx.data_path,
             spectrum_name=ctx.item_name, spectrum_idx=ctx.item_idx,
             base_script=script,
+            anchor_saved_fit_r2=(reference or {}).get("saved_fit_r2") if isinstance(reference, dict) else None,
         )
 
     def _reuse_failed(self, ctx: QCItemContext, reuse_result: dict, source: Optional[str]) -> Optional[dict]:
@@ -6209,7 +6474,9 @@ Return JSON with:
             script_kind="curve-fitting",
             output_contract=(
                 "the FIT_RESULTS_JSON print, the success marker, the "
-                "visualization saving, and the results schema"),
+                "visualization saving, the results schema, and reading x and y "
+                "from their fixed positions in data.npy (never a column or a "
+                "window chosen by matching one spectrum's values)"),
             config_key="locked_fitting_config",
             data_context=(
                 f"system_info: {str(ctx.state.get('system_info'))[:800]}\n"
@@ -7809,11 +8076,21 @@ Return JSON with:
             nm = (r.get("fit_quality") or {}).get("not_measured") if r.get("success") else None
             if nm and r["index"] not in already:
                 already.add(r["index"])
+                nothing = (r.get("fit_quality") or {}).get("no_target_measured")
                 flagged.append({
                     "index": r["index"], "name": r["name"], "reason": "not_measured",
                     "r_squared": None, "series_mean": None, "series_std": None, "deviation_sigma": None,
-                    "recommendation": ("Caveat, not a failure: not measured — " + describe_not_measured(nm)
+                    "recommendation": (("Withheld: no target measured — " if nothing else
+                                        "Caveat, not a failure: not measured — ") + describe_not_measured(nm)
                                        + ". " + NOT_MEASURED_NOTE)})
+            wv = (r.get("fit_quality") or {}).get("withheld_values") if r.get("success") else None
+            if wv and r["index"] not in already:
+                already.add(r["index"])
+                flagged.append({
+                    "index": r["index"], "name": r["name"], "reason": "withheld_values",
+                    "r_squared": None, "series_mean": None, "series_std": None, "deviation_sigma": None,
+                    "recommendation": ("Caveat, not a failure: reported as no value (the data cannot "
+                                       "support them) — " + describe_withheld(wv) + ".")})
             sec = (r.get("fit_quality") or {}).get("secondary_pins") if r.get("success") else None
             if sec and r["index"] not in already:
                 flagged.append({
@@ -8048,6 +8325,7 @@ Return JSON with:
         recipe_by_regime: Dict[str, dict] = {}
         anchor_params_by_regime: Dict[str, Any] = {}      # what each regime's anchor found, for the followers' checks
         anchor_targets_by_regime: Dict[str, Any] = {}     # the targets each regime's anchor declared: its followers' seed (#747)
+        anchor_saved_r2_by_regime: Dict[str, Any] = {}    # each anchor's saved-fit R²: what its followers' replays are held to (#762)
         base_scripts: Dict[str, str] = {}  # keyed by regime name
         locked_preprocessing_strategy = None
         original_locked_config = state.get("locked_fitting_config", {})
@@ -8166,6 +8444,7 @@ Return JSON with:
                     base_scripts[regime_name] = result["script"]
                     anchor_params_by_regime[regime_name] = result.get("parameters")
                     anchor_targets_by_regime[regime_name] = result.get("targets")
+                    anchor_saved_r2_by_regime[regime_name] = result.get("saved_fit_r2")
                     # THE predicate every reader of the gate keys on: this
                     # regime's anchor REPLAYED the recipe (verbatim, or repaired
                     # by the ladder — the same lineage). A reuse that failed
@@ -8192,7 +8471,10 @@ Return JSON with:
                             "model": _regime_model(state, regime_name),
                             # the gate this recipe was approved under: what a
                             # later replay of it is held to
-                            "gate": gate_record(_recorded_gate(self, state))}
+                            "gate": gate_record(_recorded_gate(self, state)),
+                            # the anchor's saved fit against its own data: what a
+                            # replay of the recipe is held to (#762)
+                            "saved_fit_r2": result.get("saved_fit_r2")}
                     if idx == 0:
                         state["base_fitting_script"] = result["script"]
                     self.logger.info(
@@ -8232,6 +8514,7 @@ Return JSON with:
                     spectrum_name=spectrum_name, spectrum_idx=idx,
                     base_script=base_script, hold_recipe=base_script is not None,
                     seed_targets=anchor_targets_by_regime.get(regime_name),
+                    anchor_saved_fit_r2=anchor_saved_r2_by_regime.get(regime_name),
                 )
                 self._check_follower(result, recipe_by_regime.get(regime_name),
                                      anchor_params_by_regime.get(regime_name), curve_data)
@@ -8278,6 +8561,7 @@ Return JSON with:
                     base_script=job["base_script"],
                     hold_recipe=job["base_script"] is not None,
                     seed_targets=anchor_targets_by_regime.get(job["regime_name"]),
+                    anchor_saved_fit_r2=anchor_saved_r2_by_regime.get(job["regime_name"]),
                 )
 
             with ThreadPoolExecutor(max_workers=workers) as pool:

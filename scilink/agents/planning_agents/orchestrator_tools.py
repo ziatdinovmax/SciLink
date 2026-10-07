@@ -628,6 +628,8 @@ class OrchestratorTools:
     _EMPTY_VALUE_REASONS = {
         "not_measured": "not measured: a band peaking beyond the measured axis",
         "secondary_pin": "a secondary component at its bound: no value",
+        "withheld_values": "a value the data cannot support (a width wider than the axis, an "
+                           "uncertainty of a degenerate fit): no value",
     }
 
     @staticmethod
