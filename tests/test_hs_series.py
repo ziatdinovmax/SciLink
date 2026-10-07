@@ -1270,3 +1270,7 @@ def test_units_drift_only_on_one_side_and_quantity_words_are_whole_words():
     assert not same("CI95_Area", "Area") and not same("Uncertainties_Depth", "Depth")
     assert not same("Errors_Depth", "Depth") and not same("Sigmas_Depth", "Depth")
     assert same("Cis_Isomer_Area", "Isomer_Area")
+    # an acronym's plural is the acronym (CIs), still not a cis isomer; RMS names a noise or a
+    # residual (#759 review)
+    assert not same("CIs_Area", "Area") and not same("SNRs_Map", "Map")
+    assert not same("Rms_Depth", "Depth") and not same("RMS_Depth", "Depth") and not same("rms_depth", "depth")

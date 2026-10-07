@@ -117,13 +117,38 @@ def current_cancel() -> Optional[threading.Event]:
     return _CANCEL_EVENTS.get(threading.get_ident())
 
 
+class _AnyEvent(threading.Event):
+    """Set when any of its events is: a turn's Stop ADDED to the cancel the
+    thread already carried (a branch's or an item's budget, memory or
+    coordinator cancel), so neither goes quiet for the turn. Readers poll
+    ``is_set()`` or ``wait()`` it like the events it joins."""
+
+    def __init__(self, *events: threading.Event) -> None:
+        super().__init__()
+        self._events = events
+
+    def is_set(self) -> bool:
+        return super().is_set() or any(e.is_set() for e in self._events)
+
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        import time
+        end = None if timeout is None else time.monotonic() + timeout
+        while not self.is_set():
+            left = None if end is None else end - time.monotonic()
+            if left is not None and left <= 0:
+                return False
+            super().wait(0.05 if left is None else min(0.05, left))
+        return True
+
+
 def register_turn_stop(event: threading.Event) -> Optional[threading.Event]:
-    """Make a turn's Stop event (a capture's) the current thread's cancel for
-    the turn, so every wait that polls the cancel — an engine run about to
-    start, an LLM slot, a backoff — ends on the user's Stop too. Returns the
-    event it replaced, for :func:`restore_cancel`."""
+    """Add a turn's Stop event (a capture's) to the current thread's cancel
+    for the turn, so every wait that polls the cancel — an engine run about
+    to start, an LLM slot, a backoff — ends on the user's Stop too, and still
+    on a cancel the thread already carried. Returns that cancel, for
+    :func:`restore_cancel`."""
     prev = current_cancel()
-    register_cancel(event)
+    register_cancel(_AnyEvent(prev, event) if prev is not None else event)
     return prev
 
 
