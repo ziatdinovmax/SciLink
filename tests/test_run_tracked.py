@@ -242,7 +242,29 @@ def test_a_capture_restores_the_cancel_it_found():
     log_context.register_cancel(outer)
     try:
         with OutputCapture() as cap:
-            assert log_context.current_cancel() is cap._stop_event
+            assert not log_context.cancel_requested()
+            cap._stop_event.set()                           # the turn's Stop
+            assert log_context.cancel_requested()
+        assert log_context.current_cancel() is outer and not outer.is_set()
+    finally:
+        log_context.unregister_cancel()
+
+
+def test_a_capture_adds_the_turns_stop_to_the_cancel_it_found():
+    """A capture on a thread that already carries a cancel (a worker's budget
+    or memory cancel) keeps that cancel live for the turn: either ends a wait
+    (#760 review)."""
+    from scilink.ui.output_capture import AgentStoppedError, OutputCapture
+    from scilink.utils import log_context
+    outer = threading.Event()
+    log_context.register_cancel(outer)
+    try:
+        with OutputCapture():
+            log_context.raise_if_cancelled()                # nothing set yet
+            outer.set()                                     # the worker's own cancel, mid-turn
+            with pytest.raises(AgentStoppedError):
+                log_context.raise_if_cancelled()
+            assert log_context.current_cancel().wait(1.0)   # a wait on the cancel ends too
         assert log_context.current_cancel() is outer
     finally:
         log_context.unregister_cancel()

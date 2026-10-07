@@ -1320,14 +1320,15 @@ def _norm_name(name: str) -> str:
 #: prefix. Matched as a whole word of the original name, never as a
 #: substring (``ci`` must not hit ``Specific_Area``).
 _QUANTITY_PREFIX_WORDS = frozenset({"err", "error", "errors", "uncert", "uncertainty", "unc", "std", "stdev",
-                                    "stddev", "sigma", "snr", "noise", "ci", "var", "variance"})
+                                    "stddev", "sigma", "snr", "noise", "ci", "var", "variance", "rms"})
 
 
 def _words(name: str) -> List[str]:
-    """The words of an original column name: split on separators and at a
-    lower-to-upper case change (``Fit_R2`` and ``FitR2`` give the same)."""
+    """The words of an original column name, in their original case: split on
+    separators and at a lower-to-upper case change (``Fit_R2`` and ``FitR2``
+    give the same)."""
     import re
-    return [w.lower() for w in re.split(r"[^A-Za-z0-9]+", re.sub(r"([a-z])([A-Z])", r"\1_\2", str(name))) if w]
+    return [w for w in re.split(r"[^A-Za-z0-9]+", re.sub(r"([a-z])([A-Z])", r"\1_\2", str(name))) if w]
 
 
 def _column_units(row: Dict[str, Any]) -> Dict[str, str]:
@@ -1347,14 +1348,18 @@ def _column_units(row: Dict[str, Any]) -> Dict[str, str]:
 
 def _is_quantity_word(word: str) -> bool:
     """A listed quantity word up to its digits and a plural (``CI95``,
-    ``Uncertainties``, ``Errors``); the four-letter floor keeps ``cis`` from
-    reading as a plural of ``ci``."""
+    ``Uncertainties``, ``Errors``). The four-letter floor keeps ``cis`` from
+    reading as a plural of ``ci``; below it, only an upper-case acronym with a
+    lower-case ``s`` is a plural (``CIs``, not ``Cis`` of a cis isomer)."""
     w = word.strip("0123456789")
-    forms = [w]
-    if len(w) >= 4 and w.endswith("ies"):
-        forms.append(w[:-3] + "y")
-    elif len(w) >= 4 and w.endswith("s"):
-        forms.append(w[:-1])
+    lw = w.lower()
+    forms = [lw]
+    if len(lw) >= 4 and lw.endswith("ies"):
+        forms.append(lw[:-3] + "y")
+    elif len(lw) >= 4 and lw.endswith("s"):
+        forms.append(lw[:-1])
+    elif len(w) >= 3 and w.endswith("s") and w[:-1].isupper():
+        forms.append(lw[:-1])
     return any(f in _QUANTITY_PREFIX_WORDS for f in forms)
 
 
@@ -1390,7 +1395,7 @@ def _same_quantity(candidate: str, target: str, units: str = "", target_units: s
                 if len(seen) >= n_prefix:
                     break
                 words.append(w)
-                seen += w
+                seen += w.lower()
             if seen != longer[:n_prefix]:
                 words = [longer[:n_prefix]]            # boundaries do not align: judge it as one word
             return not any(_is_quantity_word(w) for w in words)
