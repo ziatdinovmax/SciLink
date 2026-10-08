@@ -93,7 +93,8 @@ def test_a_series_run_replays_its_first_regimes_locked_recipe_with_its_gate(tmp_
     assert _maps(res) == {"Peak_Position"}                       # regime B's script did not run
     assert res["script_reuse"]["n_replayed"] == 1
     src = res["script_reuse"]["source"]
-    assert "regime A" in src and "cube_0" in src and "first of 2 regimes" in src
+    assert "regime A" in src and "cube_0" in src and "1 of 2 in lock order" in src
+    assert res["script_reuse"]["regime_choice"]["chosen"] == 1
 
 
 def test_a_board_folder_of_regime_copies_replays_the_first_by_lock_order(tmp_path, monkeypatch):
@@ -111,7 +112,51 @@ def test_copies_with_no_recorded_order_replay_the_first_by_name_and_its_own_gate
     ag = _strict_agent(tmp_path, "x")
     rec = ag._prior_recipe([_board_copies(tmp_path, with_index=False)])
     assert rec["records"] == RECS_B and rec["reference_maps"] == REF_B      # chosen together
-    assert "the first of 2" in rec["source"] and "never a merge" in rec["source"]
+    assert "1 of 2 in lock order" in rec["source"] and "never a merge" in rec["source"]
+    # the other copy is an alternative, held to ITS gate if the first fails
+    [alt] = rec["alternatives"]
+    assert alt["records"] == RECS_A and alt["reference_maps"] == REF_A
+
+
+REF_B2 = {"Peak_Position": {"min": 698.0, "max": 722.0, "mean": 710.0, "coverage": 1.0}}
+
+
+def _same_method_series(tmp_path):
+    """Two regimes measuring the same quantity with the same script, their
+    gates holding different ranges (the band moved between the regimes)."""
+    d = tmp_path / "series2"
+    d.mkdir()
+    lock = lambda regime, idx, ref: {
+        "unit": f"cube_{idx}", "index": idx, "regime": regime, "file": "dynamic_analysis_records.json",
+        "script": json.dumps(RECS_A), "verdict": {"verified": True},
+        "gate": {"kind": "map_health", "reference_maps": ref},
+        "certification_reference": {"kind": "maps", "reference_maps": ref}}
+    (d / "analysis_results.json").write_text(json.dumps({"status": "success", "locked_recipes": {
+        "A": lock("A", 0, REF_A), "B": lock("B", 3, REF_B2)}}))
+    return d
+
+
+@pytest.mark.parametrize("center, kept, verified", [
+    (660.0, "A", True),          # regime A's frame: A, as before
+    (710.0, "B", True),          # regime B's: A's gate rejects it, B's own holds it
+    (800.0, "A", False),         # neither's: the first kept, not verified
+])
+def test_a_reuse_falls_through_the_regimes_on_their_own_gates(tmp_path, monkeypatch, center, kept, verified):
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+    np.save(tmp_path / "cube.npy", _peak_cube(center=center, seed=1))
+    res = _strict_agent(tmp_path, "frame").analyze(
+        str(tmp_path / "cube.npy"), system_info=dict(AXIS_OK),
+        prior_analysis_paths=[str(_same_method_series(tmp_path))], reuse_locked_script=True, strict_replay=True)
+    sr = res["script_reuse"]
+    assert sr["regime_choice"]["chosen_regime"] == kept and f"regime {kept}" in sr["source"]
+    assert bool((res.get("verdict") or {}).get("verified")) is verified
+    assert [t["regime"] for t in sr["regime_choice"]["tried"]] == (["A"] if kept == "A" and verified else ["A", "B"])
+    if verified:
+        assert {f["name"] for f in res["extracted_features"]} == {"Peak_Position"}
+    # the kept run is this run, at this run's folder
+    assert res.get("output_directory") == str(tmp_path / "frame")
+    if verified:
+        assert (tmp_path / "frame" / "analysis_results.json").is_file()
 
 
 def test_of_several_paths_the_first_is_replayed_and_the_rest_named(tmp_path):
