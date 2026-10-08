@@ -278,6 +278,8 @@ def list_reference_analyses(session_dir: str, limit: int = 40) -> List[Dict[str,
             pass
         add(d, "curve", model, (d / "spectrum_0000" / "data.npy").exists(), marker.stat().st_mtime)
     for marker in root.rglob("dynamic_analysis_records.json"):
+        if "_candidates" in marker.parts:
+            continue        # a run's tried candidates, never a reference of their own (#751)
         try:
             records = json.loads(marker.read_text())
             ok = [r for r in records if isinstance(r, dict) and r.get("task_success") and r.get("script")]

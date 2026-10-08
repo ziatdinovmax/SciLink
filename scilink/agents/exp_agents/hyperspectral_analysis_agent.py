@@ -2023,15 +2023,23 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 shutil.copytree(item, dest, dirs_exist_ok=True)
             else:
                 shutil.copy2(item, dest)
-        def moved(text: str) -> str:
-            # the candidate folder's path, whole, as this run's (never a sibling's prefix)
-            for end in ("/", '"', "\\"):
-                text = text.replace(str(src) + end, str(self.output_dir) + end)
-            return text
-        res = json.loads(moved(json.dumps({k: v for k, v in chosen["result"].items() if k != "success"},
+        seps = tuple({os.sep, "/"} | ({os.altsep} if os.altsep else set()))
+
+        def moved(value):
+            # a path in the candidate folder, whole, as this run's — on the parsed
+            # values, so a path is matched whatever its separators (never a
+            # sibling's prefix, never inside JSON escaping)
+            if isinstance(value, str):
+                if value == str(src) or value.startswith(tuple(str(src) + sep for sep in seps)):
+                    return str(self.output_dir) + value[len(str(src)):]
+                return value
+            if isinstance(value, dict):
+                return {k: moved(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [moved(v) for v in value]
+            return value
+        res = moved(json.loads(json.dumps({k: v for k, v in chosen["result"].items() if k != "success"},
                                           default=str)))
-        if res.get("output_directory") == str(src):
-            res["output_directory"] = str(self.output_dir)
         good = chosen["verdict"]["verdict"] == "good"
         sr = res.setdefault("script_reuse", {})
         sr["source"] = (cands[n - 1]["source"] or f"regime recipe {n}") + (
@@ -2044,7 +2052,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         sr["recipe_path"] = cands[n - 1]["path"]
         try:
             ar = self.output_dir / "analysis_results.json"
-            rec = json.loads(moved(ar.read_text(encoding="utf-8")))
+            rec = moved(json.loads(ar.read_text(encoding="utf-8")))
             rec["script_reuse"] = sr
             ar.write_text(json.dumps(rec, indent=2, default=str), encoding="utf-8")
         except (OSError, ValueError):

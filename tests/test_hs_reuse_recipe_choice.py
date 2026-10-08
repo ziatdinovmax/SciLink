@@ -14,6 +14,7 @@ merge shows as a second map, and a recipe held to another regime's gate fails.
 """
 import json
 import os
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -206,3 +207,26 @@ def test_the_board_records_each_regime_copys_lock_order(tmp_path):
     side = json.loads((tmp_path / "swarm" / "recipes" / "03_series" / "a1" / "cube_0"
                        / "dynamic_analysis_records.recipe.json").read_text())
     assert side["index"] == 0 and side["regime"] == "A"
+
+
+@pytest.mark.parametrize("center, donor", [(710.0, True), (800.0, False)])
+def test_a_reuses_tried_candidates_are_never_read_as_the_runs_recipe(tmp_path, monkeypatch, center, donor):
+    """The fan-out's donor probe and the Live tab's references read a folder's
+    recipe by its records file: a fall-through leaves one per try under
+    ``_candidates/`` (and the regime records each try was given), and none of
+    them is the run's — a regime this data rejected must never be offered."""
+    from scilink.agents.meta_agent.fanout import find_donor_reuse_dir
+    from scilink.server.live_api import list_reference_analyses
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+    np.save(tmp_path / "cube.npy", _peak_cube(center=center, seed=1))
+    run = tmp_path / "session" / "frame"
+    _strict_agent(tmp_path / "session", "frame").analyze(
+        str(tmp_path / "cube.npy"), system_info=dict(AXIS_OK),
+        prior_analysis_paths=[str(_same_method_series(tmp_path))], reuse_locked_script=True, strict_replay=True)
+    assert list((run / "_candidates").rglob("dynamic_analysis_records.json"))      # the tries are there
+    found, _kind = find_donor_reuse_dir(run)
+    listed = [r["path"] for r in list_reference_analyses(str(tmp_path / "session"))]   # session-relative
+    if donor:          # regime B kept: the run itself, once
+        assert found == run and listed == ["frame"]
+    else:              # nothing passed: no donor, nothing offered
+        assert found is None and listed == []
