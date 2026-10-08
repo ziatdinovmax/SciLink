@@ -1384,7 +1384,9 @@ def _promote_to_staging_unlocked(domain: str, rid: str, technique: Optional[str]
         # was consumed (upgrade/consolidate remove staged records) or pruned,
         # the mark is dangling and re-promotion is legitimate.
         if _staging.get_staged(domain, prior_sid, root=staging_root) is not None:
-            return {"status": "error",
+            # ``already_staged``: a caller that would otherwise stage the
+            # script itself skips it — the copy under review is this record's
+            return {"status": "error", "already_staged": prior_sid,
                     "message": (f"Record {rid} is already staged for review "
                                 f"(staged id {prior_sid}). Review it with "
                                 f"`scilink memory staged`.")}
