@@ -13,7 +13,10 @@ item runs — so it is the mode, the kind of data (by the largest unit's file
 type), that unit's in-memory size bucket (powers of two of a megabyte) and
 how many units there are. Two cubes of the same size and kind are one
 class whatever the agent then chooses to do with them, which is the
-granularity the measurement can honestly support. The table keeps the MAX
+granularity the measurement can honestly support — except the depth the
+caller asked for: a quick or extract analysis (``:quick``, by a profile
+dict's ``base``) is its own class, since its spend says nothing about a
+thorough run's, and a thorough one keeps the plain key (#756). The table keeps the MAX
 seen per class: a class is sized by its worst run, never by its average.
 Recorded: a run that did its class's work (peak and tokens), and a run that
 ended on memory — killed by the system, or cancelled by the guard — whose
@@ -71,14 +74,32 @@ def _units_bucket(n: int) -> str:
 
 
 def item_class(item: dict) -> str:
-    """``mode[:kind:largest-unit-bucket:units[:wN]]`` — see the module
-    docstring. ``:wN`` is the series' replay workers when more than one
+    """``mode[:kind:largest-unit-bucket:units[:wN]][:profile]`` — see the
+    module docstring. ``:wN`` is the series' replay workers when more than one
     (#750's own resolver and cap: a series' peak is its units in flight at
     once, so a four-worker run and a one-worker run of the same cubes are
     two classes). An analysis item with data it cannot read is
     ``analysis:unreadable``."""
     mode = str(item.get("mode") or "")
-    if mode != "analysis" or not item.get("data_path"):
+    if mode != "analysis":
+        return mode
+    return _base_class(item, mode) + _profile_suffix(item)
+
+
+def _profile_suffix(item: dict) -> str:
+    """``:<preset>`` for an analysis asked for at a depth other than the
+    default (a swarm item's ``depth``, a fan-out branch's own field), so its
+    spend sizes only its own kind of run; empty for thorough."""
+    prof = (item.get("depth") or {}).get("profile") if isinstance(item.get("depth"), dict) else None
+    prof = prof or item.get("profile")
+    if isinstance(prof, dict):
+        prof = prof.get("base") or prof.get("name")
+    prof = str(prof or "").strip().lower()
+    return "" if prof in ("", "thorough") else f":{prof}"
+
+
+def _base_class(item: dict, mode: str) -> str:
+    if not item.get("data_path"):
         return mode
     from ...utils.workers import resolve_workers
     from . import fanout as fo

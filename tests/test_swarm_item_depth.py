@@ -179,6 +179,9 @@ def test_the_same_depth_reaches_the_child_on_every_path(meta, monkeypatch, tmp_p
     ({"profile": "thorogh"}, "thorogh"),
     ({"targets": [3]}, "targets"),
     ({"time_budget_s": -5}, "time_budget_s"),
+    ({"time_budget_s": float("nan")}, "time_budget_s"),
+    ({"time_budget_s": float("inf")}, "time_budget_s"),
+    ({"time_budget_s": True}, "time_budget_s"),
 ])
 def test_bad_depth_is_refused_with_its_reason_before_anything_runs(meta, monkeypatch, tmp_path, bad, why):
     meta._get_analysis_child = lambda: Worker("analysis", tmp_path / "d")
@@ -232,3 +235,40 @@ def test_the_swarm_tool_offers_an_items_depth(meta):
     item = params["properties"]["work_items"]["items"]["properties"]
     assert item["profile"]["enum"] == ["thorough", "quick", "extract"]
     assert {"targets", "time_budget_s", "pattern"} <= set(item)
+
+
+# ── a quick run is measured apart from a thorough one ────────────────────
+
+def test_a_quick_or_extract_item_is_its_own_measured_class(tmp_path):
+    from scilink.agents.meta_agent import peaks
+    data = tmp_path / "d"
+    data.mkdir()
+    np.save(data / "a.npy", np.zeros((64, 64)))
+    base = {"mode": "analysis", "data_path": str(data)}
+    plain = peaks.item_class(base)
+    # thorough keeps the key existing tables were recorded under
+    assert peaks.item_class({**base, "depth": {"profile": "thorough"}}) == plain
+    assert peaks.item_class({**base, "depth": {"profile": "quick"}}) == plain + ":quick"
+    assert peaks.item_class({**base, "profile": "extract"}) == plain + ":extract"          # a fan-out branch
+    assert peaks.item_class({**base, "depth": {"profile": {"base": "quick", "max_attempts": 1}}}) == plain + ":quick"
+    assert peaks.item_class({"mode": "planning", "depth": {"profile": "quick"}}) == "planning"
+
+
+@pytest.mark.parametrize("recorded, asked, runs", [
+    # a cheap screening spend must not size a thorough run's reservation...
+    ({"quick": 30_000}, None, False),
+    # ...nor a thorough spend refuse the cheap screening swarm
+    ({"thorough": 300_000, "quick": 30_000}, "quick", True),
+])
+def test_a_reservation_is_sized_by_runs_at_the_items_own_depth(meta, monkeypatch, recorded, asked, runs):
+    from scilink.agents.meta_agent import peaks
+    for prof, tokens in recorded.items():
+        peaks.record(peaks.item_class({"mode": "analysis", "depth": {"profile": prof}}), tokens=tokens)
+    _workers(monkeypatch)
+    depth = {"profile": asked} if asked else {}
+    res = json.loads(swarm.run_swarm(meta, [{"mode": "analysis", "task": f"fit {n}", "label": n, **depth}
+                                            for n in "ABC"], budget={"max_tokens": 200_000}))
+    started = {c["task"] for c in Worker.calls}
+    assert (started == {"fit A", "fit B", "fit C"}) is runs, res.get("not_started")
+    if not runs:
+        assert all("token budget" in r["reason"] for r in res["not_started"])

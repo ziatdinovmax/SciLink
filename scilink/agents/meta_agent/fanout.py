@@ -37,6 +37,7 @@ import glob
 from scilink.utils import path_fence as _path_fence
 import io
 import json
+import math
 import logging
 import os
 
@@ -596,13 +597,15 @@ def analysis_depth(source: Any) -> dict:
             raise ValueError(f"targets must be a list of quantity names (got {targets!r})")
         depth["targets"] = [t.strip() for t in targets]
     budget = src.get("time_budget_s")
-    if budget:
+    if budget:                                   # 0 / None: no budget, as on every path before
         try:
+            if isinstance(budget, bool):
+                raise TypeError
             budget = float(budget)
         except (TypeError, ValueError):
             raise ValueError(f"time_budget_s must be a number of seconds (got {budget!r})") from None
-        if budget <= 0:
-            raise ValueError(f"time_budget_s must be positive (got {budget!r})")
+        if not math.isfinite(budget) or budget <= 0:
+            raise ValueError(f"time_budget_s must be a positive, finite number of seconds (got {budget!r})")
         depth["time_budget_s"] = budget
     return depth
 # In AUTONOMOUS mode there is no human to confirm, so the verdict IS the gate:
@@ -2316,7 +2319,7 @@ def run_fanout(orch, branches: List[dict],
             if b.get("_steering"):
                 entry["steered_by"] = [p["label"] for p in b["_steering"]]
             # As _delegate records it, and what a resumed branch runs under.
-            _depth = {k: b.get(k) for k in _BRANCH_DEPTH_KEYS if b.get(k)}
+            _depth = analysis_depth(b)
             if _depth:
                 entry["depth"] = _depth
             # Carry the input path/metadata so a later fuse_delegations can
