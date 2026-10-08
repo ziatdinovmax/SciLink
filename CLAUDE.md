@@ -156,7 +156,12 @@ later refit of the anchor (the refit's script stays as that unit's
 from it). A curve reuse of a series that locked several regimes replays the
 recipes in lock order and keeps the first the R² gate calls good; an image
 reuse replays the first regime's and says so (its verdict is one vision
-review, not a gate). `prior_analysis_paths` also takes a recipe FILE (`.py`,
+review, not a gate), and so does a hyperspectral reuse, its recipe held to
+that regime's own map gate: a folder of several records files (a series run's
+datasets, the board's copies of its regimes) is resolved to ONE recipe — the
+first by lock order, else by name — never merged, and of several paths the
+first is replayed and the rest named (`script_reuse.source`, #751).
+`prior_analysis_paths` also takes a recipe FILE (`.py`,
 or `dynamic_analysis_records.json` for a cube) through the same replay gate,
 so the swarm board's copy under `swarm/recipes/` is replayable — as a recipe
 only: a file is not a run, so the realtime profile, the live loop's anchor and

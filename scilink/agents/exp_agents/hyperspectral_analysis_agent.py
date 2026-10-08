@@ -381,7 +381,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     },
                     "output_directory": str(self.output_dir),
                 }
-            reuse_records = self._load_prior_dynamic_records(prior_analysis_paths)
+            recipe = self._prior_recipe(prior_analysis_paths)
+            reuse_records = (recipe or {}).get("records") or []
             if not reuse_records:
                 from ._joint import replay_refusal
                 _joint_why = next((r for r in (replay_refusal(p) for p in prior_analysis_paths) if r), None)
@@ -403,13 +404,14 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 # under in its sidecar (#734): a replay of the copy is held to
                 # the anchor's plausible ranges like the series' own replays,
                 # not to coverage alone. An explicit reference still wins.
-                replay_reference = self._recipe_sidecar_reference(prior_analysis_paths)
+                replay_reference = recipe.get("reference_maps")
             # With no gate to hold it to, the recipe's certification reference
             # (#753) only certifies: the verdict stays the one a replay of the
             # run would get (a single cube's recipe was approved by review, not
             # by a map gate, #711), and the run folder certifies the same way.
-            certification_maps = (None if replay_reference
-                                  else self._recipe_certification_maps(prior_analysis_paths))
+            certification_maps = None if replay_reference else recipe.get("certification_maps")
+            if recipe.get("source"):
+                self.logger.info(f"🔒 Replaying {recipe['source']}")
             # Verbatim replay is a single-attempt contract: a failure must be
             # reported (or salvaged), never regenerated into a different
             # method — that would silently break cross-dataset comparability.
@@ -669,6 +671,9 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             response["script_reuse"] = {
                 "prior_analysis_paths": [str(p) for p in prior_analysis_paths],
                 "n_replayed": len(reuse_records),
+                # which recipe was replayed and why (#751): one recipe, never a merge
+                **({"source": recipe["source"]} if (recipe or {}).get("source") else {}),
+                **({"recipe_path": recipe["path"]} if (recipe or {}).get("path") else {}),
                 # False when a mechanical execution repair had to modify a
                 # script — the run then is NOT byte-comparable to the donor.
                 "verbatim": bool(_new_recs) and all(
@@ -1849,6 +1854,125 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                                      f"({len(maps)} map(s), from {src.name}); its verdict is the run's")
                     return maps
         return None
+
+    @staticmethod
+    def _approved_records(path: Path) -> list:
+        """The approved records (``task_success`` and a script) of one records
+        file; empty when it is unreadable or holds none."""
+        try:
+            recs = json.loads(read_text_utf8(path))
+        except Exception:  # noqa: BLE001 - unreadable: no recipe here
+            return []
+        return [r for r in (recs if isinstance(recs, list) else [])
+                if isinstance(r, dict) and r.get("script") and r.get("task_success")]
+
+    def _prior_recipe(self, prior_analysis_paths: list) -> dict | None:
+        """The ONE recipe a locked-script reuse replays (#751), with the gate it
+        was locked under and its certification reference, chosen together:
+        ``{records, reference_maps, certification_maps, source, path}``.
+
+        Per path, in order: a records FILE is the recipe (as before); a run
+        folder holding one is that run's; a SERIES run folder replays its first
+        regime's locked recipe (``locked_recipes``, the script its followers
+        replayed), as the curve and image reuses do; a folder holding several
+        records files (the board's copies of a series' regimes, a series from
+        before the record) replays the first — by the lock order the board
+        recorded, else by name — and never merges them. The first path that
+        yields a recipe is used; the others are named as not replayed. None
+        when no path holds an approved recipe."""
+        from ._joint import replay_refusal
+        from ._verification_record import series_recipes
+        found, skipped = None, []
+        for raw in prior_analysis_paths or []:
+            base = Path(raw)
+            if found is not None:
+                skipped.append(str(raw))
+                continue
+            refused = replay_refusal(base)
+            if refused:
+                self.logger.warning(f"Prior records {base} not replayed: {refused}.")
+                continue
+            if base.is_file() and base.name == "dynamic_analysis_records.json":
+                files = [base]
+            elif base.is_dir() and (base / "dynamic_analysis_records.json").is_file():
+                files = [base / "dynamic_analysis_records.json"]
+            elif base.is_dir():
+                try:
+                    recorded = json.loads((base / "analysis_results.json").read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    recorded = None
+                locked = series_recipes(recorded if isinstance(recorded, dict) else None)
+                for n, r in enumerate(locked, 1):
+                    try:
+                        recs = json.loads(r["script"])
+                    except ValueError:
+                        continue
+                    recs = [x for x in (recs if isinstance(recs, list) else [])
+                            if isinstance(x, dict) and x.get("script") and x.get("task_success")]
+                    if not recs:
+                        continue
+                    gate = r.get("gate") or {}
+                    cert = r.get("certification_reference") or {}
+                    found = {"records": recs, "path": str(base),
+                             "reference_maps": (gate.get("reference_maps")
+                                                if gate.get("kind") == "map_health" else None) or None,
+                             "certification_maps": (cert.get("reference_maps")
+                                                    if cert.get("kind") == "maps" else None) or None,
+                             "source": (f"the series' locked recipe of regime {r.get('regime')!s} "
+                                        f"(anchor {r.get('unit')}"
+                                        + (f"; the first of {len(locked)} regimes, as a reuse of a "
+                                           "series replays its first regime" if len(locked) > 1 else "")
+                                        + (f"; regime {n} — the earlier ones hold no approved script"
+                                           if n > 1 else "") + ")")}
+                    break
+                if found is not None:
+                    continue
+                files = (sorted(base.glob("*/dynamic_analysis_records.json"))
+                         + sorted(base.glob("results/*/dynamic_analysis_records.json")))
+                files = sorted(files, key=lambda f: (self._copy_lock_order(f), str(f)))
+            else:
+                files = []
+            for f in files:
+                if replay_refusal(f):
+                    self.logger.warning(f"Prior records {f} not replayed: {replay_refusal(f)}.")
+                    continue
+                recs = self._approved_records(f)
+                if not recs:
+                    continue
+                side = self._copy_sidecar(f)
+                found = {"records": recs, "path": str(f),
+                         "reference_maps": self._recipe_sidecar_reference([f]),
+                         "certification_maps": self._recipe_certification_maps([f]),
+                         "source": None}
+                if len(files) > 1:
+                    what = (f"regime {side['regime']!s} (unit {side.get('unit') or f.parent.name})"
+                            if side.get("regime") else f"{f.parent.name}")
+                    found["source"] = (f"{what}'s records, the first of {len(files)} in {base} "
+                                       "— one recipe is replayed, never a merge of them")
+                elif base.is_file():
+                    found["source"] = f"the records file named ({f})"
+                break
+        if found is not None and skipped:
+            found["source"] = ((found["source"] or f"the recipe in {found['path']}")
+                               + f"; not replayed: {', '.join(skipped)}")
+            self.logger.warning(f"One prior recipe is replayed; not replayed: {', '.join(skipped)}")
+        return found
+
+    @staticmethod
+    def _copy_sidecar(records_file: Path) -> dict:
+        """The board's sidecar beside a copied records file (#734), or {}."""
+        try:
+            data = json.loads((Path(records_file).with_name("dynamic_analysis_records.recipe.json"))
+                              .read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _copy_lock_order(self, records_file: Path) -> int:
+        """The order the board recorded for a copied regime recipe (the anchor
+        unit's index in its series), else last."""
+        idx = self._copy_sidecar(records_file).get("index")
+        return idx if isinstance(idx, int) and not isinstance(idx, bool) else 1 << 30
 
     def _load_prior_dynamic_records(self, prior_analysis_paths: list) -> list:
         """Collect the APPROVED dynamic-analysis records of prior runs.

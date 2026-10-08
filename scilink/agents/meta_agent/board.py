@@ -668,6 +668,9 @@ def _recipe_specs(aid: str, rec: Dict[str, Any]) -> List[Dict[str, Any]]:
             out.append({"kind": "recipe",
                         "payload": {"analysis_id": aid, "agent": rec.get("agent_name"), "unit": r["unit"],
                                     "regime": r.get("regime"),
+                                    # the anchor's index in its series: the regimes' lock order,
+                                    # which a reuse of a folder of copies replays the first of (#751)
+                                    **({"index": r["index"]} if isinstance(r.get("index"), int) else {}),
                                     # what the recipe was approved under and what it is: a replay of
                                     # the board's copy is held to this gate (#717)
                                     **({"quality_gate": r["gate"]} if isinstance(r.get("gate"), dict) else {}),
@@ -963,6 +966,8 @@ def _materialize_recipe(board: Board, entry: Dict[str, Any], spec: Dict[str, Any
     # a figure-of-merit recipe replayed under the R² default, #717)
     side = {k: spec["payload"][k] for k in ("quality_gate", "model", "regime", "unit", "analysis_id", "analysis_shape")
             if spec["payload"].get(k)}
+    if isinstance(spec["payload"].get("index"), int):
+        side["index"] = spec["payload"]["index"]          # 0 is the first anchor (#751)
     if isinstance(cert_ref, dict):
         side["certification_reference"] = cert_ref
     if side.get("quality_gate") or side.get("analysis_shape") or side.get("certification_reference"):
