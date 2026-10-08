@@ -464,8 +464,53 @@ class TestConcurrentWriters:
         _bank(script="print('new')", fp=_fp(center=40, seed=2))     # must not deadlock
         assert [r["id"] for r in sb.list_archived("curve_fitting")] == [old]
 
+    def _slow_staging(self, monkeypatch, during=None):
+        """Stage after a pause (and run ``during`` in it), so a second writer
+        reaches the record while a promotion is between its read and write."""
+        import time
+        from scilink.skills._shared import _staging
+        real = _staging.stage_solution
+
+        def slow(*a, **k):
+            if during:
+                during()
+            time.sleep(0.3)
+            return real(*a, **k)
+        monkeypatch.setattr(_staging, "stage_solution", slow)
+
+    def test_two_promotions_of_one_record_stage_it_once(self, monkeypatch):
+        import threading
+        from scilink.skills._shared import _staging
+        rid = _bank()
+        self._slow_staging(monkeypatch)
+        outs = []
+        threads = [threading.Thread(target=lambda: outs.append(
+            sb.promote_to_staging("curve_fitting", rid, technique="t"))) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert sorted(o["status"] for o in outs) == ["error", "success"]
+        assert len(_staging.list_staged("curve_fitting")) == 1
+        sid = next(o["staged_id"] for o in outs if o["status"] == "success")
+        assert _rec(rid)["promoted_to_staging"] == sid
+
+    def test_a_success_counted_during_a_promotion_is_kept(self, monkeypatch):
+        import threading
+        rid = _bank()
+        n0 = _rec(rid)["stats"]["n_successes"]
+        other = threading.Thread(target=sb.record_success, args=("curve_fitting", rid),
+                                 kwargs={"session": "s9"})
+        self._slow_staging(monkeypatch, during=other.start)
+        out = sb.promote_to_staging("curve_fitting", rid, technique="t")
+        other.join()
+        rec = _rec(rid)
+        assert out["status"] == "success" and rec["promoted_to_staging"] == out["staged_id"]
+        assert rec["stats"]["n_successes"] == n0 + 1
+
     def test_public_names_are_the_locked_ones(self):
         for name in ("add_record", "record_success", "record_failure",
-                     "mark_retrieved", "archive_records", "restore_records"):
+                     "mark_retrieved", "archive_records", "restore_records",
+                     "promote_to_staging"):
             assert getattr(sb, name).__name__ == name
             assert getattr(sb, name).__wrapped__.__name__ == f"_{name}_unlocked"
