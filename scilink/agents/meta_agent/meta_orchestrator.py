@@ -1459,8 +1459,15 @@ class MetaOrchestratorAgent:
                 "message": f"Unknown delegation target: {mode}",
             })
 
+        if mode == "analysis":
+            from .fanout import analysis_depth
+            try:
+                depth = analysis_depth(depth)
+            except ValueError as e:
+                return json.dumps({"status": "error", "message": f"{e}. Nothing was delegated."})
+        else:
+            depth = {}
         entry = self._open_delegation(mode, task, context, context_from, label)
-        depth = {k: v for k, v in (depth or {}).items() if v} if mode == "analysis" else {}
         with self._fanout_lock:               # new keys on a live entry: see _ledger_snapshot
             if depth:
                 entry["depth"] = depth

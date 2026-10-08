@@ -856,6 +856,29 @@ class MetaOrchestratorTools:
                                                          "dataset path, used to estimate the "
                                                          "item's memory and set its time "
                                                          "budget."},
+                            "pattern": {"type": "string",
+                                        "description": "Optional, analysis items: a filename "
+                                                       "glob selecting the item's files when "
+                                                       "data_path is a directory holding several "
+                                                       "datasets; sizes its memory estimate and "
+                                                       "time budget. The task must still name "
+                                                       "the files it analyses."},
+                            "profile": {"type": "string",
+                                        "enum": ["thorough", "quick", "extract"],
+                                        "description": "Optional, analysis items: the depth for "
+                                                       "THIS item, chosen by what its result is "
+                                                       "for (see delegate_to_analysis). Omit for "
+                                                       "thorough."},
+                            "targets": {"type": "array", "items": {"type": "string"},
+                                        "description": "Optional, analysis items: the quantities "
+                                                       "needed from THIS item, in plain words; "
+                                                       "scopes its verifier to them."},
+                            "time_budget_s": {"type": "number",
+                                              "description": "Optional, analysis items: soft "
+                                                             "wall-clock budget per analysis, in "
+                                                             "seconds (see delegate_to_analysis); "
+                                                             "item_time_budget_s still bounds the "
+                                                             "whole item."},
                             "context": {"type": "object",
                                         "description": "Optional context, as for a "
                                                        "delegate_to_* call."},
@@ -902,8 +925,9 @@ class MetaOrchestratorTools:
                     "type": "array",
                     "description": ("Optional reactions: {on: {kind, subject?, status?}, "
                                     "enqueue: {mode, label, task, subject?, reads_board?, "
-                                    "check?, context?, data_path?}, max_fires?}. `task` and "
-                                    "`label` are templates filled from the triggering finding."),
+                                    "check?, context?, data_path?, pattern?, profile?, targets?, "
+                                    "time_budget_s?}, max_fires?}. `task` and `label` are "
+                                    "templates filled from the triggering finding."),
                     "items": {
                         "type": "object",
                         "properties": {
@@ -923,6 +947,11 @@ class MetaOrchestratorTools:
                                             "task": {"type": "string"},
                                             "subject": {"type": "string"},
                                             "data_path": {"type": "string"},
+                                            "pattern": {"type": "string"},
+                                            "profile": {"type": "string",
+                                                        "enum": ["thorough", "quick", "extract"]},
+                                            "targets": {"type": "array", "items": {"type": "string"}},
+                                            "time_budget_s": {"type": "number"},
                                             "context": {"type": "object"},
                                             "reads_board": {"type": "object"},
                                             "check": {"type": "boolean"}},

@@ -982,6 +982,11 @@ Settled rules, each learned from a live run or a review:
   its task and context carry everything. The persistent specialists stay for
   conversation, where accumulating context is the point — and two concurrent
   `run_task` calls on one specialist would each report the other's output.
+  An analysis item carries its own depth (`profile`, `targets`,
+  `time_budget_s`) as a delegation and a fan-out branch do: one rule reads it
+  on all three paths (`fanout.analysis_depth`; a bad value is refused before
+  anything runs), it is on the entry, and a rerun or a re-run after a
+  retraction starts from it (#756).
 - **The coordinator is rules, not a model.** Admission by free memory (an
   item is estimated by its LARGEST unit, nested data included — a series runs
   its units one at a time, times the replay workers the agent itself resolves

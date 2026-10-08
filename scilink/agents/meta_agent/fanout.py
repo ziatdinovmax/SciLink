@@ -37,6 +37,7 @@ import glob
 from scilink.utils import path_fence as _path_fence
 import io
 import json
+import math
 import logging
 import os
 
@@ -571,6 +572,42 @@ FANOUT_RAW_INSTRUMENT_BUDGET_FACTOR = 3.0
 FANOUT_SERIES_BUDGET_FACTOR = 2.0
 #: A branch's typed depth, the single delegation's ``depth`` keys.
 _BRANCH_DEPTH_KEYS = ("profile", "targets", "time_budget_s")
+
+
+def analysis_depth(source: Any) -> dict:
+    """The typed depth of an analysis delegation, a fan-out branch or a swarm
+    item — ``profile``, ``targets``, ``time_budget_s`` — read by one rule on
+    all three paths (#756). Unset keys are left out, so a source with none
+    gives ``{}`` and the child's call is what it was without them. Raises
+    ``ValueError`` with the reason for a profile no preset names, targets
+    that are not quantity names, or a budget that is not a positive number:
+    refused before anything runs, never passed through."""
+    src = source if isinstance(source, dict) else {}
+    depth: dict = {}
+    if src.get("profile"):
+        from ..exp_agents._qc_profile import resolve_profile
+        resolve_profile(src["profile"])          # its error names the presets
+        depth["profile"] = src["profile"]
+    targets = src.get("targets")
+    if targets:
+        if isinstance(targets, str):
+            targets = [targets]
+        if (not isinstance(targets, (list, tuple))
+                or not all(isinstance(t, str) and t.strip() for t in targets)):
+            raise ValueError(f"targets must be a list of quantity names (got {targets!r})")
+        depth["targets"] = [t.strip() for t in targets]
+    budget = src.get("time_budget_s")
+    if budget:                                   # 0 / None: no budget, as on every path before
+        try:
+            if isinstance(budget, bool):
+                raise TypeError
+            budget = float(budget)
+        except (TypeError, ValueError):
+            raise ValueError(f"time_budget_s must be a number of seconds (got {budget!r})") from None
+        if not math.isfinite(budget) or budget <= 0:
+            raise ValueError(f"time_budget_s must be a positive, finite number of seconds (got {budget!r})")
+        depth["time_budget_s"] = budget
+    return depth
 # In AUTONOMOUS mode there is no human to confirm, so the verdict IS the gate:
 # proceed only on a confident 'complementary' read.
 AUTONOMOUS_CONFIDENCE_THRESHOLD = 0.6
@@ -1514,7 +1551,7 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
                          else _mesh_task(branch, companions))
             # Typed per-branch depth (the single-delegation path's twin): the
             # child applies it to every run_analysis call of the branch.
-            _depth = {k: branch.get(k) for k in _BRANCH_DEPTH_KEYS if branch.get(k)}
+            _depth = analysis_depth(branch)
             # The branch's wall-clock budget is NOT handed to the child as a
             # run deadline: the fan-out's hard cancel already bounds the
             # branch, and a run deadline counts human wait (an AUTOPILOT plan
@@ -2038,6 +2075,11 @@ def run_fanout(orch, branches: List[dict],
                            f"(same data_path AND task): {dp}")
             continue
         seen_dup.add(dup_key)
+        try:
+            depth = analysis_depth(b)
+        except ValueError as e:
+            return json.dumps({"status": "error", "message": (
+                f"Branch '{b.get('label') or Path(dp).stem}': {e}. Nothing was started.")})
         norm.append({
             "data_path": dp, "task": task,
             "label": (b.get("label") or Path(dp).stem),
@@ -2052,7 +2094,7 @@ def run_fanout(orch, branches: List[dict],
             "figure_style": (str(figure_style) if figure_style else None),
             # The branch's typed depth (#718): read at the launch site and
             # applied by the child to every run_analysis call of the branch.
-            **{k: b.get(k) for k in _BRANCH_DEPTH_KEYS if b.get(k)},
+            **depth,
         })
     # Stash for fuse_delegations (a separate tool call): fusion codegen
     # applies the same presentation preference to fusion_figure.png.
@@ -2277,7 +2319,7 @@ def run_fanout(orch, branches: List[dict],
             if b.get("_steering"):
                 entry["steered_by"] = [p["label"] for p in b["_steering"]]
             # As _delegate records it, and what a resumed branch runs under.
-            _depth = {k: b.get(k) for k in _BRANCH_DEPTH_KEYS if b.get(k)}
+            _depth = analysis_depth(b)
             if _depth:
                 entry["depth"] = _depth
             # Carry the input path/metadata so a later fuse_delegations can

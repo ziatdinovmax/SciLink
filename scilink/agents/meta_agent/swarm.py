@@ -146,7 +146,15 @@ def normalize_items(items: Any, *, coordinator: bool = False) -> Tuple[List[dict
         if not task:
             refused.append({"item": i + 1, "label": label, "reason": "empty task"})
             continue
+        # An analysis item's typed depth, by the rule a delegation and a
+        # fan-out branch use (#756); other modes have none, as before.
+        try:
+            depth = fo.analysis_depth(raw) if mode == "analysis" else {}
+        except ValueError as e:
+            refused.append({"item": i + 1, "label": label, "reason": str(e)})
+            continue
         ok.append({**{k: v for k, v in raw.items() if coordinator or k not in _COORDINATOR_FIELDS},
+                   "depth": depth,
                    "mode": mode, "task": task, "label": label,
                    "subject": (str(raw.get("subject")).strip() if raw.get("subject") else None),
                    "reads_board": _read_spec(raw.get("reads_board")),
@@ -373,7 +381,8 @@ def _run_item(orch, item: dict, entry: dict, channel, autonomy: str, stop_event)
             else:
                 child = build_child(orch, item["mode"], base_dir, label=f"Swarm: {item['label']}")
                 result = child.run_task(task, context=item.get("context"),
-                                        autonomy=autonomy_for(item["mode"], autonomy))
+                                        autonomy=autonomy_for(item["mode"], autonomy),
+                                        **(item.get("depth") or {}))
         except Exception as exc:  # noqa: BLE001
             fo.logger.exception(f"swarm item {index} failed: {exc}")
             result = _error_result(str(exc))
@@ -639,6 +648,10 @@ def run_swarm(orch, items: Any, item_time_budget_s: Optional[float] = None,
                 # its complementarity gate from the entries' data paths.
                 entry["data_path"] = str(item["data_path"])
             entry["_budget_s"] = item_budget
+            if item.get("depth"):
+                entry["depth"] = dict(item["depth"])
+            if item["mode"] == "analysis" and item.get("pattern"):
+                entry["pattern"] = str(item["pattern"])
             # The item's own inputs, so a re-run (retract_finding's
             # rerun_items) starts from what this one had.
             if item.get("reads_board") is not None:
