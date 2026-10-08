@@ -717,6 +717,8 @@ def find_donor_reuse_dir(donor_dir) -> tuple:
                    key=lambda p: p.stat().st_mtime)
     from ..exp_agents._joint import replay_refusal
     for c in reversed(cands):
+        if "_candidates" in c.parts:
+            continue    # a candidate a run tried, kept or not, never the run's own record (#751)
         if replay_refusal(c):
             continue    # a joint run's records read its own run's files: no donor (#757)
         try:
