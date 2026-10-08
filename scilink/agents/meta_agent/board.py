@@ -1176,11 +1176,13 @@ def retract_and_report(orch, finding_id: str, reason: str) -> Dict[str, Any]:
         if e.get("caused_by"):
             # a reaction re-run still rests on its cause (its task quotes it)
             item["rests_on"] = list(e["caused_by"])
-        for key in ("data_path", "reads_board", "check"):
+        for key in ("data_path", "pattern", "reads_board", "check"):
             # ``reads_board: {}`` is the plain opt-in and falsy — test for
             # presence, not truth; a False check or an absent spec is the default.
             if e.get(key) is not None and e.get(key) is not False:
                 item[key] = e[key]
+        if src["mode"] == "analysis" and isinstance(e.get("depth"), dict):
+            item.update(e["depth"])           # the depth the original ran at
         rerun_items.append(item)
     parts = ([f"withdraws {', '.join(fx['withdrawn'])}"] if fx["withdrawn"] else []) \
         + ([f"taints {len(fx['tainted'])}"] if fx["tainted"] else []) \

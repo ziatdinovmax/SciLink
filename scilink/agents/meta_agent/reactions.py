@@ -78,6 +78,13 @@ def normalize_subscriptions(raw: Any) -> Tuple[List[dict], List[dict]]:
         if not task:
             refused.append({"subscription": n, "reason": "enqueue.task is empty"})
             continue
+        if mode == "analysis":
+            from .fanout import analysis_depth
+            try:
+                analysis_depth(enq)
+            except ValueError as e:
+                refused.append({"subscription": n, "reason": f"enqueue: {e}"})
+                continue
         try:
             max_fires = int(sub.get("max_fires", DEFAULT_MAX_FIRES))
         except (TypeError, ValueError):

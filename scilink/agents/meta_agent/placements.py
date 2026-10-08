@@ -211,6 +211,7 @@ def item_spec(orch, item: dict, task: str, base_dir: Path, autonomy: str) -> dic
     from ... import executors
     return {
         "mode": item["mode"], "task": task, "context": item.get("context"),
+        "depth": dict(item.get("depth") or {}),
         "label": item["label"], "base_dir": str(base_dir), "autonomy": autonomy,
         "budget_s": item.get("_budget_s"), "host": host_spec(orch),
         "sandbox_approved": bool(getattr(executors, "_GLOBAL_SANDBOX_APPROVED", False)
@@ -286,7 +287,8 @@ def run_item(spec: dict) -> dict:
     try:
         child = build_child(host, spec["mode"], base_dir, label=f"Swarm: {spec['label']}")
         result = child.run_task(spec["task"], context=spec.get("context"),
-                                autonomy=autonomy_for(spec["mode"], spec["autonomy"]))
+                                autonomy=autonomy_for(spec["mode"], spec["autonomy"]),
+                                **(spec.get("depth") or {}))
     except Exception as exc:  # noqa: BLE001 - the work's failure is a result
         result = {"status": "error", "error": str(exc), "summary": "", "key_findings": [],
                   "files_produced": [], "suggested_followups": [], "warnings": []}
