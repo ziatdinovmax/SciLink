@@ -1354,11 +1354,11 @@ def find_by_script(domain: str, script: str, *,
     return hit[0] if hit else None
 
 
-def promote_to_staging(domain: str, rid: str, technique: Optional[str] = None,
-                       *, root: Optional[Path] = None,
-                       staging_root: Optional[Path] = None,
-                       provenance: str = "bank_proven",
-                       extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _promote_to_staging_unlocked(domain: str, rid: str, technique: Optional[str] = None,
+                                 *, root: Optional[Path] = None,
+                                 staging_root: Optional[Path] = None,
+                                 provenance: str = "bank_proven",
+                                 extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Copy a bank record into the distill-staging buffer (graduation path).
 
     The staged record enters the existing review-gated ceremony (upgrade an
@@ -1367,6 +1367,11 @@ def promote_to_staging(domain: str, rid: str, technique: Optional[str] = None,
     bank record is kept and marked ``promoted_to_staging`` so surfaces show
     it and repeat promotions are flagged. ``technique`` defaults to a
     deterministic label derived from the record (no LLM).
+
+    A read-modify-write of the record, so it runs under the domain lock (the
+    public ``promote_to_staging``): two promotions of one record stage it once,
+    and a success counted meanwhile is kept. The staging lock is taken inside
+    it, never the other way round.
     """
     from . import _staging
 
@@ -1379,7 +1384,9 @@ def promote_to_staging(domain: str, rid: str, technique: Optional[str] = None,
         # was consumed (upgrade/consolidate remove staged records) or pruned,
         # the mark is dangling and re-promotion is legitimate.
         if _staging.get_staged(domain, prior_sid, root=staging_root) is not None:
-            return {"status": "error",
+            # ``already_staged``: a caller that would otherwise stage the
+            # script itself skips it — the copy under review is this record's
+            return {"status": "error", "already_staged": prior_sid,
                     "message": (f"Record {rid} is already staged for review "
                                 f"(staged id {prior_sid}). Review it with "
                                 f"`scilink memory staged`.")}
@@ -1646,3 +1653,4 @@ record_failure = _locked(_record_failure_unlocked)
 archive_records = _locked(_archive_records_unlocked)
 restore_records = _locked(_restore_records_unlocked)
 remove_records = _locked(_remove_records_unlocked)
+promote_to_staging = _locked(_promote_to_staging_unlocked)

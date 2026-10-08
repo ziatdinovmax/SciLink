@@ -308,6 +308,47 @@ class TestT2StageHook:
         assert staged[0]["technique"] == "voigt_plus_exp_tail"
         assert "VERBATIM_MARKER" in staged[0]["working_script"]
 
+    def test_a_banked_script_is_staged_once_however_often_it_is_nominated(self, tmp_path, monkeypatch):
+        """#398: the second nomination of a record already awaiting review is
+        skipped, not staged again as an unlinked copy — one after the other,
+        and from two threads at once."""
+        import threading
+        import time
+        monkeypatch.setenv("SCILINK_HOME", str(tmp_path))
+        monkeypatch.setenv("SCILINK_MEMORY", "1")
+        monkeypatch.delenv("SCILINK_SCRIPT_BANK", raising=False)
+        from scilink.agents.exp_agents.curve_fitting_agent import CurveFittingAgent
+        from scilink.skills._shared import _script_bank, _staging
+        state = self._hot_state()
+        rid = _script_bank.add_record("curve_fitting", {
+            "working_script": state["series_results"][0]["script"],
+            "data_fingerprint": {"kind": "curve", "n": 10},
+            "measurement_context": {"technique": "raman"},
+            "provenance": {"session": "s1"}})["id"]
+        agent = self._fake_agent(str(tmp_path), self._Model())
+
+        def one_copy_linked():
+            staged = _staging.list_staged("curve_fitting")
+            assert len(staged) == 1 and staged[0].get("bank_id") == rid
+            return staged[0]["id"]
+
+        first = CurveFittingAgent._maybe_stage_t2_solutions(agent, self._hot_state())
+        assert CurveFittingAgent._maybe_stage_t2_solutions(agent, self._hot_state()) == []
+        assert first == [one_copy_linked()]
+        # the same race between two nominations, staging slowed so both read first
+        _staging.remove_staged("curve_fitting", first)
+        real = _staging.stage_solution
+        monkeypatch.setattr(_staging, "stage_solution", lambda *a, **k: (time.sleep(0.3), real(*a, **k))[1])
+        outs = []
+        threads = [threading.Thread(target=lambda: outs.append(
+            CurveFittingAgent._maybe_stage_t2_solutions(agent, self._hot_state()))) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert sorted(len(o) for o in outs) == [0, 1]
+        one_copy_linked()
+
     def test_no_stage_when_not_hot(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SCILINK_HOME", str(tmp_path))
         from scilink.agents.exp_agents.curve_fitting_agent import CurveFittingAgent

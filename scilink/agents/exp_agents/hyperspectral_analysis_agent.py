@@ -1788,6 +1788,10 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     )
                     if out.get("status") == "success":
                         sid = out["staged_id"]
+                    elif out.get("already_staged"):
+                        # this record's copy is already awaiting review: a
+                        # second, unlinked copy would be a duplicate (#398)
+                        continue
                 if sid is None:
                     sid = _staging.stage_solution("hyperspectral", technique, record)
                 staged.append(sid)
