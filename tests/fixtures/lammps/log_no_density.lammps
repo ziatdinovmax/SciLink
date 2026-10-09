@@ -1,0 +1,66 @@
+    4100 = # of frozen angles
+  find clusters CPU = 0.001 seconds
+
+# ============================================================
+# STAGE 1 : 100 ps NVT re-thermalization  (fresh velocities, seed 101)
+# ============================================================
+velocity        all create 298.15 101 dist gaussian mom yes rot yes
+
+fix             NVT all nvt temp 298.15 298.15 100.0
+
+thermo          1000
+thermo_style    custom step temp press pe ke etotal vol pxy pxz pyz
+thermo_modify   flush yes
+timestep        1.0
+
+restart         50000 thermalize.restart1 thermalize.restart2
+run             100000     # 100 ps
+
+CITE-CITE-CITE-CITE-CITE-CITE-CITE-CITE-CITE-CITE-CITE-CITE-CITE
+
+Your simulation uses code contributions which should be cited:
+
+- Type Label Framework: https://doi.org/10.1021/acs.jpcb.3c08419
+
+@Article{Gissinger24,
+ author = {Jacob R. Gissinger, Ilia Nikiforov, Yaser Afshar, Brendon Waters, Moon-ki Choi, Daniel S. Karls, Alexander Stukowski, Wonpil Im, Hendrik Heinz, Axel Kohlmeyer, and Ellad B. Tadmor},
+ title = {Type Label Framework for Bonded Force Fields in LAMMPS},
+ journal = {J. Phys. Chem. B},
+ year =    2024,
+ volume =  128,
+ number =  13,
+ pages =   {3282–-3297}
+}
+
+CITE-CITE-CITE-CITE-CITE-CITE-CITE-CITE-CITE-CITE-CITE-CITE-CITE
+
+PPPM initialization ...
+WARNING: System is not charge neutral, net charge = 4.598e-05 (src/kspace.cpp:327)
+  using 12-bit tables for long-range coulomb (src/kspace.cpp:342)
+  G vector (1/distance) = 0.21466932
+  grid = 24 24 24
+  stencil order = 5
+  estimated absolute RMS force accuracy = 0.032801388
+  estimated relative force accuracy = 9.8780404e-05
+  using double precision FFTW3
+  3d grid and FFT values/proc = 2197 216
+Generated 36 of 36 mixed pair_coeff terms from geometric mixing rule
+Neighbor list info ...
+  update: every = 1 steps, delay = 0 steps, check = yes
+  max neighbors/atom: 2000, page size: 100000
+  master list distance cutoff = 14.5
+  ghost atom cutoff = 14.5
+  binsize = 7.25, bins = 9 9 9
+  1 neighbor lists, perpetual/occasional/extra = 1 0 0
+  (1) pair lj/cut/coul/long, perpetual
+      attributes: half, newton on
+      pair build: half/bin/newton
+      stencil: half/bin/3d
+      bin: standard
+Per MPI rank memory allocation (min/avg/max) = 16.65 | 17.07 | 17.71 Mbytes
+   Step          Temp          Press          PotEng         KinEng         TotEng         Volume          Pxy            Pxz            Pyz      
+         0   302.58904     -652.56917     -82486.615      11849.054     -70637.561      214656         345.85429      351.83907     -5.4821179    
+
+         0   302.58904     -652.56917     -82486.615      11849.054     -70637.561      214656         345.85429      351.83907     -5.4821179    
+ERROR: Fix in variable not computed at compatible time (src/variable.cpp:4463)
+Last command: run             200000     # 200 ps
