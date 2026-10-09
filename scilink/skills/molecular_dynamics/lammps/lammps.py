@@ -1681,7 +1681,135 @@ def detect_signal_logging(deck_text: str, signal: str) -> Dict[str, Any]:
     return {"present": False, "interval_steps": None}
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Health-gate reader — a gross physical-sanity value from a finished run
+# ──────────────────────────────────────────────────────────────────────────
+
+# health observable name -> LAMMPS thermo column header tokens (lowercased)
+# that carry it, most-preferred first.
+_HEALTH_COLUMNS: Dict[str, Tuple[str, ...]] = {
+    "density": ("density",),
+    "temperature": ("temp", "temperature"),
+    "pressure": ("press", "pressure"),
+    "volume": ("volume", "vol"),
+    "potential_energy": ("poteng", "pe"),
+    "total_energy": ("toteng", "etotal"),
+}
+
+_THERMO_LOG_NAMES = ("log.lammps", "thermo.log")
+
+
+def _find_thermo_log(output_dir: str) -> Optional[Path]:
+    """Return the LAMMPS thermo log in ``output_dir`` (recursively), or None."""
+    d = Path(output_dir)
+    if not d.is_dir():
+        return None
+    for name in _THERMO_LOG_NAMES:
+        hit = d / name
+        if hit.is_file():
+            return hit
+    # a fan-out member may nest the log one level down
+    for name in _THERMO_LOG_NAMES:
+        for hit in d.rglob(name):
+            if hit.is_file():
+                return hit
+    return None
+
+
+def _parse_thermo_columns(log_file: Path) -> Dict[str, List[float]]:
+    """Extract thermo columns from a LAMMPS log, keyed by lowercased header.
+
+    Accumulates every thermo block in the file (minimize, equilibrate, produce)
+    in order; never raises — a malformed log yields whatever parsed so far.
+    """
+    data: Dict[str, List[float]] = {}
+    headers: List[str] = []
+    try:
+        with open(log_file, "r", errors="ignore") as f:
+            in_thermo = False
+            for line in f:
+                s = line.strip()
+                if s.startswith("Step ") or s == "Step":
+                    headers = [h.lower() for h in s.split()]
+                    for h in headers:
+                        data.setdefault(h, [])
+                    in_thermo = True
+                    continue
+                if in_thermo:
+                    if not s or s.startswith("Loop time"):
+                        in_thermo = False
+                        continue
+                    parts = s.split()
+                    if len(parts) != len(headers):
+                        in_thermo = False
+                        continue
+                    try:
+                        row = [float(x) for x in parts]
+                    except ValueError:
+                        in_thermo = False
+                        continue
+                    for h, v in zip(headers, row):
+                        data[h].append(v)
+    except Exception as e:
+        logger.debug("could not parse LAMMPS thermo log %s: %s", log_file, e)
+    return data
+
+
+def _equilibrated_mean(values: List[float]) -> Optional[float]:
+    """Mean of the back half of a thermo series (drops startup transients)."""
+    if not values:
+        return None
+    tail = values[len(values) // 2:] or values
+    return sum(tail) / len(tail)
+
+
+def read_health_observable(output_dir: str, observable: str) -> Optional[float]:
+    """Read one gross physical-sanity observable from a finished LAMMPS run.
+
+    Engine hook for the engine-neutral health gate (mirrors VASP's
+    ``read_convergence_observable``). Parses the thermo log and returns the
+    back-half mean of the matching column — robust enough to tell a physical run
+    from a blown-up one (e.g. density near zero after a barostat instability).
+    Which observables and plausible bands to check live in lammps.md's
+    ``health:`` frontmatter, not here.
+
+    Returns the value as a float, or ``None`` if it cannot be read (no log,
+    unknown observable, column absent). Never raises — an unreadable observable
+    becomes a ``None`` the gate skips.
+    """
+    cols = _HEALTH_COLUMNS.get(observable.lower())
+    if not cols:
+        logger.debug("unknown health observable %r for LAMMPS", observable)
+        return None
+    log = _find_thermo_log(output_dir)
+    if log is None:
+        return None
+    data = _parse_thermo_columns(log)
+    for key in cols:
+        if data.get(key):
+            return _equilibrated_mean(data[key])
+    return None
+
+
 TOOL_SPECS = [
+    ToolSpec(
+        name="read_health_observable",
+        description=(
+            "Read a gross physical-sanity observable (density, temperature, "
+            "pressure, volume, energy) from a finished LAMMPS run directory by "
+            "parsing its thermo log. Engine hook for the health gate; returns "
+            "None if unreadable. Plausible bands live in lammps.md's `health:` "
+            "frontmatter."
+        ),
+        parameters={
+            "output_dir": "Finished LAMMPS run directory (string).",
+            "observable": (
+                "Observable name: density | temperature | pressure | volume | "
+                "potential_energy | total_energy."
+            ),
+        },
+        agents=["simulation"],
+    ),
     ToolSpec(
         name="detect_signal_logging",
         description=(
