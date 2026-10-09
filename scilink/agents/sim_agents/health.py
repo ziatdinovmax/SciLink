@@ -24,9 +24,31 @@ run trips them.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+
+def _as_number(value) -> Optional[float]:
+    """Coerce a frontmatter bound to a float, or ``None`` if it isn't one.
+
+    Accepts ints/floats and numeric strings (``"0.02"``); rejects booleans
+    (``True`` is an ``int`` subclass but never a valid bound) and anything
+    unparseable.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
 
 
 @dataclass(frozen=True)
@@ -78,11 +100,15 @@ def parse_health_specs(specs) -> List[HealthBand]:
         name = spec.get("observable")
         if not name:
             continue
-        lo = spec.get("min", spec.get("minimum"))
-        hi = spec.get("max", spec.get("maximum"))
-        lo = float(lo) if isinstance(lo, (int, float)) else None
-        hi = float(hi) if isinstance(hi, (int, float)) else None
+        lo = _as_number(spec.get("min", spec.get("minimum")))
+        hi = _as_number(spec.get("max", spec.get("maximum")))
         if lo is None and hi is None:
+            continue
+        if lo is not None and hi is not None and lo > hi:
+            # An inverted band would fail every finite value — almost certainly
+            # a typo. Skip it (and say so) rather than reject every run.
+            logger.warning(
+                "health band for %r has min %g > max %g; skipping it", name, lo, hi)
             continue
         bands.append(HealthBand(observable=str(name), minimum=lo, maximum=hi))
     return bands
@@ -108,7 +134,12 @@ def evaluate_health(
         value = observations.get(band.observable)
         if value is None:
             continue
-        value = float(value)
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            # A reader hook that returned a non-numeric value can't be judged —
+            # skip it rather than raise (the gate never breaks a run).
+            continue
         if not math.isfinite(value):
             violations.append(HealthViolation(
                 band.observable, value, band.minimum, band.maximum))

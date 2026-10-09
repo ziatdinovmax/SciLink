@@ -49,6 +49,13 @@ def test_missing_observable_is_skipped():
     assert evaluate_health({}, DENSITY_SPEC) == []
 
 
+def test_non_numeric_value_is_skipped_not_raised():
+    # A (third-party) reader hook that returns a non-numeric value must not
+    # break the run — the gate judges only what it can coerce.
+    assert evaluate_health({"density": "N/A"}, DENSITY_SPEC) == []
+    assert evaluate_health({"density": object()}, DENSITY_SPEC) == []
+
+
 def test_non_finite_is_always_a_violation():
     for bad in (float("nan"), float("inf"), float("-inf")):
         violations = evaluate_health({"density": bad}, DENSITY_SPEC)
@@ -96,6 +103,22 @@ def test_parse_skips_malformed():
 def test_parse_non_list_is_empty():
     assert parse_health_specs(None) == []
     assert parse_health_specs({"observable": "x"}) == []
+
+
+def test_parse_coerces_string_bounds():
+    # Quoted YAML bounds ("0.02") should still gate, not be silently dropped.
+    bands = parse_health_specs([{"observable": "density", "min": "0.02", "max": "30"}])
+    assert bands == [HealthBand("density", 0.02, 30.0)]
+
+
+def test_parse_rejects_bool_bounds():
+    # bool is an int subclass but never a valid bound.
+    assert parse_health_specs([{"observable": "d", "min": True, "max": False}]) == []
+
+
+def test_parse_skips_inverted_band():
+    # min > max would fail every finite value — treat as a typo and skip.
+    assert parse_health_specs([{"observable": "d", "min": 30, "max": 0.02}]) == []
 
 
 def test_observable_names_dedup_preserves_order():

@@ -76,3 +76,30 @@ def test_temperature_and_volume_also_readable():
     d = _run_dir("log_healthy.lammps")
     assert read_health_observable(d, "temperature") == pytest.approx(298, abs=20)
     assert read_health_observable(d, "volume") > 0
+
+
+def test_uses_last_block_not_earlier_ramp():
+    # Two thermo blocks: an equilibration ramp (density ~0.1) then production
+    # (density ~0.83). The reader must report the FINAL block only, so the
+    # equilibration transient can't bleed into the mean.
+    log = (
+        "LAMMPS\n"
+        "   Step          Temp          Density   \n"
+        "         0   300.0         0.10\n"
+        "       100   300.0         0.20\n"
+        "Loop time of 1 on 1 procs\n"
+        "   Step          Temp          Density   \n"
+        "         0   298.0         0.830\n"
+        "       100   298.0         0.832\n"
+        "       200   298.0         0.831\n"
+        "Loop time of 2 on 1 procs\n"
+    )
+    td = Path(tempfile.mkdtemp())
+    (td / "log.lammps").write_text(log)
+    assert read_health_observable(str(td), "density") == pytest.approx(0.831, abs=0.01)
+
+
+def test_missing_dir_and_empty_dir_return_none():
+    assert read_health_observable("/no/such/dir", "density") is None
+    empty = tempfile.mkdtemp()
+    assert read_health_observable(empty, "density") is None

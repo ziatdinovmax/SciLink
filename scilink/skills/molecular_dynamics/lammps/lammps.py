@@ -1700,7 +1700,14 @@ _THERMO_LOG_NAMES = ("log.lammps", "thermo.log")
 
 
 def _find_thermo_log(output_dir: str) -> Optional[Path]:
-    """Return the LAMMPS thermo log in ``output_dir`` (recursively), or None."""
+    """Return the thermo log at the TOP LEVEL of ``output_dir``, or None.
+
+    Deliberately not recursive: a phase owns its run directory, and recursing
+    could pick up an unrelated nested log (a ``_dryrun/`` log, or — for a
+    combine stage whose dir is the parent of a fan-out — an arbitrary member's
+    log). An engine that nests its log elsewhere should say so explicitly rather
+    than have the gate guess.
+    """
     d = Path(output_dir)
     if not d.is_dir():
         return None
@@ -1708,31 +1715,37 @@ def _find_thermo_log(output_dir: str) -> Optional[Path]:
         hit = d / name
         if hit.is_file():
             return hit
-    # a fan-out member may nest the log one level down
-    for name in _THERMO_LOG_NAMES:
-        for hit in d.rglob(name):
-            if hit.is_file():
-                return hit
     return None
 
 
-def _parse_thermo_columns(log_file: Path) -> Dict[str, List[float]]:
-    """Extract thermo columns from a LAMMPS log, keyed by lowercased header.
+def _read_thermo_column(log_file: Path, candidates: Tuple[str, ...]) -> List[float]:
+    """Values of the first matching column from the LAST thermo block that logs it.
 
-    Accumulates every thermo block in the file (minimize, equilibrate, produce)
-    in order; never raises — a malformed log yields whatever parsed so far.
+    Streams the log keeping only the one requested column (bounded memory, even
+    for a long production log), and resets at each thermo header so the result
+    reflects the final run segment — minimization / equilibration ramps from
+    earlier blocks don't bleed into the mean. Never raises; a malformed or
+    truncated log yields whatever parsed cleanly.
     """
-    data: Dict[str, List[float]] = {}
-    headers: List[str] = []
+    last: List[float] = []   # last completed block that had the column
+    cur: List[float] = []    # the block currently being read
+    col = -1                 # target column index in the current block
+    hdrlen = 0
     try:
         with open(log_file, "r", errors="ignore") as f:
             in_thermo = False
             for line in f:
                 s = line.strip()
                 if s.startswith("Step ") or s == "Step":
-                    headers = [h.lower() for h in s.split()]
-                    for h in headers:
-                        data.setdefault(h, [])
+                    if col != -1 and cur:        # close out the previous block
+                        last = cur
+                    header = [h.lower() for h in s.split()]
+                    hdrlen = len(header)
+                    cur, col = [], -1
+                    for cand in candidates:
+                        if cand in header:
+                            col = header.index(cand)
+                            break
                     in_thermo = True
                     continue
                 if in_thermo:
@@ -1740,19 +1753,20 @@ def _parse_thermo_columns(log_file: Path) -> Dict[str, List[float]]:
                         in_thermo = False
                         continue
                     parts = s.split()
-                    if len(parts) != len(headers):
+                    if len(parts) != hdrlen:     # truncated/short line ends block
                         in_thermo = False
+                        continue
+                    if col == -1:                # this block doesn't log it
                         continue
                     try:
-                        row = [float(x) for x in parts]
-                    except ValueError:
+                        cur.append(float(parts[col]))
+                    except ValueError:           # not a real numeric thermo row
                         in_thermo = False
-                        continue
-                    for h, v in zip(headers, row):
-                        data[h].append(v)
     except Exception as e:
         logger.debug("could not parse LAMMPS thermo log %s: %s", log_file, e)
-    return data
+    if col != -1 and cur:
+        last = cur
+    return last
 
 
 def _equilibrated_mean(values: List[float]) -> Optional[float]:
@@ -1767,11 +1781,11 @@ def read_health_observable(output_dir: str, observable: str) -> Optional[float]:
     """Read one gross physical-sanity observable from a finished LAMMPS run.
 
     Engine hook for the engine-neutral health gate (mirrors VASP's
-    ``read_convergence_observable``). Parses the thermo log and returns the
-    back-half mean of the matching column — robust enough to tell a physical run
-    from a blown-up one (e.g. density near zero after a barostat instability).
-    Which observables and plausible bands to check live in lammps.md's
-    ``health:`` frontmatter, not here.
+    ``read_convergence_observable``). Reads the matching thermo column from the
+    run's final block and returns its back-half (equilibrated) mean — robust
+    enough to tell a physical run from a blown-up one (e.g. density near zero
+    after a barostat instability). Which observables and plausible bands to
+    check live in lammps.md's ``health:`` frontmatter, not here.
 
     Returns the value as a float, or ``None`` if it cannot be read (no log,
     unknown observable, column absent). Never raises — an unreadable observable
@@ -1784,11 +1798,7 @@ def read_health_observable(output_dir: str, observable: str) -> Optional[float]:
     log = _find_thermo_log(output_dir)
     if log is None:
         return None
-    data = _parse_thermo_columns(log)
-    for key in cols:
-        if data.get(key):
-            return _equilibrated_mean(data[key])
-    return None
+    return _equilibrated_mean(_read_thermo_column(log, cols))
 
 
 TOOL_SPECS = [
