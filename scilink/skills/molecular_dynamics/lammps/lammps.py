@@ -1698,6 +1698,17 @@ _HEALTH_COLUMNS: Dict[str, Tuple[str, ...]] = {
 
 _THERMO_LOG_NAMES = ("log.lammps", "thermo.log")
 
+# LAMMPS reports `density` in the deck's `units` system. Factor to convert that
+# raw value to g/cm^3 (the unit the health band is declared in). Unit systems
+# not listed (lj reduced, nano, electron, micro, …) are not convertible to a
+# g/cm^3 band, so the reader returns None for them and the gate skips.
+_DENSITY_UNIT_TO_GCC = {
+    "real": 1.0,     # g/cm^3 already
+    "metal": 1.0,    # g/cm^3 already
+    "cgs": 1.0,      # g/cm^3 already
+    "si": 1.0e-3,    # kg/m^3 -> g/cm^3
+}
+
 
 def _find_thermo_log(output_dir: str) -> Optional[Path]:
     """Return the thermo log at the TOP LEVEL of ``output_dir``, or None.
@@ -1718,55 +1729,60 @@ def _find_thermo_log(output_dir: str) -> Optional[Path]:
     return None
 
 
-def _read_thermo_column(log_file: Path, candidates: Tuple[str, ...]) -> List[float]:
-    """Values of the first matching column from the LAST thermo block that logs it.
+def parse_thermo_log(log_file) -> List[Dict[str, List[float]]]:
+    """Parse a LAMMPS thermo log into one column-dict per thermo block.
 
-    Streams the log keeping only the one requested column (bounded memory, even
-    for a long production log), and resets at each thermo header so the result
-    reflects the final run segment — minimization / equilibration ramps from
-    earlier blocks don't bleed into the mean. Never raises; a malformed or
-    truncated log yields whatever parsed cleanly.
+    The single place the LAMMPS thermo-format rules live in the skill (used by
+    the health reader here and by the MLIP agent), so the two can never read a
+    different density from the same log. Keys preserve the header's original
+    case. Robust to real-world noise:
+
+    * a header starts with ``Step`` or ``Time`` and has at least two columns;
+    * a stray mid-block line — a ``fix print`` message, a ``WARNING:``, a blank,
+      a truncated final row — is skipped, NOT treated as the end of the block;
+    * a block ends only at ``Loop time``, end of file, or the next header.
+
+    Never raises; a malformed log yields whatever parsed cleanly. Operates on
+    the thermo log (not the trajectory), so memory stays bounded in practice.
     """
-    last: List[float] = []   # last completed block that had the column
-    cur: List[float] = []    # the block currently being read
-    col = -1                 # target column index in the current block
-    hdrlen = 0
+    blocks: List[Dict[str, List[float]]] = []
+    header: Optional[List[str]] = None
+    cur: Optional[Dict[str, List[float]]] = None
     try:
         with open(log_file, "r", errors="ignore") as f:
-            in_thermo = False
             for line in f:
-                s = line.strip()
-                if s.startswith("Step ") or s == "Step":
-                    if col != -1 and cur:        # close out the previous block
-                        last = cur
-                    header = [h.lower() for h in s.split()]
-                    hdrlen = len(header)
-                    cur, col = [], -1
-                    for cand in candidates:
-                        if cand in header:
-                            col = header.index(cand)
-                            break
-                    in_thermo = True
+                toks = line.split()
+                if toks and toks[0] in ("Step", "Time") and len(toks) >= 2:
+                    header = toks
+                    cur = {h: [] for h in header}
+                    blocks.append(cur)
                     continue
-                if in_thermo:
-                    if not s or s.startswith("Loop time"):
-                        in_thermo = False
-                        continue
-                    parts = s.split()
-                    if len(parts) != hdrlen:     # truncated/short line ends block
-                        in_thermo = False
-                        continue
-                    if col == -1:                # this block doesn't log it
-                        continue
-                    try:
-                        cur.append(float(parts[col]))
-                    except ValueError:           # not a real numeric thermo row
-                        in_thermo = False
+                if cur is None:
+                    continue
+                if line.strip().startswith("Loop time"):
+                    cur, header = None, None
+                    continue
+                if len(toks) != len(header):
+                    continue            # stray line — skip, keep the block open
+                try:
+                    row = [float(t) for t in toks]
+                except ValueError:
+                    continue            # non-numeric stray line — skip
+                for h, v in zip(header, row):
+                    cur[h].append(v)
     except Exception as e:
         logger.debug("could not parse LAMMPS thermo log %s: %s", log_file, e)
-    if col != -1 and cur:
-        last = cur
-    return last
+    # drop empty blocks (a header with no numeric rows, e.g. a false "Step ..." line)
+    return [b for b in blocks if any(b.values())]
+
+
+def _match_column(block: Dict[str, List[float]], candidates: Tuple[str, ...]):
+    """First block column (case-insensitive) matching ``candidates``, or None."""
+    lowered = {k.lower(): k for k in block}
+    for cand in candidates:
+        if cand in lowered and block[lowered[cand]]:
+            return lowered[cand]
+    return None
 
 
 def _equilibrated_mean(values: List[float]) -> Optional[float]:
@@ -1775,6 +1791,31 @@ def _equilibrated_mean(values: List[float]) -> Optional[float]:
         return None
     tail = values[len(values) // 2:] or values
     return sum(tail) / len(tail)
+
+
+def _deck_units(log_file: Path, output_dir: str) -> Optional[str]:
+    """The ``units`` style this run used, or None if it can't be determined.
+
+    LAMMPS echoes the input script into the log, and ``units`` is a mandatory
+    command, so the style is almost always recoverable from the log itself;
+    falls back to scanning the deck files in the run directory.
+    """
+    pat = re.compile(r'^\s*units\s+(\w+)', re.MULTILINE)
+    try:
+        m = pat.search(Path(log_file).read_text(errors="ignore"))
+        if m:
+            return m.group(1).lower()
+    except Exception:
+        pass
+    try:
+        for f in sorted(Path(output_dir).glob("*")):
+            if f.is_file() and f.name not in _THERMO_LOG_NAMES:
+                m = pat.search(f.read_text(errors="ignore"))
+                if m:
+                    return m.group(1).lower()
+    except Exception:
+        pass
+    return None
 
 
 def read_health_observable(output_dir: str, observable: str) -> Optional[float]:
@@ -1787,9 +1828,13 @@ def read_health_observable(output_dir: str, observable: str) -> Optional[float]:
     after a barostat instability). Which observables and plausible bands to
     check live in lammps.md's ``health:`` frontmatter, not here.
 
+    For ``density`` the raw thermo value is in the deck's ``units`` system, so
+    it is converted to the g/cm^3 the band is declared in; a unit system with no
+    g/cm^3 equivalent (lj reduced, nano, …) yields None so the gate skips rather
+    than compare raw numbers against a g/cm^3 band.
+
     Returns the value as a float, or ``None`` if it cannot be read (no log,
-    unknown observable, column absent). Never raises — an unreadable observable
-    becomes a ``None`` the gate skips.
+    unknown observable, column absent, uncovered unit system). Never raises.
     """
     cols = _HEALTH_COLUMNS.get(observable.lower())
     if not cols:
@@ -1798,7 +1843,25 @@ def read_health_observable(output_dir: str, observable: str) -> Optional[float]:
     log = _find_thermo_log(output_dir)
     if log is None:
         return None
-    return _equilibrated_mean(_read_thermo_column(log, cols))
+    # the LAST block that logs the column (final run segment, not the ramp)
+    values: List[float] = []
+    for block in reversed(parse_thermo_log(log)):
+        key = _match_column(block, cols)
+        if key is not None:
+            values = block[key]
+            break
+    value = _equilibrated_mean(values)
+    if value is None:
+        return None
+    if observable.lower() == "density":
+        units = _deck_units(log, output_dir)
+        factor = _DENSITY_UNIT_TO_GCC.get(units) if units else None
+        if factor is None:
+            logger.debug("density health check skipped: units %r not convertible "
+                         "to g/cm^3 in %s", units, output_dir)
+            return None
+        value *= factor
+    return value
 
 
 TOOL_SPECS = [

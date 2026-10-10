@@ -83,6 +83,7 @@ def test_uses_last_block_not_earlier_ramp():
     # (density ~0.83). The reader must report the FINAL block only, so the
     # equilibration transient can't bleed into the mean.
     log = (
+        "units real\n"
         "LAMMPS\n"
         "   Step          Temp          Density   \n"
         "         0   300.0         0.10\n"
@@ -97,6 +98,53 @@ def test_uses_last_block_not_earlier_ramp():
     td = Path(tempfile.mkdtemp())
     (td / "log.lammps").write_text(log)
     assert read_health_observable(str(td), "density") == pytest.approx(0.831, abs=0.01)
+
+
+def test_stray_line_mid_block_does_not_truncate(tmp_path):
+    # A `fix print` / WARNING line mid-block must be skipped, not end the block —
+    # otherwise the mean becomes the startup rows and a healthy run FAILS.
+    log = (
+        "units real\n"
+        "   Step   Temp   Density\n"
+        "      0   300.0   0.010\n"
+        "    100   300.0   0.015\n"
+        "Water box: 0.5 ns elapsed\n"          # stray fix print
+        "WARNING: bond atoms missing (src/ntopo.cpp:1)\n"   # stray warning
+        "    200   298.0   0.820\n"
+        "    300   298.0   0.830\n"
+        "    400   298.0   0.840\n"
+        "Loop time of 2 on 1 procs\n"
+    )
+    (tmp_path / "log.lammps").write_text(log)
+    rho = read_health_observable(str(tmp_path), "density")
+    assert rho == pytest.approx(0.835, abs=0.02)   # the settled rows, not 0.015
+
+
+def test_time_first_header_is_detected(tmp_path):
+    # `thermo_style custom time temp density` -> header starts with Time, not Step.
+    log = ("units real\n"
+           "   Time   Temp   Density\n"
+           "    0.0   298.0   0.83\n"
+           "    1.0   298.0   0.84\n"
+           "Loop time of 1 on 1 procs\n")
+    (tmp_path / "log.lammps").write_text(log)
+    assert read_health_observable(str(tmp_path), "density") == pytest.approx(0.835, abs=0.02)
+
+
+def test_density_unit_conversion(tmp_path):
+    # si logs density in kg/m^3; must convert to g/cm^3 before the band check.
+    si = ("units si\n   Step Temp Density\n   0 298 1000.0\n   100 298 1000.0\n"
+          "Loop time of 1 on 1 procs\n")
+    (tmp_path / "log.lammps").write_text(si)
+    assert read_health_observable(str(tmp_path), "density") == pytest.approx(1.0, abs=0.01)
+
+
+def test_unsupported_units_return_none(tmp_path):
+    # lj reduced density has no g/cm^3 equivalent -> skip rather than misjudge.
+    lj = ("units lj\n   Step Temp Density\n   0 1.0 0.80\n   100 1.0 0.80\n"
+          "Loop time of 1 on 1 procs\n")
+    (tmp_path / "log.lammps").write_text(lj)
+    assert read_health_observable(str(tmp_path), "density") is None
 
 
 def test_missing_dir_and_empty_dir_return_none():

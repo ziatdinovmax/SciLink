@@ -556,20 +556,11 @@ def _refine_phase(
     ctx.cycle = 0
     last_verdict: Dict[str, Any] = {}
     phase_status = "failed"
+    health_reasons: Optional[List[str]] = None
 
     while ctx.cycle < ctx.max_cycles:
-        result, health_violations = _run_phase_health_gated(
+        result, violations, inputs = _run_phase_health_gated(
             inputs, phase, executor, ctx, allow_retry=True)
-        if health_violations:
-            # A run that completed in a non-physical state and could not be
-            # rescued by re-running. This is not a deck-fix situation, so stop
-            # the refine loop and report a health failure the campaign can act
-            # on rather than feeding a broken run to the critic.
-            ctx.record(phase, result, {
-                "run_status": "failed", "verdict": "needs_fixes",
-                "failure_class": "health_gate",
-            })
-            return _health_failure_record(phase, ctx.cycle + 1, health_violations)
 
         if result.get("status") == "error":
             # Could not launch — still assess (the critic reads the persisted
@@ -579,13 +570,26 @@ def _refine_phase(
                 phase.name, result.get("error"),
             )
 
+        # The health gate informs the critic rather than replacing it: a physical
+        # violation is handed over as a deterministic finding (which the fixer
+        # must treat as blocking and answer with a corrected deck), and the run
+        # is deterministically held below "acceptable" so a fail-open verdict
+        # cannot wave a measured-non-physical run through. The normal repair loop
+        # then drives the fix + re-run; only if it exhausts do we fail.
         verdict = run_critic.assess(
             output_dir=result.get("output_dir", phase.run_dir),
             research_goal=ctx.research_goal,
             skill=ctx.skill,
             domain=ctx.domain,
             input_files=inputs,
+            check_observables=bool(violations),
+            deterministic_findings=([v.reason for v in violations]
+                                    if violations else None),
         )
+        if violations:
+            health_reasons = [v.reason for v in violations]
+            verdict = {**verdict, "verdict": "needs_fixes",
+                       "failure_class": verdict.get("failure_class") or "health_gate"}
         last_verdict = verdict
         ctx.record(phase, result, verdict)
 
@@ -609,7 +613,7 @@ def _refine_phase(
         # Budget exhausted without an acceptable verdict.
         phase_status = "exhausted"
 
-    return {
+    rec = {
         "phase": phase.name,
         "status": phase_status,
         "cycles": ctx.cycle + 1,
@@ -617,6 +621,10 @@ def _refine_phase(
         "run_status": last_verdict.get("run_status"),
         "failure_class": last_verdict.get("failure_class"),
     }
+    # Surface the physical-sanity reasons when the phase ended unresolved on one.
+    if phase_status != "success" and rec.get("failure_class") == "health_gate":
+        rec["health_violations"] = health_reasons or []
+    return rec
 
 
 def _run_once_phase(
@@ -624,25 +632,23 @@ def _run_once_phase(
     executor: Executor,
     run_critic: _RunCriticLike,
     ctx: RefinementContext,
-    allow_retry: bool = True,
 ) -> Dict[str, Any]:
-    """Run a phase exactly once and assess it, with no refine loop.
+    """Run a combine phase exactly once and assess it, with no refine loop.
 
-    Used for two things: a replica-ensemble member (run once so its deck stays
-    identical to its siblings — the health gate may still re-run it with fresh
-    initial conditions, which keeps the deck identical) and a combine stage that
-    consumes a prior fan-out's outputs (``allow_retry=False`` — re-running an
-    aggregation is not a sensible recovery). The critic refine loop is skipped
-    either way; it is judged once, not iterated.
+    The combine stage post-processes a prior fan-out's outputs (e.g. assembling
+    a free-energy profile from umbrella windows), so re-running it with a fix is
+    not the right recovery — it is judged once, not iterated. The health gate
+    still applies (a cleanly-finished but non-physical aggregation is caught),
+    but without a retry, since re-running an aggregation cannot change its input.
     """
-    result, health_violations = _run_phase_health_gated(
-        phase.input_files, phase, executor, ctx, allow_retry=allow_retry)
-    if health_violations:
+    result, violations, _ = _run_phase_health_gated(
+        phase.input_files, phase, executor, ctx, allow_retry=False)
+    if violations:
         ctx.record(phase, result, {
             "run_status": "failed", "verdict": "needs_fixes",
             "failure_class": "health_gate",
         })
-        return _health_failure_record(phase, 1, health_violations)
+        return _health_failure_record(phase, 1, violations)
     if result.get("status") == "error":
         logger.warning(
             "Executor could not launch combine phase %s: %s",
@@ -728,6 +734,29 @@ def _read_health_observations(output_dir: str, specs, reader) -> Dict[str, Any]:
     return obs
 
 
+def _resolve_health(ctx: RefinementContext):
+    """Resolve ``(specs, reader, perturb)`` for the active skill, once per context.
+
+    Skill and domain are fixed for the life of a ``RefinementContext``, so the
+    skill markdown is loaded and the hooks resolved a single time and cached on
+    the context — not re-parsed per phase × cycle × health-retry × member.
+    """
+    cached = getattr(ctx, "_health_cache", None)
+    if cached is not None:
+        return cached
+    specs = _health_specs(ctx.skill, ctx.domain)
+    reader = (_resolve_skill_callable(ctx.skill, ctx.domain, "read_health_observable")
+              if specs else None)
+    perturb = (_resolve_skill_callable(ctx.skill, ctx.domain, "perturb_for_retry")
+               if specs else None)
+    resolved = (specs, reader, perturb)
+    try:
+        ctx._health_cache = resolved
+    except Exception:
+        pass
+    return resolved
+
+
 def _run_phase_health_gated(
     inputs: Dict[str, str],
     phase: Phase,
@@ -735,54 +764,58 @@ def _run_phase_health_gated(
     ctx: RefinementContext,
     allow_retry: bool = True,
 ):
-    """Execute a phase and gate it on physical sanity.
+    """Execute a phase and gate a *cleanly finished* run on physical sanity.
 
-    Runs the executor; if the finished run violates the active skill's declared
-    ``health:`` bands, re-runs it — first perturbing the inputs through the
-    engine's optional ``perturb_for_retry`` hook (e.g. a fresh velocity seed) —
-    up to ``ctx.max_health_retries`` times, then gives up. The perturbation
-    touches only the retry's initial conditions, never the deck, so a replica
-    ensemble's identical-deck invariant is preserved.
+    Runs the executor. The gate judges only a run that actually completed with
+    ``returncode == 0``: a non-zero exit (or a launch error) is a crash, not a
+    non-physical result, so it is handed to the critic to diagnose rather than
+    mislabeled. On a clean run whose declared ``health:`` observable is out of
+    band, the inputs are re-run — first perturbed through the engine's optional
+    ``perturb_for_retry`` hook (e.g. a fresh velocity seed) — up to
+    ``ctx.max_health_retries`` times, then the violation is returned. Without a
+    perturb hook, re-running the identical deck cannot help, so the gate does
+    not retry (the violation goes to the critic, which may propose a deck fix).
 
-    Returns ``(result, violations)`` where ``violations`` is:
+    Returns ``(result, violations, run_inputs)`` where ``violations`` is:
 
-    * ``None`` — gate disabled (no ``health:`` block or no reader hook), or the
-      executor could not launch (diagnosing that is the critic's job);
+    * ``None`` — not gated (no ``health:`` block / no reader hook, a launch
+      error, or a non-zero return code);
     * ``[]`` — the run passed the gate;
     * a non-empty list of :class:`~scilink.agents.sim_agents.health.HealthViolation`
-      — the run was non-physical and retries could not rescue it.
+      — a clean run that is physically out of band and retries could not rescue.
+
+    ``run_inputs`` is the deck that actually produced ``result`` (it differs from
+    the argument only when a perturb retry changed it), so the caller hands the
+    critic the inputs the run was really made from.
     """
     from .health import evaluate_health
-    specs = _health_specs(ctx.skill, ctx.domain)
-    reader = _resolve_skill_callable(ctx.skill, ctx.domain,
-                                     "read_health_observable")
+    specs, reader, perturb_hook = _resolve_health(ctx)
     gate_on = bool(specs) and reader is not None
-    perturb = (_resolve_skill_callable(ctx.skill, ctx.domain, "perturb_for_retry")
-               if gate_on and allow_retry else None)
-    # Re-running an identical deck cannot rescue a non-physical run, so retries
-    # are only worthwhile when the engine can perturb the retry's initial
-    # conditions. Without a `perturb_for_retry` hook the gate fails fast.
+    perturb = perturb_hook if (gate_on and allow_retry) else None
     retries = (max(0, ctx.max_health_retries)
                if (allow_retry and perturb is not None) else 0)
 
     attempt = 0
     while True:
         result = executor.run(inputs, phase.run_command, phase.run_dir)
-        if not gate_on or result.get("status") == "error":
-            return result, None
+        # Only a clean completion is a candidate for the physical-sanity gate.
+        rc = result.get("returncode")
+        if (not gate_on or result.get("status") == "error"
+                or (rc is not None and rc != 0)):
+            return result, None, inputs
 
         out_dir = result.get("output_dir", phase.run_dir)
         obs = _read_health_observations(out_dir, specs, reader)
         violations = evaluate_health(obs, specs)
         if not violations:
-            return result, []
+            return result, [], inputs
 
         reasons = "; ".join(v.reason for v in violations)
         if attempt >= retries:
             logger.warning(
-                "health gate FAILED phase %s after %d attempt(s): %s",
+                "health gate tripped on phase %s after %d attempt(s): %s",
                 phase.name, attempt + 1, reasons)
-            return result, violations
+            return result, violations, inputs
 
         attempt += 1
         logger.warning(
@@ -1093,8 +1126,7 @@ def run_campaign(
 
     for stage in runnable:
         if stage.kind == "combine":
-            rec = _run_once_phase(stage.phases[0], executor, run_critic, ctx,
-                                  allow_retry=False)
+            rec = _run_once_phase(stage.phases[0], executor, run_critic, ctx)
             flat.append(rec)
             status = "success" if rec["status"] == "success" else "failed"
             stage_records.append({
@@ -1177,6 +1209,16 @@ def run_campaign(
     # the deck loop cannot fix it — it needs reparameterization upstream.
     elif any(p.get("failure_class") == "force_field" for p in flat):
         result["failure_class"] = "force_field"
+    # A health-gate failure is a run that finished cleanly but non-physical (e.g.
+    # a barostat-blown box) which the repair loop could not rescue. Surface it —
+    # with the measured reasons — so the orchestrator can tell it apart from an
+    # ordinary refinement failure and act on it.
+    elif any(p.get("failure_class") == "health_gate" for p in flat):
+        result["failure_class"] = "health_gate"
+        result["health_violations"] = [
+            r for p in flat if p.get("failure_class") == "health_gate"
+            for r in p.get("health_violations", [])
+        ]
     if dry_run_record is not None:
         result["dry_run"] = dry_run_record
     return result
