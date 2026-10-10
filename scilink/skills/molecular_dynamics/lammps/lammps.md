@@ -16,6 +16,15 @@ detect:
     Python module (PYTHON package binding) is also a valid runtime
     surface — if importable, the engine is usable even without a
     standalone binary on $PATH.
+health:
+  # Gross physical-sanity bands for a finished condensed-phase run — a tripwire
+  # for a non-physical result (e.g. a barostat that drove the box to a near-
+  # vacuum), NOT an accuracy check. Keep the bounds loose: only a genuinely
+  # broken run should trip them. Accuracy is judged downstream against a
+  # reference, never here. Read by the `read_health_observable` hook.
+  - observable: density       # g/cm^3
+    min: 0.02                 # below any real liquid/solid; a blown-up box -> ~0
+    max: 30.0                 # above the densest solids; catches an implosion
 ---
 
 ## Overview
@@ -260,7 +269,7 @@ pair_coeff * * {potential_file} {element_list}
 neighbor 2.0 bin
 neigh_modify every 1 delay 0 check yes
 thermo 100
-thermo_style custom step temp press pe ke etotal vol lx ly lz
+thermo_style custom step temp press pe ke etotal vol density lx ly lz
 minimize 1.0e-6 1.0e-8 10000 100000
 velocity all create {temperature} {seed} dist gaussian
 fix 1 all npt temp {temperature} {temperature} 0.1 aniso {pressure} {pressure} 1.0

@@ -957,6 +957,36 @@ def _run_workflow_once(
             "Run flagged force-field-limited (failure_class='force_field'); "
             "reparameterization needed — not yet automated."
         )
+    # A health-gate failure is a run that finished cleanly but non-physical (a
+    # measured observable out of its plausible band) which the repair loop could
+    # not rescue. Surface it to the user with the measured reasons, like the
+    # force-field case, rather than leaving it as a bare refinement failure.
+    elif refinement.get("failure_class") == "health_gate":
+        reasons = refinement.get("health_violations") or []
+        result["health_gate_flagged"] = True
+        result.setdefault("warnings", []).append(
+            "A run completed cleanly but a measured physical observable is "
+            "outside its plausible range (a non-physical result): "
+            + ("; ".join(reasons) if reasons else "see refinement details")
+            + ". The automatic repair loop could not resolve it; treat this "
+            "result as unreliable."
+        )
+        logger.warning(
+            "Run flagged health-gate (non-physical result): %s",
+            "; ".join(reasons) if reasons else "(no reasons recorded)",
+        )
+    # Independent of pass/fail: the health gate could not read its declared
+    # observable for at least one run, so that run was not physically checked.
+    # Surface it so a clean-looking result is not mistaken for a vouched one.
+    if refinement.get("health_checked") is False:
+        result.setdefault("warnings", []).append(
+            "The physical-sanity (health) gate could not read its declared "
+            "observable for at least one run — the deck may not log it, the unit "
+            "system is not covered, or no log was written. That run passed "
+            "WITHOUT a physical-sanity check."
+        )
+        logger.warning("Health gate could not read its observable; a run passed "
+                       "without a physical-sanity check.")
     result["final_status"] = (
         "success" if refinement.get("status") == "success"
         else f"refinement_{refinement.get('status', 'failed')}"

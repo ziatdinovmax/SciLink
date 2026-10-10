@@ -1681,7 +1681,273 @@ def detect_signal_logging(deck_text: str, signal: str) -> Dict[str, Any]:
     return {"present": False, "interval_steps": None}
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Health-gate reader — a gross physical-sanity value from a finished run
+# ──────────────────────────────────────────────────────────────────────────
+
+# health observable name -> LAMMPS thermo column header tokens (lowercased)
+# that carry it, most-preferred first.
+_HEALTH_COLUMNS: Dict[str, Tuple[str, ...]] = {
+    "density": ("density",),
+    "temperature": ("temp", "temperature"),
+    "pressure": ("press", "pressure"),
+    "volume": ("volume", "vol"),
+    "potential_energy": ("poteng", "pe"),
+    "total_energy": ("toteng", "etotal"),
+}
+
+_THERMO_LOG_NAMES = ("log.lammps", "thermo.log")
+
+# LAMMPS reports `density` in the deck's `units` system. Factor to convert that
+# raw value to g/cm^3 (the unit the health band is declared in). Unit systems
+# not listed (lj reduced, nano, electron, micro, …) are not convertible to a
+# g/cm^3 band, so the reader returns None for them and the gate skips.
+_DENSITY_UNIT_TO_GCC = {
+    "real": 1.0,     # g/cm^3 already
+    "metal": 1.0,    # g/cm^3 already
+    "cgs": 1.0,      # g/cm^3 already
+    "si": 1.0e-3,    # kg/m^3 -> g/cm^3
+}
+
+
+def _find_thermo_log(output_dir: str) -> Optional[Path]:
+    """Return the thermo log at the TOP LEVEL of ``output_dir``, or None.
+
+    Deliberately not recursive: a phase owns its run directory, and recursing
+    could pick up an unrelated nested log (a ``_dryrun/`` log, or — for a
+    combine stage whose dir is the parent of a fan-out — an arbitrary member's
+    log). An engine that nests its log elsewhere should say so explicitly rather
+    than have the gate guess.
+    """
+    d = Path(output_dir)
+    if not d.is_dir():
+        return None
+    for name in _THERMO_LOG_NAMES:
+        hit = d / name
+        if hit.is_file():
+            return hit
+    return None
+
+
+def _is_number(tok: str) -> bool:
+    try:
+        float(tok)
+        return True
+    except ValueError:
+        return False
+
+
+def parse_thermo_log(log_file, columns=None) -> List[Dict[str, List[float]]]:
+    """Parse a LAMMPS thermo log into one column-dict per thermo block.
+
+    The single place the LAMMPS thermo-format rules live in the skill (used by
+    the health reader here and by the MLIP agent), so the two can never read a
+    different density from the same log. Keys preserve the header's original
+    case. Robust to real-world noise:
+
+    * a header line (starts with ``Step``/``Time``, >=2 non-numeric tokens) is
+      only ACCEPTED once a numeric data row with the same column count actually
+      follows it — so an all-words ``fix print "Step done now"`` line is not
+      mistaken for a header and does not steal the rows after it;
+    * a stray mid-block line — a ``fix print`` message, a ``WARNING:``, a blank,
+      a truncated final row — is skipped, NOT treated as the end of the block;
+    * a block ends only at ``Loop time``, end of file, or the next real header.
+
+    ``columns`` optionally restricts which columns are materialized (lowercased
+    names); the health reader passes just the one it needs so a long, densely
+    logged run isn't held in memory column-for-column. ``None`` keeps all.
+
+    Never raises; a malformed log yields whatever parsed cleanly.
+    """
+    blocks: List[Dict[str, List[float]]] = []
+    header: Optional[List[str]] = None       # confirmed current-block header
+    keep: Optional[List[str]] = None         # columns being accumulated
+    cur: Optional[Dict[str, List[float]]] = None
+    pending: Optional[List[str]] = None      # candidate header, not yet confirmed
+
+    def _looks_like_header(tokens):
+        return (tokens and tokens[0] in ("Step", "Time") and len(tokens) >= 2
+                and not any(_is_number(t) for t in tokens))
+
+    try:
+        with open(log_file, "r", errors="ignore") as f:
+            for line in f:
+                toks = line.split()
+                if _looks_like_header(toks):
+                    # Don't open a block yet — a real header is confirmed only by
+                    # the numeric row that follows (below). This defers to the
+                    # most recent candidate if several appear in a row.
+                    pending = toks
+                    continue
+                numeric = bool(toks) and all(_is_number(t) for t in toks)
+                if pending is not None:
+                    if numeric and len(toks) == len(pending):
+                        header = pending
+                        keep = [h for h in header
+                                if columns is None or h.lower() in columns]
+                        cur = {h: [] for h in keep}
+                        blocks.append(cur)
+                        pending = None
+                        row = dict(zip(header, toks))
+                        for h in keep:
+                            cur[h].append(float(row[h]))
+                        continue
+                    pending = None   # candidate was a stray line, not a header
+                if cur is None:
+                    continue
+                if line.strip().startswith("Loop time"):
+                    cur, header, keep = None, None, None
+                    continue
+                if numeric and len(toks) == len(header):
+                    row = dict(zip(header, toks))
+                    for h in keep:
+                        cur[h].append(float(row[h]))
+                # else: stray / truncated line — skip, keep the block open
+    except Exception as e:
+        logger.debug("could not parse LAMMPS thermo log %s: %s", log_file, e)
+    return [b for b in blocks if any(b.values())]
+
+
+def _match_column(block: Dict[str, List[float]], candidates: Tuple[str, ...]):
+    """First block column (case-insensitive) matching ``candidates``, or None."""
+    lowered = {k.lower(): k for k in block}
+    for cand in candidates:
+        if cand in lowered and block[lowered[cand]]:
+            return lowered[cand]
+    return None
+
+
+def _equilibrated_mean(values: List[float]) -> Optional[float]:
+    """Mean of the back half of a thermo series (drops startup transients)."""
+    if not values:
+        return None
+    tail = values[len(values) // 2:] or values
+    return sum(tail) / len(tail)
+
+
+# Deck filename globs the skill declares (lammps.md `inputs.deck`). The units
+# scan is restricted to these so the fallback never reads a trajectory dump or
+# data file (which can be multi-GB) into memory.
+_DECK_GLOBS = ("run.lammps", "run_*.lammps", "in.*", "*.in")
+_UNITS_SCAN_BYTES = 65536
+
+
+def _units_in(path: Path, rx) -> Optional[str]:
+    """First ``units`` style in the head of ``path``, or None. Reads a capped
+    prefix only — ``units`` is echoed at the very top of a LAMMPS script/log."""
+    try:
+        with open(path, "r", errors="ignore") as fh:
+            m = rx.search(fh.read(_UNITS_SCAN_BYTES))
+        return m.group(1).lower() if m else None
+    except Exception:
+        return None
+
+
+def _deck_units(log_file: Path, output_dir: str) -> Optional[str]:
+    """The ``units`` style this run used, or None if it can't be determined.
+
+    LAMMPS echoes the input script into the log, and ``units`` is a mandatory
+    command, so the style is almost always recoverable from the log's head;
+    falls back to the declared deck files (never arbitrary run-dir files).
+    """
+    rx = re.compile(r'^\s*units\s+(\w+)', re.MULTILINE)
+    units = _units_in(Path(log_file), rx)
+    if units:
+        return units
+    seen = set()
+    for pat in _DECK_GLOBS:
+        for f in sorted(Path(output_dir).glob(pat)):
+            if f.name in _THERMO_LOG_NAMES or f in seen or not f.is_file():
+                continue
+            seen.add(f)
+            units = _units_in(f, rx)
+            if units:
+                return units
+    return None
+
+
+def read_health_observable(output_dir: str, observable: str,
+                           since: Optional[float] = None) -> Optional[float]:
+    """Read one gross physical-sanity observable from a finished LAMMPS run.
+
+    Engine hook for the engine-neutral health gate (mirrors VASP's
+    ``read_convergence_observable``). Reads the matching thermo column from the
+    run's final block and returns its back-half (equilibrated) mean — robust
+    enough to tell a physical run from a blown-up one (e.g. density near zero
+    after a barostat instability). Which observables and plausible bands to
+    check live in lammps.md's ``health:`` frontmatter, not here.
+
+    ``since`` is the wall-clock time just before the run; the log is treated as
+    stale (``None`` returned) if it is not newer than that, so a phase that
+    produced no log of its own in a shared run directory is not judged on the
+    previous phase's log.
+
+    For ``density`` the raw thermo value is in the deck's ``units`` system, so
+    it is converted to the g/cm^3 the band is declared in; a unit system with no
+    g/cm^3 equivalent (lj reduced, nano, …) yields None so the gate skips rather
+    than compare raw numbers against a g/cm^3 band.
+
+    Returns the value as a float, or ``None`` if it cannot be read (no log,
+    stale log, unknown observable, column absent, uncovered unit system). Never
+    raises.
+    """
+    cols = _HEALTH_COLUMNS.get(observable.lower())
+    if not cols:
+        logger.debug("unknown health observable %r for LAMMPS", observable)
+        return None
+    log = _find_thermo_log(output_dir)
+    if log is None:
+        return None
+    # A rc==0 exit does not prove THIS run wrote the log (a tee/wrapper that
+    # swallows the exit code, an mpirun that returns 0 on a pre-launch failure);
+    # a log older than the run start is a leftover from an earlier phase.
+    if since is not None:
+        try:
+            if log.stat().st_mtime + 1.0 < since:
+                logger.debug("thermo log %s predates the run; treating as absent", log)
+                return None
+        except OSError:
+            return None
+    # the LAST block that logs the column (final run segment, not the ramp)
+    values: List[float] = []
+    for block in reversed(parse_thermo_log(log, columns={c.lower() for c in cols})):
+        key = _match_column(block, cols)
+        if key is not None:
+            values = block[key]
+            break
+    value = _equilibrated_mean(values)
+    if value is None:
+        return None
+    if observable.lower() == "density":
+        units = _deck_units(log, output_dir)
+        factor = _DENSITY_UNIT_TO_GCC.get(units) if units else None
+        if factor is None:
+            logger.debug("density health check skipped: units %r not convertible "
+                         "to g/cm^3 in %s", units, output_dir)
+            return None
+        value *= factor
+    return value
+
+
 TOOL_SPECS = [
+    ToolSpec(
+        name="read_health_observable",
+        description=(
+            "Read a gross physical-sanity observable (density, temperature, "
+            "pressure, volume, energy) from a finished LAMMPS run directory by "
+            "parsing its thermo log. Engine hook for the health gate; returns "
+            "None if unreadable. Plausible bands live in lammps.md's `health:` "
+            "frontmatter."
+        ),
+        parameters={
+            "output_dir": "Finished LAMMPS run directory (string).",
+            "observable": (
+                "Observable name: density | temperature | pressure | volume | "
+                "potential_energy | total_energy."
+            ),
+        },
+        agents=["simulation"],
+    ),
     ToolSpec(
         name="detect_signal_logging",
         description=(
