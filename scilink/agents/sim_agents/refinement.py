@@ -35,6 +35,7 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -556,11 +557,13 @@ def _refine_phase(
     ctx.cycle = 0
     last_verdict: Dict[str, Any] = {}
     phase_status = "failed"
-    health_reasons: Optional[List[str]] = None
+    violations = None          # the final cycle's health violations (if any)
+    gate_unchecked = False     # gated but no observable could be read
 
     while ctx.cycle < ctx.max_cycles:
-        result, violations, inputs = _run_phase_health_gated(
+        result, violations, inputs, checked = _run_phase_health_gated(
             inputs, phase, executor, ctx, allow_retry=True)
+        gate_unchecked = checked is False
 
         if result.get("status") == "error":
             # Could not launch — still assess (the critic reads the persisted
@@ -571,25 +574,28 @@ def _refine_phase(
             )
 
         # The health gate informs the critic rather than replacing it: a physical
-        # violation is handed over as a deterministic finding (which the fixer
-        # must treat as blocking and answer with a corrected deck), and the run
-        # is deterministically held below "acceptable" so a fail-open verdict
-        # cannot wave a measured-non-physical run through. The normal repair loop
-        # then drives the fix + re-run; only if it exhausts do we fail.
+        # violation is handed over as POST-run physical-sanity evidence (the run
+        # finished cleanly but is non-physical — fix the deck, do not add
+        # outputs), and the run is deterministically held below "acceptable" so a
+        # fail-open verdict cannot wave a measured-non-physical run through. The
+        # normal repair loop then drives the fix + re-run; only on exhaustion
+        # does the phase fail.
+        # Pass physical evidence only when there is a violation, so a critic that
+        # predates the `physical_findings` argument is unaffected on clean runs.
+        extra = {"physical_findings": [v.reason for v in violations]} if violations else {}
         verdict = run_critic.assess(
             output_dir=result.get("output_dir", phase.run_dir),
             research_goal=ctx.research_goal,
             skill=ctx.skill,
             domain=ctx.domain,
             input_files=inputs,
-            check_observables=bool(violations),
-            deterministic_findings=([v.reason for v in violations]
-                                    if violations else None),
+            **extra,
         )
         if violations:
-            health_reasons = [v.reason for v in violations]
+            # The measured violation is the ground truth: it overrides a
+            # fail-open verdict and names the terminal cause if unresolved.
             verdict = {**verdict, "verdict": "needs_fixes",
-                       "failure_class": verdict.get("failure_class") or "health_gate"}
+                       "failure_class": "health_gate"}
         last_verdict = verdict
         ctx.record(phase, result, verdict)
 
@@ -621,9 +627,16 @@ def _refine_phase(
         "run_status": last_verdict.get("run_status"),
         "failure_class": last_verdict.get("failure_class"),
     }
-    # Surface the physical-sanity reasons when the phase ended unresolved on one.
-    if phase_status != "success" and rec.get("failure_class") == "health_gate":
-        rec["health_violations"] = health_reasons or []
+    # A phase that ended unresolved on a measured non-physical value is a
+    # health-gate failure — label it so and carry the reasons, whatever class
+    # the critic named on the way.
+    if phase_status != "success" and violations:
+        rec["failure_class"] = "health_gate"
+        rec["health_violations"] = [v.reason for v in violations]
+    # The gate was enabled but couldn't read its observable — record that the
+    # pass was unvouched (the deck may not log it / unsupported units / no log).
+    if gate_unchecked:
+        rec["health_checked"] = False
     return rec
 
 
@@ -641,7 +654,7 @@ def _run_once_phase(
     still applies (a cleanly-finished but non-physical aggregation is caught),
     but without a retry, since re-running an aggregation cannot change its input.
     """
-    result, violations, _ = _run_phase_health_gated(
+    result, violations, _, checked = _run_phase_health_gated(
         phase.input_files, phase, executor, ctx, allow_retry=False)
     if violations:
         ctx.record(phase, result, {
@@ -662,13 +675,16 @@ def _run_once_phase(
         input_files=phase.input_files,
     )
     ctx.record(phase, result, verdict)
-    return {
+    rec = {
         "phase": phase.name,
         "status": "success" if _is_acceptable(verdict) else "stopped",
         "cycles": 1,
         "verdict": verdict.get("verdict"),
         "run_status": verdict.get("run_status"),
     }
+    if checked is False:
+        rec["health_checked"] = False
+    return rec
 
 
 _MAX_DRYRUN_CYCLES = 5
@@ -717,16 +733,22 @@ def _health_specs(skill: Optional[str], domain: Optional[str]) -> List[Dict[str,
         return []
 
 
-def _read_health_observations(output_dir: str, specs, reader) -> Dict[str, Any]:
+def _read_health_observations(output_dir: str, specs, reader, since=None) -> Dict[str, Any]:
     """Call the per-engine reader hook once per declared observable.
 
-    Never raises: a reader that fails on one observable contributes ``None``,
-    which the pure comparator skips (it judges only what it can read)."""
+    ``since`` is the wall-clock time just before the run; a reader that accepts
+    it should ignore output older than it (a stale log from an earlier phase in
+    a shared run directory). Never raises: a reader that fails on one observable
+    contributes ``None``, which the pure comparator skips."""
     from .health import observable_names
     obs: Dict[str, Any] = {}
     for name in observable_names(specs):
         try:
-            obs[name] = reader(output_dir=output_dir, observable=name)
+            try:
+                obs[name] = reader(output_dir=output_dir, observable=name, since=since)
+            except TypeError:
+                # reader predates the `since` argument — call the old way
+                obs[name] = reader(output_dir=output_dir, observable=name)
         except Exception as e:
             logger.debug("health reader failed for %s in %s: %s",
                          name, output_dir, e)
@@ -776,13 +798,19 @@ def _run_phase_health_gated(
     perturb hook, re-running the identical deck cannot help, so the gate does
     not retry (the violation goes to the critic, which may propose a deck fix).
 
-    Returns ``(result, violations, run_inputs)`` where ``violations`` is:
+    Returns ``(result, violations, run_inputs, checked)`` where ``violations`` is:
 
     * ``None`` — not gated (no ``health:`` block / no reader hook, a launch
       error, or a non-zero return code);
-    * ``[]`` — the run passed the gate;
+    * ``[]`` — the run passed the gate (or the gate could not read a value);
     * a non-empty list of :class:`~scilink.agents.sim_agents.health.HealthViolation`
       — a clean run that is physically out of band and retries could not rescue.
+
+    ``checked`` is a tri-state: ``None`` when the gate did not apply, ``True``
+    when it read at least one declared observable and actually judged the run,
+    and ``False`` when it was gated but every declared observable read ``None``
+    (the deck did not log it, an unsupported unit system, a stale log) — a pass
+    that the gate could not actually vouch for, so the caller can record it.
 
     ``run_inputs`` is the deck that actually produced ``result`` (it differs from
     the argument only when a perturb retry changed it), so the caller hands the
@@ -797,25 +825,32 @@ def _run_phase_health_gated(
 
     attempt = 0
     while True:
+        since = time.time()
         result = executor.run(inputs, phase.run_command, phase.run_dir)
         # Only a clean completion is a candidate for the physical-sanity gate.
         rc = result.get("returncode")
         if (not gate_on or result.get("status") == "error"
                 or (rc is not None and rc != 0)):
-            return result, None, inputs
+            return result, None, inputs, None
 
         out_dir = result.get("output_dir", phase.run_dir)
-        obs = _read_health_observations(out_dir, specs, reader)
+        obs = _read_health_observations(out_dir, specs, reader, since=since)
+        checked = any(v is not None for v in obs.values())
         violations = evaluate_health(obs, specs)
         if not violations:
-            return result, [], inputs
+            if not checked:
+                logger.info(
+                    "health gate skipped on phase %s: no declared observable "
+                    "could be read (not logged, unsupported units, or no log)",
+                    phase.name)
+            return result, [], inputs, checked
 
         reasons = "; ".join(v.reason for v in violations)
         if attempt >= retries:
             logger.warning(
                 "health gate tripped on phase %s after %d attempt(s): %s",
                 phase.name, attempt + 1, reasons)
-            return result, violations, inputs
+            return result, violations, inputs, True
 
         attempt += 1
         logger.warning(

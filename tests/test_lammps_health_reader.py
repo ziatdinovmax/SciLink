@@ -27,6 +27,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from scilink.agents.sim_agents.health import evaluate_health  # noqa: E402
 from scilink.skills.molecular_dynamics.lammps.lammps import (  # noqa: E402
+    parse_thermo_log,
     read_health_observable,
 )
 
@@ -145,6 +146,69 @@ def test_unsupported_units_return_none(tmp_path):
           "Loop time of 1 on 1 procs\n")
     (tmp_path / "log.lammps").write_text(lj)
     assert read_health_observable(str(tmp_path), "density") is None
+
+
+def test_fix_print_step_line_is_not_a_header(tmp_path):
+    # A `fix print "Step $s ..."` line begins with "Step" but contains numbers;
+    # it must not be taken as a thermo header (which would drop the rows after
+    # it and return the mean of only the first rows).
+    log = (
+        "units real\n"
+        "   Step   Temp   Density\n"
+        "      0   300.0   0.010\n"
+        "    100   300.0   0.015\n"
+        "Step 200 reached Temp 300 rho 0.02\n"   # fix print idiom, not a header
+        "    200   298.0   0.820\n"
+        "    300   298.0   0.830\n"
+        "    400   298.0   0.840\n"
+        "Loop time of 2 on 1 procs\n"
+    )
+    (tmp_path / "log.lammps").write_text(log)
+    rho = read_health_observable(str(tmp_path), "density")
+    assert rho == pytest.approx(0.835, abs=0.02)   # settled rows, not 0.0125
+
+
+def test_stale_log_from_earlier_phase_is_ignored(tmp_path):
+    # A log older than the run start (shared run_dir, this phase wrote no log)
+    # must be treated as absent, not judged.
+    import os
+    import time
+    log = ("units real\n   Step Temp Density\n   0 298 0.83\n   100 298 0.83\n"
+           "Loop time of 1 on 1 procs\n")
+    (tmp_path / "log.lammps").write_text(log)
+    old = time.time() - 3600
+    os.utime(tmp_path / "log.lammps", (old, old))
+    # since = now: the hour-old log predates the run -> None
+    assert read_health_observable(str(tmp_path), "density", since=time.time()) is None
+    # without a since, the log is read normally
+    assert read_health_observable(str(tmp_path), "density") == pytest.approx(0.83, abs=0.01)
+
+
+def test_parse_thermo_log_column_filter_and_last_block():
+    log = (
+        "   Step   Temp   Density\n   0 300 0.10\n   100 300 0.20\n"
+        "Loop time of 1 on 1 procs\n"
+        "   Step   Temp   Density\n   0 298 0.83\n   100 298 0.84\n"
+        "Loop time of 2 on 1 procs\n"
+    )
+    import tempfile as _t
+    p = Path(_t.mkdtemp()) / "log.lammps"
+    p.write_text(log)
+    # column filter keeps only Density; two blocks returned
+    blocks = parse_thermo_log(p, columns={"density"})
+    assert len(blocks) == 2
+    assert set(blocks[0]) == {"Density"}
+    assert blocks[-1]["Density"] == [0.83, 0.84]
+
+
+def test_parse_thermo_log_parity_on_real_fixture():
+    # The canonical parser (shared with the MLIP agent) reads the real fixture's
+    # final-block Density; preserves original-case keys.
+    blocks = parse_thermo_log(FIXTURES / "log_healthy.lammps")
+    assert blocks, "expected at least one thermo block"
+    assert "Density" in blocks[-1]
+    tail = blocks[-1]["Density"]
+    assert sum(tail[len(tail) // 2:]) / (len(tail) - len(tail) // 2) == pytest.approx(0.83, abs=0.05)
 
 
 def test_missing_dir_and_empty_dir_return_none():

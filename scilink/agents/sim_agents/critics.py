@@ -810,6 +810,7 @@ class RunCritic(_CriticBase):
         check_observables: bool = False,
         required_observables: Optional[list] = None,
         deterministic_findings: Optional[list] = None,
+        physical_findings: Optional[list] = None,
     ) -> Dict[str, Any]:
         """Assess a finished run and return a verdict report.
 
@@ -998,6 +999,26 @@ class RunCritic(_CriticBase):
                 "deterministic check — treat each as BLOCKING and return a "
                 "corrected deck that fixes it):\n- "
                 + "\n- ".join(str(f) for f in deterministic_findings)
+            )
+
+        # Post-run physical-sanity evidence. Framed as a completed-but-wrong
+        # result — distinct from the pre-run coverage channel above — so the
+        # fixer diagnoses the deck setting that produced a non-physical value
+        # rather than being steered to add missing outputs.
+        if physical_findings:
+            observable_coverage += (
+                "\n\n=== Physical-sanity check (POST-run) ===\n"
+                "The run COMPLETED CLEANLY (the engine exited normally), but a "
+                "deterministic check measured a physical observable OUTSIDE its "
+                "plausible range. The result is NON-PHYSICAL, not under-provided "
+                "with outputs: the data IS present and it is wrong. Do NOT "
+                "propose adding thermo columns, dumps, or other logging. "
+                "Diagnose the deck setting that produced the non-physical state "
+                "(e.g. an unstable barostat/thermostat, a wrong `units` system, "
+                "too large a timestep, a bad initial box) and return the "
+                "COMPLETE corrected deck(s) in `suggested_fixes`, keyed by the "
+                "exact input filename. Treat each as BLOCKING:\n- "
+                + "\n- ".join(str(f) for f in physical_findings)
             )
 
         prompt = self.BASELINE_PROMPT_TEMPLATE.format(

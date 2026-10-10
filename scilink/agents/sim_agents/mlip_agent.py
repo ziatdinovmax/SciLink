@@ -880,6 +880,12 @@ Return JSON:
         agent and the health gate read the same log by the same rules (a stray
         ``fix print`` / ``WARNING:`` line is skipped, not treated as the end of
         the block). Keys preserve the header's original case (e.g. ``Density``).
+
+        Note: the canonical parser also parses ``Time``-headed blocks, so if a
+        log mixes ``Step``- and ``Time``-headed blocks the merged columns can be
+        ragged (different lengths). Current consumers index single columns
+        (``Density[-100:]``, ``Temp``, ``TotEng``) and are unaffected; a future
+        consumer that zips columns together must not assume equal length.
         """
         from ...skills.molecular_dynamics.lammps.lammps import parse_thermo_log
         merged: Dict[str, List[float]] = {}
