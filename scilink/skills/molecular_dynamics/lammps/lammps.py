@@ -1745,12 +1745,13 @@ def parse_thermo_log(log_file, columns=None) -> List[Dict[str, List[float]]]:
     different density from the same log. Keys preserve the header's original
     case. Robust to real-world noise:
 
-    * a header starts with ``Step`` or ``Time``, has at least two columns, and
-      every token is non-numeric — so a ``fix print "Step 200 ..."`` line is not
-      mistaken for a header;
+    * a header line (starts with ``Step``/``Time``, >=2 non-numeric tokens) is
+      only ACCEPTED once a numeric data row with the same column count actually
+      follows it — so an all-words ``fix print "Step done now"`` line is not
+      mistaken for a header and does not steal the rows after it;
     * a stray mid-block line — a ``fix print`` message, a ``WARNING:``, a blank,
       a truncated final row — is skipped, NOT treated as the end of the block;
-    * a block ends only at ``Loop time``, end of file, or the next header.
+    * a block ends only at ``Loop time``, end of file, or the next real header.
 
     ``columns`` optionally restricts which columns are materialized (lowercased
     names); the health reader passes just the one it needs so a long, densely
@@ -1759,36 +1760,51 @@ def parse_thermo_log(log_file, columns=None) -> List[Dict[str, List[float]]]:
     Never raises; a malformed log yields whatever parsed cleanly.
     """
     blocks: List[Dict[str, List[float]]] = []
-    header: Optional[List[str]] = None
-    keep: Optional[List[str]] = None       # header tokens being accumulated
+    header: Optional[List[str]] = None       # confirmed current-block header
+    keep: Optional[List[str]] = None         # columns being accumulated
     cur: Optional[Dict[str, List[float]]] = None
+    pending: Optional[List[str]] = None      # candidate header, not yet confirmed
+
+    def _looks_like_header(tokens):
+        return (tokens and tokens[0] in ("Step", "Time") and len(tokens) >= 2
+                and not any(_is_number(t) for t in tokens))
+
     try:
         with open(log_file, "r", errors="ignore") as f:
             for line in f:
                 toks = line.split()
-                if (toks and toks[0] in ("Step", "Time") and len(toks) >= 2
-                        and not any(_is_number(t) for t in toks)):
-                    header = toks
-                    keep = [h for h in header
-                            if columns is None or h.lower() in columns]
-                    cur = {h: [] for h in keep}
-                    blocks.append(cur)
+                if _looks_like_header(toks):
+                    # Don't open a block yet — a real header is confirmed only by
+                    # the numeric row that follows (below). This defers to the
+                    # most recent candidate if several appear in a row.
+                    pending = toks
                     continue
+                numeric = bool(toks) and all(_is_number(t) for t in toks)
+                if pending is not None:
+                    if numeric and len(toks) == len(pending):
+                        header = pending
+                        keep = [h for h in header
+                                if columns is None or h.lower() in columns]
+                        cur = {h: [] for h in keep}
+                        blocks.append(cur)
+                        pending = None
+                        row = dict(zip(header, toks))
+                        for h in keep:
+                            cur[h].append(float(row[h]))
+                        continue
+                    pending = None   # candidate was a stray line, not a header
                 if cur is None:
                     continue
                 if line.strip().startswith("Loop time"):
                     cur, header, keep = None, None, None
                     continue
-                if len(toks) != len(header):
-                    continue            # stray line — skip, keep the block open
-                if not all(_is_number(t) for t in toks):
-                    continue            # non-numeric stray line — skip
-                row = dict(zip(header, toks))
-                for h in keep:
-                    cur[h].append(float(row[h]))
+                if numeric and len(toks) == len(header):
+                    row = dict(zip(header, toks))
+                    for h in keep:
+                        cur[h].append(float(row[h]))
+                # else: stray / truncated line — skip, keep the block open
     except Exception as e:
         logger.debug("could not parse LAMMPS thermo log %s: %s", log_file, e)
-    # drop empty blocks (a header with no numeric rows, e.g. a false "Step ..." line)
     return [b for b in blocks if any(b.values())]
 
 

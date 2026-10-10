@@ -246,6 +246,18 @@ def test_refine_records_health_checked_false_when_unreadable(monkeypatch):
     assert rec["health_checked"] is False
 
 
+def test_refine_keeps_structure_class_beside_a_violation(monkeypatch):
+    # A violating run the critic diagnoses as a bad structure keeps the
+    # structure class (its own campaign routing) — not overwritten to
+    # health_gate — while the measured reasons are still carried.
+    _patch(monkeypatch, density=0.003)
+    critic = RecordingCritic([_needs_fix(failure_class="structure")])
+    rec = _refine_phase(_phase(), FakeExecutor(), critic, policy_for("autonomous"),
+                        _ctx(max_cycles=1))
+    assert rec["failure_class"] == "structure"
+    assert rec["health_violations"]
+
+
 def test_refine_crash_reaches_critic_not_health_gate(monkeypatch):
     # rc != 0 with an out-of-band reading: the gate steps aside, the critic owns it.
     _patch(monkeypatch, density=0.003)
@@ -285,3 +297,15 @@ def test_campaign_surfaces_health_gate(monkeypatch):
     assert out["status"] != "success"
     assert out["failure_class"] == "health_gate"
     assert out["health_violations"]
+
+
+def test_campaign_surfaces_health_checked_false(monkeypatch):
+    # The gate couldn't read its observable: the run passes, but the campaign
+    # result flags that the pass was unvouched.
+    _patch(monkeypatch, density=None)
+    stage = Stage(name="prod", phases=[_phase()])
+    out = run_campaign([stage], FakeExecutor(), RecordingCritic([_good()]),
+                       policy_for("autonomous"), _ctx(max_cycles=1),
+                       pre_run_verdict={"verdict": "good"})
+    assert out["status"] == "success"
+    assert out["health_checked"] is False

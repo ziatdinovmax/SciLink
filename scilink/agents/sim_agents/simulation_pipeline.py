@@ -975,6 +975,18 @@ def _run_workflow_once(
             "Run flagged health-gate (non-physical result): %s",
             "; ".join(reasons) if reasons else "(no reasons recorded)",
         )
+    # Independent of pass/fail: the health gate could not read its declared
+    # observable for at least one run, so that run was not physically checked.
+    # Surface it so a clean-looking result is not mistaken for a vouched one.
+    if refinement.get("health_checked") is False:
+        result.setdefault("warnings", []).append(
+            "The physical-sanity (health) gate could not read its declared "
+            "observable for at least one run — the deck may not log it, the unit "
+            "system is not covered, or no log was written. That run passed "
+            "WITHOUT a physical-sanity check."
+        )
+        logger.warning("Health gate could not read its observable; a run passed "
+                       "without a physical-sanity check.")
     result["final_status"] = (
         "success" if refinement.get("status") == "success"
         else f"refinement_{refinement.get('status', 'failed')}"

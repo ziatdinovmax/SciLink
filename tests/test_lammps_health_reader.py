@@ -168,6 +168,42 @@ def test_fix_print_step_line_is_not_a_header(tmp_path):
     assert rho == pytest.approx(0.835, abs=0.02)   # settled rows, not 0.0125
 
 
+def test_all_words_fix_print_step_line_is_not_a_header(tmp_path):
+    # An all-WORDS line beginning with "Step" (no numbers) must not be taken as
+    # a header: it would otherwise steal the rows after it and leave the mean on
+    # the startup rows, failing a healthy run.
+    log = (
+        "units real\n"
+        "   Step   Temp   Density\n"
+        "      0   300.0   0.010\n"
+        "    100   300.0   0.015\n"
+        "Step reseed complete; continuing production\n"   # all words, starts "Step"
+        "    200   298.0   0.820\n"
+        "    300   298.0   0.830\n"
+        "    400   298.0   0.840\n"
+        "Loop time of 2 on 1 procs\n"
+    )
+    (tmp_path / "log.lammps").write_text(log)
+    rho = read_health_observable(str(tmp_path), "density")
+    assert rho == pytest.approx(0.835, abs=0.02)   # settled rows, not 0.0125
+
+
+def test_header_confirmed_only_by_following_numeric_row(tmp_path):
+    # Two real blocks separated by an all-words stray "Step" line; the parser
+    # must keep exactly the two real blocks, not spawn a phantom one.
+    log = (
+        "   Step Temp Density\n   0 300 0.10\n   100 300 0.20\n"
+        "Loop time of 1 on 1 procs\n"
+        "Step change: switching ensemble\n"              # not a header
+        "   Step Temp Density\n   0 298 0.83\n   100 298 0.84\n"
+        "Loop time of 2 on 1 procs\n"
+    )
+    (tmp_path / "log.lammps").write_text(log)
+    blocks = parse_thermo_log(tmp_path / "log.lammps")
+    assert len(blocks) == 2
+    assert blocks[-1]["Density"] == [0.83, 0.84]
+
+
 def test_stale_log_from_earlier_phase_is_ignored(tmp_path):
     # A log older than the run start (shared run_dir, this phase wrote no log)
     # must be treated as absent, not judged.
@@ -209,6 +245,18 @@ def test_parse_thermo_log_parity_on_real_fixture():
     assert "Density" in blocks[-1]
     tail = blocks[-1]["Density"]
     assert sum(tail[len(tail) // 2:]) / (len(tail) - len(tail) // 2) == pytest.approx(0.83, abs=0.05)
+
+
+def test_mlip_wrapper_merges_blocks_on_real_fixture():
+    # Exercise the MLIP agent's _parse_lammps_thermo wrapper itself (not just
+    # parse_thermo_log) so the merge-and-original-case behaviour it relies on is
+    # covered. The wrapper uses no instance state, so a bare instance is fine.
+    from scilink.agents.sim_agents.mlip_agent import MLIPAgent
+    agent = MLIPAgent.__new__(MLIPAgent)
+    merged = agent._parse_lammps_thermo(str(FIXTURES / "log_healthy.lammps"))
+    assert "Density" in merged and "Temp" in merged     # original-case keys
+    tail = merged["Density"][-100:]
+    assert sum(tail) / len(tail) == pytest.approx(0.83, abs=0.05)
 
 
 def test_missing_dir_and_empty_dir_return_none():

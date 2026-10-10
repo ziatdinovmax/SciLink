@@ -593,9 +593,14 @@ def _refine_phase(
         )
         if violations:
             # The measured violation is the ground truth: it overrides a
-            # fail-open verdict and names the terminal cause if unresolved.
-            verdict = {**verdict, "verdict": "needs_fixes",
-                       "failure_class": "health_gate"}
+            # fail-open verdict (held below "acceptable"). It names the cause
+            # only when the critic did not diagnose a more specific, differently
+            # routed one — a `structure` or `force_field` call made alongside the
+            # violation is kept so the campaign still routes it correctly.
+            forced = {**verdict, "verdict": "needs_fixes"}
+            if forced.get("failure_class") not in ("structure", "force_field"):
+                forced["failure_class"] = "health_gate"
+            verdict = forced
         last_verdict = verdict
         ctx.record(phase, result, verdict)
 
@@ -627,11 +632,12 @@ def _refine_phase(
         "run_status": last_verdict.get("run_status"),
         "failure_class": last_verdict.get("failure_class"),
     }
-    # A phase that ended unresolved on a measured non-physical value is a
-    # health-gate failure — label it so and carry the reasons, whatever class
-    # the critic named on the way.
+    # A phase that ended unresolved on a measured non-physical value carries its
+    # reasons; it is labelled health_gate unless the critic named a more specific
+    # cause (structure / force_field) with its own campaign routing.
     if phase_status != "success" and violations:
-        rec["failure_class"] = "health_gate"
+        if rec.get("failure_class") not in ("structure", "force_field"):
+            rec["failure_class"] = "health_gate"
         rec["health_violations"] = [v.reason for v in violations]
     # The gate was enabled but couldn't read its observable — record that the
     # pass was unvouched (the deck may not log it / unsupported units / no log).
@@ -1254,6 +1260,11 @@ def run_campaign(
             r for p in flat if p.get("failure_class") == "health_gate"
             for r in p.get("health_violations", [])
         ]
+    # A phase whose health gate could not read its observable passed WITHOUT a
+    # physical-sanity check; surface that on the campaign result so the pipeline
+    # (and the user) know the pass was unvouched — even when the run succeeded.
+    if any(p.get("health_checked") is False for p in flat):
+        result["health_checked"] = False
     if dry_run_record is not None:
         result["dry_run"] = dry_run_record
     return result
