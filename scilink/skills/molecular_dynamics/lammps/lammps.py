@@ -1773,36 +1773,41 @@ def parse_thermo_log(log_file, columns=None) -> List[Dict[str, List[float]]]:
         with open(log_file, "r", errors="ignore") as f:
             for line in f:
                 toks = line.split()
-                if _looks_like_header(toks):
-                    # Don't open a block yet — a real header is confirmed only by
-                    # the numeric row that follows (below). This defers to the
-                    # most recent candidate if several appear in a row.
-                    pending = toks
-                    continue
                 numeric = bool(toks) and all(_is_number(t) for t in toks)
-                if pending is not None:
-                    if numeric and len(toks) == len(pending):
-                        header = pending
-                        keep = [h for h in header
-                                if columns is None or h.lower() in columns]
-                        cur = {h: [] for h in keep}
-                        blocks.append(cur)
-                        pending = None
+
+                if line.strip().startswith("Loop time"):
+                    cur, header, keep, pending = None, None, None, None
+                    continue
+
+                if cur is not None:
+                    # Inside an open block, a numeric row of the right width is
+                    # data; EVERYTHING else — including a `Step`/`Time` line from
+                    # a `fix print` — is a stray line that is skipped, never a new
+                    # header. A new block only begins after `Loop time` closes
+                    # this one.
+                    if numeric and len(toks) == len(header):
                         row = dict(zip(header, toks))
                         for h in keep:
                             cur[h].append(float(row[h]))
-                        continue
-                    pending = None   # candidate was a stray line, not a header
-                if cur is None:
                     continue
-                if line.strip().startswith("Loop time"):
-                    cur, header, keep = None, None, None
+
+                # No block open. A candidate header is HELD (across intervening
+                # stray lines) until a numeric row of matching width confirms it;
+                # a later candidate replaces an unconfirmed one.
+                if _looks_like_header(toks):
+                    pending = toks
                     continue
-                if numeric and len(toks) == len(header):
+                if pending is not None and numeric and len(toks) == len(pending):
+                    header = pending
+                    keep = [h for h in header
+                            if columns is None or h.lower() in columns]
+                    cur = {h: [] for h in keep}
+                    blocks.append(cur)
+                    pending = None
                     row = dict(zip(header, toks))
                     for h in keep:
                         cur[h].append(float(row[h]))
-                # else: stray / truncated line — skip, keep the block open
+                # else: no block, unconfirmed — skip, keep holding `pending`
     except Exception as e:
         logger.debug("could not parse LAMMPS thermo log %s: %s", log_file, e)
     return [b for b in blocks if any(b.values())]

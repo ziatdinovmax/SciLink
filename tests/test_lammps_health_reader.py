@@ -204,6 +204,40 @@ def test_header_confirmed_only_by_following_numeric_row(tmp_path):
     assert blocks[-1]["Density"] == [0.83, 0.84]
 
 
+def test_header_held_across_a_stray_line_before_first_row(tmp_path):
+    # Regression guard: a WARNING between the header and the first data row must
+    # not drop the whole block (the candidate header is held until a numeric row
+    # confirms it).
+    log = (
+        "units real\n"
+        "   Step   Temp   Density\n"
+        "WARNING: bond atoms missing (src/ntopo.cpp:1)\n"   # stray BEFORE data
+        "      0   298.0   0.830\n"
+        "    100   298.0   0.840\n"
+        "Loop time of 1 on 1 procs\n"
+    )
+    (tmp_path / "log.lammps").write_text(log)
+    assert read_health_observable(str(tmp_path), "density") == pytest.approx(0.835, abs=0.01)
+
+
+def test_mid_block_step_line_matching_width_is_stray(tmp_path):
+    # An all-words `Step` line INSIDE an open block is a stray line even when its
+    # token count matches the columns — it must not split the block.
+    log = (
+        "units real\n"
+        "   Step   Temp   Density\n"           # 3 columns
+        "      0   300.0   0.010\n"
+        "    100   300.0   0.015\n"
+        "Step is steady\n"                      # 3 tokens, all words — still stray
+        "    200   298.0   0.820\n"
+        "    300   298.0   0.830\n"
+        "    400   298.0   0.840\n"
+        "Loop time of 2 on 1 procs\n"
+    )
+    (tmp_path / "log.lammps").write_text(log)
+    assert read_health_observable(str(tmp_path), "density") == pytest.approx(0.835, abs=0.02)
+
+
 def test_stale_log_from_earlier_phase_is_ignored(tmp_path):
     # A log older than the run start (shared run_dir, this phase wrote no log)
     # must be treated as absent, not judged.
