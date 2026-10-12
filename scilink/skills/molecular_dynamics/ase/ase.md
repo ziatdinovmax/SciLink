@@ -5,17 +5,16 @@ outputs:
   thermo_log: [thermo.log]
 inputs:
   deck: ["run_md.py", "run_relax.py"]
-detect:
-  python_modules: [ase]
-  guidance: |
-    ASE here is a Python driver, not a standalone MD engine binary. It is the
-    universal fallback for EXECUTING a deployed MLIP potential when no classical
-    engine fits (issue #429) — a Pt/metal system, for example, which OpenFF and
-    classical force fields cannot parameterize. It is deliberately NOT offered
-    as a general user-available MD engine in routing: the router injects "ase"
-    only for an MLIP-only audience (no classical MD engine installed), and the
-    pipeline re-points to this bundle when potential selection chooses an MLIP
-    after routing. Everyday molecular systems still route to lammps / gromacs.
+# ase is the universal MLIP *execution* path — a Python driver injected for the
+# MLIP-only audience and re-pointed to when potential selection picks an MLIP
+# after routing (issue #429) — NOT a routable, user-selectable MD engine. So it
+# carries no `detect:` block: it is not an installed engine for AvailableSoftware
+# to discover (a `detect: python_modules:[ase]` would make an MLIP-only machine
+# report a classical force field could run, overriding the model's MLIP pick),
+# and `routable: false` keeps it out of the router's candidate set. Discovery and
+# routing both key off these, so there is one place — here — that marks ase
+# special. Everyday molecular systems still route to lammps / gromacs.
+routable: false
 health:
   # Gross physical-sanity band for a finished ASE MD run — a tripwire for a
   # non-physical result (e.g. a thermostat that ran away), NOT an accuracy
