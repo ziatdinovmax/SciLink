@@ -159,3 +159,38 @@ class TestVacuousFixGuard:
         report = {"suggested_fixes": None}
         _drop_vacuous_fix(report)
         assert report["suggested_fixes"] is None
+
+
+class TestPhysicalFindingsFraming:
+    """A health violation reaches the critic as POST-run non-physical evidence,
+    NOT through the pre-run observable-coverage channel (which would steer the
+    fixer toward adding logged outputs rather than fixing the deck)."""
+
+    def test_physical_findings_use_postrun_block_not_coverage(self, tmp_path):
+        rc, captured = _stub_critic(
+            RunCritic,
+            json.dumps({"run_status": "succeeded", "verdict": "needs_fixes",
+                        "suggested_fixes": {"in.lmp": "fixed"}}),
+        )
+        rc.assess(
+            output_dir=str(tmp_path),
+            research_goal="1 mol/L aqueous electrolyte density",
+            skill="lammps", domain="molecular_dynamics",
+            physical_findings=["density=0.0026 g/cm^3 < min 0.02"],
+        )
+        prompt = captured["prompt"]
+        # framed as a completed-but-non-physical result, with the measured value
+        assert "Physical-sanity check (POST-run)" in prompt
+        assert "NON-PHYSICAL" in prompt
+        assert "density=0.0026 g/cm^3 < min 0.02" in prompt
+        # and NOT through the pre-run observable-coverage / missing-output framing
+        assert "Observable-coverage check (pre-run)" not in prompt
+
+    def test_no_physical_findings_adds_no_block(self, tmp_path):
+        rc, captured = _stub_critic(
+            RunCritic,
+            json.dumps({"run_status": "succeeded", "verdict": "good"}),
+        )
+        rc.assess(output_dir=str(tmp_path), research_goal="x",
+                  skill="lammps", domain="molecular_dynamics")
+        assert "Physical-sanity check (POST-run)" not in captured["prompt"]

@@ -874,42 +874,25 @@ Return JSON:
         return report
 
     def _parse_lammps_thermo(self, log_file: str) -> Dict[str, List[float]]:
-        """Extract thermo columns from a LAMMPS log file."""
-        import numpy as np
+        """Extract thermo columns from a LAMMPS log file (all blocks merged).
 
-        data: Dict[str, List[float]] = {}
-        headers: List[str] = []
+        Delegates to the LAMMPS skill's canonical thermo parser so the MLIP
+        agent and the health gate read the same log by the same rules (a stray
+        ``fix print`` / ``WARNING:`` line is skipped, not treated as the end of
+        the block). Keys preserve the header's original case (e.g. ``Density``).
 
-        try:
-            with open(log_file) as f:
-                in_thermo = False
-                for line in f:
-                    stripped = line.strip()
-
-                    # Detect thermo header
-                    if stripped.startswith("Step "):
-                        headers = stripped.split()
-                        for h in headers:
-                            data.setdefault(h, [])
-                        in_thermo = True
-                        continue
-
-                    if in_thermo:
-                        if stripped.startswith("Loop time") or not stripped:
-                            in_thermo = False
-                            continue
-                        parts = stripped.split()
-                        if len(parts) == len(headers):
-                            try:
-                                values = [float(x) for x in parts]
-                                for h, v in zip(headers, values):
-                                    data[h].append(v)
-                            except ValueError:
-                                in_thermo = False
-        except Exception as e:
-            self.logger.warning(f"Error parsing LAMMPS log: {e}")
-
-        return data
+        Note: the canonical parser also parses ``Time``-headed blocks, so if a
+        log mixes ``Step``- and ``Time``-headed blocks the merged columns can be
+        ragged (different lengths). Current consumers index single columns
+        (``Density[-100:]``, ``Temp``, ``TotEng``) and are unaffected; a future
+        consumer that zips columns together must not assume equal length.
+        """
+        from ...skills.molecular_dynamics.lammps.lammps import parse_thermo_log
+        merged: Dict[str, List[float]] = {}
+        for block in parse_thermo_log(log_file):
+            for key, values in block.items():
+                merged.setdefault(key, []).extend(values)
+        return merged
 
     # ================================================================
     # PRIVATE — LLM HELPERS
