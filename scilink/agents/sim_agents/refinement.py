@@ -770,13 +770,22 @@ def _merge_health_bounds(frontmatter, derived):
     """Per-observable override of frontmatter bands by model-derived bands.
     Derived wins where present; frontmatter observables with no derived band are kept;
     derived observables absent from frontmatter are added. Both are raw spec dicts, so
-    parse_health_specs validates them identically."""
+    parse_health_specs validates them identically.
+
+    Each surviving spec is tagged with its ``source`` (``"frontmatter"`` /
+    ``"derived"``) so a violation can say whether the BAND or the RUN is suspect
+    (an existing ``source`` is preserved). The no-derived fast path returns the
+    frontmatter list unchanged — the default-OFF gate is byte-identical and
+    ``parse_health_specs`` defaults an untagged spec to ``"frontmatter"``."""
     if not derived:
         return frontmatter
-    by_obs = {d["observable"]: d for d in frontmatter if isinstance(d, dict) and d.get("observable")}
+    by_obs = {}
+    for d in frontmatter:
+        if isinstance(d, dict) and d.get("observable"):
+            by_obs[d["observable"]] = {**d, "source": d.get("source", "frontmatter")}
     for d in derived:
         if isinstance(d, dict) and d.get("observable"):
-            by_obs[d["observable"]] = d
+            by_obs[d["observable"]] = {**d, "source": d.get("source", "derived")}
     return list(by_obs.values())
 
 

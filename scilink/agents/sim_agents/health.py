@@ -56,12 +56,20 @@ class HealthBand:
     """A plausible range for one observable.
 
     Either bound may be ``None`` (one-sided). ``observable`` is the name the
-    per-engine reader hook understands (e.g. ``"density"``).
+    per-engine reader hook understands (e.g. ``"density"``). ``units`` is the
+    optional unit string the band (and the reader) are expressed in — carried so
+    a system-aware deriver can ask the model for an expected value in the SAME
+    units the gate judges in. ``source`` records provenance (``"frontmatter"``
+    for a static skill-declared band, ``"derived"`` for a model-derived
+    system-aware one) so a violation can say whether the BAND or the RUN is
+    suspect.
     """
 
     observable: str
     minimum: Optional[float] = None
     maximum: Optional[float] = None
+    units: Optional[str] = None
+    source: str = "frontmatter"
 
 
 @dataclass(frozen=True)
@@ -72,9 +80,19 @@ class HealthViolation:
     value: float
     minimum: Optional[float]
     maximum: Optional[float]
+    source: str = "frontmatter"
 
     @property
     def reason(self) -> str:
+        base = self._base_reason()
+        # A model-derived band is a hypothesis about the system, not a
+        # skill-vetted bound: flag its provenance so the critic can question the
+        # BAND (re-derive / loosen) rather than only the run.
+        if self.source == "derived":
+            return f"{base} [band was model-derived]"
+        return base
+
+    def _base_reason(self) -> str:
         if not math.isfinite(self.value):
             return f"{self.observable}={self.value} (non-finite)"
         if self.minimum is not None and self.value < self.minimum:
@@ -110,7 +128,13 @@ def parse_health_specs(specs) -> List[HealthBand]:
             logger.warning(
                 "health band for %r has min %g > max %g; skipping it", name, lo, hi)
             continue
-        bands.append(HealthBand(observable=str(name), minimum=lo, maximum=hi))
+        units = spec.get("units")
+        units = str(units) if units is not None else None
+        # Provenance is optional metadata; a raw frontmatter spec carries none
+        # and is, by definition, frontmatter.
+        source = spec.get("source") or "frontmatter"
+        bands.append(HealthBand(observable=str(name), minimum=lo, maximum=hi,
+                                units=units, source=str(source)))
     return bands
 
 
@@ -142,14 +166,14 @@ def evaluate_health(
             continue
         if not math.isfinite(value):
             violations.append(HealthViolation(
-                band.observable, value, band.minimum, band.maximum))
+                band.observable, value, band.minimum, band.maximum, band.source))
             continue
         if band.minimum is not None and value < band.minimum:
             violations.append(HealthViolation(
-                band.observable, value, band.minimum, band.maximum))
+                band.observable, value, band.minimum, band.maximum, band.source))
         elif band.maximum is not None and value > band.maximum:
             violations.append(HealthViolation(
-                band.observable, value, band.minimum, band.maximum))
+                band.observable, value, band.minimum, band.maximum, band.source))
     return violations
 
 
