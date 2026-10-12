@@ -1192,6 +1192,7 @@ class SimulationOrchestratorTools:
                     max_refinement_cycles=max_refinement_cycles,
                     max_run_cycles=max_run_cycles,
                     executor=executor, run_command=run_command,
+                    run_command_source=rc_source,
                 )
             except Exception as e:
                 return json.dumps({

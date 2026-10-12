@@ -140,11 +140,35 @@ def _generate_mlip_inputs(
         runner="ase",
     )
     # Normalize to the common input_files shape: the generated run script is
-    # the single input artifact.
+    # the single input artifact. Store its CONTENTS (not its path) — the
+    # classical branch does the same (``_generate_classical_md_inputs``), and
+    # the execution path (``_collect_phases`` -> ``LocalExecutor.run``) writes
+    # each ``input_files`` value verbatim into the run directory. A path string
+    # left here would be written out as the script body, so the ASE run never
+    # executed (MLIP-execution-in-loop, Blocker 1).
     run_path = result.get("run_path") or result.get("script_path")
     if run_path and Path(run_path).exists():
-        result.setdefault("input_files", {Path(run_path).name: run_path})
+        result.setdefault("input_files",
+                          {Path(run_path).name: Path(run_path).read_text()})
         result.setdefault("entry_file", Path(run_path).name)
+    # Stage the structure into the run dir under its basename, next to the run
+    # script — the generated ASE driver reads it by basename (see
+    # _ase_runner.generate_ase_script), and the executor writes every
+    # input_files entry verbatim into the run dir. This makes the run dir
+    # self-contained (the same shape as the classical path, which ships its
+    # data file by name), so the script finds the structure regardless of cwd
+    # or local-vs-remote execution. Structure files here are text
+    # (POSCAR/cif/xyz/lammps-data), so embed the contents, not the path.
+    staged_structure = result.get("structure_file") or structure_file
+    if staged_structure and Path(staged_structure).exists():
+        inputs = result.setdefault("input_files", {})
+        basename = Path(staged_structure).name
+        if basename not in inputs:
+            try:
+                inputs[basename] = Path(staged_structure).read_text()
+            except (OSError, UnicodeDecodeError) as exc:
+                logger.debug("could not stage structure %s into run dir: %r",
+                             staged_structure, exc)
     result.setdefault("status", "success")
     return result
 
@@ -459,6 +483,7 @@ def _run_workflow_once(
     validate: bool = True,
     executor: "Executor | None" = None,
     run_command: Optional[str] = None,
+    run_command_source: Optional[str] = None,
     autonomy: str = "autonomous",
     max_run_cycles: int = 3,
     coverage_votes: int = 1,
@@ -512,6 +537,13 @@ def _run_workflow_once(
             filled from each phase's entry file (e.g. ``"lmp -in {script}"``).
             User/config — required when ``executor`` is provided. The engine
             binary lives here, never in this module.
+        run_command_source: Provenance of ``run_command`` — ``"user"`` (the
+            caller passed it explicitly), ``"skill"`` (it is the routed engine
+            skill's declared default), or ``None`` (absent). The ASE seam uses
+            this instead of guessing from the command text: for an MLIP/ASE run
+            a non-``"user"`` command is the wrong (classical) engine's default
+            and is re-resolved from the ase bundle, while a ``"user"`` command —
+            including an HPC launcher like ``srun {script}`` — is preserved.
         autonomy: Autonomy level for the refinement loop (``"co-pilot"`` /
             ``"autopilot"`` / ``"autonomous"``); selects the built-in policy.
         max_run_cycles: Maximum run → assess → fix cycles per phase.
@@ -796,6 +828,22 @@ def _run_workflow_once(
         return result
     result["steps_completed"].append("input_generation")
 
+    # classical-vs-ASE is decided by potential_selection INSIDE input
+    # generation, after the router picked the engine, so the routed classical
+    # engine's skill/domain are wrong for an MLIP run. When generation ran the
+    # ASE path, re-point the effective skill/domain at the ``ase`` bundle once,
+    # here — so the step-3 pre-run validator, the step-4 health gate and the
+    # RunCritic all ground on ase rather than on the routed classical engine.
+    run_skill, run_domain = software, scale
+    run_engine = software
+    if gen_result.get("runner") == "ase":
+        run_skill, run_domain = "ase", "molecular_dynamics"
+        # The executed engine is ase, not the routed classical software. This is
+        # what the delegation ledger and RefinementContext.engine must record,
+        # so overwrite the result's engine (set to `software` at step 0) too.
+        run_engine = "ase"
+        result["engine"] = run_engine
+
     # ── Step 3: pre-run input validation (engine-neutral critic) ──
     # Skipped for named (deterministic, expert-defined) backends and when
     # the caller opts out.
@@ -809,7 +857,7 @@ def _run_workflow_once(
             )
             result["input_validation"] = validator.validate(
                 input_files=input_files, system_description=user_request,
-                skill=software, domain=scale,
+                skill=run_skill, domain=run_domain,
             )
             result["steps_completed"].append("input_validation")
     else:
@@ -915,6 +963,27 @@ def _run_workflow_once(
         result["final_status"] = "success"
         return result
 
+    # ── MLIP/ASE execution seam (MLIP-execution-in-loop, Blocker 2) ──
+    # run_skill/run_domain were already re-pointed to the ``ase`` bundle above
+    # (right after input generation). Here, re-resolve the run_command using its
+    # PROVENANCE, not a guess from its text: for an MLIP/ASE run a command that
+    # is absent or was the routed classical engine's skill default
+    # (``run_command_source != "user"``) would feed the Python driver to the
+    # wrong binary, so re-resolve it from the ase bundle. A command the caller
+    # passed explicitly (``run_command_source == "user"``) is preserved verbatim
+    # — including an HPC launcher like ``srun {script}`` or ``mpirun -n 4
+    # {script}``, which a text heuristic would have wrongly rewritten.
+    if run_skill == "ase" and run_command_source != "user":
+        try:
+            from ...skills._shared._registry import get_tool_function
+            ase_rc = get_tool_function(
+                "default_run_command", active_skills=["ase"])()
+        except Exception as e:
+            logger.debug("could not resolve ase run_command: %r", e)
+            ase_rc = None
+        if ase_rc:
+            run_command = ase_rc
+
     if not run_command:
         result["refinement"] = {
             "status": "skipped",
@@ -928,8 +997,8 @@ def _run_workflow_once(
 
     stages = _collect_stages(gen_result, output_dir, run_command)
     ctx = RefinementContext(
-        research_goal=user_request, scale=scale, engine=software,
-        skill=software, domain=scale, autonomy=autonomy,
+        research_goal=user_request, scale=scale, engine=run_engine,
+        skill=run_skill, domain=run_domain, autonomy=autonomy,
         max_cycles=max_run_cycles, coverage_votes=coverage_votes,
         required_observables=required_observables,
     )

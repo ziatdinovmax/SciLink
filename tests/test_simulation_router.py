@@ -91,6 +91,84 @@ def test_candidate_engines_returns_intersection():
     assert "qe" not in cands.get("periodic_dft", [])
 
 
+def test_ase_bundle_is_not_a_normal_md_candidate():
+    """Adding the real ase skill bundle must not make it a routable MD engine.
+
+    `ase` is the universal MLIP EXECUTION path, injected only for an MLIP-only
+    audience — it must stay OUT of the normal candidate set so the router can't
+    pick it over lammps/gromacs for an ordinary molecular system. Here both
+    lammps and ase are marked available; only lammps may be a candidate.
+    """
+    avail = _avail_with(
+        ("molecular_dynamics", "lammps"),
+        ("molecular_dynamics", "ase"),      # even marked available...
+    )
+    router = SimulationRouter(model=MagicMock(), available_software=avail)
+    cands = router.candidate_engines()
+    assert "ase" not in cands.get("molecular_dynamics", [])
+    assert cands["molecular_dynamics"] == ["lammps"]
+
+
+def test_ase_excluded_from_discover_scale_agents_support():
+    """`ase` is filtered from the molecular_dynamics supported set at source."""
+    scales = discover_scale_agents()
+    assert "ase" not in scales["molecular_dynamics"]["supported"]
+
+
+def test_ase_not_detected_as_installed_md_engine():
+    """AvailableSoftware never reports `ase` as an installed MD engine.
+
+    `ase.md` carries no `detect:` block, so a real frontmatter probe cannot
+    mark it available. This is the root fix for the leak: a `detect:` on ase
+    would make an MLIP-only machine (ase importable, no LAMMPS) report that a
+    classical force field could run, letting potential_selection override the
+    model's MLIP pick and emit a LAMMPS deck for an absent engine.
+    """
+    sw = AvailableSoftware.detect()
+    assert "ase" not in sw.list_available(domain="molecular_dynamics")
+
+
+def test_routable_false_skill_is_dropped_from_discovery():
+    """The discovery filter keys off `routable: false`, not the name `ase`.
+
+    `discover_scale_agents` drops any molecular_dynamics skill whose frontmatter
+    declares `routable: false`; ase is exactly such a bundle. Proving it through
+    the frontmatter flag (not a hardcoded name) guards against the ase-specific
+    hardcode returning.
+    """
+    from scilink.skills.loader import list_skills, load_skill
+
+    supported = set(discover_scale_agents()["molecular_dynamics"]["supported"])
+    for name in list_skills(domain="molecular_dynamics"):
+        meta = load_skill(name, domain="molecular_dynamics").get("meta") or {}
+        if meta.get("routable", True) is False:
+            assert name not in supported, (
+                f"routable:false skill {name!r} leaked into the candidate set"
+            )
+    # and ase, the concrete case, is among those dropped
+    assert "ase" in list_skills(domain="molecular_dynamics")
+    assert "ase" not in supported
+
+
+def test_ordinary_system_routes_to_lammps_not_ase():
+    """An ordinary MD goal routes to lammps; ase is never even a candidate."""
+    avail = _avail_with(
+        ("molecular_dynamics", "lammps"),
+        ("molecular_dynamics", "ase"),
+    )
+    decision_json = json.dumps({
+        "scale": "molecular_dynamics", "engine": "lammps",
+        "reasoning": "water box; classical lammps is the right engine",
+        "alternatives": [],
+    })
+    router = SimulationRouter(
+        model=_model_returning(decision_json), available_software=avail)
+    out = router.route("Equilibrate a water box at 300 K")
+    assert out["scale"] == "molecular_dynamics"
+    assert out["engine"] == "lammps"
+    assert "ase" not in out["candidates_considered"].get("molecular_dynamics", [])
+
+
 def test_candidate_engines_omits_unavailable_scales():
     """If user has no engines available for a scale, that scale is omitted."""
     avail = _avail_with(("periodic_dft", "vasp"))  # nothing else

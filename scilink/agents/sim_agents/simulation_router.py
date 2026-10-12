@@ -113,10 +113,28 @@ def discover_scale_agents() -> Dict[str, Dict[str, Any]]:
         # (runtime-keyed by successfully-imported tools modules). We
         # also union with skill-bundle discovery so a markdown-only
         # bundle counts even if its sibling .py wasn't importable.
-        from ...skills.loader import list_skills
+        from ...skills.loader import list_skills, load_skill
+        # Some molecular_dynamics skill bundles are execution surfaces, not
+        # engines the router chooses among — "ase" is the universal MLIP
+        # EXECUTION path (issue #429): injected in candidate_engines only for an
+        # MLIP-only audience, and re-pointed to when potential selection picks an
+        # MLIP after routing. Such a bundle declares `routable: false` in its
+        # frontmatter; drop any that do, so the router never picks one over
+        # lammps / gromacs for everyday systems. (Keyed off the same frontmatter
+        # flag the health gate reads — no engine named by hand here.)
+        def _is_routable(name: str) -> bool:
+            try:
+                meta = load_skill(name, domain="molecular_dynamics").get("meta") or {}
+            except Exception as exc:
+                _logger.debug("could not load md skill %r meta: %s", name, exc)
+                return True
+            return meta.get("routable", True) is not False
         supported = sorted(
-            set(getattr(MDSimulationAgent, "TOOL_REGISTRY", {}).keys())
-            | set(list_skills(domain="molecular_dynamics"))
+            name for name in (
+                set(getattr(MDSimulationAgent, "TOOL_REGISTRY", {}).keys())
+                | set(list_skills(domain="molecular_dynamics"))
+            )
+            if _is_routable(name)
         )
         found["molecular_dynamics"] = {
             "agent_class": MDSimulationAgent,
