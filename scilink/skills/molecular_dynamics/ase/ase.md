@@ -23,7 +23,8 @@ health:
   # `temperature` is declared here. Keep the bounds loose: only a genuinely
   # broken run should trip them. Accuracy is judged downstream against a
   # reference, never here. Read by the `read_health_observable` hook.
-  - observable: temperature   # K
+  - observable: temperature
+    units: K                  # the units the band (and the reader) are in
     min: 1.0                  # a dead / frozen run; a real MD setpoint is >> 1 K
     max: 50000.0              # a thermostat blow-up; far above any physical setpoint
 ---

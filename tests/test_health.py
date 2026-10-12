@@ -128,3 +128,33 @@ def test_observable_names_dedup_preserves_order():
         {"observable": "density", "max": 30},
     ]
     assert observable_names(specs) == ["density", "temperature"]
+
+
+# ── units + provenance (issue #783) ──────────────────────────────────────────
+
+def test_parse_carries_units_and_defaults_source_frontmatter():
+    bands = parse_health_specs([{"observable": "density", "min": 0.02,
+                                 "max": 30.0, "units": "g/cm^3"}])
+    assert bands[0].units == "g/cm^3"
+    assert bands[0].source == "frontmatter"   # no source key -> frontmatter
+
+
+def test_parse_retains_explicit_source():
+    bands = parse_health_specs([{"observable": "density", "min": 0.2,
+                                 "max": 5.0, "source": "derived"}])
+    assert bands[0].source == "derived"
+
+
+def test_violation_from_frontmatter_band_reports_frontmatter_source():
+    specs = [{"observable": "density", "min": 0.2, "max": 5.0}]  # no source key
+    v = evaluate_health({"density": 0.1}, specs)[0]
+    assert v.source == "frontmatter"
+    assert "model-derived" not in v.reason
+
+
+def test_violation_from_derived_band_reports_derived_source():
+    specs = [{"observable": "density", "min": 0.2, "max": 5.0,
+              "source": "derived"}]
+    v = evaluate_health({"density": 0.1}, specs)[0]
+    assert v.source == "derived"
+    assert "band was model-derived" in v.reason

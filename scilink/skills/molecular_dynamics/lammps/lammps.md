@@ -22,7 +22,8 @@ health:
   # vacuum), NOT an accuracy check. Keep the bounds loose: only a genuinely
   # broken run should trip them. Accuracy is judged downstream against a
   # reference, never here. Read by the `read_health_observable` hook.
-  - observable: density       # g/cm^3
+  - observable: density
+    units: g/cm^3             # the units the band (and the reader) are in
     min: 0.02                 # below any real liquid/solid; a blown-up box -> ~0
     max: 30.0                 # above the densest solids; catches an implosion
 ---
