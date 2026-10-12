@@ -320,6 +320,9 @@ class RefinementContext:
         required_observables: Optional engine-neutral ``Requirement`` list the
             run must yield; when set, the coverage gate checks this authoritative
             list instead of re-deriving the required set from the goal.
+        health_bounds: Optional system-aware ``health:`` bands (raw spec dicts)
+            derived from the system; merged OVER the frontmatter fallback in
+            :func:`_resolve_health`. None leaves frontmatter bands untouched.
         history: Per-cycle records appended by :meth:`record`.
         interact: Optional human-feedback handle; ``None`` for headless runs.
     """
@@ -335,6 +338,7 @@ class RefinementContext:
     max_health_retries: int = 2
     coverage_votes: int = 1
     required_observables: Optional[List] = None
+    health_bounds: Optional[List[Dict[str, Any]]] = None
     history: List[Dict[str, Any]] = field(default_factory=list)
     interact: Optional[InteractFn] = None
 
@@ -762,17 +766,38 @@ def _read_health_observations(output_dir: str, specs, reader, since=None) -> Dic
     return obs
 
 
+def _merge_health_bounds(frontmatter, derived):
+    """Per-observable override of frontmatter bands by model-derived bands.
+    Derived wins where present; frontmatter observables with no derived band are kept;
+    derived observables absent from frontmatter are added. Both are raw spec dicts, so
+    parse_health_specs validates them identically."""
+    if not derived:
+        return frontmatter
+    by_obs = {d["observable"]: d for d in frontmatter if isinstance(d, dict) and d.get("observable")}
+    for d in derived:
+        if isinstance(d, dict) and d.get("observable"):
+            by_obs[d["observable"]] = d
+    return list(by_obs.values())
+
+
 def _resolve_health(ctx: RefinementContext):
     """Resolve ``(specs, reader, perturb)`` for the active skill, once per context.
 
     Skill and domain are fixed for the life of a ``RefinementContext``, so the
     skill markdown is loaded and the hooks resolved a single time and cached on
     the context — not re-parsed per phase × cycle × health-retry × member.
+
+    Precedence: frontmatter is the fallback; a system-aware derived band for the
+    same observable (``ctx.health_bounds``) replaces it. The merge is applied
+    BEFORE reader/perturb resolution so a derived-only band on an engine with no
+    frontmatter ``health:`` block still resolves a reader (this ordering is
+    load-bearing).
     """
     cached = getattr(ctx, "_health_cache", None)
     if cached is not None:
         return cached
     specs = _health_specs(ctx.skill, ctx.domain)
+    specs = _merge_health_bounds(specs, getattr(ctx, "health_bounds", None))
     reader = (_resolve_skill_callable(ctx.skill, ctx.domain, "read_health_observable")
               if specs else None)
     perturb = (_resolve_skill_callable(ctx.skill, ctx.domain, "perturb_for_retry")

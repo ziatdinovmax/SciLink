@@ -309,3 +309,50 @@ def test_campaign_surfaces_health_checked_false(monkeypatch):
                        pre_run_verdict={"verdict": "good"})
     assert out["status"] == "success"
     assert out["health_checked"] is False
+
+
+# ── system-aware health bands (issue #783) ───────────────────────────────────
+
+WATER_BAND = [{"observable": "density", "min": 0.2, "max": 5.0}]
+
+
+def test_resolve_health_merges_bounds_over_frontmatter(monkeypatch):
+    # Frontmatter declares NO health block; a system-aware derived band must
+    # still be applied AND resolve a reader. The merge runs BEFORE the
+    # reader/perturb resolution, so the derived-only path is still gated.
+    _patch(monkeypatch, density=0.83, specs=[])
+    ctx = _ctx(health_bounds=WATER_BAND)
+    specs, reader, perturb = refinement._resolve_health(ctx)
+    assert any(s["observable"] == "density" for s in specs)
+    assert reader is not None
+
+
+def test_gate_uses_derived_band_tighter_than_frontmatter(monkeypatch):
+    # density 0.10 is inside the universal frontmatter 0.02–30 (a no-op under
+    # #782) but outside the system-aware water band 0.2–5.0 — now a violation.
+    _patch(monkeypatch, density=0.10, specs=DENSITY_SPEC)
+    ctx = _ctx(health_bounds=WATER_BAND)
+    result, violations, _, checked = _run_phase_health_gated(
+        _phase().input_files, _phase(), FakeExecutor(), ctx)
+    assert violations and "density" in violations[0].reason
+    assert checked is True
+
+
+def test_gate_derived_band_does_not_fire_on_accurate_value(monkeypatch):
+    # A merely-inaccurate-but-physical 0.88 passes the water band 0.2–5.0: the
+    # system-aware band is a gross-sanity tripwire, not an accuracy check.
+    _patch(monkeypatch, density=0.88, specs=DENSITY_SPEC)
+    ctx = _ctx(health_bounds=WATER_BAND)
+    result, violations, _, checked = _run_phase_health_gated(
+        _phase().input_files, _phase(), FakeExecutor(), ctx)
+    assert violations == [] and checked is True
+
+
+def test_back_compat_no_health_bounds(monkeypatch):
+    # health_bounds unset (None) -> identical to the #782 healthy-passes path.
+    _patch(monkeypatch, density=0.83, specs=DENSITY_SPEC)
+    ctx = _ctx()
+    assert ctx.health_bounds is None
+    result, violations, _, checked = _run_phase_health_gated(
+        _phase().input_files, _phase(), FakeExecutor(), ctx)
+    assert violations == [] and checked is True
