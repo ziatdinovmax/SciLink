@@ -140,10 +140,16 @@ def _generate_mlip_inputs(
         runner="ase",
     )
     # Normalize to the common input_files shape: the generated run script is
-    # the single input artifact.
+    # the single input artifact. Store its CONTENTS (not its path) — the
+    # classical branch does the same (``_generate_classical_md_inputs``), and
+    # the execution path (``_collect_phases`` -> ``LocalExecutor.run``) writes
+    # each ``input_files`` value verbatim into the run directory. A path string
+    # left here would be written out as the script body, so the ASE run never
+    # executed (MLIP-execution-in-loop, Blocker 1).
     run_path = result.get("run_path") or result.get("script_path")
     if run_path and Path(run_path).exists():
-        result.setdefault("input_files", {Path(run_path).name: run_path})
+        result.setdefault("input_files",
+                          {Path(run_path).name: Path(run_path).read_text()})
         result.setdefault("entry_file", Path(run_path).name)
     result.setdefault("status", "success")
     return result
@@ -427,6 +433,19 @@ def _reparameterize(flagged, system_description, backend, components,
         apply_and_recheck_fn=_apply_and_recheck,
         confirm_fn=confirm_fn or (lambda candidate: True),
     )
+
+
+def _run_command_cannot_launch_python(run_command: Optional[str]) -> bool:
+    """True when ``run_command`` cannot launch a Python ASE driver script.
+
+    The ASE runner emits a plain Python script (``run_md.py`` /
+    ``run_relax.py``). A ``run_command`` inherited from the routed classical
+    engine (e.g. ``"lmp -in {script}"``) has no Python interpreter and would
+    feed the script to the wrong binary, so it must be re-resolved from the
+    ``ase`` bundle. A command that already invokes Python is treated as a
+    deliberate user override and preserved (MLIP-execution-in-loop, Blocker 2).
+    """
+    return "python" not in (run_command or "").lower()
 
 
 def _convergence_specs(software: str, scale: str) -> list:
@@ -915,6 +934,28 @@ def _run_workflow_once(
         result["final_status"] = "success"
         return result
 
+    # ── MLIP/ASE execution seam (MLIP-execution-in-loop, Blocker 2) ──
+    # classical-vs-ASE is decided by potential_selection INSIDE input
+    # generation, after the router picked the engine, so the routed engine's
+    # skill/domain and run_command (resolved up-front from that engine) can be
+    # wrong for an ASE run. When generation ran the ASE path, re-point the
+    # refinement at the ``ase`` bundle — so the health gate + RunCritic ground
+    # on ase, and the run launches the Python driver instead of the classical
+    # binary. A user-supplied Python run_command is preserved as an override.
+    run_skill, run_domain = software, scale
+    if gen_result.get("runner") == "ase":
+        run_skill, run_domain = "ase", "molecular_dynamics"
+        if run_command is None or _run_command_cannot_launch_python(run_command):
+            try:
+                from ...skills._shared._registry import get_tool_function
+                ase_rc = get_tool_function(
+                    "default_run_command", active_skills=["ase"])()
+            except Exception as e:
+                logger.debug("could not resolve ase run_command: %r", e)
+                ase_rc = None
+            if ase_rc:
+                run_command = ase_rc
+
     if not run_command:
         result["refinement"] = {
             "status": "skipped",
@@ -929,7 +970,7 @@ def _run_workflow_once(
     stages = _collect_stages(gen_result, output_dir, run_command)
     ctx = RefinementContext(
         research_goal=user_request, scale=scale, engine=software,
-        skill=software, domain=scale, autonomy=autonomy,
+        skill=run_skill, domain=run_domain, autonomy=autonomy,
         max_cycles=max_run_cycles, coverage_votes=coverage_votes,
         required_observables=required_observables,
     )
