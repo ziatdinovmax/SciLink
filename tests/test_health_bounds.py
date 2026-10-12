@@ -38,6 +38,17 @@ def test_center_becomes_K_slack_band():
     assert spec["max"] == pytest.approx(5.0)
 
 
+def test_center_band_is_exact_ratio_even_for_tiny_values():
+    # Regression: the center path must not route through sqrt(e*e), which
+    # underflows to 0.0 for e <~ 1e-154 and collapses the band to [0.0, e].
+    e = 1e-200
+    spec = clamp_center_to_band("x", e)
+    assert spec is not None
+    assert spec["min"] > 0.0
+    assert spec["min"] == pytest.approx(e / 5.0)
+    assert spec["max"] == pytest.approx(e * 5.0)
+
+
 def test_tight_model_band_is_widened_to_floor():
     # A model that (against the contract) hands back a tight 0.95–1.05 band is
     # WIDENED around its geometric center; the gate on that band must then PASS a

@@ -84,12 +84,18 @@ def clamp_center_to_band(observable: str, expected) -> Optional[Dict[str, Any]]:
     if not observable:
         return None
     e = _as_number(expected)
-    if e is None:
+    if e is None or not math.isfinite(e) or e <= 0:
         return None
-    band = _clamp_to_slack_band(e, e)
-    if band is None:
+    # Compute the K-slack band directly (not via the geometric-mean helper):
+    # for a single center the band is simply [e/K, e*K], which stays correct
+    # and underflow-safe down to the smallest positive float, whereas
+    # ``sqrt(e*e)`` underflows to 0.0 for e <~ 1e-154 and would collapse the
+    # band to [0.0, e]. The geometric-mean path is only needed when a caller
+    # supplies a genuine (min, max) band.
+    lo, hi = e / _SLACK_K, e * _SLACK_K
+    if not (math.isfinite(lo) and math.isfinite(hi)):
         return None
-    return {"observable": str(observable), "min": band["min"], "max": band["max"]}
+    return {"observable": str(observable), "min": lo, "max": hi}
 
 
 class HealthBoundsDeriver(_CriticBase):
