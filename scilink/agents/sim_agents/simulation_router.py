@@ -114,9 +114,17 @@ def discover_scale_agents() -> Dict[str, Dict[str, Any]]:
         # also union with skill-bundle discovery so a markdown-only
         # bundle counts even if its sibling .py wasn't importable.
         from ...skills.loader import list_skills
+        # "ase" is the universal MLIP EXECUTION path (issue #429), not a
+        # general classical MD engine the router chooses among: it is injected
+        # explicitly in candidate_engines only for an MLIP-only audience, and
+        # the pipeline re-points to it when potential selection picks an MLIP
+        # after routing. Adding the ase skill bundle makes list_skills() report
+        # it, so drop it here to keep it OUT of the normal candidate set — the
+        # router must not pick ASE over lammps / gromacs for everyday systems.
         supported = sorted(
-            set(getattr(MDSimulationAgent, "TOOL_REGISTRY", {}).keys())
-            | set(list_skills(domain="molecular_dynamics"))
+            (set(getattr(MDSimulationAgent, "TOOL_REGISTRY", {}).keys())
+             | set(list_skills(domain="molecular_dynamics")))
+            - {"ase"}
         )
         found["molecular_dynamics"] = {
             "agent_class": MDSimulationAgent,
