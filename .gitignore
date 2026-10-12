@@ -57,6 +57,9 @@ cover/
 
 # Django stuff:
 *.log
+# but DO track the committed ASE thermo-log test fixtures (real-format logs the
+# health reader and its test ground on — not run artifacts).
+!tests/fixtures/**/*.log
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
