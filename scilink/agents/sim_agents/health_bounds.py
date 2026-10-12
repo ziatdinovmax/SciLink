@@ -31,7 +31,7 @@ from .critics import _CriticBase
 from .health import _as_number
 
 
-# The fixed slack: the model supplies the CENTER e, CODE owns the WIDTH.
+# The default slack: the model supplies the CENTER e, CODE owns the WIDTH.
 #
 #     min = e / K      max = e * K
 #
@@ -42,57 +42,35 @@ from .health import _as_number
 # constant, modulus, etc. (each with its own scale). This is deliberately NOT a
 # "superset of the frontmatter" rule: that would forbid the useful tightening of
 # 0.02–30 down to 0.2–5.0 that is the whole point of making bands system-aware.
+# The factor is a CALLER-level knob (``health_slack_factor``, threaded from the
+# pipeline) defaulting to this constant — the model still never sets the width.
 _SLACK_K = 5.0
 
 
-def _clamp_to_slack_band(e_min: float, e_max: float) -> Optional[Dict[str, float]]:
-    """Widen a (min, max) pair so the band is never tighter than K-slack.
-
-    The normal path passes a single expected value as ``e_min == e_max == e`` and
-    gets ``e/K .. e*K``. If a caller ever supplies an explicit band, it is only
-    ever WIDENED (never narrowed) around its geometric center ``g = sqrt(min*max)``:
-    ``final_min = min(e_min, g/K)``, ``final_max = max(e_max, g*K)``. Code can
-    only widen; a model-narrowed band can never tighten the gate.
-
-    Returns the raw ``{"min", "max"}`` spec, or ``None`` when the center/bounds
-    are non-positive or non-finite (the observable is then dropped and the gate
-    falls back to the frontmatter band).
-    """
-    if e_min is None or e_max is None:
-        return None
-    if not (math.isfinite(e_min) and math.isfinite(e_max)):
-        return None
-    if e_min <= 0 or e_max <= 0:
-        return None
-    lo, hi = (e_min, e_max) if e_min <= e_max else (e_max, e_min)
-    g = math.sqrt(lo * hi)
-    final_min = min(lo, g / _SLACK_K)
-    final_max = max(hi, g * _SLACK_K)
-    if not (math.isfinite(final_min) and math.isfinite(final_max)):
-        return None
-    return {"min": final_min, "max": final_max}
-
-
-def clamp_center_to_band(observable: str, expected) -> Optional[Dict[str, Any]]:
-    """Turn an expected CENTER value ``e`` into a widened raw ``health:`` spec.
+def clamp_center_to_band(
+    observable: str, expected, slack_factor: float = _SLACK_K,
+) -> Optional[Dict[str, Any]]:
+    """Turn an expected CENTER value ``e`` into a K-slack raw ``health:`` spec.
 
     ``expected`` is parsed with :func:`health._as_number`, so the same coercion
-    rules (numeric strings yes, booleans/None no) apply here as in the gate.
-    Returns ``{"observable", "min", "max"}`` or ``None`` when ``e`` is
-    non-positive / non-finite / unparseable (drop it, fall back to frontmatter).
+    rules (numeric strings yes, booleans/None no) apply here as in the gate. The
+    band is computed directly as ``[e / K, e * K]`` with ``K = slack_factor``;
+    the direct form stays underflow-safe down to the smallest positive float
+    (a ``sqrt(e*e)`` center would underflow to 0.0 for e <~ 1e-154 and collapse
+    the band to ``[0.0, e]``). Returns ``{"observable", "min", "max"}`` or
+    ``None`` when ``e`` is non-positive / non-finite / unparseable, or when
+    ``slack_factor`` is not a finite number > 1 (drop it, fall back to
+    frontmatter).
     """
     if not observable:
         return None
     e = _as_number(expected)
     if e is None or not math.isfinite(e) or e <= 0:
         return None
-    # Compute the K-slack band directly (not via the geometric-mean helper):
-    # for a single center the band is simply [e/K, e*K], which stays correct
-    # and underflow-safe down to the smallest positive float, whereas
-    # ``sqrt(e*e)`` underflows to 0.0 for e <~ 1e-154 and would collapse the
-    # band to [0.0, e]. The geometric-mean path is only needed when a caller
-    # supplies a genuine (min, max) band.
-    lo, hi = e / _SLACK_K, e * _SLACK_K
+    k = _as_number(slack_factor)
+    if k is None or not math.isfinite(k) or k <= 1:
+        return None
+    lo, hi = e / k, e * k
     if not (math.isfinite(lo) and math.isfinite(hi)):
         return None
     return {"observable": str(observable), "min": lo, "max": hi}
@@ -123,6 +101,8 @@ class HealthBoundsDeriver(_CriticBase):
         components: Optional[List[Dict[str, Any]]] = None,
         skill: Optional[str] = None,
         domain: Optional[str] = None,
+        input_files: Optional[Dict[str, str]] = None,
+        slack_factor: float = _SLACK_K,
     ) -> List[Dict[str, Any]]:
         """Return system-aware ``health:`` band spec dicts for this system.
 
@@ -134,11 +114,24 @@ class HealthBoundsDeriver(_CriticBase):
             skill: Skill bundle whose ``validation`` section supplies known
                 reference behaviour (same section as ``ReferencePropertyCritic``).
             domain: Skill subdirectory (required when ``skill`` is given).
+            input_files: Optional generated deck (``{filename: contents}``) so the
+                model reasons about the EXACT run it is grounding — the goal AND
+                the deck, as #783 asks. Truncated in the prompt.
+            slack_factor: Multiplicative K owning the band WIDTH (min = e/K,
+                max = e*K). Caller-level knob; the model never sets the width.
 
         Returns:
-            A list of raw ``{"observable", "min", "max"}`` spec dicts, each band
-            already widened by the K-slack clamp, or ``[]`` on any failure.
-            ``parse_health_specs`` validates these identically to frontmatter.
+            A list of raw ``{"observable", "min", "max", "source"}`` spec dicts,
+            each band widened by the K-slack clamp and each carrying
+            ``source="derived"``; ``[]`` on any failure. ``parse_health_specs``
+            validates these identically to frontmatter.
+
+        A derived center is kept only when it is physically consistent with the
+        frontmatter fallback band (if one exists for that observable): a center
+        OUTSIDE the frontmatter ``[min, max]`` is almost always a units slip
+        (e.g. water handed back as 997 kg/m³ instead of ~1 g/cm³), which would
+        turn the gate into a tripwire that fires on every healthy run. Such a
+        band is dropped so the frontmatter fallback stands.
         """
         if skill and not domain:
             raise ValueError(
@@ -146,18 +139,40 @@ class HealthBoundsDeriver(_CriticBase):
                 "'molecular_dynamics')."
             )
         try:
+            # The frontmatter health block tells us WHICH observables to ground,
+            # their units, and the fallback band each derived center is sanity-
+            # checked against (the same load path the gate uses).
+            fm_bands = self._frontmatter_bands(skill, domain)
             skill_context = self._load_skill_section(skill, domain or "")
             prompt = self._build_prompt(
-                research_goal, system_description, components, skill_context)
+                research_goal, system_description, components, skill_context,
+                fm_bands, input_files)
             report = self._generate_json(prompt)
-            return self._parse(report)
+            return self._parse(report, fm_bands, slack_factor)
         except Exception as exc:  # derivation is best-effort, never fatal
             self.logger.warning("Health-bounds derivation failed: %s", exc)
             return []
 
+    @staticmethod
+    def _frontmatter_bands(skill: Optional[str], domain: Optional[str]):
+        """Parsed frontmatter ``health:`` bands for the active engine, by name.
+
+        Uses the same ``_health_specs`` -> ``parse_health_specs`` path as the
+        gate, so the deriver sees exactly the observables (and units, and
+        fallback bands) the gate will judge against. Best-effort: ``{}`` on any
+        failure keeps derivation fail-open.
+        """
+        from .refinement import _health_specs
+        from .health import parse_health_specs
+        try:
+            bands = parse_health_specs(_health_specs(skill, domain))
+        except Exception:
+            return {}
+        return {b.observable: b for b in bands}
+
     def _build_prompt(self, research_goal: str, system_description: str,
                       components: Optional[List[Dict[str, Any]]],
-                      skill_context: str) -> str:
+                      skill_context: str, fm_bands, input_files) -> str:
         if components:
             comp_lines = "\n".join(
                 f"- {c.get('name', '?')}"
@@ -168,6 +183,22 @@ class HealthBoundsDeriver(_CriticBase):
             comp_block = f"=== Components ===\n{comp_lines}\n\n"
         else:
             comp_block = ""
+        if fm_bands:
+            obs_lines = "\n".join(
+                f"- {b.observable}"
+                + (f" (units: {b.units})" if b.units else " (units: unspecified)")
+                for b in fm_bands.values()
+            )
+            obs_block = (
+                "=== Sanity observables to ground (give the expected value in "
+                "the stated units) ===\n" + obs_lines + "\n\n")
+        else:
+            obs_block = ""
+        if input_files:
+            deck_block = "=== Generated input deck ===\n" + _format_deck(
+                input_files) + "\n\n"
+        else:
+            deck_block = ""
         return (
             "You are setting GROSS PHYSICAL-SANITY expectations for a simulation "
             "before it runs. Independently of any target result, state the "
@@ -176,24 +207,65 @@ class HealthBoundsDeriver(_CriticBase):
             f"{skill_context or '(no engine skill guidance loaded)'}\n\n"
             f"=== System ===\n{system_description or '(not provided)'}\n\n"
             f"{comp_block}"
+            f"{obs_block}"
+            f"{deck_block}"
             f"=== Research goal (context only) ===\n{research_goal}\n\n"
             "For each sanity observable whose plausible scale you can state for "
             "this system (e.g. 'density' for a condensed-phase box), give a "
-            "SINGLE expected value `e` — one positive number in the observable's "
-            "usual units, NOT a range and NOT an uncertainty. You are giving the "
-            "CENTER only; the code owns the tolerance. Omit any observable you "
-            "cannot ground for this system.\n"
+            "SINGLE expected value `e` — one positive number IN THE STATED UNITS "
+            "for that observable, NOT a range and NOT an uncertainty. You are "
+            "giving the CENTER only; the code owns the tolerance. Omit any "
+            "observable you cannot ground for this system.\n"
             "Return JSON: {\"bounds\": [{\"observable\": <str>, "
             "\"expected\": <number>}, ...]}."
         )
 
-    def _parse(self, report: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _parse(self, report: Dict[str, Any], fm_bands,
+               slack_factor: float) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         for item in (report.get("bounds") or []):
             if not isinstance(item, dict):
                 continue
-            spec = clamp_center_to_band(item.get("observable"),
-                                        item.get("expected"))
-            if spec is not None:
-                out.append(spec)
+            observable = item.get("observable")
+            expected = item.get("expected")
+            spec = clamp_center_to_band(observable, expected, slack_factor)
+            if spec is None:
+                continue
+            # Units-slip guard: a derived CENTER that falls outside the
+            # frontmatter fallback band for the same observable is almost
+            # certainly a wrong-units value (e.g. 997 kg/m^3 for a density the
+            # gate reads in g/cm^3). Dropping it keeps the frontmatter band as
+            # the fallback rather than deriving a band that trips every run.
+            fm = fm_bands.get(spec["observable"]) if fm_bands else None
+            if fm is not None and not _center_in_band(_as_number(expected), fm):
+                self.logger.warning(
+                    "dropping derived health band for %r: center %r is outside "
+                    "the frontmatter fallback [%s, %s] (likely a units slip); "
+                    "keeping the frontmatter band",
+                    spec["observable"], expected, fm.minimum, fm.maximum)
+                continue
+            spec["source"] = "derived"
+            out.append(spec)
         return out
+
+
+def _center_in_band(e: Optional[float], band) -> bool:
+    """Whether a derived center lies within a (possibly one-sided) band."""
+    if e is None or not math.isfinite(e):
+        return False
+    if band.minimum is not None and e < band.minimum:
+        return False
+    if band.maximum is not None and e > band.maximum:
+        return False
+    return True
+
+
+def _format_deck(input_files: Dict[str, str], limit: int = 4000) -> str:
+    """Render a deck mapping as labelled, truncated sections for the prompt."""
+    chunks = []
+    for name, content in (input_files or {}).items():
+        body = (content or "").rstrip()
+        if len(body) > limit:
+            body = body[:limit] + "\n[truncated]"
+        chunks.append(f"--- {name} ---\n{body}")
+    return "\n\n".join(chunks)

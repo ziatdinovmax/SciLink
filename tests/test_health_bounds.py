@@ -10,7 +10,6 @@ No LLM, no API key. Two pieces are exercised:
   the frontmatter fallback by the derived bands.
 """
 
-import math
 import sys
 from pathlib import Path
 
@@ -22,7 +21,6 @@ sys.path.insert(0, str(REPO_ROOT))
 from scilink.agents.sim_agents.health import evaluate_health  # noqa: E402
 from scilink.agents.sim_agents.health_bounds import (  # noqa: E402
     _SLACK_K,
-    _clamp_to_slack_band,
     clamp_center_to_band,
 )
 from scilink.agents.sim_agents.refinement import _merge_health_bounds  # noqa: E402
@@ -49,24 +47,20 @@ def test_center_band_is_exact_ratio_even_for_tiny_values():
     assert spec["max"] == pytest.approx(e * 5.0)
 
 
-def test_tight_model_band_is_widened_to_floor():
-    # A model that (against the contract) hands back a tight 0.95–1.05 band is
-    # WIDENED around its geometric center; the gate on that band must then PASS a
-    # merely-inaccurate 0.88 — proving the model can't tighten it into an
-    # accuracy check.
-    band = _clamp_to_slack_band(0.95, 1.05)
-    g = math.sqrt(0.95 * 1.05)
-    assert band["min"] == pytest.approx(g / 5.0)
-    assert band["max"] == pytest.approx(g * 5.0)
-    specs = [{"observable": "density", "min": band["min"], "max": band["max"]}]
-    assert evaluate_health({"density": 0.88}, specs) == []
+def test_slack_factor_sets_band_width():
+    # The caller-level health_slack_factor owns the WIDTH; the model only ever
+    # supplies the center. K=10 -> [e/10, e*10].
+    spec = clamp_center_to_band("density", 1.0, slack_factor=10.0)
+    assert spec["min"] == pytest.approx(0.1)
+    assert spec["max"] == pytest.approx(10.0)
 
 
-def test_wider_model_band_is_preserved():
-    # An already-wide 0.1–8.0 band is wider than the K-slack floor, so it is kept.
-    band = _clamp_to_slack_band(0.1, 8.0)
-    assert band["min"] == pytest.approx(0.1)
-    assert band["max"] == pytest.approx(8.0)
+def test_slack_factor_must_exceed_one():
+    # A degenerate K <= 1 (or non-finite) would not widen the center into a
+    # band — drop it so the frontmatter fallback stands.
+    assert clamp_center_to_band("density", 1.0, slack_factor=1.0) is None
+    assert clamp_center_to_band("density", 1.0, slack_factor=0.0) is None
+    assert clamp_center_to_band("density", 1.0, slack_factor=float("inf")) is None
 
 
 def test_nonpositive_or_nonfinite_center_is_dropped():
@@ -108,6 +102,19 @@ def test_merge_adds_derived_only_observable():
     by_obs = {d["observable"]: d for d in merged}
     assert "density" in by_obs and "lattice_constant" in by_obs
     assert by_obs["lattice_constant"]["max"] == 25.0
+
+
+def test_merge_tags_provenance_source():
+    # The merge is the one place that knows which list is frontmatter and which
+    # is derived — it tags each surviving spec so a later violation can say
+    # whether the BAND or the RUN is suspect.
+    fm = [{"observable": "density", "min": 0.02, "max": 30.0},
+          {"observable": "pressure", "min": -5000, "max": 5000}]
+    derived = [{"observable": "density", "min": 0.2, "max": 5.0}]
+    merged = _merge_health_bounds(fm, derived)
+    by_obs = {d["observable"]: d for d in merged}
+    assert by_obs["density"]["source"] == "derived"      # overridden by derived
+    assert by_obs["pressure"]["source"] == "frontmatter"  # untouched fallback
 
 
 def test_merge_none_is_identity():
