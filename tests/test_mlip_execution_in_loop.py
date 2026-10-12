@@ -1,14 +1,21 @@
 """The MLIP/ASE path executes in-loop like the classical path.
 
 Drives _run_workflow_once with a gen_result that carries runner="ase" and
-path-free input_files, a FakeExecutor, and a run_command inherited from the
-routed classical engine ("lmp -in {script}"). The execution seam must:
-  (a) re-resolve run_command from the ase bundle, so the Phase runs
-      `<python> run_md.py`, NOT `lmp -in ...`;
-  (b) re-point the RefinementContext at skill="ase" / domain="molecular_dynamics";
-  (c) actually invoke the executor (reach the refinement campaign, not the
-      "executor provided without a run_command" skip).
-(MLIP-execution-in-loop, Blocker 2.)
+path-free input_files, a FakeExecutor, and a run_command plus its provenance
+(run_command_source). The execution seam decides from the PROVENANCE, not a
+guess from the command text:
+  (a) a command that is absent or the routed classical engine's skill default
+      (run_command_source != "user") is re-resolved from the ase bundle, so the
+      Phase runs `<python> run_md.py`, NOT `lmp -in ...`;
+  (b) a command the caller passed explicitly (run_command_source == "user") is
+      preserved verbatim — including an HPC launcher like `srun {script}` that
+      has no interpreter token, which the old "contains python" heuristic would
+      have wrongly rewritten;
+  (c) the RefinementContext is re-pointed at skill="ase" /
+      domain="molecular_dynamics" either way;
+  (d) the executor is actually invoked (the refinement campaign is reached, not
+      the "executor provided without a run_command" skip).
+(MLIP-execution-in-loop, Blocker 2; SHOULD-FIX 4.)
 """
 
 import sys
@@ -63,7 +70,7 @@ def _setup(monkeypatch, run_command):
     return captured
 
 
-def _run(executor, run_command, tmp_path):
+def _run(executor, run_command, tmp_path, run_command_source=None):
     return simulation_pipeline._run_workflow_once(
         "MD of Pt bulk at 300 K",
         scale="molecular_dynamics", software="lammps",
@@ -71,13 +78,16 @@ def _run(executor, run_command, tmp_path):
         force_field_files={"noop": "x"},  # skip FF/potential-selection block
         output_dir=str(tmp_path), validate=False,
         executor=executor, run_command=run_command,
+        run_command_source=run_command_source,
     )
 
 
 def test_classical_run_command_is_overridden_to_python(tmp_path, monkeypatch):
+    # The command here is the routed classical engine's skill default
+    # (run_command_source="skill"), wrong for the ASE Python driver -> override.
     captured = _setup(monkeypatch, "lmp -in {script}")
     ex = FakeExecutor()
-    result = _run(ex, "lmp -in {script}", tmp_path)
+    result = _run(ex, "lmp -in {script}", tmp_path, run_command_source="skill")
 
     # (a) the run command the Phase carries is a python launch, not lammps
     phase = captured["stages"][0].phases[0]
@@ -99,15 +109,33 @@ def test_classical_run_command_is_overridden_to_python(tmp_path, monkeypatch):
 
 
 def test_user_supplied_python_run_command_is_preserved(tmp_path, monkeypatch):
-    # A run_command that already launches python is a deliberate override and
-    # must survive the seam untouched (only skill/domain re-point).
+    # A command the caller passed explicitly (run_command_source="user") is a
+    # deliberate override and must survive the seam untouched (only the
+    # skill/domain re-point still happens).
     captured = _setup(monkeypatch, "python -O {script}")
     ex = FakeExecutor()
-    _run(ex, "python -O {script}", tmp_path)
+    _run(ex, "python -O {script}", tmp_path, run_command_source="user")
 
     phase = captured["stages"][0].phases[0]
     assert phase.run_command == "python -O run_md.py"
     assert captured["ctx"].skill == "ase"
+
+
+def test_user_supplied_srun_launcher_is_preserved_verbatim(tmp_path, monkeypatch):
+    # The whole point of provenance over a "contains python" heuristic: a
+    # user-supplied HPC launcher WITHOUT an interpreter token (e.g.
+    # ``srun {script}``) is preserved verbatim, not rewritten to a local python
+    # invocation. The old heuristic dropped exactly this command.
+    captured = _setup(monkeypatch, "srun {script}")
+    ex = FakeExecutor()
+    _run(ex, "srun {script}", tmp_path, run_command_source="user")
+
+    phase = captured["stages"][0].phases[0]
+    assert phase.run_command == "srun run_md.py"
+    assert "python" not in phase.run_command
+    assert captured["ctx"].skill == "ase"
+    # the executor ran the user's launcher untouched
+    assert ex.calls[0][1] == "srun run_md.py"
 
 
 def test_prerun_validator_grounds_on_ase_for_mlip_run(tmp_path, monkeypatch):

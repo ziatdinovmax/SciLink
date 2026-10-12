@@ -453,19 +453,6 @@ def _reparameterize(flagged, system_description, backend, components,
     )
 
 
-def _run_command_cannot_launch_python(run_command: Optional[str]) -> bool:
-    """True when ``run_command`` cannot launch a Python ASE driver script.
-
-    The ASE runner emits a plain Python script (``run_md.py`` /
-    ``run_relax.py``). A ``run_command`` inherited from the routed classical
-    engine (e.g. ``"lmp -in {script}"``) has no Python interpreter and would
-    feed the script to the wrong binary, so it must be re-resolved from the
-    ``ase`` bundle. A command that already invokes Python is treated as a
-    deliberate user override and preserved (MLIP-execution-in-loop, Blocker 2).
-    """
-    return "python" not in (run_command or "").lower()
-
-
 def _convergence_specs(software: str, scale: str) -> list:
     """Return the engine skill's ``convergence:`` frontmatter block, or []."""
     try:
@@ -496,6 +483,7 @@ def _run_workflow_once(
     validate: bool = True,
     executor: "Executor | None" = None,
     run_command: Optional[str] = None,
+    run_command_source: Optional[str] = None,
     autonomy: str = "autonomous",
     max_run_cycles: int = 3,
     coverage_votes: int = 1,
@@ -549,6 +537,13 @@ def _run_workflow_once(
             filled from each phase's entry file (e.g. ``"lmp -in {script}"``).
             User/config — required when ``executor`` is provided. The engine
             binary lives here, never in this module.
+        run_command_source: Provenance of ``run_command`` — ``"user"`` (the
+            caller passed it explicitly), ``"skill"`` (it is the routed engine
+            skill's declared default), or ``None`` (absent). The ASE seam uses
+            this instead of guessing from the command text: for an MLIP/ASE run
+            a non-``"user"`` command is the wrong (classical) engine's default
+            and is re-resolved from the ase bundle, while a ``"user"`` command —
+            including an HPC launcher like ``srun {script}`` — is preserved.
         autonomy: Autonomy level for the refinement loop (``"co-pilot"`` /
             ``"autopilot"`` / ``"autonomous"``); selects the built-in policy.
         max_run_cycles: Maximum run → assess → fix cycles per phase.
@@ -964,16 +959,15 @@ def _run_workflow_once(
 
     # ── MLIP/ASE execution seam (MLIP-execution-in-loop, Blocker 2) ──
     # run_skill/run_domain were already re-pointed to the ``ase`` bundle above
-    # (right after input generation). Here, re-resolve the run_command: the one
-    # inherited from the routed classical engine (or None) would feed the Python
-    # driver to the wrong binary. A command that already invokes Python
-    # (including an HPC launcher like ``srun python {script}``) is a deliberate
-    # override and is preserved. NOTE: a bare launcher without an interpreter
-    # token (e.g. ``srun {script}``) reads as non-Python and is re-resolved to a
-    # local python invocation — pass ``srun python {script}`` to keep a
-    # scheduler/MPI prefix.
-    if run_skill == "ase" and (
-            run_command is None or _run_command_cannot_launch_python(run_command)):
+    # (right after input generation). Here, re-resolve the run_command using its
+    # PROVENANCE, not a guess from its text: for an MLIP/ASE run a command that
+    # is absent or was the routed classical engine's skill default
+    # (``run_command_source != "user"``) would feed the Python driver to the
+    # wrong binary, so re-resolve it from the ase bundle. A command the caller
+    # passed explicitly (``run_command_source == "user"``) is preserved verbatim
+    # — including an HPC launcher like ``srun {script}`` or ``mpirun -n 4
+    # {script}``, which a text heuristic would have wrongly rewritten.
+    if run_skill == "ase" and run_command_source != "user":
         try:
             from ...skills._shared._registry import get_tool_function
             ase_rc = get_tool_function(
