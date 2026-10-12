@@ -835,8 +835,14 @@ def _run_workflow_once(
     # here — so the step-3 pre-run validator, the step-4 health gate and the
     # RunCritic all ground on ase rather than on the routed classical engine.
     run_skill, run_domain = software, scale
+    run_engine = software
     if gen_result.get("runner") == "ase":
         run_skill, run_domain = "ase", "molecular_dynamics"
+        # The executed engine is ase, not the routed classical software. This is
+        # what the delegation ledger and RefinementContext.engine must record,
+        # so overwrite the result's engine (set to `software` at step 0) too.
+        run_engine = "ase"
+        result["engine"] = run_engine
 
     # ── Step 3: pre-run input validation (engine-neutral critic) ──
     # Skipped for named (deterministic, expert-defined) backends and when
@@ -991,7 +997,7 @@ def _run_workflow_once(
 
     stages = _collect_stages(gen_result, output_dir, run_command)
     ctx = RefinementContext(
-        research_goal=user_request, scale=scale, engine=software,
+        research_goal=user_request, scale=scale, engine=run_engine,
         skill=run_skill, domain=run_domain, autonomy=autonomy,
         max_cycles=max_run_cycles, coverage_votes=coverage_votes,
         required_observables=required_observables,

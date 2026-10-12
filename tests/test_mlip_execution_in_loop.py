@@ -138,6 +138,52 @@ def test_user_supplied_srun_launcher_is_preserved_verbatim(tmp_path, monkeypatch
     assert ex.calls[0][1] == "srun run_md.py"
 
 
+def test_engine_reflects_ase_for_an_mlip_run(tmp_path, monkeypatch):
+    # The executed engine for an MLIP/ASE run is ase, not the routed classical
+    # software. That is what the result's engine field and RefinementContext.engine
+    # (the delegation ledger) must record (SHOULD-FIX 5).
+    captured = _setup(monkeypatch, "lmp -in {script}")
+    ex = FakeExecutor()
+    result = _run(ex, "lmp -in {script}", tmp_path, run_command_source="skill")
+
+    assert result["engine"] == "ase"
+    assert captured["ctx"].engine == "ase"
+
+
+def test_engine_stays_routed_value_for_a_classical_run(tmp_path, monkeypatch):
+    # A classical run (no runner="ase") keeps the routed engine untouched.
+    classical_gen = {
+        "status": "success",
+        "entry_file": "in.lammps",
+        "input_files": {"in.lammps": "units metal\nrun 0\n"},
+    }
+    monkeypatch.setattr(simulation_pipeline, "_generate_inputs",
+                        lambda **kw: classical_gen)
+    monkeypatch.setattr(critics, "RunCritic", lambda **kw: object())
+
+    captured = {}
+
+    def fake_run_campaign(stages, executor, run_critic, policy, ctx,
+                          pre_run_verdict=None):
+        captured["ctx"] = ctx
+        return {"status": "success"}
+
+    monkeypatch.setattr(refinement, "run_campaign", fake_run_campaign)
+
+    result = simulation_pipeline._run_workflow_once(
+        "MD of a water box at 300 K",
+        scale="molecular_dynamics", software="lammps",
+        structure_file=str(tmp_path / "structure.cif"),
+        force_field_files={"noop": "x"},
+        output_dir=str(tmp_path), validate=False,
+        executor=FakeExecutor(), run_command="lmp -in {script}",
+        run_command_source="skill",
+    )
+
+    assert result["engine"] == "lammps"
+    assert captured["ctx"].engine == "lammps"
+
+
 def test_prerun_validator_grounds_on_ase_for_mlip_run(tmp_path, monkeypatch):
     # The step-3 pre-run validator must ground on the ase bundle for an
     # MLIP/ASE run, not on the routed classical engine ("lammps") — otherwise
