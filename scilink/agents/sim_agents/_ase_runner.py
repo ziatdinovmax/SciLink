@@ -64,6 +64,9 @@ def generate_ase_script(
 
     spec = potential.ase_calculator
     el_repr = ", ".join(repr(e) for e in potential.elements)
+    # The generated script reads the structure by basename (the file is staged
+    # into the run dir next to the script); the caller may pass any path.
+    struct_basename = os.path.basename(structure_file)
 
     # ── shared scaffold: imports, device, structure read, calc attach ──
     header = f'''"""
@@ -94,7 +97,12 @@ _LAMMPS_EXTS = {{".data", ".lammps", ".lmp"}}
 
 
 def _load_structure():
-    _path = {structure_file!r}
+    # The structure is staged into the run dir under its basename alongside this
+    # script (see _generate_mlip_inputs), and the script runs with cwd=run_dir.
+    # Reference it by basename so it resolves regardless of cwd and whether the
+    # executor is local or remote — an absolute/relative path would break on a
+    # compute node where the caller's local path does not exist.
+    _path = {struct_basename!r}
     if pathlib.Path(_path).suffix.lower() in _LAMMPS_EXTS:
         from ase.io.lammpsdata import read_lammps_data
         atoms = read_lammps_data(_path, atom_style="atomic", sort_by_id=True)

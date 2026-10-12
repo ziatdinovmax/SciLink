@@ -151,6 +151,24 @@ def _generate_mlip_inputs(
         result.setdefault("input_files",
                           {Path(run_path).name: Path(run_path).read_text()})
         result.setdefault("entry_file", Path(run_path).name)
+    # Stage the structure into the run dir under its basename, next to the run
+    # script — the generated ASE driver reads it by basename (see
+    # _ase_runner.generate_ase_script), and the executor writes every
+    # input_files entry verbatim into the run dir. This makes the run dir
+    # self-contained (the same shape as the classical path, which ships its
+    # data file by name), so the script finds the structure regardless of cwd
+    # or local-vs-remote execution. Structure files here are text
+    # (POSCAR/cif/xyz/lammps-data), so embed the contents, not the path.
+    staged_structure = result.get("structure_file") or structure_file
+    if staged_structure and Path(staged_structure).exists():
+        inputs = result.setdefault("input_files", {})
+        basename = Path(staged_structure).name
+        if basename not in inputs:
+            try:
+                inputs[basename] = Path(staged_structure).read_text()
+            except (OSError, UnicodeDecodeError) as exc:
+                logger.debug("could not stage structure %s into run dir: %r",
+                             staged_structure, exc)
     result.setdefault("status", "success")
     return result
 

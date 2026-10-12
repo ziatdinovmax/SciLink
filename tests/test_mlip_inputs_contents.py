@@ -6,15 +6,22 @@ input_files value verbatim into the run script, so a path string there becomes
 the script body and the ASE run never executes. This checks the MLIP branch now
 carries the source text, and that _collect_phases propagates it
 (MLIP-execution-in-loop, Blocker 1).
+
+Also checks the run dir is self-contained for the ASE path (SHOULD-FIX 3): the
+generated script references the structure by BASENAME, and _generate_mlip_inputs
+stages the structure's contents into input_files under that same basename, so
+the script finds it regardless of cwd or local-vs-remote execution.
 """
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from scilink.agents.sim_agents import mlip_agent  # noqa: E402
+from scilink.agents.sim_agents._ase_runner import generate_ase_script  # noqa: E402
 from scilink.agents.sim_agents.simulation_pipeline import (  # noqa: E402
     _collect_phases,
     _generate_mlip_inputs,
@@ -63,6 +70,67 @@ def test_mlip_input_files_carry_source_text_not_path(tmp_path, monkeypatch):
     assert not body.strip().startswith("/")        # not a path
     assert result["entry_file"] == "run_md.py"
     assert result.get("runner") == "ase"
+
+
+def test_generated_ase_script_references_structure_by_basename(tmp_path):
+    """The ASE driver must read the structure by basename, not an embedded path.
+
+    A relative path resolves against the wrong cwd (the script runs with
+    cwd=run_dir); an absolute path breaks on a remote executor where the local
+    path does not exist on the compute node. So the generated script embeds only
+    the basename — the structure is staged beside it in the run dir.
+    """
+    spec = SimpleNamespace(
+        device_env_var="CUDA_VISIBLE_DEVICES",
+        import_line="from mace.calculators import mace_mp",
+        construct_expr="mace_mp()",
+    )
+    potential = SimpleNamespace(
+        ase_calculator=spec, elements=["Pt"],
+        backend="mace", model_name="mace-mp-0",
+    )
+    # a structure living in a DIFFERENT directory, with parent components
+    struct_dir = tmp_path / "elsewhere" / "inputs"
+    struct_dir.mkdir(parents=True)
+    abs_struct = str(struct_dir / "Pt_bulk.xyz")
+
+    script_path = generate_ase_script(
+        potential, working_dir=str(tmp_path),
+        structure_file=abs_struct, task="md",
+    )
+    content = Path(script_path).read_text()
+
+    # the embedded structure reference is a bare basename
+    assert "_path = 'Pt_bulk.xyz'" in content
+    # no absolute path and no parent-dir components leaked into the script
+    assert str(struct_dir) not in content
+    assert "elsewhere" not in content
+    assert "/inputs/" not in content
+
+
+def test_structure_is_staged_into_run_dir_by_basename(tmp_path, monkeypatch):
+    """_generate_mlip_inputs stages the structure into input_files by basename.
+
+    The executor writes every input_files entry into the run dir, so staging the
+    structure under its basename — alongside the run script — makes the run dir
+    self-contained and the basename reference above resolvable.
+    """
+    monkeypatch.setattr(mlip_agent, "MLIPAgent", _FakeMLIPAgent)
+    struct = tmp_path / "Pt_bulk.xyz"
+    struct.write_text("2\nPt bulk\nPt 0.0 0.0 0.0\nPt 0.0 0.0 1.96\n")
+
+    result = _generate_mlip_inputs(
+        backend=None, structure_file=str(struct),
+        request="MD of Pt bulk", output_dir=str(tmp_path),
+        api_key=None, base_url=None, model_name="m",
+    )
+
+    files = result["input_files"]
+    # the run script and the structure both live in the run dir
+    assert "run_md.py" in files
+    assert "Pt_bulk.xyz" in files
+    # staged by CONTENTS, not a path string
+    assert files["Pt_bulk.xyz"] == struct.read_text()
 
 
 def test_collect_phases_carries_the_contents(tmp_path, monkeypatch):
