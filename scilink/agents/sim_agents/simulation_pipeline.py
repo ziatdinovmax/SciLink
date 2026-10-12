@@ -815,6 +815,16 @@ def _run_workflow_once(
         return result
     result["steps_completed"].append("input_generation")
 
+    # classical-vs-ASE is decided by potential_selection INSIDE input
+    # generation, after the router picked the engine, so the routed classical
+    # engine's skill/domain are wrong for an MLIP run. When generation ran the
+    # ASE path, re-point the effective skill/domain at the ``ase`` bundle once,
+    # here — so the step-3 pre-run validator, the step-4 health gate and the
+    # RunCritic all ground on ase rather than on the routed classical engine.
+    run_skill, run_domain = software, scale
+    if gen_result.get("runner") == "ase":
+        run_skill, run_domain = "ase", "molecular_dynamics"
+
     # ── Step 3: pre-run input validation (engine-neutral critic) ──
     # Skipped for named (deterministic, expert-defined) backends and when
     # the caller opts out.
@@ -828,7 +838,7 @@ def _run_workflow_once(
             )
             result["input_validation"] = validator.validate(
                 input_files=input_files, system_description=user_request,
-                skill=software, domain=scale,
+                skill=run_skill, domain=run_domain,
             )
             result["steps_completed"].append("input_validation")
     else:
@@ -935,26 +945,26 @@ def _run_workflow_once(
         return result
 
     # ── MLIP/ASE execution seam (MLIP-execution-in-loop, Blocker 2) ──
-    # classical-vs-ASE is decided by potential_selection INSIDE input
-    # generation, after the router picked the engine, so the routed engine's
-    # skill/domain and run_command (resolved up-front from that engine) can be
-    # wrong for an ASE run. When generation ran the ASE path, re-point the
-    # refinement at the ``ase`` bundle — so the health gate + RunCritic ground
-    # on ase, and the run launches the Python driver instead of the classical
-    # binary. A user-supplied Python run_command is preserved as an override.
-    run_skill, run_domain = software, scale
-    if gen_result.get("runner") == "ase":
-        run_skill, run_domain = "ase", "molecular_dynamics"
-        if run_command is None or _run_command_cannot_launch_python(run_command):
-            try:
-                from ...skills._shared._registry import get_tool_function
-                ase_rc = get_tool_function(
-                    "default_run_command", active_skills=["ase"])()
-            except Exception as e:
-                logger.debug("could not resolve ase run_command: %r", e)
-                ase_rc = None
-            if ase_rc:
-                run_command = ase_rc
+    # run_skill/run_domain were already re-pointed to the ``ase`` bundle above
+    # (right after input generation). Here, re-resolve the run_command: the one
+    # inherited from the routed classical engine (or None) would feed the Python
+    # driver to the wrong binary. A command that already invokes Python
+    # (including an HPC launcher like ``srun python {script}``) is a deliberate
+    # override and is preserved. NOTE: a bare launcher without an interpreter
+    # token (e.g. ``srun {script}``) reads as non-Python and is re-resolved to a
+    # local python invocation — pass ``srun python {script}`` to keep a
+    # scheduler/MPI prefix.
+    if run_skill == "ase" and (
+            run_command is None or _run_command_cannot_launch_python(run_command)):
+        try:
+            from ...skills._shared._registry import get_tool_function
+            ase_rc = get_tool_function(
+                "default_run_command", active_skills=["ase"])()
+        except Exception as e:
+            logger.debug("could not resolve ase run_command: %r", e)
+            ase_rc = None
+        if ase_rc:
+            run_command = ase_rc
 
     if not run_command:
         result["refinement"] = {

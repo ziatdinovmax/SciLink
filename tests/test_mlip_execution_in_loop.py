@@ -108,3 +108,40 @@ def test_user_supplied_python_run_command_is_preserved(tmp_path, monkeypatch):
     phase = captured["stages"][0].phases[0]
     assert phase.run_command == "python -O run_md.py"
     assert captured["ctx"].skill == "ase"
+
+
+def test_prerun_validator_grounds_on_ase_for_mlip_run(tmp_path, monkeypatch):
+    # The step-3 pre-run validator must ground on the ase bundle for an
+    # MLIP/ASE run, not on the routed classical engine ("lammps") — otherwise
+    # it critiques the ASE Python driver against LAMMPS engine knowledge and
+    # feeds that verdict into the now-executing campaign.
+    monkeypatch.setattr(simulation_pipeline, "_generate_inputs",
+                        lambda **kw: _gen_result())
+    monkeypatch.setattr(critics, "RunCritic", lambda **kw: object())
+    monkeypatch.setattr(refinement, "run_campaign",
+                        lambda *a, **k: {"status": "success"})
+
+    seen = {}
+
+    class FakeValidator:
+        def __init__(self, **kw):
+            pass
+
+        def validate(self, *, input_files, system_description, skill, domain):
+            seen["skill"] = skill
+            seen["domain"] = domain
+            return {"status": "ok"}
+
+    monkeypatch.setattr(critics, "InputValidator", FakeValidator)
+
+    simulation_pipeline._run_workflow_once(
+        "MD of Pt bulk at 300 K",
+        scale="molecular_dynamics", software="lammps",
+        structure_file=str(tmp_path / "structure.cif"),
+        force_field_files={"noop": "x"},
+        output_dir=str(tmp_path), validate=True,
+        executor=FakeExecutor(), run_command="lmp -in {script}",
+    )
+
+    assert seen.get("skill") == "ase"
+    assert seen.get("domain") == "molecular_dynamics"
