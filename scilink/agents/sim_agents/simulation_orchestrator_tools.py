@@ -1055,7 +1055,9 @@ class SimulationOrchestratorTools:
                            structure_file: str = None,
                            max_refinement_cycles: int = 4,
                            max_run_cycles: int = 3,
-                           run_timeout: int = 3600) -> str:
+                           run_timeout: int = 3600,
+                           derive_health_bounds: bool = False,
+                           health_slack_factor: float = 5.0) -> str:
             from .simulation_pipeline import run_complete_workflow
 
             # Explicit opt-out: structure_file="new" forces a fresh build for
@@ -1193,6 +1195,8 @@ class SimulationOrchestratorTools:
                     max_run_cycles=max_run_cycles,
                     executor=executor, run_command=run_command,
                     run_command_source=rc_source,
+                    derive_health_bounds=derive_health_bounds,
+                    health_slack_factor=health_slack_factor,
                 )
             except Exception as e:
                 return json.dumps({
@@ -1318,6 +1322,26 @@ class SimulationOrchestratorTools:
                 "max_run_cycles": {
                     "type": "integer",
                     "description": "Max run → assess → fix cycles per phase (default 3).",
+                },
+                "derive_health_bounds": {
+                    "type": "boolean",
+                    "description": (
+                        "Opt-in (default false): derive SYSTEM-AWARE physical-"
+                        "sanity bands for the gross-sanity health gate from the "
+                        "actual system (the model gives the expected CENTER; code "
+                        "owns the width), tightening the engine's loose static "
+                        "bands so a non-physical-but-in-range run is still caught. "
+                        "Falls back to the static frontmatter bands on any failure."
+                    ),
+                },
+                "health_slack_factor": {
+                    "type": "number",
+                    "description": (
+                        "Multiplicative half-width K for a derived health band "
+                        "(min = e/K, max = e*K; default 5.0). Larger = looser. Only "
+                        "used when derive_health_bounds is true; the model never "
+                        "sets the width."
+                    ),
                 },
             },
             required=["description"],

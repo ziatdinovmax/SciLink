@@ -495,6 +495,7 @@ def _run_workflow_once(
     required_observables: Optional[list] = None,
     derive_observables: bool = False,
     derive_health_bounds: bool = False,
+    health_slack_factor: float = 5.0,
     converge_parameters: bool = False,
 ) -> Dict[str, Any]:
     """Run the full structure → inputs → validation pipeline for any scale.
@@ -810,27 +811,6 @@ def _run_workflow_once(
         except Exception as e:
             logger.warning("Observable derivation skipped: %s", e)
 
-    # ── Produce system-aware health bands when opted in (issue #783) ──
-    # Derive the physical-sanity bands from the actual system (the model gives
-    # the expected CENTER; code owns the K-slack width) and merge them OVER the
-    # static frontmatter fallback in the gate. Same family as derive_observables:
-    # opt-in, engine-neutral, fail-open — default OFF leaves existing runs alone.
-    health_bounds = None
-    if derive_health_bounds:
-        try:
-            from .health_bounds import HealthBoundsDeriver
-            hbd = HealthBoundsDeriver(
-                api_key=api_key, base_url=base_url, model_name=model_name)
-            components = manifest["components"] if manifest else None
-            health_bounds = hbd.derive(
-                user_request, system_description=user_request,
-                components=components, skill=software, domain=scale) or None
-            if health_bounds:
-                logger.info("Derived %d system-aware health band(s).",
-                            len(health_bounds))
-        except Exception as e:
-            logger.warning("Health-bounds derivation skipped: %s", e)
-
     # ── Step 2: input generation (routed to the scale's foundation agent) ──
     try:
         gen_result = _generate_inputs(
@@ -866,6 +846,36 @@ def _run_workflow_once(
         # so overwrite the result's engine (set to `software` at step 0) too.
         run_engine = "ase"
         result["engine"] = run_engine
+
+    # ── Produce system-aware health bands when opted in (issue #783) ──
+    # Derive the physical-sanity bands from the actual system (the model gives
+    # the expected CENTER; code owns the K-slack width) and merge them OVER the
+    # static frontmatter fallback in the gate. Same family as derive_observables:
+    # opt-in, engine-neutral, fail-open — default OFF leaves existing runs alone.
+    #
+    # This runs AFTER input generation and the #784 re-grounding, on the
+    # EFFECTIVE engine (run_skill/run_domain): for an MLIP run those are the
+    # ``ase`` bundle, so the deriver grounds on the engine the gate actually
+    # judges (ase's `validation`/`health:`) rather than the routed classical
+    # engine, whose observables the ASE reader does not even serve. It also sees
+    # the generated deck, so it reasons about the exact run — goal + deck.
+    health_bounds = None
+    if derive_health_bounds:
+        try:
+            from .health_bounds import HealthBoundsDeriver
+            hbd = HealthBoundsDeriver(
+                api_key=api_key, base_url=base_url, model_name=model_name)
+            components = manifest["components"] if manifest else None
+            health_bounds = hbd.derive(
+                user_request, system_description=user_request,
+                components=components, skill=run_skill, domain=run_domain,
+                input_files=_collect_input_files(gen_result),
+                slack_factor=health_slack_factor) or None
+            if health_bounds:
+                logger.info("Derived %d system-aware health band(s).",
+                            len(health_bounds))
+        except Exception as e:
+            logger.warning("Health-bounds derivation skipped: %s", e)
 
     # ── Step 3: pre-run input validation (engine-neutral critic) ──
     # Skipped for named (deterministic, expert-defined) backends and when
