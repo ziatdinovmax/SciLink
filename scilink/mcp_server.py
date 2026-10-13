@@ -54,7 +54,7 @@ _COPILOT_APPROVAL_TOOLS = {
     # Simulation-mode tools that build/run a calculation (expensive; co-pilot
     # gates them, as it does the analysis/planning run tools).
     "run_simulation", "run_complete_dft_workflow", "run_mlip_simulation",
-    "run_exafs_workflow", "submit_simulation_job",
+    "submit_simulation_job",
     # Meta-mode granular delegations (each one launches a full specialist
     # workflow — co-pilot gates them; in autopilot they run and the
     # children's own questions surface via awaiting_input instead).
@@ -97,7 +97,6 @@ _BACKGROUND_CAPABLE_TOOLS = {
     "run_simulation",
     "run_complete_dft_workflow",
     "run_mlip_simulation",
-    "run_exafs_workflow",
     "analyze_output",
     "submit_simulation_job",
     "generate_final_report",
