@@ -54,6 +54,49 @@ class TestExecution:
         r = agent._execute_script('print(json.dumps({"a": 1}))extra)', "t")
         assert r["status"] == "error" and "SyntaxError" in r["concise_error"]
 
+    def test_default_timeout_matches_the_experimental_agents(self, agent):
+        from scilink.executors import DEFAULT_TIMEOUT
+        assert agent.executor.timeout == DEFAULT_TIMEOUT        # was 120 s (#698)
+
+    def test_a_slow_script_is_rerun_with_more_time_not_corrected(self, tmp_path):
+        """A real script that needs ~1.5 s under a 1 s limit: the SAME script is
+        re-run at 2 s and succeeds — no refine pass, no LLM call."""
+        a = _Concrete(output_dir=str(tmp_path), api_key="test-key", executor_timeout=1)
+        code = ("import time, json\ntime.sleep(1.5)\n"
+                "print(json.dumps({'status': 'success', 'value': 7}))")
+        r = a._execute_script(code, "slow")
+        assert r["ok"] and r["value"] == 7
+
+    def test_escalation_schedule_and_what_is_not_escalated(self, agent):
+        calls = []
+
+        class FakeExecutor:
+            timeout = 600
+
+            def __init__(self, outcomes):
+                self.outcomes = list(outcomes)
+
+            def execute_script(self, script_content, working_dir=None, timeout=None):
+                calls.append(timeout)
+                return self.outcomes.pop(0)
+
+        timeout_msg = {"status": "error", "message": "Script execution timed out after 600 seconds."}
+        ok = {"status": "success", "stdout": '{"status": "success", "value": 1}'}
+        agent.executor = FakeExecutor([timeout_msg, ok])
+        assert agent._execute_script("x = 1", "t")["value"] == 1
+        assert calls == [600, 1200]                              # same script, doubled limit
+
+        calls.clear()
+        agent.executor = FakeExecutor([timeout_msg] * 5)
+        r = agent._execute_script("x = 1", "t")
+        assert calls == [600, 1200, 1800]                        # capped at 1800 s
+        assert r["ok"] is False and "timed out" in r["message"]  # then the refine loop decides
+
+        calls.clear()
+        agent.executor = FakeExecutor([{"status": "error", "message": "Traceback ...\nValueError: bad"}])
+        agent._execute_script("x = 1", "t")
+        assert calls == [600]                                    # a real error is not escalated
+
     def test_execute_script_long_name_saves_capped_filename(self, agent):
         name = "shear_viscosity for the research goal: " + "very long goal " * 30
         r = agent._execute_script('print(\'{"status":"success","value":5}\')', name)

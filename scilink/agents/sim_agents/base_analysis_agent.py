@@ -28,7 +28,8 @@ from typing import Any, Dict, List, Optional, Union
 from ...auth import get_internal_proxy_key, require_vendor_credentials
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
-from ...executors import ScriptExecutor, check_security_sandbox_indicators
+from ...executors import DEFAULT_TIMEOUT, ScriptExecutor, check_security_sandbox_indicators
+from ..exp_agents._locked_exec import escalate_timeouts
 from ..exp_agents._qc_engine import CodegenQCEngine, QCEngineSpec, QCItemContext
 from ._deprecation import normalize_params
 
@@ -85,7 +86,7 @@ class BaseAnalysisAgent(ABC):
         model_name: str = "claude-opus-4-6",
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-        executor_timeout: int = 120,
+        executor_timeout: int = DEFAULT_TIMEOUT,
         max_refinement_attempts: int = 2,
         google_api_key: Optional[str] = None,
         local_model: Optional[str] = None,
@@ -101,7 +102,10 @@ class BaseAnalysisAgent(ABC):
                 LiteLLM, which falls back to the vendor's env var.
             base_url: OpenAI-compatible internal-proxy URL; when set, requests
                 route through the proxy client, otherwise through LiteLLM.
-            executor_timeout: Per-script sandbox timeout, in seconds.
+            executor_timeout: Per-script sandbox timeout, in seconds (the
+                same default as the experimental agents). A script that times
+                out is re-run unchanged with a longer limit before the refine
+                loop treats it as broken (``escalate_timeouts``).
             max_refinement_attempts: How many times a script that *crashed*
                 (or violated the output contract) is regenerated from its
                 error before giving up. Bounds the initial attempt only.
@@ -607,8 +611,19 @@ class BaseAnalysisAgent(ABC):
         # slug exceeds the 255-byte filename limit (ENAMETOOLONG).
         slug = re.sub(r"[^0-9a-zA-Z]+", "_", name).strip("_")[:80].rstrip("_") \
             or "analysis"
-        exec_result = self.executor.execute_script(
-            script_content=code, working_dir=str(self.output_dir))
+        # A timeout is rarely broken code — a long trajectory just needs longer.
+        # Re-run the SAME script with a growing limit (the shared policy the
+        # experimental agents use) before handing a timeout to the refine loop,
+        # which would otherwise "fix" code that was never wrong.
+        exec_result, _ = escalate_timeouts(
+            lambda timeout_s: self.executor.execute_script(
+                script_content=code, working_dir=str(self.output_dir),
+                timeout=timeout_s),
+            base_timeout=int(self.executor.timeout),
+            timed_out=lambda r: (r.get("status") != "success"
+                                 and "timed out" in (r.get("message") or "").lower()),
+            logger=self.logger,
+        )
         if exec_result.get("status") == "success":
             (self.output_dir / f"{slug}.py").write_text(code, encoding="utf-8")
             parsed = self._extract_json(exec_result.get("stdout", ""))
