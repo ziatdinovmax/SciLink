@@ -67,3 +67,26 @@ def test_inject_noop_without_declaration(tmp_path):
     result = {"input_files": {"qe.in": "&control\n"}}
     _agent()._inject_native_structure(result, str(p), {"skill_sections": {"meta": {}}})
     assert list(result["input_files"].keys()) == ["qe.in"]
+
+
+def test_inject_groups_interleaved_species_for_vasp(tmp_path):
+    """An interleaved structure (rock-salt supercell, packmol box) must come out
+    with one species block per element, or VASP sees one 'type' per block and
+    the POTCAR gets one entry per block (a 64-atom MgO:Ca cell gave 63)."""
+    from ase.constraints import FixAtoms
+    mgo = bulk("MgO", "rocksalt", a=4.21, cubic=True).repeat((2, 2, 2))   # Mg O Mg O ...
+    mgo[0].symbol = "Ca"
+    mgo.set_constraint(FixAtoms(indices=[0]))                             # fix the Ca
+    p = tmp_path / "structure.extxyz"
+    write(str(p), mgo, format="extxyz")
+    result = {"input_files": {"INCAR": ""}}
+    _agent()._inject_native_structure(result, str(p), VASP_SKILL)
+
+    lines = result["input_files"]["POSCAR"].splitlines()
+    assert lines[5].split() == ["Ca", "Mg", "O"]
+    assert lines[6].split() == ["1", "31", "32"]
+    pp = tmp_path / "POSCAR"
+    pp.write_text(result["input_files"]["POSCAR"])
+    back = read(str(pp), format="vasp")
+    fixed = back.constraints[0].get_indices()
+    assert [back[k].symbol for k in fixed] == ["Ca"]                       # flag followed the atom
