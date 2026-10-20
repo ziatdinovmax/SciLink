@@ -153,7 +153,8 @@ class PeriodicDFTAgent:
                       software: str,
                       skill_sections: Optional[dict] = None,
                       native_structure_file: Optional[str] = None,
-                      required_observables: Optional[list] = None) -> str:
+                      required_observables: Optional[list] = None,
+                      pseudo_block: str = "") -> str:
         """
         Build the full prompt, injecting skill content if available.
 
@@ -206,6 +207,7 @@ class PeriodicDFTAgent:
             f"```\n{structure_content}\n```\n\n"
             f"**User request:**\n{request}\n\n"
             f"{obs_block}"
+            f"{pseudo_block}"
             f"**Output format:** Return ONLY a JSON object with this "
             f"structure:\n"
             f"```json\n"
@@ -299,11 +301,123 @@ class PeriodicDFTAgent:
         except Exception as e:
             self.logger.warning(f"Could not write deterministic {fname}: {e}")
 
+    # ── pseudopotentials (engine-neutral contract, #786) ──────────────
+    # The LLM picks a variant per element; the engine skill's hooks supply the
+    # recommended defaults and the local inventory, render the spec + prep
+    # script, and the pipeline runs the prep script before the engine.
+
+    @staticmethod
+    def _pseudo_meta(skill_state) -> dict:
+        meta = ((skill_state or {}).get("skill_sections") or {}).get("meta") or {}
+        block = meta.get("pseudopotentials")
+        return block if isinstance(block, dict) else {}
+
+    def _pseudopotential_context(self, structure_file: str, skill_state,
+                                 software: str) -> Optional[dict]:
+        """Defaults + local inventory for the structure's elements, or None
+        when the engine skill does not declare the contract."""
+        if not self._pseudo_meta(skill_state):
+            return None
+        try:
+            from ase.io import read as _ase_read
+            from ...skills._shared._registry import get_tool_function
+            elements = list(dict.fromkeys(_ase_read(structure_file).get_chemical_symbols()))
+            defaults = get_tool_function(
+                "default_pseudopotentials", active_skills=[software])(elements=elements)
+            try:
+                listing = get_tool_function(
+                    "list_pseudopotentials", active_skills=[software])(elements=elements)
+            except LookupError:
+                listing = None
+            return {"elements": elements, "defaults": defaults, "listing": listing}
+        except Exception as e:
+            self.logger.warning(f"Pseudopotential context unavailable: {e}")
+            return None
+
+    @staticmethod
+    def _pseudo_prompt_block(ctx: Optional[dict]) -> str:
+        if not ctx:
+            return ""
+        lines = []
+        for el in ctx["elements"]:
+            line = f"- {el}: recommended `{ctx['defaults'].get(el, el)}`"
+            avail = (ctx.get("listing") or {}).get(el)
+            if avail:
+                opts = ", ".join(
+                    f"`{a['variant']}`"
+                    + (f" (ZVAL {a['zval']:g}, ENMAX {a['enmax']:g} eV)"
+                       if a.get("zval") is not None and a.get("enmax") is not None else "")
+                    for a in avail)
+                line += f"; installed: {opts}"
+            lines.append(line)
+        note = ("" if ctx.get("listing") is not None else
+                " (the library is not readable here; the choice is checked when the run starts)")
+        return (
+            f"**Pseudopotentials**{note}:\n" + "\n".join(lines) + "\n"
+            "Keep the recommended variant unless the physics calls for another. "
+            "To deviate, add a top-level `\"pseudopotentials\"` object to the JSON: "
+            "`{\"<El>\": {\"variant\": \"<name>\", \"reason\": \"<why>\"}}` "
+            "(list only elements you change). Set ENCUT from the ENMAX of the "
+            "variants used. Do not emit POTCAR or POTCAR.spec.\n\n"
+        )
+
+    def _inject_pseudopotentials(self, result: dict, ctx: Optional[dict],
+                                 software: str, agent_choice=None,
+                                 overrides: Optional[dict] = None) -> None:
+        """Resolve the choice and add the spec + prep script to ``input_files``;
+        record the choice, its sources, and any warnings under
+        ``result["pseudopotentials"]`` and the prep step as
+        ``result["pre_run_command"]``."""
+        if not ctx or not isinstance(result.get("input_files"), dict):
+            return
+        try:
+            from ...skills._shared._registry import get_tool_function
+            from ...skills._shared.pseudopotentials import resolve_pseudopotentials
+
+            def hook(name):
+                return get_tool_function(name, active_skills=[software])
+
+            listing = ctx.get("listing")
+            inventory = (None if listing is None else
+                         {el: [a["variant"] for a in v] for el, v in listing.items()})
+            choice, warnings = resolve_pseudopotentials(
+                ctx["elements"], ctx["defaults"],
+                agent_choice=agent_choice if isinstance(agent_choice, dict) else None,
+                user_map=overrides, inventory=inventory)
+            files = result["input_files"]
+            species = []
+            try:
+                species = hook("poscar_species")(poscar_text=files.get("POSCAR", ""))
+            except LookupError:
+                pass
+            files.update(hook("render_pseudopotential_prep")(choice=choice, species=species))
+            files.pop("POTCAR", None)  # never an LLM-authored POTCAR
+            record = {"choice": choice, "warnings": warnings}
+            if listing is not None:
+                enmax = {el: next((a.get("enmax") for a in listing.get(el, [])
+                                   if a["variant"] == c["variant"]), None)
+                         for el, c in choice.items()}
+                record["enmax"] = enmax
+                try:
+                    finding = hook("check_encut_floor")(
+                        incar_text=files.get("INCAR", ""), enmax=enmax)
+                except LookupError:
+                    finding = None
+                if finding:
+                    record["warnings"].append(finding)
+            result["pseudopotentials"] = record
+            result["pre_run_command"] = hook("pre_run_command")()
+            for w in record["warnings"]:
+                self.logger.warning(f"pseudopotentials: {w}")
+        except Exception as e:
+            self.logger.warning(f"Could not resolve pseudopotentials: {e}")
+
     def generate_inputs(self, structure_file: str,
                         request: str,
                         software: str = "vasp",
                         skill: Optional[str] = None,
-                        required_observables: Optional[list] = None) -> dict:
+                        required_observables: Optional[list] = None,
+                        pseudopotential_overrides: Optional[dict] = None) -> dict:
         """
         Generate input files for a periodic-DFT calculation.
 
@@ -327,6 +441,12 @@ class PeriodicDFTAgent:
             ``software="vasp"`` loads the ``vasp`` skill bundle). Pass
             an explicit name (or full path to a .md file) to override.
             Set to None to skip skill loading.
+
+        pseudopotential_overrides : dict, optional
+            ``{element: variant}`` that always wins over the agent's choice and
+            the skill default (e.g. a project's ``VASPConfig.potcar_map``).
+            Used only when the engine skill declares a ``pseudopotentials:``
+            block.
 
         Returns
         -------
@@ -356,6 +476,7 @@ class PeriodicDFTAgent:
             skill_sections = skill_state.get("skill_sections")
 
         native_file, _ = self._native_structure_spec(skill_state)
+        pseudo_ctx = self._pseudopotential_context(structure_file, skill_state, software)
         prompt = self._build_prompt(
             structure_content=structure_content,
             request=request,
@@ -363,6 +484,7 @@ class PeriodicDFTAgent:
             skill_sections=skill_sections,
             native_structure_file=native_file,
             required_observables=required_observables,
+            pseudo_block=self._pseudo_prompt_block(pseudo_ctx),
         )
 
         try:
@@ -443,6 +565,11 @@ class PeriodicDFTAgent:
 
         # Deterministic engine-native coordinate file (exact coordinates).
         self._inject_native_structure(result, structure_file, skill_state)
+        # Pseudopotentials: resolve the LLM's choice and add the spec + prep script.
+        self._inject_pseudopotentials(
+            result, pseudo_ctx, software,
+            agent_choice=result.pop("pseudopotentials", None),
+            overrides=pseudopotential_overrides)
 
         result["status"] = "success"
         result["software"] = software
@@ -614,6 +741,14 @@ class PeriodicDFTAgent:
         # Keep the engine-native coordinate file exact (overwrite any LLM copy)
         # before writing the improved set to disk.
         self._inject_native_structure(result, structure_file, skill_state)
+        # Carry the pseudopotential spec + prep script over unchanged: the
+        # improvement pass edits settings, not the pseudopotential choice.
+        spec_name = self._pseudo_meta(skill_state).get("spec_file")
+        if spec_name and spec_name in original_inputs:
+            result["input_files"].pop("POTCAR", None)
+            for name, content in original_inputs.items():
+                if name == spec_name or name.startswith("prepare_pseudopotentials"):
+                    result["input_files"].setdefault(name, content)
 
         os.makedirs(output_dir, exist_ok=True)
         improved_paths = {}

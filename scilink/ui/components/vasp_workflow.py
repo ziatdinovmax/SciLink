@@ -46,9 +46,14 @@ def _build_slurm_script(
     pseudo_dir: str,
     elements: List[str],
     vasp_command: str,
+    use_prep_script: bool = False,
 ) -> str:
     """Construct the SLURM script: SBATCH directives, module loads,
-    POTCAR assembly from `pseudo_dir`, then `vasp_command`."""
+    POTCAR assembly from `pseudo_dir`, then `vasp_command`.
+
+    With ``use_prep_script`` the POTCAR is assembled by the agent's
+    ``prepare_pseudopotentials.sh`` from its ``POTCAR.spec`` choice (#786);
+    otherwise each element's plain ``<pseudo_dir>/<El>/POTCAR`` is used."""
     sbatch_lines = [
         "#!/bin/bash",
         f"#SBATCH --job-name={job_name}",
@@ -69,6 +74,31 @@ def _build_slurm_script(
 
     elements_arr = " ".join(_q(e) for e in elements) if elements else ""
 
+    if use_prep_script:
+        potcar_block = textwrap.dedent(f"""\
+            # ---- Assemble POTCAR from the agent's POTCAR.spec ----
+            export VASP_PP_PATH={_q(pseudo_dir)}
+            bash prepare_pseudopotentials.sh
+        """)
+    else:
+        potcar_block = textwrap.dedent(f"""\
+            # ---- Assemble POTCAR from pseudo dir ----
+            PSEUDO_DIR={_q(pseudo_dir)}
+            ELEMENTS=({elements_arr})
+            if [ ${{#ELEMENTS[@]}} -eq 0 ]; then
+                echo "No elements parsed from POSCAR; aborting." >&2
+                exit 1
+            fi
+            : > POTCAR
+            for e in "${{ELEMENTS[@]}}"; do
+                if [ ! -f "$PSEUDO_DIR/$e/POTCAR" ]; then
+                    echo "Missing POTCAR for element $e at $PSEUDO_DIR/$e/POTCAR" >&2
+                    exit 1
+                fi
+                cat "$PSEUDO_DIR/$e/POTCAR" >> POTCAR
+            done
+        """)
+
     body = textwrap.dedent(f"""\
 
         set -e
@@ -77,21 +107,7 @@ def _build_slurm_script(
         # ---- Module environment ----
         {module_commands.strip() or "# (no modules specified)"}
 
-        # ---- Assemble POTCAR from pseudo dir ----
-        PSEUDO_DIR={_q(pseudo_dir)}
-        ELEMENTS=({elements_arr})
-        if [ ${{#ELEMENTS[@]}} -eq 0 ]; then
-            echo "No elements parsed from POSCAR; aborting." >&2
-            exit 1
-        fi
-        : > POTCAR
-        for e in "${{ELEMENTS[@]}}"; do
-            if [ ! -f "$PSEUDO_DIR/$e/POTCAR" ]; then
-                echo "Missing POTCAR for element $e at $PSEUDO_DIR/$e/POTCAR" >&2
-                exit 1
-            fi
-            cat "$PSEUDO_DIR/$e/POTCAR" >> POTCAR
-        done
+    """) + potcar_block + textwrap.dedent(f"""\
 
         # ---- Run VASP ----
         {vasp_command}
@@ -374,6 +390,12 @@ def _render_configure() -> None:
             poscar_text = Path(structure["structure_path"]).read_text()
             incar_text = Path(files["INCAR"]).read_text() if files.get("INCAR") else ""
             kpoints_text = Path(files["KPOINTS"]).read_text() if files.get("KPOINTS") else ""
+            # The agent's pseudopotential choice + its assembly script (#786).
+            pseudo_files = {
+                name: Path(files[name]).read_text()
+                for name in ("POTCAR.spec", "prepare_pseudopotentials.sh")
+                if files.get(name)
+            }
         except Exception as exc:
             err_slot.error(f"Could not read generated files: {exc}")
             return
@@ -392,12 +414,14 @@ def _render_configure() -> None:
             pseudo_dir=pseudo_dir.strip(),
             elements=elements,
             vasp_command=vasp_command.strip(),
+            use_prep_script=len(pseudo_files) == 2,
         )
 
         st.session_state.hpc_gen_vasp_files = {
             "POSCAR": poscar_text,
             "INCAR": incar_text,
             "KPOINTS": kpoints_text,
+            **pseudo_files,
         }
         st.session_state.hpc_gen_slurm_script = slurm_script
         st.session_state.hpc_gen_remote_work_dir = (
@@ -578,6 +602,9 @@ def _render_review_inputs() -> None:
                     _upload_text(conn, poscar_edit, f"{remote_dir}/POSCAR")
                     _upload_text(conn, incar_edit, f"{remote_dir}/INCAR")
                     _upload_text(conn, kpoints_edit, f"{remote_dir}/KPOINTS")
+                    for name in ("POTCAR.spec", "prepare_pseudopotentials.sh"):
+                        if files.get(name):
+                            _upload_text(conn, files[name], f"{remote_dir}/{name}")
                     _upload_text(conn, slurm_edit, f"{remote_dir}/submit.sh")
                     conn.run(f"chmod +x {_q(remote_dir + '/submit.sh')}", timeout=30)
 
