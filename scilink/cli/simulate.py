@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 scilink simulate — the simulation orchestrator in the terminal: build
-atomic structures, generate VASP inputs, analyze the outputs you bring back.
+atomic structures, generate and run simulation inputs (periodic DFT, quantum
+chemistry, molecular dynamics), and analyze the outputs.
 
 The interactive loop is the shared terminal shell (``scilink.cli.shell``);
 this module keeps the historical entry point.

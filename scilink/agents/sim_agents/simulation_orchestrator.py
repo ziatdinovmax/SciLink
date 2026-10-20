@@ -264,7 +264,8 @@ def get_system_prompt(
 
 class SimulationOrchestratorAgent:
     """
-    Orchestrator agent for coordinating VASP DFT input preparation.
+    Orchestrator agent for coordinating simulation setup, execution, and analysis
+    across engines (periodic DFT, quantum chemistry, molecular dynamics).
 
     Manages an iterative, structure-centric workflow with configurable
     autonomy levels. Each session creates a directory under base_dir;

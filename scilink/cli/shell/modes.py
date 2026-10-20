@@ -630,22 +630,25 @@ def _objective(shell, arg: str) -> None:
 
 class SimulateAdapter(ModeAdapter):
     key = "simulate"
-    description = "SciLink Simulation Orchestrator - Interactive VASP DFT input prep"
+    description = "SciLink Simulation Orchestrator - Interactive simulation setup, execution, and analysis"
     epilog = """
 Examples:
   scilink simulate                                        # co-pilot, empty chat
   scilink simulate --request "Build a rutile TiO2 supercell with one O vacancy"
   scilink simulate --mode autopilot
   scilink simulate -p "Generate VASP inputs for bulk Si" --output-format json
+  scilink simulate -p "Set up a LAMMPS NVT simulation of liquid water at 300 K"
 
 Modes:
   co-pilot (default)   Human leads, AI assists. Confirms before each tool call.
   autopilot            AI leads with defaults; surfaces significant decisions.
   autonomous           Full autonomy. AI executes without confirmation.
 
-Scope (for now):
-  • VASP DFT input prep only (LAMMPS support is planned follow-up).
-  • Local prep only — you run VASP elsewhere and bring back outputs for analysis.
+Scope:
+  • Engines: VASP, Quantum ESPRESSO, CP2K (periodic DFT); NWChem, ORCA (quantum
+    chemistry); LAMMPS, GROMACS, ASE/MLIP (molecular dynamics).
+  • Runs locally when a run command is available; otherwise prepares inputs to
+    run elsewhere and analyzes the outputs you bring back.
 """ + _ENV_EPILOG + "  MP_API_KEY               Materials Project API key (enables MP tool-resolver)\n"
 
     def add_arguments(self, p: argparse.ArgumentParser) -> None:
