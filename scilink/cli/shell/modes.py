@@ -646,9 +646,10 @@ Modes:
 
 Scope:
   • Engines: VASP, Quantum ESPRESSO, CP2K (periodic DFT); NWChem, ORCA (quantum
-    chemistry); LAMMPS, GROMACS, ASE/MLIP (molecular dynamics).
-  • Runs locally when a run command is available; otherwise prepares inputs to
-    run elsewhere and analyzes the outputs you bring back.
+    chemistry); LAMMPS, GROMACS, ASE with ML potentials (molecular dynamics).
+  • Runs locally where the engine skill provides a run command (LAMMPS, ASE) or
+    you give the agent one; otherwise prepares inputs to run elsewhere and
+    analyzes the outputs you bring back.
 """ + _ENV_EPILOG + "  MP_API_KEY               Materials Project API key (enables MP tool-resolver)\n"
 
     def add_arguments(self, p: argparse.ArgumentParser) -> None:

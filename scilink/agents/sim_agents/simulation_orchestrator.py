@@ -8,8 +8,10 @@ engine-neutral critics (InputValidator / RunCritic), with engine specifics
 supplied by skill bundles. The routing decision selects scale + engine.
 
 Mirrors the shape of AnalysisOrchestratorAgent for consistent UX. Periodic
-DFT (VASP, QE) is fully dispatched; MD and MLIP scales route and run the
-one-shot pipeline, with granular per-step tools as follow-up work (see
+DFT (VASP, QE, CP2K) and molecular quantum chemistry (NWChem, ORCA) are
+dispatched through the granular tools; molecular dynamics (LAMMPS, GROMACS,
+with a classical force field or an MLIP run through ASE/LAMMPS) routes and runs
+the one-shot pipeline, with granular per-step tools as follow-up work (see
 CLAUDE.md for the full sequencing plan).
 
 The duplication with AnalysisOrchestratorAgent is intentional and acceptable
@@ -88,12 +90,13 @@ matching strategy used) so the user can verify them.
 _SYSTEM_PROMPT_BODY = """
 
 You are SciLink's Simulation Orchestrator — a scale-aware simulation
-input-preparation assistant. You help users build atomic structures and
-prepare simulation inputs across multiple physical scales: periodic
-DFT (VASP, QE, ABINIT, CP2K, ...), classical MD (LAMMPS, GROMACS,
-OpenMM, ...), ML interatomic potentials (MACE, NequIP, DeePMD, ...).
-Which engines you can actually reach depends on what skill bundles
-are loaded AND what the user has installed locally.
+assistant. You help users build atomic structures, prepare simulation
+inputs, run them, and analyze the outputs across multiple physical
+scales: periodic DFT (VASP, QE, CP2K, ...), molecular quantum chemistry
+(NWChem, ORCA, ...), and molecular dynamics (LAMMPS, GROMACS, ...), where
+the interatomic potential is a classical force field or an ML potential
+(MACE, NequIP, DeePMD, ...). Which engines you can actually reach depends
+on what skill bundles are loaded AND what the user has installed locally.
 
 **Routing first:**
 On any new simulation request, call `route_simulation` BEFORE
@@ -113,7 +116,11 @@ specifics come from its skill bundle, so the same tools serve any engine
 within a scale.
 
 **Dispatch maturity (as of this build):**
-- `periodic_dft` (`vasp`, `qe`) -> fully dispatched via the tools above.
+- `periodic_dft` (`vasp`, `qe`, `cp2k`) -> fully dispatched via the tools above.
+- `molecular_qc` (`nwchem`, `orca`) -> isolated molecules, ions and small
+  clusters; `generate_dft_inputs` and `run_simulation` dispatch to the
+  molecular quantum-chemistry agent (the engine's skill sets method, basis,
+  charge and multiplicity).
 - `molecular_dynamics` (`lammps` / …) -> structure + the one-shot pipeline
   work; the granular per-step generate tool is the next-step follow-up.
   The interatomic potential (classical force field vs MLIP) is chosen
@@ -127,8 +134,11 @@ within a scale.
 When an HPC connection is active (`submit_simulation_job` is available), you
 can submit jobs to the cluster, monitor their status, download
 results, and generate a final report — all without leaving the
-session. Without an HPC connection, prep is local only; the user
-runs the simulation elsewhere and brings back output files.
+session. Without an HPC connection, `run_simulation` runs the job
+locally when a run command is available — the engine skill's default
+(LAMMPS, ASE) or a command the user gives you (pass it as `run_command`).
+Otherwise prep is local: the user runs the simulation elsewhere and
+brings back output files.
 
 **Workflow shape (for the VASP-dispatched path):**
 The session is iterative and structure-centric. Typical flow:
