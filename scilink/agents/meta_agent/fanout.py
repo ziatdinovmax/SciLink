@@ -2343,44 +2343,6 @@ def run_fanout(orch, branches: List[dict],
                     if isinstance(p.get("source_slot"), int) and p["source_slot"] < len(entries)
                     and run_branches[p["source_slot"]] is not b]
 
-    # On the board a steering payload is a finding OF THE COMPANION: a
-    # measurement of its series (a deterministic reduction, but no gate
-    # passed it, so provisional, under the mode "steering") filed under the
-    # companion's ledger index, which the steered branch has READ before it
-    # starts. That read is what fusion's independence count sees; the
-    # informed_by stamp above stays as prose.
-    board = getattr(orch, "board", None)
-    if board is not None:
-        for b, entry in zip(run_branches, entries):
-            reads = []
-            for pl in (b.get("_steering") or []):
-                slot = pl.get("source_slot")
-                if not isinstance(slot, int) or slot >= len(entries) or run_branches[slot] is b:
-                    continue
-                c_entry = entries[slot]
-                try:
-                    rec = board.post(
-                        kind="measurement", status="provisional",
-                        author={"worker": f"fan-out steering (reduction of '{pl['label']}')",
-                                "delegation_index": c_entry["index"], "mode": "steering"},
-                        subject=c_entry.get("subject") or pl.get("label"),
-                        payload={"name": "sharpest change along the control variable",
-                                 "value": pl.get("change_point"),
-                                 "context": f"series '{pl['label']}'; sharpness "
-                                            f"{pl.get('change_sharpness')}; unsupervised reduction"},
-                        evidence={"files": [pl["score_curve_path"]] if pl.get("score_curve_path") else [],
-                                  "gate": "series_reduction (deterministic)"})
-                except (ValueError, KeyError) as e:  # noqa: BLE001
-                    logger.warning(f"board: steering record refused: {e}")
-                    continue
-                with orch._fanout_lock:
-                    c_entry.setdefault("posted", []).append(rec["finding_id"])
-                reads.append(rec["finding_id"])
-            if reads:
-                with orch._fanout_lock:
-                    entry["reads"] = reads
-                    entry["board_version"] = len(board)
-
     # Persist the provisional 'running' entries BEFORE any branch runs: a
     # coordinator crash before the first branch completes would otherwise
     # leave no on-disk trace of the fan-out (_close_delegation writes the
@@ -3447,33 +3409,58 @@ def _ledger_dependents(ledger: List[dict], indices: List[int]) -> Dict[int, set]
     return result
 
 
-def independent_support_of(board, ledger: List[dict], entries: List[dict]) -> Dict[str, Any]:
-    """Fusion's independence count over ``entries`` (the agreeing set):
-    the board's read graph (``board.independent_support``) joined with the
-    ledger's own coupling edges. Keyed by delegation index; ``dependent``
-    is rendered as ``'label' (#index)`` for the prompt and the report.
+def independent_set_size(keys, deps: Dict[Any, set]) -> "tuple[int, bool]":
+    """The size of the largest subset of ``keys`` with no coupling between
+    any two of them (``deps[k]`` = what k depends on; coupling is symmetric
+    here). Exact by exhaustive search up to 12 keys; beyond that a greedy
+    pass (fewest couplings first), which is a LOWER bound — the second value
+    says which. Three mutually coupled supporters count 1, never 0; two
+    independent ones plus a third that cited both count 2."""
+    import itertools
+    keys = list(keys)
+    coupled = {(x, y) for x in keys for y in deps.get(x, ()) if y in keys}
+    coupled |= {(y, x) for x, y in coupled}
+
+    def independent(subset) -> bool:
+        return not any((x, y) in coupled for x, y in itertools.combinations(subset, 2))
+
+    if not keys:
+        return 0, True
+    if len(keys) <= 12:
+        for n in range(len(keys), 0, -1):
+            if any(independent(c) for c in itertools.combinations(keys, n)):
+                return n, True
+        return 0, True
+    chosen: List[Any] = []
+    for k in sorted(keys, key=lambda x: sum(1 for y in keys if (x, y) in coupled)):
+        if independent(chosen + [k]):
+            chosen.append(k)
+    return len(chosen), False
+
+
+def independent_support_of(ledger: List[dict], entries: List[dict]) -> Dict[str, Any]:
+    """Fusion's independence count over ``entries`` (the agreeing set), from
+    the ledger's own coupling edges (``_ledger_dependents``: context_from
+    citations, steering, fusion feedback, transitively). Keyed by delegation
+    index; ``dependent`` is rendered as ``'label' (#index)`` for the prompt
+    and the report.
 
     ``count`` is the size of the largest set of branches none of which is
-    coupled to another (``board.independent_set_size``: exact up to 12
-    branches, a greedy lower bound beyond — ``exact`` says which). Three
-    meshed-and-steered or mutually informed branches count once, never
-    zero; two independent branches plus a re-analysis that read both count
-    two.
+    coupled to another (``independent_set_size``: exact up to 12 branches, a
+    greedy lower bound beyond — ``exact`` says which). Three meshed-and-
+    steered or mutually informed branches count once, never zero; two
+    independent branches plus a re-analysis that cited both count two.
     """
-    from .board import independent_set_size
     idx = [e["index"] for e in entries]
     disp = {e["index"]: f"'{e.get('label') or 'delegation'}' (#{e['index']})" for e in entries}
-    on_board = board.independent_support({e["index"]: list(e.get("posted") or []) for e in entries},
-                                         reads={e["index"]: list(e.get("reads") or []) for e in entries})
     deps: Dict[int, set] = {i: set() for i in idx}
-    for k, others in on_board["dependent"].items():
-        deps[int(k)].update(int(o) for o in others)
     for i, others in _ledger_dependents(ledger, idx).items():
         deps[i].update(others)
     count, exact = independent_set_size(idx, deps)
     dependent = {disp[i]: [disp[j] for j in sorted(o)] for i, o in deps.items() if o}
     return {"count": count, "raw": len(idx), "exact": exact, "dependent": dependent,
             "by_index": {str(i): sorted(o) for i, o in deps.items() if o}}
+
 
 
 def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> str:
@@ -3605,22 +3592,18 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
                 "construction and must not be counted as independent "
                 "corroboration.")
 
-    # Independence COMPUTED from the board (stage 2 of the swarm proposal):
-    # the fused entries are the agreeing set, and an entry counts as
-    # independent when the transitive read closure of what it posted (and of
-    # what it read at launch) holds none of another fused entry's findings.
-    # The legacy stamps above stay as prose; this is the number the prompt
-    # renders beside the raw count.
-    board = getattr(orch, "board", None)
-    support = None
-    if board is not None:
-        support = independent_support_of(board, ledger, ok)
-        for lbl, srcs in support["dependent"].items():
-            independence_caveats.append(
-                f"Branch {lbl} had read or been given findings of {srcs} "
-                "(board reads, context_from citations or steering, transitively) "
-                "before it reported; its agreement with them is not an independent "
-                "confirmation.")
+    # Independence COMPUTED from the ledger: the fused entries are the
+    # agreeing set, and an entry counts as independent when no transitive
+    # chain of citations, steering or fusion feedback couples it to another
+    # fused entry. The legacy stamps above stay as prose; this is the number
+    # the prompt renders beside the raw count.
+    support = independent_support_of(ledger, ok)
+    for lbl, srcs in support["dependent"].items():
+        independence_caveats.append(
+            f"Branch {lbl} had read or been given findings of {srcs} "
+            "(context_from citations, steering or fusion feedback, transitively) "
+            "before it reported; its agreement with them is not an independent "
+            "confirmation.")
 
     # Harmonized replay — METHOD coupling, the opposite of an independence
     # spend: branches that replayed the donor's approved script verbatim are
@@ -3778,7 +3761,7 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
         + ((f"\n\nINDEPENDENT SUPPORT (computed, not judged): "
             f"{'' if support.get('exact', True) else 'at least '}{support['count']} of "
             f"{support['raw']} — the largest set of branches none of which read, was steered "
-            "by, or cited another branch in the set (board reads, context_from and "
+            "by, or cited another branch in the set (context_from and "
             "steering edges, transitively)"
             + (f"; couplings: {json.dumps(support['dependent'])}"
                if support["dependent"] else "")
@@ -3799,7 +3782,7 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
             "computation rather than two confirmations. A branch re-analyzed with "
             "FUSION FEEDBACK has effectively seen ALL its companions' findings — the "
             "same discount as steering applies."
-            + (" Couplings that come from board reads or citations are listed in the "
+            + (" Couplings that come from citations or steering are listed in the "
                "INDEPENDENT SUPPORT block; a pair listed in neither place is independent."
                if support is not None else
                " A pair not listed here, and not coupled by a citation in context_from, "
@@ -3900,8 +3883,6 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
                                  computed.get("numerics_path"),
                                  computed.get("figure_path")) if p]
 
-    fusion_reads = sorted({f for e in ok for f in (e.get("posted") or [])}
-                          | {f for e in ok for f in (e.get("reads") or [])})
     with orch._fanout_lock:
         orch._delegation_ledger.append({
             "index": len(orch._delegation_ledger) + 1,
@@ -3922,36 +3903,8 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
             "suggested_followups": reanalysis_followups,
             "warnings": ([ungated_warning] if ungated_warning else []),
             "error": None,
-            # What the fusion had read: every fused branch's findings. A
-            # re-analysis that cites this fusion inherits them as reads.
-            "reads": fusion_reads,
             "independent_support": support,
         })
-        fusion_entry = orch._delegation_ledger[-1]
-    # The fused claims go on the board as claims that READ every fused
-    # finding, so the independence fold sees the fusion as what it is: a
-    # synthesis of its inputs, not new support for them. Provisional: an
-    # ungated fusion vouches for nothing, and a gated one is a model's
-    # synthesis that passed no gate of its own.
-    if board is not None:
-        posted = []
-        author = {"worker": "cross-dataset fusion", "delegation_index": fusion_entry["index"],
-                  "mode": "fusion"}
-        for c in fused["scientific_claims"] or []:
-            text = (c.get("claim") if isinstance(c, dict) else str(c)) or ""
-            if not str(text).strip():
-                continue
-            try:
-                rec = board.post(kind="claim", author=author, payload={"text": str(text)[:2000]},
-                                 subject=next((e.get("subject") for e in ok if e.get("subject")), None),
-                                 status="provisional", reads=fusion_reads,
-                                 evidence={"files": [str(report_path)],
-                                           "gate": "fusion synthesis (no gate of its own)"})
-                posted.append(rec["finding_id"])
-            except (ValueError, KeyError) as e:  # noqa: BLE001
-                logger.warning(f"board: fusion claim refused: {e}")
-        with orch._fanout_lock:
-            fusion_entry["posted"] = posted
     # Persist the fusion entry the way _close_delegation persists analysis
     # entries: without this, a resumed session restores a ledger with no
     # mode="fusion" entries — losing fusion history and resetting the

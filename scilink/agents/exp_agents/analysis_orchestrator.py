@@ -15,7 +15,7 @@ from scilink.utils.text_io import atomic_write_json
 import logging
 from ._verification_record import (analysis_verdict, replay_certification_reason, replay_escalation,
                                    series_anchor_unit, series_coverage,
-                                   series_recipes, ungated_outputs_of, failed_outputs_of)
+                                   ungated_outputs_of, failed_outputs_of)
 import os
 import time
 from pathlib import Path
@@ -1739,12 +1739,6 @@ class AnalysisOrchestratorAgent:
                     # a series' locked recipe is the anchor's unit script
                     "recipe_unit": series_anchor_unit(rec.get("full_result")),
                     "series": bool((rec.get("full_result") or {}).get("individual_results")),
-                    # the recipes the series driver recorded at lock time
-                    # (one per regime, script text included): what a caller
-                    # that keeps its own copy of a recipe — the meta's board
-                    # — copies from; the meta leaves it off the rows its
-                    # model reads (_summarize_delegation_result).
-                    "recipes": series_recipes(rec.get("full_result")),
                     # a replay whose certificate was withheld and was explained by
                     # the judge (#712 escalation): an opinion beside the
                     # verdict, which the board posts as a provisional claim
