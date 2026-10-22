@@ -14,6 +14,7 @@ structure_format: vasp
 pseudopotentials:
   library_env: VASP_PP_PATH
   spec_file: POTCAR.spec
+  prep_script: prepare_pseudopotentials.sh
 detect:
   binaries: [vasp_std, vasp_gam, vasp_ncl, vasp]
   env_vars: [VASP_HOME, VASP_DIR]

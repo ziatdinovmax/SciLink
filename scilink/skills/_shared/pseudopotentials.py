@@ -9,6 +9,7 @@ choice is materialized) live in the engine's skill bundle, which exposes:
     default_pseudopotentials(elements)            -> {element: variant}
     list_pseudopotentials(elements, library=None) -> {element: [{variant, ...}]} | None
     render_pseudopotential_prep(choice, species)  -> {filename: contents}
+    pseudopotential_set(input_files)              -> set key for list_pseudopotentials | None
     describe_pseudopotentials(run_dir)            -> {element: {variant, ...}}
 
 An engine opts in by declaring a ``pseudopotentials:`` frontmatter block in its
@@ -68,10 +69,13 @@ def resolve_pseudopotentials(
 
         if el in user_map:
             v = user_map[el]
-            if avail is not None and v not in avail:
-                warnings.append(f"{el}: user-requested {v} is not in the library")
-            choice[el] = {"variant": v, "source": "user", "reason": None}
-            continue
+            if not isinstance(v, str) or element_of(v) != el:
+                warnings.append(f"{el}: user-requested {v!r} is not a variant of {el}; ignored")
+            else:
+                if avail is not None and v not in avail:
+                    warnings.append(f"{el}: user-requested {v} is not in the library")
+                choice[el] = {"variant": v, "source": "user", "reason": None}
+                continue
 
         raw = agent_choice.get(el)
         if raw:

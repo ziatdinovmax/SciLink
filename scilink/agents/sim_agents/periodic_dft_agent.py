@@ -154,7 +154,8 @@ class PeriodicDFTAgent:
                       skill_sections: Optional[dict] = None,
                       native_structure_file: Optional[str] = None,
                       required_observables: Optional[list] = None,
-                      pseudo_block: str = "") -> str:
+                      pseudo_block: str = "",
+                      order_block: str = "") -> str:
         """
         Build the full prompt, injecting skill content if available.
 
@@ -207,6 +208,7 @@ class PeriodicDFTAgent:
             f"```\n{structure_content}\n```\n\n"
             f"**User request:**\n{request}\n\n"
             f"{obs_block}"
+            f"{order_block}"
             f"{pseudo_block}"
             f"**Output format:** Return ONLY a JSON object with this "
             f"structure:\n"
@@ -284,9 +286,23 @@ class PeriodicDFTAgent:
         rather than relying on the LLM to transcribe positions. No-op for engines
         whose skill declares no separate coordinate file (e.g. QE embeds the
         geometry in its main input)."""
-        fname, fmt = self._native_structure_spec(skill_state)
-        if not (fname and fmt) or not isinstance(result.get("input_files"), dict):
+        if not isinstance(result.get("input_files"), dict):
             return
+        rendered = self._render_native_structure(structure_file, skill_state)
+        if rendered:
+            fname, text = rendered
+            result["input_files"][fname] = text
+            self.logger.info(
+                f"Wrote deterministic {fname} from "
+                f"{os.path.basename(structure_file)}"
+            )
+
+    def _render_native_structure(self, structure_file: str,
+                                 skill_state) -> Optional[tuple]:
+        """(filename, contents) of the engine-native coordinate file, or None."""
+        fname, fmt = self._native_structure_spec(skill_state)
+        if not (fname and fmt):
+            return None
         try:
             import io
             from ase.io import read as _ase_read, write as _ase_write
@@ -301,13 +317,39 @@ class PeriodicDFTAgent:
             # kwarg) are unaffected.
             write_kwargs = {"sort": True} if fmt == "vasp" else {}
             _ase_write(buf, atoms, format=fmt, **write_kwargs)
-            result["input_files"][fname] = buf.getvalue()
-            self.logger.info(
-                f"Wrote deterministic {fname} ({fmt}) from "
-                f"{os.path.basename(structure_file)}"
-            )
+            return fname, buf.getvalue()
         except Exception as e:
             self.logger.warning(f"Could not write deterministic {fname}: {e}")
+            return None
+
+    def _atom_order_block(self, structure_file: str, skill_state) -> str:
+        """Prompt note giving the atom order of the engine-native coordinate
+        file, which can differ from the structure file shown to the model (the
+        VASP POSCAR is grouped by species), so per-atom tags follow it."""
+        rendered = self._render_native_structure(structure_file, skill_state)
+        if not rendered:
+            return ""
+        fname, text = rendered
+        try:
+            import io
+            from ase.io import read as _ase_read
+            _, fmt = self._native_structure_spec(skill_state)
+            symbols = _ase_read(io.StringIO(text), format=fmt).get_chemical_symbols()
+        except Exception as e:
+            self.logger.debug(f"atom order unavailable: {e}")
+            return ""
+        runs: list = []
+        for sym in symbols:
+            if runs and runs[-1][0] == sym:
+                runs[-1][1] += 1
+            else:
+                runs.append([sym, 1])
+        order = ", ".join(f"{sym} {n}" for sym, n in runs)
+        return (
+            f"**Atom order in {fname}** (written for you; may differ from the "
+            f"structure file above): {order}. Write every per-atom tag "
+            f"(e.g. MAGMOM) in this order.\n\n"
+        )
 
     # ── pseudopotentials (engine-neutral contract, #786) ──────────────
     # The LLM picks a variant per element; the engine skill's hooks supply the
@@ -385,14 +427,23 @@ class PeriodicDFTAgent:
             def hook(name):
                 return get_tool_function(name, active_skills=[software])
 
+            files = result["input_files"]
             listing = ctx.get("listing")
+            # The prompt showed the default (PBE) set; if the generated inputs
+            # select another functional set, ground the choice in that one.
+            try:
+                pp_set = hook("pseudopotential_set")(input_files=files)
+            except LookupError:
+                pp_set = None
+            if pp_set and listing is not None:
+                listing = hook("list_pseudopotentials")(
+                    elements=ctx["elements"], gga=pp_set)
             inventory = (None if listing is None else
                          {el: [a["variant"] for a in v] for el, v in listing.items()})
             choice, warnings = resolve_pseudopotentials(
                 ctx["elements"], ctx["defaults"],
                 agent_choice=agent_choice if isinstance(agent_choice, dict) else None,
                 user_map=overrides, inventory=inventory)
-            files = result["input_files"]
             species = []
             try:
                 species = hook("poscar_species")(poscar_text=files.get("POSCAR", ""))
@@ -493,6 +544,7 @@ class PeriodicDFTAgent:
             native_structure_file=native_file,
             required_observables=required_observables,
             pseudo_block=self._pseudo_prompt_block(pseudo_ctx),
+            order_block=self._atom_order_block(structure_file, skill_state),
         )
 
         try:
@@ -751,11 +803,13 @@ class PeriodicDFTAgent:
         self._inject_native_structure(result, structure_file, skill_state)
         # Carry the pseudopotential spec + prep script over unchanged: the
         # improvement pass edits settings, not the pseudopotential choice.
-        spec_name = self._pseudo_meta(skill_state).get("spec_file")
+        pmeta = self._pseudo_meta(skill_state)
+        spec_name = pmeta.get("spec_file")
         if spec_name and spec_name in original_inputs:
             result["input_files"].pop("POTCAR", None)
+            carried = {spec_name, pmeta.get("prep_script")}
             for name, content in original_inputs.items():
-                if name == spec_name or name.startswith("prepare_pseudopotentials"):
+                if name in carried:
                     result["input_files"].setdefault(name, content)
 
         os.makedirs(output_dir, exist_ok=True)

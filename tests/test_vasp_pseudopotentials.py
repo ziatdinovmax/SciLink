@@ -318,3 +318,151 @@ def test_ui_submit_script_uses_prep_script_when_spec_present():
     assert "export VASP_PP_PATH='/lib/pbe'" in prep
     assert prep.index("bash prepare_pseudopotentials.sh") < prep.index("mpirun vasp_std")
     assert "PSEUDO_DIR" not in prep
+
+
+# ── review follow-ups (PR #791) ──────────────────────────────────────
+
+def test_resolve_ignores_user_override_for_wrong_element():
+    choice, warnings = resolve_pseudopotentials(
+        ["Na"], {"Na": "Na_pv"}, user_map={"Na": "Cl"}, inventory={"Na": ["Na", "Na_pv"]})
+    assert choice["Na"] == {"variant": "Na_pv", "source": "default", "reason": None}
+    assert any("user-requested 'Cl' is not a variant of Na" in w for w in warnings)
+
+
+def test_pseudopotential_set_from_incar():
+    assert vp.pseudopotential_set({"INCAR": "GGA = PE\n"}) is None
+    assert vp.pseudopotential_set({"INCAR": "ENCUT = 400\n"}) is None
+    assert vp.pseudopotential_set({"INCAR": "  gga = lda ! comment\n"}) == "LDA"
+    assert vp.pseudopotential_set({"INCAR": "GGA = 91\n"}) == "91"
+    assert vp.pseudopotential_set({}) is None
+
+
+def test_agent_grounds_choice_in_the_set_the_incar_selects(tmp_path):
+    """The prompt shows the PBE set; an LDA INCAR is checked against potpaw/."""
+    _fake_potcar(tmp_path / "potpaw_PBE" / "O", "O", 6, 400)
+    _fake_potcar(tmp_path / "potpaw" / "O", "O", 6, 350)
+    ctx = {"elements": ["O"], "defaults": {"O": "O"},
+           "listing": vp.list_pseudopotentials(["O"], library=str(tmp_path))}
+    import os
+    old = os.environ.get("VASP_PP_PATH")
+    os.environ["VASP_PP_PATH"] = str(tmp_path)
+    try:
+        result = {"input_files": {"INCAR": "GGA = LDA\nENCUT = 480\n", "POSCAR": ""}}
+        _agent()._inject_pseudopotentials(result, ctx, "vasp")
+    finally:
+        if old is None:
+            os.environ.pop("VASP_PP_PATH", None)
+        else:
+            os.environ["VASP_PP_PATH"] = old
+    rec = result["pseudopotentials"]
+    assert rec["enmax"] == {"O": pytest.approx(350)}
+    assert not any("ENCUT" in w for w in rec["warnings"])   # 480 >= 1.3 * 350
+
+
+@pytest.mark.skipif(BASH is None, reason="bash not available")
+def test_prep_script_rejects_vasp4_poscar_clearly(tmp_path, library):
+    vasp4 = POSCAR_NACL.replace("Na Cl\n", "")              # no species line
+    files = {"POSCAR": vasp4, "INCAR": "",
+             **vp.render_pseudopotential_prep({"Na": "Na", "Cl": "Cl"}, ["Na", "Cl"])}
+    r = _run_prep(tmp_path, files, library)
+    assert r.returncode == vp.MISSING_EXIT_CODE
+    assert "not a species line" in r.stderr
+
+
+def test_prompt_states_poscar_atom_order(tmp_path):
+    """The POSCAR is grouped by species, so per-atom tags must follow its order,
+    not the (interleaved) order of the structure file the model sees."""
+    from ase import Atoms
+    from ase.io import write
+    atoms = Atoms("OMgOCaOMg", positions=[[i, 0, 0] for i in range(6)],
+                  cell=[10, 10, 10], pbc=True)
+    p = tmp_path / "s.extxyz"; write(p, atoms)
+    state = {"skill_sections": {"meta": {"structure_file": "POSCAR",
+                                         "structure_format": "vasp"}}}
+    block = _agent()._atom_order_block(str(p), state)
+    assert "Ca 1, Mg 2, O 3" in block and "MAGMOM" in block
+    assert _agent()._atom_order_block(str(p), {"skill_sections": {"meta": {}}}) == ""
+
+
+def test_vasp_frontmatter_declares_prep_script():
+    text = (Path(vp.__file__).parent / "vasp.md").read_text()
+    assert f"prep_script: {vp.PREP_SCRIPT}" in text and f"spec_file: {vp.SPEC_FILE}" in text
+
+
+# ── orchestrator tools ───────────────────────────────────────────────
+
+def _orch(tmp_path, conn=None, sched=None):
+    from scilink.agents.sim_agents import SimulationOrchestratorAgent, SimulationMode
+    return SimulationOrchestratorAgent(
+        base_dir=str(tmp_path / "sim"), api_key="dummy", model_name="claude-opus-4-6",
+        simulation_mode=SimulationMode.AUTONOMOUS, hpc_connection=conn, hpc_scheduler=sched)
+
+
+_PSEUDO_RECORD = {"choice": {"Na": {"variant": "Na_pv", "source": "default", "reason": None}},
+                  "warnings": ["ENCUT = 300 eV is below 1.3 x max ENMAX (262 eV) = 341 eV"]}
+
+
+def test_generate_dft_inputs_records_pre_run_and_returns_warnings(tmp_path, monkeypatch):
+    import json
+    import scilink.agents.sim_agents.simulation_pipeline as sp
+    orch = _orch(tmp_path)
+    sdir = tmp_path / "s"; sdir.mkdir()
+    structure = sdir / "structure.extxyz"; structure.write_text("x")
+    orch.generated_structures.append({"slug": "nacl", "structure_dir": str(sdir),
+                                      "structure_path": str(structure)})
+
+    def fake_generate(**kw):
+        (sdir / "INCAR").write_text("ENCUT = 300\n")
+        (sdir / vp.SPEC_FILE).write_text("Na_pv\n")
+        return {"status": "success", "input_files": {"INCAR": "", vp.SPEC_FILE: ""},
+                "pre_run_command": vp.pre_run_command(), "pseudopotentials": _PSEUDO_RECORD}
+    monkeypatch.setattr(sp, "_generate_inputs", fake_generate)
+
+    r = json.loads(orch.tools.execute_tool(
+        "generate_dft_inputs", structure_path=str(structure), request="scf", software="vasp"))
+    assert r["status"] == "success"
+    assert r["pseudopotentials"]["warnings"] == _PSEUDO_RECORD["warnings"]
+    assert r["pseudopotentials"]["choice"]["Na"]["variant"] == "Na_pv"
+    assert orch.generated_structures[0]["pre_run_command"] == "bash prepare_pseudopotentials.sh"
+
+
+def test_submit_job_script_runs_prep_before_engine(tmp_path):
+    import json
+    from unittest.mock import MagicMock
+    conn, sched = MagicMock(), MagicMock()
+    conn.is_connected = True
+    sched.name = "SLURM"
+    sched.submit = MagicMock(return_value="1")
+    orch = _orch(tmp_path, conn, sched)
+    sdir = tmp_path / "s"; sdir.mkdir()
+    files = {}
+    for name in ("POSCAR", "INCAR", vp.SPEC_FILE, vp.PREP_SCRIPT):
+        (sdir / name).write_text("x")
+        files[name] = str(sdir / name)
+    orch.generated_structures.append({
+        "slug": "nacl", "structure_dir": str(sdir), "structure_path": files["POSCAR"],
+        "input_files": files, "pre_run_command": vp.pre_run_command()})
+
+    r = json.loads(orch.tools.execute_tool(
+        "submit_simulation_job", structure_slug="nacl", remote_dir="/scratch/x",
+        run_command="srun vasp_std"))
+    assert r["status"] == "success", r
+    script = (sdir / "job.sh").read_text()
+    assert "\nbash prepare_pseudopotentials.sh && srun vasp_std\n" in script
+    uploaded = {c.args[1].rsplit("/", 1)[1] for c in conn.upload.call_args_list}
+    assert {vp.SPEC_FILE, vp.PREP_SCRIPT} <= uploaded
+
+
+def test_run_simulation_returns_pseudopotential_warnings(tmp_path, monkeypatch):
+    import json
+    import scilink.agents.sim_agents.simulation_pipeline as sp
+    orch = _orch(tmp_path)
+
+    def fake_workflow(user_request, **kw):
+        return {"final_status": "success", "structure_generation": {},
+                "input_generation": {"pseudopotentials": _PSEUDO_RECORD}}
+    monkeypatch.setattr(sp, "run_complete_workflow", fake_workflow)
+    r = json.loads(orch.tools.execute_tool(
+        "run_simulation", description="NaCl scf", scale="periodic_dft", software="vasp"))
+    assert r["pseudopotentials"]["warnings"] == _PSEUDO_RECORD["warnings"]
+    assert "Pseudopotential warnings: ENCUT = 300 eV" in r["note"]
