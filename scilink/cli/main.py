@@ -282,7 +282,7 @@ Available Commands:
   plan          Interactive planning orchestrator for experimental design
                 and Bayesian optimization workflows
 
-  simulate      Simulation agents for MD, DFT, LAMMPS, VASP workflows
+  simulate      Simulation agents for DFT, quantum chemistry, and MD workflows
 
   prepare-ff    Force field agent for generating LAMMPS force field and
                 data files with AMBER

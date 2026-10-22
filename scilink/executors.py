@@ -603,7 +603,6 @@ _SANDBOX_ENV_NAMES = frozenset({
     "PYTHONPATH", "PYTHONHOME", "PYTHONHASHSEED", "PYTHONIOENCODING",
     "PYTHONUNBUFFERED", "PYTHONDONTWRITEBYTECODE", "PYTHONWARNINGS",
     "VIRTUAL_ENV", "MPLBACKEND", "MPLCONFIGDIR", "MP_API_KEY",
-    "FEFF_DIR", "FEFF_BIN",
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
     "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
     "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
@@ -844,7 +843,8 @@ class ScriptExecutor:
                 _end_leftover_group(proc)
             except subprocess.TimeoutExpired:
                 _kill_process_tree(proc, grace=0.5)
-                return {"status": "error", "message": f"Script execution timed out after {effective_timeout} seconds."}
+                return {"status": "error", "timed_out": True,
+                        "message": f"Script execution timed out after {effective_timeout} seconds."}
             except BaseException:
                 # Interrupted while waiting (Ctrl-C, a stop): the script is in
                 # its own session and would otherwise outlive us.
