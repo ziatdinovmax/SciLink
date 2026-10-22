@@ -7,6 +7,14 @@ outputs:
 # coordinates, so the LLM never transcribes positions and the file is guaranteed.
 structure_file: POSCAR
 structure_format: vasp
+# Pseudopotentials are an agent choice grounded in the local library (#786): the
+# agent picks a variant per element (Materials Project default unless it states a
+# reason), and prepare_pseudopotentials.sh assembles POTCAR from $VASP_PP_PATH on
+# the execution host before VASP runs. Hooks: vasp_pseudopotentials.py.
+pseudopotentials:
+  library_env: VASP_PP_PATH
+  spec_file: POTCAR.spec
+  prep_script: prepare_pseudopotentials.sh
 detect:
   binaries: [vasp_std, vasp_gam, vasp_ncl, vasp]
   env_vars: [VASP_HOME, VASP_DIR]
@@ -67,6 +75,15 @@ pseudopotential directory ASE uses. This is critical:
 ALWAYS include the GGA tag explicitly. Omitting it when PBE potentials
 are intended causes a fatal "No pseudopotential" error because ASE
 searches the wrong directory.
+
+**Pseudopotentials (POTCAR):** You are given the recommended variant for each
+element (Materials Project set) and, when the library is readable, the variants
+installed with their valence (ZVAL) and ENMAX. Keep the recommended variant unless
+the physics calls for another, and say why when you deviate: semicore `_pv`/`_sv`
+for high pressure, short bonds, magnetism in early transition metals, or GW;
+`_h` (hard) variants for very short bonds; `_GW` sets only for GW. Set ENCUT
+from the ENMAX of the variants actually used (>= 1.3 x the largest). Do not
+emit POTCAR or POTCAR.spec yourself — they are written from your choice.
 
 **System identification:** Before choosing parameters, identify the system:
 1. Is it a metal, semiconductor, insulator, or molecule?

@@ -188,6 +188,7 @@ def _generate_inputs(
     staged: bool = False,
     required_observables: Optional[list] = None,
     potential_selection: Optional[Dict[str, Any]] = None,
+    pseudopotential_overrides: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Generate inputs for ``scale``, returning a normalized result.
 
@@ -232,6 +233,7 @@ def _generate_inputs(
         result = agent.generate_inputs(
             structure_file=structure_file, request=request, software=software,
             required_observables=required_observables,
+            pseudopotential_overrides=pseudopotential_overrides,
         )
         # PeriodicDFTAgent already returns input_files as {filename: contents}.
         if result.get("status") == "success":
@@ -497,6 +499,7 @@ def _run_workflow_once(
     derive_health_bounds: bool = False,
     health_slack_factor: float = 5.0,
     converge_parameters: bool = False,
+    pseudopotential_overrides: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Run the full structure → inputs → validation pipeline for any scale.
 
@@ -564,6 +567,11 @@ def _run_workflow_once(
             equilibration → production) sequential campaign instead of a single
             run, so the refinement loop runs the per-phase loop over a restart-
             chained sequence. MD only; ignored by other scales.
+        pseudopotential_overrides: ``{element: variant}`` that wins over the
+            agent's pseudopotential choice and the engine skill's default, for
+            engines whose skill declares a ``pseudopotentials:`` block (VASP).
+            The choice, its sources, and (after a run) the pseudopotentials
+            actually used are reported under ``result["pseudopotentials"]``.
 
     Returns:
         A workflow-result dict with ``final_status``, ``scale``, ``engine``,
@@ -820,6 +828,7 @@ def _run_workflow_once(
             model_name=model_name, force_field_files=force_field_files,
             staged=staged, required_observables=required_observables,
             potential_selection=potential_selection,
+            pseudopotential_overrides=pseudopotential_overrides,
         )
     except Exception as e:
         result["final_status"] = "failed_input_generation"
@@ -904,6 +913,9 @@ def _run_workflow_once(
     # the deck before the production run. Same family as reference_check /
     # derive_observables: opt-in, engine-neutral, skill-declared. Needs an
     # executor + run_command since the ladder members are executed.
+    # An engine skill may need a setup step on the execution host before the
+    # engine runs (e.g. assembling POTCAR from the pseudopotential choice, #786).
+    run_command = _with_pre_run(run_command, gen_result)
     if (converge_parameters and scale in ("periodic_dft", "molecular_qc")
             and executor is not None and run_command):
         specs = _convergence_specs(software, scale)
@@ -1045,6 +1057,7 @@ def _run_workflow_once(
     )
     result["refinement"] = refinement
     result["steps_completed"].append("refinement")
+    _record_pseudopotential_provenance(result, gen_result, output_dir, software)
     # Detection is wired; the automated reparameterization fix is not. When the
     # critic attributes a converged-but-wrong result to the force field, surface
     # it plainly so the result is not read as trustworthy.
@@ -1133,6 +1146,34 @@ def run_complete_workflow(
             continue
         return result
     return result
+
+
+def _with_pre_run(run_command: Optional[str], gen_result: Dict[str, Any]) -> Optional[str]:
+    """Prefix the generation result's ``pre_run_command`` (an engine-skill setup
+    step run in the run directory, e.g. POTCAR assembly) to ``run_command``."""
+    pre = (gen_result or {}).get("pre_run_command")
+    if not run_command or not pre or run_command.startswith(f"{pre} && "):
+        return run_command
+    return f"{pre} && {run_command}"
+
+
+def _record_pseudopotential_provenance(result: Dict[str, Any],
+                                       gen_result: Dict[str, Any],
+                                       output_dir: str, software: str) -> None:
+    """Attach the pseudopotentials a run actually used (written by the prep
+    script) to ``result["pseudopotentials"]``. No-op for engines without the
+    contract."""
+    record = (gen_result or {}).get("pseudopotentials")
+    if not record:
+        return
+    try:
+        from ...skills._shared._registry import get_tool_function
+        describe = get_tool_function("describe_pseudopotentials", active_skills=[software])
+        used = describe(run_dir=output_dir)
+    except Exception as e:
+        logger.debug("pseudopotential provenance unavailable: %r", e)
+        used = {}
+    result["pseudopotentials"] = {**record, "used": used}
 
 
 def _collect_phases(

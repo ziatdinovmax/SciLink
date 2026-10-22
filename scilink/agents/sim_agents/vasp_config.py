@@ -32,6 +32,9 @@ class VASPConfig:
     potcar_map : dict, optional
         Maps element symbols to POTCAR variants.
         e.g., {"Ni": "Ni_pv", "Ti": "Ti_pv"}
+        Pass it as ``run_complete_workflow(..., pseudopotential_overrides=
+        config.potcar_map)``: it then wins over the agent's choice and the
+        skill's Materials Project default (#786).
     """
     gga: Optional[str] = None
     enforced_params: Dict[str, str] = field(default_factory=dict)

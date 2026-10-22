@@ -111,6 +111,18 @@ def _classify_convergence(result: Dict[str, Any]) -> Dict[str, Any]:
     return evidence
 
 
+def _pseudopotential_summary(record: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The pseudopotential choice + warnings (and, after a run, what was used)
+    for a tool result, so the model sees substitutions and an ENCUT below the
+    floor of the resolved variants (#786). None for engines without the contract."""
+    if not record:
+        return None
+    out = {"choice": record.get("choice"), "warnings": record.get("warnings") or []}
+    if record.get("used"):
+        out["used"] = record["used"]
+    return out
+
+
 def _extract_document_text(path: Path, ocr_model: Any = None) -> Dict[str, Any]:
     """Kept as a name for callers; the implementation is the shared engine's."""
     from ...utils.file_io import extract_document_text
@@ -874,15 +886,22 @@ class SimulationOrchestratorTools:
             if record is not None:
                 record["input_files"] = file_paths
                 record["summary"] = summary
+                # Engine setup step (e.g. POTCAR assembly) that must run before
+                # the engine wherever the job executes, incl. submit_simulation_job.
+                record["pre_run_command"] = gen.get("pre_run_command")
 
-            return json.dumps({
+            out = {
                 "status": "success",
                 "engine": skill,
                 "input_files": file_paths,
                 "summary": summary,
                 "method": method,
                 "structure_dir": str(structure_dir),
-            })
+            }
+            pseudo = _pseudopotential_summary(gen.get("pseudopotentials"))
+            if pseudo:
+                out["pseudopotentials"] = pseudo
+            return json.dumps(out)
 
         self._register_tool(
             func=generate_dft_inputs,
@@ -1234,7 +1253,13 @@ class SimulationOrchestratorTools:
                     "supplied) — generated and validated inputs only, did NOT "
                     "run. Pass run_command to execute."
                 )
-            return json.dumps({
+            pseudo = _pseudopotential_summary(
+                result.get("pseudopotentials")
+                or (result.get("input_generation") or {}).get("pseudopotentials"))
+            if pseudo and pseudo["warnings"]:
+                notes.append("Pseudopotential warnings: "
+                             + "; ".join(pseudo["warnings"]) + ".")
+            out = {
                 "status": final_status if final_status else "error",
                 "scale": scale, "engine": software,
                 "executed": executed,
@@ -1243,7 +1268,10 @@ class SimulationOrchestratorTools:
                 "refinement_status": refinement.get("status"),
                 "output_directory": str(workdir),
                 "note": " ".join(notes) if notes else None,
-            })
+            }
+            if pseudo:
+                out["pseudopotentials"] = pseudo
+            return json.dumps(out)
 
         self._register_tool(
             func=run_simulation,
@@ -1430,6 +1458,7 @@ class SimulationOrchestratorTools:
             record["script_content"] = new_script_content
             record["validation"] = None  # invalidate prior validation
             record["input_files"] = {}    # invalidate prior inputs (geometry changed)
+            record.pop("pre_run_command", None)
             record["summary"] = None
 
             return json.dumps({
@@ -2497,6 +2526,9 @@ class SimulationOrchestratorTools:
                 for fname, local_path in input_files.items():
                     conn.upload(local_path, f"{remote_dir}/{fname}")
 
+                # Run the engine's setup step (e.g. POTCAR assembly from
+                # POTCAR.spec, #786) in the job before the engine itself.
+                from .simulation_pipeline import _with_pre_run
                 script_content = self._generate_job_script(
                     sched=sched,
                     job_name=job_name,
@@ -2504,7 +2536,7 @@ class SimulationOrchestratorTools:
                     n_tasks=n_tasks,
                     time_limit=time_limit,
                     partition=partition,
-                    run_command=run_command,
+                    run_command=_with_pre_run(run_command, record),
                     modules=modules,
                     extra_directives=extra_directives,
                 )
