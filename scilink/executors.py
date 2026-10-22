@@ -843,7 +843,8 @@ class ScriptExecutor:
                 _end_leftover_group(proc)
             except subprocess.TimeoutExpired:
                 _kill_process_tree(proc, grace=0.5)
-                return {"status": "error", "message": f"Script execution timed out after {effective_timeout} seconds."}
+                return {"status": "error", "timed_out": True,
+                        "message": f"Script execution timed out after {effective_timeout} seconds."}
             except BaseException:
                 # Interrupted while waiting (Ctrl-C, a stop): the script is in
                 # its own session and would otherwise outlive us.

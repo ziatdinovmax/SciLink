@@ -54,6 +54,90 @@ class TestExecution:
         r = agent._execute_script('print(json.dumps({"a": 1}))extra)', "t")
         assert r["status"] == "error" and "SyntaxError" in r["concise_error"]
 
+    def test_default_timeout_matches_the_experimental_agents(self, agent):
+        from scilink.executors import DEFAULT_TIMEOUT
+        assert agent.executor.timeout == DEFAULT_TIMEOUT        # was 120 s (#698)
+
+    def test_a_slow_script_is_rerun_with_more_time_not_corrected(self, tmp_path):
+        """A real script that needs ~2.5 s under a 2 s limit: the SAME script is
+        re-run at 4 s and succeeds — no refine pass, no LLM call."""
+        a = _Concrete(output_dir=str(tmp_path), api_key="test-key", executor_timeout=2)
+        code = ("import time, json\ntime.sleep(2.5)\n"
+                "print(json.dumps({'status': 'success', 'value': 7}))")
+        r = a._execute_script(code, "slow")
+        assert r["ok"] and r["value"] == 7
+
+    def test_escalation_schedule_floor_and_what_is_not_escalated(self, agent):
+        calls = []
+
+        class FakeExecutor:
+            timeout = 600
+
+            def __init__(self, outcomes):
+                self.outcomes = list(outcomes)
+
+            def execute_script(self, script_content, working_dir=None, timeout=None):
+                calls.append(timeout)
+                return self.outcomes.pop(0)
+
+        timeout_msg = {"status": "error", "timed_out": True,
+                       "message": "Script execution timed out after 600 seconds."}
+        ok = {"status": "success", "stdout": '{"status": "success", "value": 1}'}
+        agent.executor = FakeExecutor([timeout_msg, ok])
+        assert agent._execute_script("x = 1", "t")["value"] == 1
+        assert calls == [600, 1200]                              # same script, doubled limit
+
+        calls.clear()
+        agent.executor = FakeExecutor([timeout_msg] * 5)
+        r = agent._execute_script("x = 1", "t")
+        assert calls == [600, 1200, 1800]                        # capped at 1800 s
+        assert r["ok"] is False and "timed out" in r["message"]  # then the refine loop decides
+
+        calls.clear()                                            # the rewrite starts at the reached limit
+        agent.executor = FakeExecutor([ok])
+        agent._execute_script("x = 2", "t")
+        assert calls == [1800]
+
+        calls.clear()
+        agent._timeout_floor = None
+        crash = {"status": "error", "message": "Traceback ...\nsocket.timeout: timed out"}
+        agent.executor = FakeExecutor([crash])
+        agent._execute_script("x = 1", "t")
+        assert calls == [600]               # a crash that merely SAYS "timed out" is not re-run
+
+    def test_reruns_are_bounded_by_the_property_deadline(self, agent):
+        calls = []
+
+        class FakeExecutor:
+            timeout = 600
+
+            def execute_script(self, script_content, working_dir=None, timeout=None):
+                calls.append(timeout)
+                return {"status": "error", "timed_out": True, "message": "timed out"}
+
+        import time as _t
+        agent.executor = FakeExecutor()
+        agent._deadline = _t.monotonic() + 700        # 700 s left on the property
+        agent._execute_script("x = 1", "t")
+        assert calls[0] == 600                         # the first limit is never clamped
+        assert all(c <= 700 for c in calls[1:])        # retries never run past the deadline
+
+    def test_compute_property_stamps_the_run_deadline(self, agent, monkeypatch):
+        seen = {}
+        from scilink.agents.sim_agents import base_analysis_agent as m
+
+        class FakeEngine:
+            def __init__(self, host, spec):
+                pass
+
+            def run_item(self, ctx):
+                seen.update(ctx.state)
+                return {"status": "success"}
+
+        monkeypatch.setattr(m, "CodegenQCEngine", FakeEngine)
+        agent.compute_property("x", {})
+        assert seen["_run_deadline"] is not None and agent.qc_time_budget_s == 3600.0
+
     def test_execute_script_long_name_saves_capped_filename(self, agent):
         name = "shear_viscosity for the research goal: " + "very long goal " * 30
         r = agent._execute_script('print(\'{"status":"success","value":5}\')', name)
