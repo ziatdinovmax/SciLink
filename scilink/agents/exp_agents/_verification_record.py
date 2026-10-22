@@ -423,8 +423,7 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
     result the verifier never approved (``approved`` false) and for one the
     judge picked as best available (``judge_warning``); hyperspectral reports
     ``partial``. This reads those signals in the shapes the agents write and
-    gives one answer with the reason — for the board, which posts only what
-    an agent verified as verified, and for any caller that must not mistake
+    gives one answer with the reason — for any caller that must not mistake
     a produced result for an approved one.
 
     Shapes:
@@ -458,7 +457,7 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
 
 def replay_certification_reason(full_result: Optional[dict]) -> Optional[str]:
     """Why a replay's interpretation is not certified (#753), for the
-    ``analyses`` row beside :func:`replay_escalation`, so the board quotes
+    ``analyses`` row beside :func:`replay_escalation`, so a reader quotes
     the reason. None when the run is not an uncertified replay."""
     rv = (full_result or {}).get("reuse_validity") or {}
     if not rv.get("reused") or interpretation_checked_by(rv):
@@ -535,7 +534,7 @@ def _stamped_series_verdict(ok_items: List[dict], failed: int) -> Dict[str, Any]
 def legacy_series_verdict(full: Dict[str, Any]) -> Dict[str, Any]:
     """The series verdict reconstructed from markers (``role``,
     ``fitted_from``, ``replaced_unit``, the salvage flags, ``regime``), as the
-    board judged a series before the drivers stamped ``unit_verdict``. Kept
+    meta judged a series before the drivers stamped ``unit_verdict``. Kept
     for checkpoints written before the stamp, and as the reference the
     parity test holds the stamped verdict to."""
     items = full.get("individual_results")
@@ -694,8 +693,8 @@ def ungated_outputs(features: Any) -> List[str]:
     """The names of the outputs a run reported that NO gate checked — the
     records their producer marked ``gated: False`` (a hyperspectral task's
     ``scalars`` channel: no map review, no replay gate). The verdict covers
-    what was gated; a claim may rest on these too, so the board keeps such a
-    run's claims provisional (#722). Read from the producer's mark, never
+    what was gated; a claim may rest on these too, so such a
+    run's claims stay provisional (#722). Read from the producer's mark, never
     guessed from a value or a name."""
     return sorted({str(m["name"]) for m in features or []
                    if isinstance(m, dict) and m.get("gated") is False and m.get("name")})
@@ -876,7 +875,7 @@ def prior_recipe_scripts(anchor_dir, *, single_name: str, named=None) -> List[Tu
 
     In order (#704, #705):
     - the file the caller NAMED (``named``, a ``.py`` path): a script file is
-      a recipe — the board's copy under ``swarm/recipes/``, or one unit's
+      a recipe — a copy with its ``<stem>.recipe.json`` sidecar, or one unit's
       script of a run — and the only candidate;
     - a single run's own script (``scripts/<single_name>``);
     - a series' LOCKED recipes, one per regime in the order the regimes were
@@ -943,7 +942,7 @@ def prior_recipe_candidates(anchor_dir, *, single_name: str, named=None) -> List
     run_ref = (recorded.get("certification_reference")
                if isinstance(recorded.get("certification_reference"), dict) else None)
     if named is not None:
-        # a script FILE: the board's copy carries its gate and model in a
+        # a script FILE: a copy carries its gate and model in a
         # sidecar (<stem>.recipe.json); a unit script inside a run takes the
         # run's gate
         side = recipe_sidecar(named)
@@ -976,7 +975,7 @@ def prior_recipe_script(anchor_dir, *, single_name: str, named=None):
 
 def recipe_sidecar(named) -> Dict[str, Any]:
     """What travels beside a copied recipe script (``<stem>.recipe.json``,
-    written by the swarm board): the gate it was approved under, the plan's
+    written beside a recipe copy): the gate it was approved under, the plan's
     model, its regime and unit. Empty when there is none."""
     try:
         p = Path(named)

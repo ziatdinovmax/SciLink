@@ -581,7 +581,7 @@ def _first_prior_image_script(state: dict):
     Mirrors the curve-fit helper: scans ``state['prior_analysis_paths']`` and
     returns ``(script_text, source_label)`` for the first path that yields a
     script (``prior_recipe_script``): a script FILE named directly (#705 —
-    the board's copy under ``swarm/recipes/``, or one unit's script), a
+    a copy with its ``.recipe.json`` sidecar, or one unit's script), a
     single-image run's ``scripts/analysis_script.py``, a series' LOCKED
     recipe from its ``analysis_results.json`` (#704: the script its table
     rests on, not a later refit's — the FIRST regime's when the series

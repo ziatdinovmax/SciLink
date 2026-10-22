@@ -427,8 +427,8 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                         break
             if replay_reference is None:
                 # An image replay has no R²: its gate is what the script reported
-                # on its REFERENCE. A script file with no run behind it (the swarm
-                # board's copy, say) has none, and the gate would drop to "some
+                # on its REFERENCE. A script file with no run behind it (a copied
+                # recipe, say) has none, and the gate would drop to "some
                 # finite number reported" — not a verdict. Replay it as an
                 # ordinary reuse (reuse_locked_script without strict_replay).
                 return {"status": "error",
@@ -1961,7 +1961,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         # The run's verdict, stamped here where the result's signals are all
         # in hand (#712): the status, the QC record, the reuse verdict, the
-        # units' stamps. What "verified" means to a reader — the board,
+        # units' stamps. What "verified" means to a reader —
         # run_task's rows — is decided here, never reconstructed later.
         from ._verification_record import final_verdict_record
         try:

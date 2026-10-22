@@ -1,16 +1,16 @@
 """How many LLM calls one process has in flight, per model — and when the
 provider is failing, how new work is held.
 
-Every worker of a fan-out or a swarm, and every best-of-N candidate inside
+Every worker of a fan-out, and every best-of-N candidate inside
 one, calls the provider from its own thread. Nothing bounded how many did so
-at once, so a swarm of N workers met one rate limit together and retried
+at once, so N workers met one rate limit together and retried
 together. ``llm_slot(model)`` is held for the duration of one provider call
 (never across a retry's backoff sleep): at most ``llm_max_inflight()`` calls
 to one model run at a time in this process, and the rest wait their turn.
 
 The default sits above what today's largest in-process parallelism reaches
 (four fan-out branches, each with a best-of-N of three), so ordinary runs
-never wait; it bounds what a swarm can put on one provider at once.
+never wait; it bounds what a fan-out can put on one provider at once.
 
 The circuit breaker (stage 4) is per model: the retry policy reports every
 provider call's outcome (``note_provider_failure`` for a retryable failure,

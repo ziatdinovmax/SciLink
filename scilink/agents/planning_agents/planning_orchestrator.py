@@ -1698,7 +1698,7 @@ class PlanningOrchestratorAgent:
             warnings.append(f"Plan auto-repair — {_c}")
 
         # How the plan was settled, for a caller that must tell a human
-        # decision from a draft (the meta's board posts a plan's findings as
+        # decision from a draft (a plan's findings count as
         # verified only when a human approved it): the review stamp, an
         # unattended gate, and any blocking finding still standing.
         from .planning_rag import blocking_findings

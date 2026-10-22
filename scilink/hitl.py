@@ -183,7 +183,7 @@ def question_timeout_s() -> Optional[float]:
 class QueueChannel:
     """Parks requests from concurrent worker threads for serial serving.
 
-    Worker threads (fan-out branches, swarm workers) install this, usually
+    Worker threads (fan-out branches) install this, usually
     behind a :class:`WorkerChannel`, as their thread channel; ``ask`` parks
     the request and blocks until a coordinator thread — the one that owns
     the human — answers it via ``serve_pending``, which relays each parked
@@ -420,7 +420,7 @@ class WorkerChannel:
     (and the subject it works on), then parks it on the coordinator's queue.
 
     ``kind`` names what the worker is on the prompt ("branch" for a fan-out
-    branch, "worker" for a swarm item). ``on_wait(True)`` / ``on_wait(False)``
+    branch). ``on_wait(True)`` / ``on_wait(False)``
     bracket every wait for the person, so a coordinator can leave that time
     out of the worker's wall-clock budget."""
 

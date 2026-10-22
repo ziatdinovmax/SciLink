@@ -118,7 +118,7 @@ _off_path = threading.local()
 _usage_sink = None
 _usage_sink_takes_worker = False
 _session_tag = threading.local()
-# The worker (a fan-out branch, a swarm item) a call was made for, tagged on
+# The worker (a fan-out branch) a call was made for, tagged on
 # the worker's thread next to its session (``attributed``).
 _worker_tag = threading.local()
 # For a thread that carries no tag (a worker a turn spawned): a resolver the
@@ -254,9 +254,8 @@ def note_llm_call(latency_s: Optional[float] = None,
 
 
 # What each tagged worker's calls moved, process-wide and exact for a worker
-# that runs on tagged threads (a swarm item, a fan-out branch, their
-# candidates): the swarm's token budget reconciles an item's reservation
-# against this when the item ends. A sink is optional; this is not.
+# that runs on tagged threads (a fan-out branch, its
+# candidates): what a worker spent is read back when it ends. A sink is optional; this is not.
 _worker_usage: Dict[str, Dict[str, int]] = {}
 
 

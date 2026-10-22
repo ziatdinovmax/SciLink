@@ -45,7 +45,7 @@ def skill_lock(skill_path: Path):
     """The lock every write of one graduated skill is made under.
 
     A write reads the skill, asks the model to merge, and writes the result;
-    two of them at once (two sessions, two swarm workers) would each merge
+    two of them at once (two sessions, two fan-out workers) would each merge
     into the same old version and the first would be lost. The lock file is
     ``.<name>.lock`` in the domain folder, beside the bundle rather than in
     it, so a distillation the model fails still leaves no bundle behind, and

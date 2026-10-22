@@ -1861,7 +1861,7 @@ class PlanningAgent(BaseAgent):
         orchestrator tell a settled plan from a draft: an approved plan is
         reopened only through the reopen gate (``_revision_gate``).
 
-        A gate nobody answered in time (a swarm or fan-out worker's question
+        A gate nobody answered in time (a fan-out worker's question
         timing out: ``hitl.last_question_timed_out``) yields the gate's
         default, which reads as Enter. That is not a human's decision: the
         plan goes on unattended, with NO ``human_review`` stamp, so it is a

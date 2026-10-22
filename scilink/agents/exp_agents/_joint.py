@@ -176,7 +176,7 @@ def _shape_in(path: Path) -> Optional[str]:
 
 def replay_refusal(path: Any) -> Optional[str]:
     """``REPLAY_REFUSAL`` when ``path`` (a run folder, a script or records file
-    inside one, or a board copy with its ``<stem>.recipe.json`` sidecar)
+    inside one, or a copy with its ``<stem>.recipe.json`` sidecar)
     belongs to a joint run, else None. The one check every reuse reader
     consults, whatever the agent."""
     if path is None:
@@ -186,7 +186,7 @@ def replay_refusal(path: Any) -> Optional[str]:
     if p.is_dir():
         candidates.append(p / "analysis_results.json")
     else:
-        candidates.append(p.with_name(f"{p.stem}.recipe.json"))       # a board copy's sidecar
+        candidates.append(p.with_name(f"{p.stem}.recipe.json"))       # a copy's sidecar
         for up in (p.parent, p.parent.parent):                         # the run it sits in
             candidates.append(up / "analysis_results.json")
     return REPLAY_REFUSAL if any(_shape_in(c) == JOINT for c in candidates) else None

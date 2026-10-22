@@ -1,6 +1,14 @@
 # Proposal: swarms — concurrent agents that share what they find
 
-Status: stage 0 merged to `main` on 2026-09-29 (head 328bd2bb); stage 1
+**Removed on 2026-10-21.** The swarm was built through stage 4 and then
+removed from SciLink: live runs produced worse analyses than the same tasks
+run as fan-out branches, and the behaviour was taken out at its entry points
+rather than tuned (CLAUDE.md, "Swarms were tried and removed", says what
+stayed and why). What follows is the design and build record as it stood;
+the code it cites is no longer in the tree except the pieces the fan-out
+uses.
+
+Status before the removal: stage 0 merged to `main` on 2026-09-29 (head 328bd2bb); stage 1
 merged on 2026-09-30 (#697, head bed2f7f8) after three review rounds, built
 as "Starting stage 1" below describes; what changed on the way is recorded
 under the stage in "Build order". Stage 2 (the board) merged on 2026-10-01 (#702, head

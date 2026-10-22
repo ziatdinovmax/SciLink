@@ -404,7 +404,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "output_directory": str(self.output_dir),
                 }
             if replay_reference is None:
-                # A recipe the board copied carries the map gate it was locked
+                # A copied recipe carries the map gate it was locked
                 # under in its sidecar (#734): a replay of the copy is held to
                 # the anchor's plausible ranges like the series' own replays,
                 # not to coverage alone. An explicit reference still wins.
@@ -876,7 +876,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 payload["verdict"] = response["verdict"]          # the run's stamped verdict (#712)
             # what a replay of this cube's recipe is certified against (#753): its
             # required maps' statistics, as a series lock records them; it
-            # travels with the board's copy of the records. A live frame (a
+            # travels with a copy of the records. A live frame (a
             # strict replay, the realtime profile) is not a recipe source and
             # writes none — the same rule as the curve writer.
             _live_frame = bool(getattr(self, "_strict_replay", False)
@@ -1183,7 +1183,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # source's columns, so feature names align across regimes and refits.
         rows: list = [None] * n
         locks: dict = {}            # regime name -> lock
-        locked_recipes: dict = {}   # regime name -> the recipe the board posts (#734)
+        locked_recipes: dict = {}   # regime name -> the regime's recipe (#734)
         schema: dict | None = None  # {"anchor_index", "targets", "columns"}
         deferred: list = []         # replay specs handed to the pool (parallel mode)
         pool = None                 # created on the first queued replay
@@ -1264,7 +1264,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                                 "source": ("prior_run" if extra.get("reuse_locked_script")
                                            else "anchor")}
                         locks[rname] = lock
-                        # The recipe as the board posts it (#734), recorded where the
+                        # The regime's recipe (#734), recorded where the
                         # regime locks, in the curve/image drivers' shape: the anchor
                         # unit, its verdict then, and the recipe file its replays ran
                         # (a cube's recipe is its dynamic_analysis_records.json).
@@ -1820,7 +1820,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         return staged
 
     def _recipe_sidecar_reference(self, prior_analysis_paths: list) -> dict | None:
-        """The ``reference_maps`` of a board recipe copy's map gate: the
+        """The ``reference_maps`` of a copied recipe's map gate: the
         ``dynamic_analysis_records.recipe.json`` sidecar beside the records
         file (a path to the file or to its folder). None when there is none,
         or its gate is not a map gate (a single cube's copy carries none: its
@@ -1843,7 +1843,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
     def _recipe_certification_maps(self, prior_analysis_paths: list) -> dict | None:
         """The reference maps a replay is CERTIFIED against when no map gate
-        holds it (#753): a board copy's sidecar ``certification_reference``,
+        holds it (#753): a copy's sidecar ``certification_reference``,
         or the run folder's own (``analysis_results.json``), so a copy and its
         run certify alike. Never a gate: it withholds a certificate, it does
         not decide the verdict (#711)."""
@@ -1884,8 +1884,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         folder holding one is that run's; a SERIES run folder offers its
         regimes' locked recipes in lock order (``locked_recipes``, the scripts
         its followers replayed); a folder holding several records files (the
-        board's copies of a series' regimes, a series from before the record)
-        offers them by the lock order the board recorded, else by name — never
+        copies of a series' regimes, a series from before the record)
+        offers them by the lock order its sidecars record, else by name — never
         merged. The first is returned and the rest are its ``alternatives``,
         which a reuse falls through on their own map gates, as the curve reuse
         does (:meth:`_reuse_first_good`). The first path that yields a recipe
@@ -2065,7 +2065,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
     @staticmethod
     def _copy_sidecar(records_file: Path) -> dict:
-        """The board's sidecar beside a copied records file (#734), or {}."""
+        """The sidecar beside a copied records file (#734), or {}."""
         try:
             data = json.loads((Path(records_file).with_name("dynamic_analysis_records.recipe.json"))
                               .read_text(encoding="utf-8"))
@@ -2074,7 +2074,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         return data if isinstance(data, dict) else {}
 
     def _copy_lock_order(self, records_file: Path) -> int:
-        """The order the board recorded for a copied regime recipe (the anchor
+        """The order a copied regime recipe's sidecar records (the anchor
         unit's index in its series), else last."""
         idx = self._copy_sidecar(records_file).get("index")
         return idx if isinstance(idx, int) and not isinstance(idx, bool) else 1 << 30
