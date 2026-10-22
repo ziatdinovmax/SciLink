@@ -2,13 +2,13 @@
 
 A hyperspectral task's gate checks its MAPS (the per-map review on fresh code,
 ``map_health`` on a replay); the ``scalars`` it also reports pass no gate. A
-live swarm run posted a claim as verified that rested on railed, fit-failed
+live run posted a claim as verified that rested on railed, fit-failed
 scalars (positions at window edges, depths of 1e-12), a subscription fired on
 it and fusion counted it. Here, through the real path — the dynamic-analysis
 controller marks what it did not check, the agent stamps it, ``run_task``
-carries it on the ``analyses`` row, the board reads it — a claim of such a run
-is provisional with the reason, its recipe stays verified, and a run with
-nothing ungated is unchanged. A derivation that failed its checks lists what
+carries it on the ``analyses`` row — so a reader holds such a run's claims on
+the named outputs while its recipe stays verified, and a run with nothing
+ungated is unchanged. A derivation that failed its checks lists what
 it left behind as unverified and is not in ``files_produced``.
 
   conda run -n scilink python -m pytest tests/test_ungated_outputs.py -q
@@ -28,12 +28,6 @@ os.environ.setdefault("UNSAFE_EXECUTION_OK", "true")
 
 from scilink.agents.exp_agents import hyperspectral_analysis_agent as hsa
 from scilink.agents.exp_agents.controllers.hyperspectral_controllers import RunDynamicAnalysisController
-from scilink.agents.meta_agent import board as board_mod
-from scilink.agents.meta_agent import reactions
-
-# a subscription as the meta declares one: on a claim, status left to its default
-ON_A_CLAIM = reactions.normalize_subscriptions(
-    [{"on": {"kind": "claim"}, "enqueue": {"mode": "planning", "task": "design a test of {finding.text}"}}])[0][0]
 
 AXIS = {"technique": "UV-vis transmission", "sample": "film",
         "energy_range": {"start": 400.0, "end": 900.0, "units": "nm"}}
@@ -115,9 +109,9 @@ def _hs_agent(out_dir, meta, records):
     return agent
 
 
-def _run_task_through_the_board(tmp_path, script, monkeypatch):
-    """controller → agent (stamp) → orchestrator.run_task (analyses row) →
-    board.records_for: the path a swarm item's claim takes."""
+def _run_task_row(tmp_path, script, monkeypatch):
+    """controller → agent (stamp) → orchestrator.run_task (analyses row): the
+    path a caller's reading of the run takes."""
     from scilink.agents.exp_agents.analysis_orchestrator import AnalysisOrchestratorAgent, AnalysisMode
     meta, records = _controller_run(tmp_path / "ctrl", script)
     cube, _ = _cube(1)
@@ -136,42 +130,22 @@ def _run_task_through_the_board(tmp_path, script, monkeypatch):
             return "analysed"
         orch.chat = chat
         result = orch.run_task("analyse the film")
-    entry = {"index": 1, "label": "film", "mode": "analysis", "status": "success"}
-    return result, board_mod.records_for(entry, result)
+    return result
 
 
 def test_a_claim_resting_on_ungated_scalars_is_provisional_and_its_recipe_verified(tmp_path, monkeypatch):
-    result, recs = _run_task_through_the_board(tmp_path, SCRIPT_WITH_SCALARS, monkeypatch)
+    result = _run_task_row(tmp_path, SCRIPT_WITH_SCALARS, monkeypatch)
     row = result["analyses"][0]
-    assert row["verified"] is True                                 # the gate passed what it checks
-    assert row["ungated_outputs"] == ["Band1_Depth", "Band1_Position_nm"]
-    claims = [r for r in recs if r["kind"] == "claim"]
-    recipes = [r for r in recs if r["kind"] == "recipe"]
-    assert claims and all(c["status"] == "provisional" for c in claims)
-    assert "no gate checked (Band1_Depth, Band1_Position_nm)" in claims[0]["evidence"]["gate"]
-    assert recipes and all(r["status"] == "verified" for r in recipes)
-    # a subscription on claims (status defaults to verified) does not fire
-    assert not any(reactions.matches(ON_A_CLAIM, c) for c in claims)
+    assert row["verified"] is True                                 # the gate passed what it checks: the recipe stands
+    assert row["decided_by"] == "qc_gate"
+    assert row["ungated_outputs"] == ["Band1_Depth", "Band1_Position_nm"]   # what a claim may rest on that no gate saw
+    assert row["failed_outputs"] == []                             # plain numbers are unchecked, not failed
 
 
 def test_a_run_with_nothing_ungated_posts_as_before(tmp_path, monkeypatch):
-    result, recs = _run_task_through_the_board(tmp_path, SCRIPT_MAPS_ONLY, monkeypatch)
-    assert result["analyses"][0]["ungated_outputs"] == []
-    claims = [r for r in recs if r["kind"] == "claim"]
-    assert [r["status"] for r in claims] == ["verified"]
-    assert all(reactions.matches(ON_A_CLAIM, c) for c in claims)
-
-
-def test_every_reason_a_claim_is_held_is_given():
-    """A replay whose interpretation is not certified AND that reported
-    ungated outputs: the claim's reason names both."""
-    row = {"analysis_id": "r1", "status": "success", "verified": True, "reason": "replay gate passed",
-           "decided_by": "replay_gate", "interpretation_checked": False, "ungated_outputs": ["n_fitted_pixels"]}
-    verified, why = board_mod._claim_verified(row)
-    assert not verified
-    assert "interpretation is not certified" in why and "no gate checked (n_fitted_pixels)" in why
-    verified, why = board_mod._claim_verified({**row, "interpretation_checked": True})
-    assert not verified and "certified" not in why and "n_fitted_pixels" in why
+    result = _run_task_row(tmp_path, SCRIPT_MAPS_ONLY, monkeypatch)
+    row = result["analyses"][0]
+    assert row["verified"] is True and row["ungated_outputs"] == [] and row["failed_outputs"] == []
 
 
 def test_a_series_carries_its_units_ungated_outputs(tmp_path, monkeypatch):

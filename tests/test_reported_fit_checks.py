@@ -353,13 +353,17 @@ def test_the_recipe_carries_its_anchors_saved_fit(tmp_path, monkeypatch):
 # -- a reuse, through the real qc_try_reuse ----------------------------------
 
 def _board_copy(tmp_path, saved_fit_r2, script):
-    """A recipe as the swarm board copies it: the script and its sidecar,
+    """A recipe copy: the script and its ``<stem>.recipe.json`` sidecar,
     carrying the run's certification reference."""
-    import test_board_copy_certification as bc
+    import json
     ref = {"kind": "curve", "drift_state": None, "x_range": None, "identity": None,
            **({"saved_fit_r2": saved_fit_r2} if saved_fit_r2 is not None else {})}
-    _, _, copy = bc._post_series_copy(tmp_path, ref)
+    copy = tmp_path / "copies" / "series_1" / "spectrum_0000.py"
+    copy.parent.mkdir(parents=True, exist_ok=True)
     copy.write_text(script)
+    copy.with_name("spectrum_0000.recipe.json").write_text(json.dumps(
+        {"regime": "anatase", "unit": "spectrum_0000", "index": 0, "verified": True, "reason": "ok",
+         "certification_reference": ref}))
     return copy
 
 

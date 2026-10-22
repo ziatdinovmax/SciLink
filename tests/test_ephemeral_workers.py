@@ -4,7 +4,7 @@ isolated from each other when they run at once.
 A persistent child's ``run_task`` reports what one call produced as a window
 over shared state (``analysis_results[n_before:]``, a file snapshot of its
 directory, ``generated_structures[n_before:]``), so two concurrent calls on one
-child report each other's output. A swarm runs a worker per item instead; these
+child report each other's output. A fan-out runs a fresh worker per branch instead; these
 tests hold every mode pair to that, with the LLM turn replaced by a stand-in
 that produces the mode's output slowly enough for the calls to overlap.
 """
@@ -55,11 +55,11 @@ def test_a_worker_is_built_like_the_specialist(meta, tmp_path, mode):
     meta._shared_extensions.append({"kind": "skill", "skill_path": str(skill)})
 
     specialist = _persistent(meta, mode)
-    worker = build_child(meta, mode, tmp_path / "swarm" / f"01_{mode}")
+    worker = build_child(meta, mode, tmp_path / "fanout" / f"01_{mode}")
 
     assert type(worker) is type(specialist)
     assert worker is not specialist and worker not in meta._children.values()
-    assert Path(worker.base_dir) == tmp_path / "swarm" / f"01_{mode}"
+    assert Path(worker.base_dir) == tmp_path / "fanout" / f"01_{mode}"
     assert getattr(worker, "model_name", None) == getattr(specialist, "model_name", None)
     assert worker._agent_label == f"{mode.capitalize()} worker"
     assert specialist._agent_label == f"{mode.capitalize()} specialist"
@@ -138,7 +138,7 @@ def test_two_workers_at_once_each_report_only_their_own_output(meta, tmp_path, p
     jobs = []
     for i, mode in enumerate(pair):
         tag = f"item{i}_{mode}"
-        child = build_child(meta, mode, tmp_path / "swarm" / f"{i:02d}_{mode}")
+        child = build_child(meta, mode, tmp_path / "fanout" / f"{i:02d}_{mode}")
         _fake_turn(child, mode, tag, started)
         jobs.append((mode, tag, child))
 

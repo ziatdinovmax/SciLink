@@ -17,7 +17,6 @@ import numpy as np
 import pytest
 
 from scilink.agents.meta_agent import fanout as fo
-from scilink.agents.meta_agent import swarm
 
 
 @pytest.fixture(autouse=True)
@@ -102,19 +101,6 @@ def test_a_raw_instrument_folder_is_estimated_by_its_preparation(tmp_path):
     est = fo._branch_mem_estimate({"data_path": str(root)})
     assert est == pytest.approx(stack * fo._BRANCH_PREP_FACTOR)            # one stack at a time, not three
     assert est > fo._BRANCH_MEM_FLOOR                                       # the old top-level glob gave the floor
-
-
-def test_the_capacity_plan_admits_together_what_fits(tmp_path):
-    """Two six-cube series items: the old sum-based estimate put each at six
-    cubes' worth; by their largest unit both fit on the machine together."""
-    for name in ("a", "b"):
-        _cubes(tmp_path / name, 6, shape=(256, 256, 400))
-    items = [{"label": n, "mode": "analysis", "data_path": str(tmp_path / n), "task": "t"} for n in ("a", "b")]
-    one = fo._branch_mem_estimate({"data_path": str(tmp_path / "a")})
-    mem = {"total": 2 * one + fo._BRANCH_MEM_MARGIN + 1e9, "available": 2 * one + fo._BRANCH_MEM_MARGIN + 1e8}
-    plan = swarm.capacity_plan(items, memory=mem)
-    assert not plan["refused"] and plan["together"] is True
-    assert plan["estimated_bytes"] == pytest.approx(2 * one)
 
 
 def test_a_bundle_with_a_nested_raw_folder_is_estimated_by_unit_kind(tmp_path):

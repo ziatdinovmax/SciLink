@@ -297,8 +297,8 @@ def test_no_reuse_reader_replays_a_joint_runs_script(tmp_path):
     assert prior_recipe_candidates(run, single_name="fitting_script.py") == []
     assert prior_recipe_scripts(run, single_name="fitting_script.py",
                                 named=run / "scripts" / "fitting_script.py") == []
-    # a board copy carries the marker in its sidecar, away from the run
-    copy = tmp_path / "board" / "fitting_script.py"
+    # a copy of the script carries the marker in its sidecar, away from the run
+    copy = tmp_path / "copies" / "fitting_script.py"
     copy.parent.mkdir()
     copy.write_text("x")
     (copy.parent / "fitting_script.recipe.json").write_text(json.dumps({"analysis_shape": "joint"}))
@@ -336,18 +336,6 @@ def test_a_strict_replay_of_a_joint_cube_run_never_runs(tmp_path):
             assert res.get("status") != "success" and not (res.get("verdict") or {}).get("verified")
         else:
             assert res["status"] == "success" and res["script_reuse"]["verbatim"] is True
-
-
-def test_the_board_marks_a_joint_runs_recipe_copy(tmp_path):
-    from scilink.agents.meta_agent import board as bd
-    run = _joint_run(tmp_path)
-    specs = bd._recipe_specs("a1", {"output_directory": str(run), "agent_name": "curve"})
-    assert specs and specs[0]["payload"]["analysis_shape"] == "joint"
-    plain = tmp_path / "plain"
-    (plain / "scripts").mkdir(parents=True)
-    (plain / "scripts" / "fitting_script.py").write_text("print(1)")
-    specs = bd._recipe_specs("a2", {"output_directory": str(plain), "agent_name": "curve"})
-    assert all("analysis_shape" not in s["payload"] for s in specs)
 
 
 def test_a_joint_script_is_never_banked(tmp_path, monkeypatch):
@@ -505,29 +493,6 @@ def test_typed_feedback_can_undo_a_joint_curve_plan(shape):
     state = ctrl._refine_plan(state, "analyse each spectrum separately")
     assert ("Analysis shape of the current plan" in ctrl.model.prompts[0]) is (shape == "joint")
     assert state["analysis_shape"] == "per_unit"
-
-
-def test_a_board_copy_of_a_joint_run_is_written_with_its_marker_and_refused(tmp_path):
-    """End to end through the real post_delegation: the board copies a joint
-    run's script, writes the sidecar with analysis_shape, and a replay of the
-    COPY (away from the run) is refused; a per-unit run's copy is replayed."""
-    from scilink.agents.meta_agent import board as bd
-    from scilink.agents.exp_agents._verification_record import prior_recipe_scripts
-    joint = _joint_run(tmp_path / "j")
-    plain = tmp_path / "p" / "plain"
-    (plain / "scripts").mkdir(parents=True)
-    (plain / "scripts" / "fitting_script.py").write_text("print(1)")
-    (plain / "analysis_results.json").write_text(json.dumps({"status": "success"}))
-    board = bd.Board(tmp_path / "session")
-    for k, (aid, run) in enumerate((("aj", joint), ("ap", plain)), 1):
-        bd.post_delegation(board, {"index": k, "label": f"item {k}", "mode": "analysis", "status": "success"},
-                           {"analyses": [{"analysis_id": aid, "status": "success", "verified": True, "reason": "ok",
-                                          "output_directory": str(run), "agent_name": "CurveFittingAgent"}]})
-    recs = {r["payload"]["analysis_id"]: r for r in board.records() if r["kind"] == "recipe"}
-    copy_j, copy_p = Path(recs["aj"]["payload"]["path"]), Path(recs["ap"]["payload"]["path"])
-    assert json.loads(copy_j.with_name(f"{copy_j.stem}.recipe.json").read_text())["analysis_shape"] == "joint"
-    assert prior_recipe_scripts(copy_j.parent, single_name="fitting_script.py", named=copy_j) == []
-    assert prior_recipe_scripts(copy_p.parent, single_name="fitting_script.py", named=copy_p)
 
 
 def test_the_live_cube_reader_and_the_fan_out_donor_picker_refuse_a_joint_run(tmp_path):

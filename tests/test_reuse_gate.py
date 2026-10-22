@@ -229,33 +229,23 @@ def _loose_controller(out, ex, r2):
         quality_instructions="", output_dir=str(out), plot_fn=lambda d, i: b"plot", r2_threshold=r2, parallel_workers=1)
 
 
-def test_the_boards_copy_of_a_recipe_carries_its_gate_and_model(tmp_path, monkeypatch):
-    """#717 review, item 2: the board copied the script alone, so a
-    figure-of-merit recipe replayed from the swarm path was judged on the R²
-    default (poor at R² 0.46). The copy's sidecar carries the gate and the
-    model; a replay of the copy reads them."""
-    from scilink.agents.meta_agent import board as board_mod
-    from scilink.agents.meta_agent.board import Board
+def test_a_copied_recipes_sidecar_carries_its_gate_and_model(tmp_path, monkeypatch):
+    """#717 review, item 2: a recipe copied as a script alone was judged on the
+    R² default when replayed (poor at R² 0.46 for a figure-of-merit recipe).
+    A copy travels with a ``<stem>.recipe.json`` sidecar carrying the gate and
+    the model; a replay of the copy reads them."""
     from scilink.agents.exp_agents._verification_record import prior_recipe_candidates, recipe_sidecar
-    board = Board(tmp_path / "meta")
-    entry = {"index": 2, "label": "xrd", "mode": "analysis", "status": "success"}
-    row = {"analysis_id": "s1", "status": "success", "verified": True, "reason": "ok", "series": True, "agent_name": "CurveFittingAgent",
-           "recipes": [{"regime": "rutile", "unit": "spectrum_0003", "index": 3, "verified": True, "reason": "ok", "script": "HIGH",
-                        "gate": gate_record(FOM), "model": "rutile TiO2, P42/mnm"}]}
-    board_mod.post_delegation(board, entry, {"analyses": [row]})
-    rec = next(r for r in board.records() if r["kind"] == "recipe")
-    copy = Path(rec["payload"]["path"])
-    assert rec["payload"]["quality_gate"] == gate_record(FOM) and rec["payload"]["model"] == "rutile TiO2, P42/mnm"
+    copy = tmp_path / "copies" / "spectrum_0003.py"
+    copy.parent.mkdir()
+    copy.write_text("HIGH")
+    copy.with_name("spectrum_0003.recipe.json").write_text(json.dumps(
+        {"regime": "rutile", "unit": "spectrum_0003", "index": 3, "quality_gate": gate_record(FOM),
+         "model": "rutile TiO2, P42/mnm"}))
     side = recipe_sidecar(copy)
     same = lambda rec, g: from_mapping(rec) == from_mapping(gate_record(g))      # noqa: E731 - the reader fills a known best value
     assert same(side["quality_gate"], FOM) and side["model"] == "rutile TiO2, P42/mnm" and side["regime"] == "rutile"
     cands = prior_recipe_candidates(copy.parent, single_name="fitting_script.py", named=copy)
     assert same(cands[0]["gate"], FOM) and cands[0]["model"] == "rutile TiO2, P42/mnm" and cands[0]["regime"] == "rutile"
-    # the sidecar sits beside the script it describes, also when the copy's name was taken (u_1-2.py)
-    board_mod.post_delegation(board, {**entry, "index": 2, "label": "xrd"}, {"analyses": [{**row, "analysis_id": "s1",
-                              "recipes": [{**row["recipes"][0], "script": "OTHER"}]}]})
-    copies = sorted(copy.parent.glob("*.py"))
-    assert len(copies) == 2 and all(c.with_name(f"{c.stem}.recipe.json").is_file() for c in copies)
     # a malformed sidecar is no sidecar: the replay falls back to the run's gate and the step does not crash
     bad = tmp_path / "bad" / "recipe.py"
     bad.parent.mkdir()
@@ -274,17 +264,13 @@ def test_the_boards_copy_of_a_recipe_carries_its_gate_and_model(tmp_path, monkey
                                   extra_params={"HIGH": rc.auto_detect_parameters(rc.RUTILE, seed=60)})
     rv = res["reuse_validity"]
     assert rv["verdict"] == "good" and rv["metric"] == "figure_of_merit" and rv["score"] == 1.0 and rv["r_squared"] == -0.5
-    # a single run's copy carries the run's recorded gate too
+    # a single run's script, with no sidecar of its own, takes the run's recorded gate
     run_dir = tmp_path / "single_run"
     (run_dir / "scripts").mkdir(parents=True)
     (run_dir / "scripts" / "fitting_script.py").write_text("ONE")
     (run_dir / "analysis_results.json").write_text(json.dumps({"status": "success", "quality_gate": gate_record(PROFILE)}))
-    row2 = {"analysis_id": "r2", "status": "success", "verified": True, "reason": "ok", "agent_name": "CurveFittingAgent",
-            "output_directory": str(run_dir)}
-    board_mod.post_delegation(board, {**entry, "index": 3}, {"analyses": [row2]})
-    rec2 = next(r for r in board.records() if r["kind"] == "recipe" and r["payload"]["analysis_id"] == "r2")
-    assert rec2["payload"]["quality_gate"] == gate_record(PROFILE)
-    assert same(recipe_sidecar(Path(rec2["payload"]["path"]))["quality_gate"], PROFILE)
+    cands = prior_recipe_candidates(run_dir, single_name="fitting_script.py")
+    assert cands[0]["script"] == "ONE" and same(cands[0]["gate"], PROFILE)
 
 
 def test_a_series_derived_live_reference_carries_the_frames_gate(tmp_path):

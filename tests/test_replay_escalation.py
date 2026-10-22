@@ -8,8 +8,8 @@ verified; they cannot say what a difference means. The judge is shown the
 findings as quoted data (between markers), the replayed fit and the new
 curve over the regime's anchor, and the skill's interpretation guidance, and
 asked which regime the measurement belongs to and what changed. Its answer
-goes on ``reuse_validity.escalation``, into the message, onto the board as a
-PROVISIONAL claim; the verdict and ``interpretation_checked`` do not move,
+goes on ``reuse_validity.escalation``, into the message, onto the ``analyses``
+row; the verdict and ``interpretation_checked`` do not move,
 nothing is re-run. It never fires on a clean pass, on the fast clock, when
 the caller asked for no review, on a replay that did not execute, and at
 most once per item.
@@ -32,7 +32,6 @@ from scilink.agents.exp_agents._verification_record import (  # noqa: E402
     analysis_verdict, final_verdict_record, replay_escalation, unit_verdict_for)
 from scilink.agents.exp_agents.controllers.curve_fitting_controllers import (  # noqa: E402
     UnifiedSeriesProcessingController, _overlay_png)
-from scilink.agents.meta_agent import board as board_mod  # noqa: E402
 
 
 class ScriptedJudge:
@@ -165,7 +164,7 @@ def test_a_replay_that_fails_its_checks_is_explained_and_the_verdict_does_not_mo
     assert [x["regime"] for x in shown["ranking"]] == ["high", "low"] and shown["ranking"][0]["distance"] < 0.05
     assert shown["ranking"][1]["distance"] > _replay.SAME_STATE_BAR and shown["chosen"] is None
     assert len(_images_of(judge.prompts[0])) >= 1                                              # the overlay at least
-    # the row and the board: an opinion beside the verdict, a PROVISIONAL claim with the judge gate
+    # the row: an opinion beside the verdict, which stays the gate's
     full = {"status": "success", "reuse_validity": rv}
     full["verdict"] = final_verdict_record(full)
     row = {"analysis_id": "r1", "status": "success", "agent_name": "CurveFittingAgent", "output_directory": str(tmp_path / "none"),
@@ -173,13 +172,7 @@ def test_a_replay_that_fails_its_checks_is_explained_and_the_verdict_does_not_mo
     assert row["verified"] is True and row["interpretation_checked"] is False
     assert row["escalation"]["belongs_to"] == "high" and row["escalation"]["decided_by"] == "judge"
     assert "no gate, no verdict, no re-run" in row["escalation"]["note"]                      # the note travels with the row
-    recs = board_mod.records_for({"index": 1, "label": "replay", "mode": "analysis", "status": "success"},
-                                 {"key_findings": ["[r1] the pattern is anatase"], "analyses": [row]})
-    kinds = [(r["kind"], r["status"]) for r in recs]
-    assert kinds == [("claim", "provisional"), ("claim", "provisional")]     # the claim withheld, the judge's reading beside it
-    judge_rec = recs[1]
-    assert judge_rec["payload"]["text"].startswith("Replay of analysis r1 escalated (state): the judge reads it as belonging to 'high'")
-    assert judge_rec["evidence"]["gate"].startswith("replay escalation: a judge's reading") and "no gate" in judge_rec["evidence"]["gate"]
+    assert row["escalation"]["trigger"] == "state" and row["escalation"]["same_interpretation"] is False
     assert replay_escalation({"reuse_validity": {}}) is None and replay_escalation({"reuse_validity": {"escalation": {"error": "x"}}}) is None
 
 
@@ -370,9 +363,10 @@ def test_a_state_flag_against_one_reference_curve_escalates_only_unattended_and_
     where = shown["state"]["where"]
     assert where and where[0]["x_from"] <= 42.5 and where[0]["x_to"] >= 40.0       # at the step, not the plateau
     assert "same_as_reference" in text and "SINGLE reference curve" in text
-    # the board and the orchestrator say it in words
-    rec = board_mod._escalation_records("r1", {"escalation": replay_escalation(res)})
-    assert "the judge reads it as the same as the reference" in rec[0]["payload"]["text"]
+    # the row carries the reading, as an opinion beside the verdict
+    esc_row = replay_escalation(res)
+    assert esc_row["belongs_to"] == "same_as_reference" and esc_row["decided_by"] == "judge"
+    assert esc_row["same_interpretation"] is True and "timing jitter" in esc_row["what_changed"]
 
 
 def test_same_as_reference_is_offered_and_read_only_without_named_regimes():

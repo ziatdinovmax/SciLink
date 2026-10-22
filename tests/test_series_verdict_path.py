@@ -1,4 +1,4 @@
-"""The board's verdict on series runs, through the REAL series path.
+"""The verdict on series runs, through the REAL series path.
 
 Every round of the #702 review found a case the hand-built fixtures could
 not: the verdict reconstructed, after the fact, which recipe each unit
@@ -318,10 +318,9 @@ def test_the_recipe_is_the_script_the_followers_replayed(tmp_path, monkeypatch):
     """An approved M1 anchor refit to an approved M2 while the followers stay
     on M1: the series verifies; the driver's recipe record holds M1 (recorded
     when the script was locked, untouched by the refit); the agent's folder
-    gets nothing new; the board copies M1 into its own folder."""
+    gets nothing new; a copy of M1 in a folder of its own is itself a recipe."""
     from scilink.agents.exp_agents._verification_record import series_recipes
     from scilink.agents.exp_agents.controllers.curve_fitting_controllers import _load_prior_curve_fit_state
-    from scilink.agents.meta_agent.board import Board, post_delegation
     # the anchor sits in the soft band (approved by the verifier at 0.92) so the outlier pass flags
     # it below threshold and the refit pass refits it
     state, _ = run_series(tmp_path, monkeypatch, names=NAMES, anchors={"spectrum_0000": {**OK, "r2": 0.92}},
@@ -347,25 +346,21 @@ def test_the_recipe_is_the_script_the_followers_replayed(tmp_path, monkeypatch):
         "M1", f"{tmp_path.name}: spectrum_0000.py (the series' locked recipe, the anchor refit since)")
     assert _first_prior_curve_fit_script({"prior_analysis_paths": [str(tmp_path / "scripts" / "spectrum_0000.py")]}) == (
         "M2", f"{tmp_path.name}: spectrum_0000.py (the script file named)")
-    # the board copies M1 into a folder of its own
-    board = Board(tmp_path / "meta")
-    row = {"analysis_id": "series_1", "status": "success", "output_directory": str(tmp_path), "agent_name": "CurveFittingAgent",
-           **analysis_verdict(results), "recipe_unit": series_anchor_unit(results), "series": True, "recipes": recipes}
-    ids = post_delegation(board, {"index": 1, "label": "Raman series", "mode": "analysis", "status": "success"},
-                          {"key_findings": ["[series_1] anatase"], "analyses": [row]})
-    recipe = next(board.get(f) for f in ids if board.get(f)["kind"] == "recipe")
-    assert recipe["status"] == "verified" and recipe["payload"]["unit"] == "spectrum_0000"
-    assert recipe["payload"]["path"].endswith("meta/swarm/recipes/01_Raman_series/series_1/spectrum_0000.py")
-    assert Path(recipe["payload"]["path"]).read_text() == "M1"
-    # and the board's copy is itself a recipe a reuse can name (#705): the same script, the same
+    # a copy of the locked recipe — its script text under the anchor unit's name — in a folder of its own
+    recipe = recipes[0]
+    copy_file = tmp_path / "meta" / "copies" / "series_1" / f"{recipe['unit']}.py"
+    copy_file.parent.mkdir(parents=True)
+    copy_file.write_text(recipe["script"])
+    assert copy_file.name == "spectrum_0000.py" and copy_file.read_text() == "M1"
+    # and the copy is itself a recipe a reuse can name (#705): the same script, the same
     # reuse path, no run folder needed
-    copy = recipe["payload"]["path"]
+    copy = str(copy_file)
     assert _first_prior_curve_fit_script({"prior_analysis_paths": [copy]}) == (
         "M1", f"{Path(copy).parent.name}: spectrum_0000.py (the script file named)")
     # ... but it is NOT a run: anchor_dir is None, so the realtime profile and the live loop refuse it
     anchor_dir, summary, text, label = _load_prior_curve_fit_state(copy)
     assert (anchor_dir, summary, text, label) == (None, None, "M1", "spectrum_0000.py (the script file named)")
-    assert _load_prior_curve_fit_state(str(Path(copy).parent))[0] is None   # the board folder is no run: nothing
+    assert _load_prior_curve_fit_state(str(Path(copy).parent))[0] is None   # a folder of copies is no run: nothing
     from scilink.live.modality import CurveModality
     assert CurveModality().anchor_script(copy) == (None, None)             # the loop arms on runs only
     # a file INSIDE the run names the run for the loop, and the loop arms on what the run replays (M1),

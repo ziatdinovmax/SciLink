@@ -1,12 +1,12 @@
 """A hyperspectral reuse replays ONE recipe, with its own gate (#751).
 
 A reuse pointed at a folder used to collect the approved records of every
-records file under it, so a series run folder (one per dataset) or the board's
-folder of a series' regime copies replayed every regime's scripts as one
-recipe, held to whichever map gate it found first. Now, as for curves and
-images, a series run replays its first regime's locked recipe, a folder of
-copies replays the first by the lock order the board recorded, a records file
-and a single run are what they were, and the pick and why are on
+records file under it, so a series run folder (one per dataset) or a folder
+of a series' regime copies replayed every regime's scripts as one recipe,
+held to whichever map gate it found first. Now, as for curves and images, a
+series run replays its first regime's locked recipe, a folder of copies
+replays the first by the lock order its sidecars record, a records file and a
+single run are what they were, and the pick and why are on
 ``script_reuse.source``.
 
 The end-to-end cases run a whole strict replay offline (no model call): a
@@ -61,10 +61,10 @@ def _series_dir(tmp_path):
     return d
 
 
-def _board_copies(tmp_path, with_index=True):
-    """The board's folder of a series' regime copies: one unit folder per
-    regime, each with its sidecar. By name B's folder comes first; by the lock
-    order the board recorded, A's."""
+def _copies_folder(tmp_path, with_index=True):
+    """A folder of a series' regime copies: one unit folder per regime, each
+    with its sidecar. By name B's folder comes first; by the lock order the
+    sidecars record, A's."""
     d = tmp_path / "recipes" / "03_series" / "a1"
     for unit, regime, idx, recs, ref in (("b_unit", "B", 3, RECS_B, REF_B), ("z_unit", "A", 0, RECS_A, REF_A)):
         (d / unit).mkdir(parents=True)
@@ -98,9 +98,9 @@ def test_a_series_run_replays_its_first_regimes_locked_recipe_with_its_gate(tmp_
     assert res["script_reuse"]["regime_choice"]["chosen"] == 1
 
 
-def test_a_board_folder_of_regime_copies_replays_the_first_by_lock_order(tmp_path, monkeypatch):
+def test_a_folder_of_regime_copies_replays_the_first_by_lock_order(tmp_path, monkeypatch):
     monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
-    res = _replay(tmp_path, [_board_copies(tmp_path)])
+    res = _replay(tmp_path, [_copies_folder(tmp_path)])
     # A's records held to A's gate: B's gate would reject the frame, B's script
     # would add its own map
     assert res["status"] == "success", res.get("error")
@@ -111,7 +111,7 @@ def test_a_board_folder_of_regime_copies_replays_the_first_by_lock_order(tmp_pat
 
 def test_copies_with_no_recorded_order_replay_the_first_by_name_and_its_own_gate(tmp_path):
     ag = _strict_agent(tmp_path, "x")
-    rec = ag._prior_recipe([_board_copies(tmp_path, with_index=False)])
+    rec = ag._prior_recipe([_copies_folder(tmp_path, with_index=False)])
     assert rec["records"] == RECS_B and rec["reference_maps"] == REF_B      # chosen together
     assert "1 of 2 in lock order" in rec["source"] and "never a merge" in rec["source"]
     # the other copy is an alternative, held to ITS gate if the first fails
@@ -161,7 +161,7 @@ def test_a_reuse_falls_through_the_regimes_on_their_own_gates(tmp_path, monkeypa
 
 
 def test_of_several_paths_the_first_is_replayed_and_the_rest_named(tmp_path):
-    copies = _board_copies(tmp_path)
+    copies = _copies_folder(tmp_path)
     b_file = copies / "b_unit" / "dynamic_analysis_records.json"
     a_file = copies / "z_unit" / "dynamic_analysis_records.json"
     rec = _strict_agent(tmp_path, "x")._prior_recipe([b_file, a_file])
@@ -194,19 +194,6 @@ def test_nothing_approved_is_still_refused(tmp_path):
     res = _strict_agent(tmp_path, "f").analyze(str(tmp_path / "cube.npy"), system_info=dict(AXIS_OK),
                                                prior_analysis_paths=[str(prior)], reuse_locked_script=True)
     assert res["status"] == "error" and "No approved prior script" in res["error"]["error"]
-
-
-def test_the_board_records_each_regime_copys_lock_order(tmp_path):
-    from scilink.agents.meta_agent import board as board_mod
-    b = board_mod.Board(tmp_path)
-    rec = {"agent_name": "HyperspectralAnalysisAgent", "recipes": [
-        {"unit": "cube_0", "regime": "A", "index": 0, "script": json.dumps(RECS_A), "verified": True,
-         "file": "dynamic_analysis_records.json", "gate": {"kind": "map_health", "reference_maps": REF_A}}]}
-    [spec] = board_mod._recipe_specs("a1", rec)
-    spec = board_mod._materialize_recipe(b, {"index": 3, "label": "series"}, spec)
-    side = json.loads((tmp_path / "swarm" / "recipes" / "03_series" / "a1" / "cube_0"
-                       / "dynamic_analysis_records.recipe.json").read_text())
-    assert side["index"] == 0 and side["regime"] == "A"
 
 
 @pytest.mark.parametrize("center, donor", [(710.0, True), (800.0, False)])

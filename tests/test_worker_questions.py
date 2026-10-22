@@ -1,7 +1,7 @@
 """Questions from concurrent workers reach the right worker, say who is asking,
 and never hold a worker forever.
 
-Several workers of one fan-out or swarm can stop at a gate at once. Each
+Several workers of one fan-out can stop at a gate at once. Each
 question is tagged with the worker and the subject it works on, parked on one
 queue and served to the person one at a time; each answer goes back to the
 worker that asked. A worker waits at most ``question_timeout_s()`` and then
@@ -226,7 +226,7 @@ def test_fanout_parks_branch_questions_with_the_timeout():
 # ------------------------------------------------------------ the planning gate
 
 def test_a_timed_out_plan_review_is_not_recorded_as_a_human_decision(tmp_path):
-    """A swarm worker's plan gate that nobody answers gets the default, which
+    """A worker's plan gate that nobody answers gets the default, which
     reads as Enter. The planner must not stamp that as human approval: the
     plan stays a draft the agent may revise."""
     from types import SimpleNamespace

@@ -177,7 +177,7 @@ def test_a_cancelled_worker_starts_no_further_engine_run(tmp_path):
     while not (tmp_path / "r1" / "run1.txt").exists() and time.monotonic() - t0 < 10:
         time.sleep(0.05)
     cancel.set()
-    ex.kill_subprocesses_for_thread(t.ident)                        # what the swarm's cancel does
+    ex.kill_subprocesses_for_thread(t.ident)                        # what a branch's cancel does
     t.join(timeout=20)
     assert not t.is_alive() and errors == ["AgentStoppedError"] and started == [1]
     assert time.monotonic() - t0 < 6 and not (tmp_path / "r2").exists()

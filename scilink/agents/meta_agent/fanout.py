@@ -258,8 +258,7 @@ def _release_branch(key: str) -> None:
 
 
 # --- Capacity: what the machine can run, and the guard while it runs -------
-# Shared by the swarm and the fan-out (stage 4): one refusal of work larger
-# than the host, one guard against overcommitting, in one place.
+# The fan-out's memory rules: one guard against overcommitting, in one place.
 
 #: Below this much free memory the guard cancels the running item that holds
 #: the most.
@@ -274,21 +273,10 @@ MODE_MEM_FLOOR = {"analysis": _BRANCH_MEM_FLOOR, "planning": 5e8, "simulation": 
 
 
 def estimate_item(item: dict) -> float:
-    """What one item (a swarm item, a fan-out branch) is planned at: its
-    class's MEASURED peak when a process worker of that class has run
-    (``peaks.py``, with its headroom), else the input-based estimate
-    (``_branch_mem_estimate``), else the mode's floor. Stamps the class and
-    whether the figure was measured on the item (``_mem_class``,
-    ``_mem_measured``), for the gate and the ledger."""
-    from . import peaks
+    """What one fan-out branch is planned at: the input-based estimate
+    (``_branch_mem_estimate``) for an analysis branch with data, else the
+    mode's floor."""
     mode = item.get("mode") or "analysis"
-    cls = peaks.item_class({**item, "mode": mode})
-    item["_mem_class"] = cls
-    peak = peaks.measured_peak(cls)
-    item["_mem_measured"] = peak is not None
-    item["_mem_peak"] = peak                     # raw: what a refusal is judged on
-    if peak is not None:
-        return peak * peaks.PEAK_HEADROOM        # with headroom: what admission plans for
     if mode == "analysis" and item.get("data_path"):
         return _branch_mem_estimate({"data_path": item["data_path"], "pattern": item.get("pattern"),
                                      "series_workers": item.get("series_workers")})
@@ -296,40 +284,26 @@ def estimate_item(item: dict) -> float:
 
 
 def plan_capacity(items: List[dict], memory: Optional[Dict[str, Optional[float]]] = None,
-                  *, max_workers: int, refuse_unmeasured: bool = True) -> dict:
-    """Which items this machine can run, and whether together or in turn.
+                  *, max_workers: int) -> dict:
+    """How the machine runs ``items``: together, or in turn.
 
-    An item that needs more than the machine has in total, less a margin for
-    the system, can never run here and is not started. The rest are admitted
-    by free memory as they go, so items that do not fit together wait for
-    each other instead of overcommitting. A measured class is refused on its
-    RAW peak (the headroom is for admission: a class that ran here must not
-    be refused here from then on); with ``refuse_unmeasured=False`` an
-    input-based estimate never refuses (the fan-out's rule, whose estimate
-    is coarse by design and must never refuse what the machine can run).
+    Items are admitted by free memory as they go (``_admit_branch``), so
+    branches that do not fit together wait for each other instead of
+    overcommitting. An input-based estimate never refuses a branch: it is
+    coarse by design and must never refuse what the machine can run, so
+    ``refused`` is always empty and is kept for the callers' shape.
     """
     mem = memory or machine_memory()
     total, avail = mem.get("total"), mem.get("available")
     margin = _BRANCH_MEM_MARGIN
-    ceiling = (total - margin) if total else None
-    run, refused = [], []
     for it in items:
-        est = estimate_item(it)
-        it["_mem_est"] = est
-        basis = it["_mem_peak"] if it.get("_mem_measured") else est
-        if (ceiling is not None and basis > ceiling
-                and (it.get("_mem_measured") or refuse_unmeasured)):
-            refused.append({"label": it["label"], "reason": (
-                f"needs about {basis / 1e9:.1f} GB"
-                + (" (measured for its class)" if it.get("_mem_measured") else "")
-                + f"; this machine has {total / 1e9:.1f} GB in all")})
-        else:
-            run.append(it)
-    need = sum(it["_mem_est"] for it in run)
+        it["_mem_est"] = estimate_item(it)
+    need = sum(it["_mem_est"] for it in items)
     together = avail is None or need + margin <= avail
-    return {"run": run, "refused": refused, "estimated_bytes": need,
+    return {"run": list(items), "refused": [], "estimated_bytes": need,
             "available_bytes": avail, "total_bytes": total, "together": together,
-            "workers": min(len(run), max_workers) if run else 0}
+            "workers": min(len(items), max_workers) if items else 0}
+
 
 
 def machine_memory() -> Dict[str, Optional[float]]:
@@ -421,11 +395,6 @@ class Drain:
 # (#358) stands either way, so cancellation only shortens the waste.
 _branch_stop_events: Dict[int, "_threading.Event"] = {}
 _branch_stop_lock = _threading.Lock()
-# A swarm item's lines carry "[label] " at the line start; the label is the
-# thread's worker label in ``log_context`` — registered by the item's
-# thread, inherited by the threads it starts, read back by
-# ``ui.narration.split_worker_tag``. Fan-out branches register no label:
-# their console output stays as it was.
 
 
 def coordinator_line(text: str) -> str:
@@ -439,46 +408,24 @@ def coordinator_line(text: str) -> str:
 
 
 def _cprint(text: str, **kwargs) -> None:
-    """``print`` for the coordinators' own lines (the swarm's and the
-    fan-out's launch, holds, guard, reruns, budgets, refusals, heartbeat
-    and finishes)."""
+    """``print`` for the fan-out coordinator's own lines (launch, holds, guard,
+    reruns, budgets, refusals, heartbeat and finishes)."""
     print(coordinator_line(text), **kwargs)
 
 
-def _register_branch_stop(event, label: Optional[str] = None) -> None:
-    from ...ui.narration import worker_tag
-    from ...utils.log_context import register_cancel, register_label
+def _register_branch_stop(event) -> None:
+    from ...utils.log_context import register_cancel
     with _branch_stop_lock:
         _branch_stop_events[_threading.get_ident()] = event
     register_cancel(event)          # waits (a parked question, an LLM slot) poll it
-    if label:
-        register_label(worker_tag(label))   # what the reader accepts, always
 
 
 def _unregister_branch_stop() -> None:
-    from ...utils.log_context import unregister_cancel, unregister_label
+    from ...utils.log_context import unregister_cancel
     with _branch_stop_lock:
         _branch_stop_events.pop(_threading.get_ident(), None)
     unregister_cancel()
-    unregister_label()
 
-
-def tag_lines(label: str, data: str, at_start: bool) -> "tuple[str, bool]":
-    """``data`` with ``[label] `` before every line that begins in it (and
-    before its first character when ``at_start``); returns the text and
-    whether the next write begins a line."""
-    if not data:
-        return data, at_start
-    prefix = f"[{label}] "
-    pieces = data.split("\n")
-    out = []
-    for i, piece in enumerate(pieces):
-        begins = at_start if i == 0 else True
-        last = i == len(pieces) - 1
-        if begins and (piece or not last):
-            piece = prefix + piece
-        out.append(piece)
-    return "\n".join(out), data.endswith("\n")
 
 
 class _ThreadStopStream:
@@ -499,11 +446,6 @@ class _ThreadStopStream:
             from ...ui.output_capture import AgentStoppedError
             raise AgentStoppedError(
                 "fan-out branch cancelled (wall-clock budget exceeded)")
-        from ...utils.log_context import current_label, line_start, set_line_start
-        label = current_label(tid)
-        if label is not None:
-            data, at_start = tag_lines(label, data, line_start(tid))
-            set_line_start(tid, at_start)
         return self._original.write(data)
 
     def flush(self) -> None:
@@ -575,8 +517,8 @@ _BRANCH_DEPTH_KEYS = ("profile", "targets", "time_budget_s")
 
 
 def analysis_depth(source: Any) -> dict:
-    """The typed depth of an analysis delegation, a fan-out branch or a swarm
-    item — ``profile``, ``targets``, ``time_budget_s`` — read by one rule on
+    """The typed depth of an analysis delegation or a fan-out branch
+    — ``profile``, ``targets``, ``time_budget_s`` — read by one rule on
     all three paths (#756). Unset keys are left out, so a source with none
     gives ``{}`` and the child's call is what it was without them. Raises
     ``ValueError`` with the reason for a profile no preset names, targets
@@ -2188,12 +2130,11 @@ def run_fanout(orch, branches: List[dict],
             return _ran
 
     # --- capacity: a branch larger than this machine is not started ---
-    # The swarm's rule (plan_capacity): an item that needs more than the
+    # The capacity plan (plan_capacity): a branch that needs more than the
     # host has in all can never run here, and admission alone would still
     # have started it when nothing else was running — the 8 GB analysis that
     # froze an 8 GB laptop. The rest run; fewer than two left is a decline.
-    cap = plan_capacity([by_id[i] for i in fanout_set], max_workers=FANOUT_MAX_WORKERS,
-                        refuse_unmeasured=False)
+    cap = plan_capacity([by_id[i] for i in fanout_set], max_workers=FANOUT_MAX_WORKERS)
     not_started = cap["refused"]
     if not_started:
         for r in not_started:
@@ -2519,7 +2460,7 @@ def run_fanout(orch, branches: List[dict],
                 _cprint(f"  ✅ analysis branch finished: {fut_label[f]}  "
                       f"({n_total - len(pending)}/{n_total} done)")
                 since_tick = 0.0  # a completion already shows the run is alive
-            # The memory guard (stage 4, the swarm's rule): under pressure the
+            # The memory guard: under pressure the
             # branch holding the most is cancelled, recorded memory_pressure,
             # and run again alone once the others are done.
             _guard_step(orch, pending, fut_entry, fut_stop, fut_label, drain, rerun)

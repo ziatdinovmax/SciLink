@@ -5,7 +5,7 @@ without a lock: two consolidations of one technique both distilled it and
 each consumed the records; two graduations into one skill each merged into
 the same old version, so the first merge was lost; an instrument's use
 counts dropped increments, and a trim or a forget elsewhere could delete a
-recipe while a run was copying it out. Several workers of one swarm, or two
+recipe while a run was copying it out. Several workers of one fan-out, or two
 sessions, reach all of these at once.
 """
 
