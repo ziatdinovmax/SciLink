@@ -215,17 +215,7 @@
     "expected": "Executing analysis script…"
   },
   {
-    "name": "swarm launched",
-    "log": "  🔧 Calling tool: run_swarm\n  🐝 swarm_20261007_100410_6ed72e: 2 item(s), up to 2 at a time\n",
-    "expected": "Swarm · 2 items"
-  },
-  {
-    "name": "swarm heartbeat",
-    "log": "  ⏳ 2 swarm item(s) still running ...\n",
-    "expected": "Swarm · 2 item(s) running"
-  },
-  {
-    "name": "swarm item held",
+    "name": "branch held",
     "log": "  ⏸  holding branch 'purity plan' for memory headroom (needs ~0.5 GB, available 1.5 GB; 1 branch(es) running)\n",
     "expected": "Holding 'purity plan' (memory or provider)"
   },
@@ -238,35 +228,5 @@
     "name": "rerun alone",
     "log": "  🔁 running 'heavy' again, alone\n",
     "expected": "Running 'heavy' again, alone"
-  },
-  {
-    "name": "swarm item finished",
-    "log": "  ✅ swarm item finished: XRD 300 K (success)\n",
-    "expected": "Swarm item finished · XRD 300 K (success)"
-  },
-  {
-    "name": "worker-tagged thought",
-    "log": "[XRD 300 K]   💭 I'll examine the data first\n",
-    "expected": "XRD 300 K · 💭 I'll examine the data first"
-  },
-  {
-    "name": "worker-tagged step",
-    "log": "[XRD 300 K] 2026-10-07 10:04:27,563 - INFO - \n[XRD 300 K] 📍 STEP 4: CurveFittingPlanningController\n",
-    "expected": "XRD 300 K · Curve Fitting Planning"
-  },
-  {
-    "name": "worker-tagged candidate",
-    "log": "[fit A] [cand_02] Verification 1/7\n",
-    "expected": "fit A · Candidate 2 · Verification 1/7…"
-  },
-  {
-    "name": "marked swarm launched",
-    "log": "  🔧 Calling tool: run_swarm\n  ⁤🐝 swarm_x: 2 item(s), up to 2 at a time\n",
-    "expected": "Swarm · 2 items"
-  },
-  {
-    "name": "marked worker-tagged heartbeat",
-    "log": "  ⁤⏳ 2 swarm item(s) still running ...\n[XRD 300 K]   💭 still fitting\n",
-    "expected": "XRD 300 K · 💭 still fitting"
   }
 ]

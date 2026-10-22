@@ -22,8 +22,8 @@ import copy
 # the printing agent is a meta-delegated specialist, so a capture that strips
 # ANSI can still colour the specialist's narration differently.
 THOUGHT_MARK = "⁣"
-#: The swarm and fan-out coordinators mark their own lines with this
-#: invisible character (U+2064, as THOUGHT_MARK is U+2063), put there by
+#: The fan-out coordinator marks its own lines with this invisible
+#: character (U+2064, as THOUGHT_MARK is U+2063), put there by
 #: ``fanout.coordinator_line``; both narration readers classify a marked
 #: line as the visible ``fanout`` kind by the mark alone, never by wording
 #: or by an emoji an agent may print too.
@@ -237,14 +237,10 @@ ACTIVITY_LABELS = {
     "analyzing": "Analyzing {target}",
     "attempt": "Attempt {n} · {label}",
     "candidate": "Candidate {n} · {label}",
-    # a swarm item's line, by its label; the coordinators' own milestones
-    "worker": "{worker} · {label}",
-    "swarm_started": "Swarm · {n} items",
-    "swarm_running": "Swarm · {n} item(s) running",
-    "swarm_holding": "Holding '{label}' (memory or provider)",
-    "swarm_guard": "Memory guard · cancelling '{label}'",
-    "swarm_rerun": "Running '{label}' again, alone",
-    "swarm_item_done": "Swarm item finished · {label} ({status})",
+    # the fan-out coordinator's own milestones
+    "holding": "Holding '{label}' (memory or provider)",
+    "memory_guard": "Memory guard · cancelling '{label}'",
+    "rerun": "Running '{label}' again, alone",
 }
 
 
