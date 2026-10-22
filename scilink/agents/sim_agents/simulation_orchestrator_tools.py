@@ -1277,13 +1277,15 @@ class SimulationOrchestratorTools:
                 "scale": {
                     "type": "string",
                     "description": ("Optional scale override "
-                                    "('periodic_dft' | 'molecular_dynamics'); "
+                                    "('periodic_dft' | 'molecular_qc' | "
+                                    "'molecular_dynamics'); "
                                     "routed from the description if omitted."),
                 },
                 "software": {
                     "type": "string",
-                    "description": ("Optional engine override "
-                                    "('vasp' | 'lammps'); routed if omitted."),
+                    "description": ("Optional engine override (e.g. 'vasp', "
+                                    "'qe', 'cp2k', 'nwchem', 'orca', 'lammps', "
+                                    "'gromacs'); routed if omitted."),
                 },
                 "structure_class": {
                     "type": "string",

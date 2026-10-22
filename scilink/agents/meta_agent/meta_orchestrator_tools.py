@@ -1397,10 +1397,12 @@ class MetaOrchestratorTools:
             name="delegate_to_simulation",
             description=(
                 "Delegate a computational-simulation task to the simulation "
-                "specialist (periodic DFT, classical molecular dynamics, and "
-                "ML-potential-driven MD). From a natural-language goal it "
-                "autonomously builds and validates an atomic structure, "
-                "generates and runs engine inputs (VASP, LAMMPS), and refines "
+                "specialist (periodic DFT, molecular quantum chemistry, "
+                "classical molecular dynamics, and ML-potential-driven MD). "
+                "From a natural-language goal it autonomously builds and "
+                "validates an atomic structure, generates and runs engine "
+                "inputs (e.g. VASP, QE, CP2K, NWChem, ORCA, LAMMPS, GROMACS), "
+                "and refines "
                 "them — no input data file required. The specialist runs "
                 "autonomously and returns a structured JSON result (status, "
                 "summary, key_findings, files_produced, structures, "
