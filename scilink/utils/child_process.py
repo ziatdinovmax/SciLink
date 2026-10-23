@@ -152,7 +152,7 @@ def run_child(target: str, payload: Any, *, log_path: Optional[str] = None) -> C
                 envelope = pickle.load(f)
         except Exception:  # noqa: BLE001 - empty or torn: nothing came back
             raise ChildLost(target, _exit_reason(returncode), returncode=returncode) from None
-        outcome, value, _info = envelope
+        outcome, value = envelope
         if outcome != "returned":
             last = next((ln.strip() for ln in reversed(value.splitlines()) if ln.strip()),
                         "an exception")
@@ -181,10 +181,9 @@ def _child_main(target: str, result_path: str, caller_pythonpath: str) -> int:
         payload = pickle.load(sys.stdin.buffer)
         module, _, name = target.partition(":")
         value = getattr(importlib.import_module(module), name)(payload)
-        envelope = ("returned", value, {})
-        blob = pickle.dumps(envelope)
+        blob = pickle.dumps(("returned", value))
     except BaseException:  # noqa: BLE001 - report everything to the parent
-        blob = pickle.dumps(("raised", traceback.format_exc(), {}))
+        blob = pickle.dumps(("raised", traceback.format_exc()))
     with open(result_path, "wb") as f:
         f.write(blob)
     return 0

@@ -133,7 +133,7 @@ def _run_task_row(tmp_path, script, monkeypatch):
     return result
 
 
-def test_a_claim_resting_on_ungated_scalars_is_provisional_and_its_recipe_verified(tmp_path, monkeypatch):
+def test_ungated_scalars_are_named_on_the_row_and_the_recipe_stands(tmp_path, monkeypatch):
     result = _run_task_row(tmp_path, SCRIPT_WITH_SCALARS, monkeypatch)
     row = result["analyses"][0]
     assert row["verified"] is True                                 # the gate passed what it checks: the recipe stands
@@ -142,7 +142,7 @@ def test_a_claim_resting_on_ungated_scalars_is_provisional_and_its_recipe_verifi
     assert row["failed_outputs"] == []                             # plain numbers are unchecked, not failed
 
 
-def test_a_run_with_nothing_ungated_posts_as_before(tmp_path, monkeypatch):
+def test_a_run_with_nothing_ungated_names_nothing(tmp_path, monkeypatch):
     result = _run_task_row(tmp_path, SCRIPT_MAPS_ONLY, monkeypatch)
     row = result["analyses"][0]
     assert row["verified"] is True and row["ungated_outputs"] == [] and row["failed_outputs"] == []

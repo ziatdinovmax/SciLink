@@ -51,6 +51,8 @@ _STOPPED_PARENTS: set = set()
 # it beside the turn-level Stop, so a wait that polls it (a parked question,
 # an LLM slot) ends when the item is cancelled instead of on its next print.
 _CANCEL_EVENTS: Dict[int, threading.Event] = {}
+
+
 def register_worker(parent_thread_id: int, tag: str, prefix: bool = True) -> None:
     """Register the CURRENT thread as a fan-out worker of ``parent_thread_id``.
 

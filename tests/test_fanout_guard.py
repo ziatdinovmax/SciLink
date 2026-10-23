@@ -32,7 +32,7 @@ def test_an_estimate_never_refuses_a_capacity_plan(tmp_path, monkeypatch):
     monkeypatch.setattr(fo, "_branch_mem_estimate", lambda b: 40e9)
     item = {"mode": "analysis", "label": "guess", "data_path": str(tmp_path / "missing.npy")}
     plan = fo.plan_capacity([item], {"total": 16e9, "available": 8e9}, max_workers=3)
-    assert plan["refused"] == [] and plan["run"] == [item]
+    assert "refused" not in plan and plan["run"] == [item]
     assert plan["run"][0]["_mem_est"] == 40e9 and plan["estimated_bytes"] == 40e9
     assert plan["together"] is False and plan["workers"] == 1
 

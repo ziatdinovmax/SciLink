@@ -289,9 +289,9 @@ def plan_capacity(items: List[dict], memory: Optional[Dict[str, Optional[float]]
 
     Items are admitted by free memory as they go (``_admit_branch``), so
     branches that do not fit together wait for each other instead of
-    overcommitting. An input-based estimate never refuses a branch: it is
-    coarse by design and must never refuse what the machine can run, so
-    ``refused`` is always empty and is kept for the callers' shape.
+    overcommitting. There is no host-size refusal: the input-based estimate
+    is coarse by design and must never refuse what the machine can run, so
+    every item is in ``run`` and the plan only says whether they fit together.
     """
     mem = memory or machine_memory()
     total, avail = mem.get("total"), mem.get("available")
@@ -300,7 +300,7 @@ def plan_capacity(items: List[dict], memory: Optional[Dict[str, Optional[float]]
         it["_mem_est"] = estimate_item(it)
     need = sum(it["_mem_est"] for it in items)
     together = avail is None or need + margin <= avail
-    return {"run": list(items), "refused": [], "estimated_bytes": need,
+    return {"run": list(items), "estimated_bytes": need,
             "available_bytes": avail, "total_bytes": total, "together": together,
             "workers": min(len(items), max_workers) if items else 0}
 
@@ -316,12 +316,12 @@ def machine_memory() -> Dict[str, Optional[float]]:
 
 
 def guard_memory(running: Dict[Any, dict], *, available: Optional[float], floor: float,
-                 est_of, rss_of, on_cancel) -> Optional[Any]:
+                 est_of, on_cancel) -> Optional[Any]:
     """Cancel the running item that holds the most memory when
     ``available`` (free memory, as the caller read it) is below ``floor``:
-    it frees the most. What an item holds is what its process worker was
-    last SAMPLED at (``rss_of``), else its estimate (``est_of``); the newest
-    of equals. ``on_cancel(fut, entry, reason)`` does the cancelling (the
+    it frees the most. What an item holds is its estimate (``est_of``; a
+    branch is a thread of this process, so nothing measures it apart); the
+    newest of equals. ``on_cancel(fut, entry, reason)`` does the cancelling (the
     caller's stop event, handle, subprocesses and ledger). Returns the
     cancelled item's future, which the caller watches until that worker has
     let go of its memory. One item alone is never cancelled: the guard is
@@ -336,14 +336,12 @@ def guard_memory(running: Dict[Any, dict], *, available: Optional[float], floor:
         return None
 
     def holds(fe):
-        rss = rss_of(fe[0])
-        return (rss if rss is not None else est_of(fe[0]), fe[1]["_started_at"])
+        return (est_of(fe[0]), fe[1]["_started_at"])
     fut, entry = max(live, key=holds)
-    held = rss_of(fut)
     entry["_cancelled"] = True
     reason = (f"memory_pressure: {avail / 1e9:.2f} GB free, below the "
-              f"{floor / 1e9:.2f} GB floor"
-              + (f"; this item held {held / 1e9:.2f} GB" if held is not None else ""))
+              f"{floor / 1e9:.2f} GB floor; this branch was estimated at "
+              f"{est_of(fut) / 1e9:.2f} GB")
     entry["_cancel_reason"] = reason
     on_cancel(fut, entry, reason)
     return fut
@@ -1389,7 +1387,7 @@ def _guard_step(orch, pending, fut_entry, fut_stop, fut_label, drain: "Drain",
     cancelled = guard_memory({f: fut_entry[f] for f in pending}, available=_available_memory(),
                              floor=MEMORY_FLOOR_BYTES,
                              est_of=lambda f: float(fut_entry[f].get("_mem_est") or _BRANCH_MEM_FLOOR),
-                             rss_of=lambda f: None, on_cancel=on_cancel)
+                             on_cancel=on_cancel)
     if cancelled is not None:
         drain.add(cancelled)
         pending.discard(cancelled)
@@ -1555,7 +1553,6 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
             finally:
                 set_thread_event_log(None)
                 _usage_tag.__exit__(None, None, None)
-                tracing.forget_worker_usage(f"fanout:{index:02d}_{slug}")
                 if queue_channel is not None:
                     from ...hitl import set_thread_channel
                     set_thread_channel(None)
@@ -2129,26 +2126,11 @@ def run_fanout(orch, branches: List[dict],
         if _ran:
             return _ran
 
-    # --- capacity: a branch larger than this machine is not started ---
-    # The capacity plan (plan_capacity): a branch that needs more than the
-    # host has in all can never run here, and admission alone would still
-    # have started it when nothing else was running — the 8 GB analysis that
-    # froze an 8 GB laptop. The rest run; fewer than two left is a decline.
-    cap = plan_capacity([by_id[i] for i in fanout_set], max_workers=FANOUT_MAX_WORKERS)
-    not_started = cap["refused"]
-    if not_started:
-        for r in not_started:
-            _cprint(f"  ⛔ not started: {r['label']} — {r['reason']}")
-        fanout_set = [i for i in fanout_set if any(by_id[i] is b for b in cap["run"])]
-        if len(fanout_set) < 2:
-            return json.dumps({
-                "status": "declined", "reason": "does_not_fit_host",
-                "not_started": not_started,
-                "message": ("Fewer than two branches fit this machine, so no parallel "
-                            "analysis was run. A branch that does not fit here needs a "
-                            "larger machine (or a smaller input); the others can be "
-                            "analysed one at a time with delegate_to_analysis.")},
-                indent=2, default=str)
+    # --- capacity: every branch runs; the plan stamps each estimate ---
+    # plan_capacity never refuses a branch (the input-based estimate is
+    # coarse by design): it stamps ``_mem_est`` on each, and _admit_branch
+    # holds branches that do not fit together until memory is free.
+    plan_capacity([by_id[i] for i in fanout_set], max_workers=FANOUT_MAX_WORKERS)
 
     # --- confirmation ---
     if _user_already_declined(orch, fanout_set):
@@ -2528,8 +2510,6 @@ def run_fanout(orch, branches: List[dict],
                "whole fan-out." if degraded and productive else "")
         ),
     }
-    if not_started:
-        out["not_started"] = not_started
     if degraded:
         n_err = sum(1 for r in degraded if r["status"] != "success")
         n_timeout = sum(1 for e in entries if e.get("timed_out"))
