@@ -966,6 +966,70 @@ through inherited internals), no base class is required. The contract is
 duck-typed; what the children share is *interface shape*, not
 *implementation*.
 
+## What concurrent workers share
+
+Several delegations run at once in the fan-out (`delegate_to_analyses`),
+the hyperspectral series' replay workers run in fresh interpreters, and a
+best-of-N run has its candidates on threads. The rules below are what every
+such worker shares; each was learned from a live run, and none is about any
+one of them.
+
+- **A gate nobody answers is never a human decision.** A worker's questions
+  go through one queue (`hitl.QueueChannel`), served on a thread of their own
+  (`hitl.QuestionServer`) so the thread that runs the branches keeps
+  enforcing its rules, tagged with who asks (`WorkerChannel`), and time out to
+  the gate's default, with the clock restarting when the question is shown.
+  A timeout, including one inside a channel with its own clock
+  (`hitl.mark_timed_out`, the MCP server's), is visible to the gate
+  (`last_question_timed_out`): the planner then writes `unattended_gate`,
+  never `human_review`, and the planning `run_task` reports how the plan was
+  settled (`plan_review`). A plan settled by silence would be settled by
+  nobody.
+- **A cancel must reach a waiting worker.** A print is not the only place a
+  Stop lands: a parked question, an LLM-slot wait, a backoff sleep and a
+  best-of-N candidate all poll the thread's cancel
+  (`log_context.register_cancel`, `inherited_context`). A new agent that
+  spawns its own threads uses `attributed_to_current` or `inherited_context`,
+  or its threads run on after their branch is cancelled. A chat turn's Stop is
+  added to its thread's cancel for the turn (`register_turn_stop`), never in
+  place of one the thread already carries, so a new wait that polls the
+  cancel ends on the user's Stop and on a branch's own cancel alike. And
+  every process SciLink starts is stoppable: model-written code runs through
+  the script executor (`ScriptExecutor`, or `executors.run_generated_script`
+  where a caller needs `subprocess.run`'s shape — SciLink's interpreter, no
+  provider keys, the sandbox limits, consent asked first), and an external
+  engine through `executors.run_engine` (Stop registration, its whole tree
+  killed on a timeout, the parent environment kept); a new call site never
+  calls `subprocess.run` on generated code or an engine (#685).
+- **The provider and the stores are shared.** At most `SCILINK_LLM_MAX_INFLIGHT`
+  calls per model are in flight (`wrappers/llm_limiter.py`, held per request,
+  never across a backoff); usage is charged per worker through the usage
+  sink; a provider circuit breaker per model holds the fan-out's admission
+  (`fanout._admit_branch`, never running work) while a model's last minute
+  holds at least six retryable failures that are at least half its calls — a
+  success counts toward the ratio and does not end the hold, since in a
+  brown-out running work keeps succeeding now and then; the distill staging,
+  graduated skills and instrument homes take a lock for every change, and a
+  reviewed skill upgrade refuses a skill that changed during the review.
+- **Memory is admitted, never refused on an estimate.** A branch is admitted
+  by free memory (`fanout._admit_branch`): branches that do not fit together
+  wait for each other. The input-based estimate (`estimate_item`,
+  `plan_capacity`) is coarse by design and refuses nothing — there is no
+  host-size refusal. Under pressure the guard (`guard_memory`) cancels the
+  running branch with the largest estimate, never one running alone, and
+  reruns it alone once (`Drain`: one cancellation at a time, memory read again
+  only once the cancelled worker has let go of what it held).
+- **Independence is a number computed from the ledger, not judged.** Fusion's
+  `independent_support` is the largest set of fused branches none of which
+  cites, was steered by, or rests on a fusion of another in the set
+  (`fanout.independent_support_of` over `_ledger_dependents`: `context_from`
+  declared or inferred, steering, fusion feedback, transitively; keyed by
+  delegation index, exact up to 12 branches and a stated lower bound beyond),
+  rendered with what it cannot see (a finding pasted by hand with no
+  citation). A shared dataset (co-registered operands) is not a coupling of
+  findings. A new way of coupling two delegations becomes a ledger edge, not
+  a prompt caveat.
+
 ## Swarms were tried and removed
 
 Between late September and early October 2026 the meta agent grew a swarm:
@@ -981,13 +1045,15 @@ to their defaults), so on 2026-10-21 it was removed rather than tuned: the
 placements and measured peaks are gone, nothing posts findings anywhere,
 and a session has no `swarm/` folder.
 
-What stayed is what the fan-out and the series drivers use: the
+What stayed is what the fan-out and the series drivers use, under the rules
+of "What concurrent workers share" above: the
 human-feedback question server and worker channel (`hitl.py`), the
 ephemeral worker constructor (`workers.build_child`), the store locks, the
 LLM in-flight slot and the provider breaker the fan-out's admission reads
 (`llm_limiter.py`), the per-thread cancel primitives and attribution in
 `log_context`, the fan-out's capacity plan and memory guard
-(`fanout.plan_capacity`, `guard_memory`, on the input-based estimate only),
+(`fanout.plan_capacity`, `guard_memory`, on the input-based estimate only;
+the host-size refusal went with the measured classes),
 the coordinator mark on the fan-out's own lines, the fresh-interpreter
 replay workers (`utils.child_process`), and the verdict record the analysis
 agents stamp (`_replay.verdict_record`, `analysis_verdict`), which the
