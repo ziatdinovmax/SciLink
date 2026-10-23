@@ -14,11 +14,9 @@ units and agreed — never for a run its own verifier approved (the verifier
 reviews the fit, not the claims) nor for a follower verified by its recipe
 (round 3 of the review: three rounds moved a deciding identity check's
 false positives from one threshold to the next; a deterministic check asked
-an interpretive question can withhold a certificate, not issue a verdict). The swarm board posts a replay's claims as verified
-only then; its recipe (a script that ran) stays verified by the gate. The
-behaviour this commit changes is exactly: a replay's CLAIMS on the board
-(verified → provisional unless the interpretation was checked); no verdict
-changes.
+an interpretive question can withhold a certificate, not issue a verdict). A
+reader of the record may call a replay's CLAIMS certified only then; its
+recipe (a script that ran) stays verified by the gate. No verdict changes.
 """
 
 import json
@@ -35,7 +33,6 @@ import test_regime_choice as rc  # noqa: E402
 from scilink.agents.exp_agents import _replay  # noqa: E402
 from scilink.agents.exp_agents._verification_record import (  # noqa: E402
     analysis_verdict, final_verdict_record, interpretation_checked_by, unit_verdict_for)
-from scilink.agents.meta_agent import board as board_mod  # noqa: E402
 
 
 def test_identity_features_and_reference_read_what_a_recipe_found():
@@ -127,7 +124,7 @@ def test_a_replay_is_held_to_the_regimes_state_and_to_what_it_found(tmp_path, mo
     uv = unit_verdict_for({**res, "success": True})
     assert uv["verified"] and uv["decided_by"] == "replay_gate" and uv["interpretation_checked"] is True
     # the anatase recipe FORCED (named file) on rutile data fits at R² 0.99999: the gate's verdict stands (good,
-    # the numbers), both checks flag it, and it is NOT certified — its claims are provisional on the board
+    # the numbers), both checks flag it, and it is NOT certified — its claims stay provisional
     (prior / "scripts" / "spectrum_0000.py").write_text("LOW")
     res, ex, _, _ = curve._replay(tmp_path / "b", monkeypatch, {"LOW": 0.99999}, prior=prior / "scripts" / "spectrum_0000.py",
                                   data=rc.spectrum(rc.RUTILE, shift=0.5, seed=2),
@@ -150,8 +147,8 @@ def test_a_replay_is_held_to_the_regimes_state_and_to_what_it_found(tmp_path, mo
     assert [s for s, _ in ex.calls] == ["HIGH"] and rv["verdict"] == "good" and rv["regime_choice"]["chosen_regime"] == "high"
     assert rv["identity"]["drifted"][0]["name"] == "space_group" and "space_group = 'f m -3 m'" in rv["message"]
     assert unit_verdict_for({**res, "success": True})["interpretation_checked"] is False
-    # the board's copy, a recipe file with no run behind it: nothing to compare, unchecked
-    copy = tmp_path / "board" / "recipe.py"
+    # a copy of the recipe, a script file with no run behind it: nothing to compare, unchecked
+    copy = tmp_path / "copies" / "recipe.py"
     copy.parent.mkdir()
     copy.write_text("ONE")
     res, ex, _, _ = curve._replay(tmp_path / "e", monkeypatch, {"ONE": 0.99}, prior=copy, data=rc.spectrum(rc.ANATASE),
@@ -173,7 +170,7 @@ def test_a_replay_is_held_to_the_regimes_state_and_to_what_it_found(tmp_path, mo
     assert unit_verdict_for({**res, "success": True})["interpretation_checked"] is False
 
 
-def test_the_record_and_the_board_tell_numbers_from_interpretation(tmp_path):
+def test_the_record_tells_numbers_from_interpretation(tmp_path):
     checked = {"checked": True, "within": True, "spread_known": True, "drifted": [], "compared": 2}
     rv_checked = {"reused": True, "verdict": "good", "source": "p", "r_squared": 0.99, "threshold": 0.95,
                   "identity": checked, "state_distance": 0.02}
@@ -207,20 +204,12 @@ def test_the_record_and_the_board_tell_numbers_from_interpretation(tmp_path):
     assert final_verdict_record(fresh)["decided_by"] == "qc_gate" and final_verdict_record(fresh)["interpretation_checked"] is False
     cube["dynamic_analysis_records"][0]["identity_checked"] = False
     assert final_verdict_record(cube)["interpretation_checked"] is False
-    # the board: a replay's CLAIM is provisional unless the interpretation was checked; its recipe is verified;
-    # a run its own gate approved posts its claims verified, as before (its claims are not a replay's)
-    out = tmp_path / "run"
-    (out / "scripts").mkdir(parents=True)
-    (out / "scripts" / "fitting_script.py").write_text("S")
-    entry = {"index": 1, "label": "replay", "mode": "analysis", "status": "success"}
-    row = {"analysis_id": "r1", "status": "success", "output_directory": str(out), "agent_name": "CurveFittingAgent"}
-    recs = board_mod.records_for(entry, {"key_findings": ["[r1] the low-temperature phase"], "analyses": [{**row, **analysis_verdict(unchecked)}]})
-    assert [(r["kind"], r["status"]) for r in recs] == [("claim", "provisional"), ("recipe", "verified")]
-    assert "interpretation is not certified" in recs[0]["evidence"]["gate"]
-    recs = board_mod.records_for(entry, {"key_findings": ["[r1] the high-temperature phase"], "analyses": [{**row, **analysis_verdict(final)}]})
-    assert [(r["kind"], r["status"]) for r in recs] == [("claim", "verified"), ("recipe", "verified")]
-    recs = board_mod.records_for(entry, {"key_findings": ["[r1] anatase"], "analyses": [{**row, **analysis_verdict(own)}]})
-    assert recs[0]["status"] == "verified"
+    # the reader of a row tells the two apart: a replay is verified by the gate whether or not the
+    # interpretation was checked; a run its own gate approved is verified, its claims not a replay's
+    assert analysis_verdict(final) == {"verified": True, "reason": "locked-script reuse passed the replay gate",
+                                       "decided_by": "replay_gate", "interpretation_checked": True}
+    assert analysis_verdict(own)["verified"] is True and analysis_verdict(own)["decided_by"] == "qc_gate"
+    assert analysis_verdict(own)["interpretation_checked"] is False
 
 
 def test_the_checks_withhold_certification_and_never_decide(tmp_path, monkeypatch):
@@ -296,9 +285,7 @@ def test_a_series_anchored_by_a_replay_rests_on_the_replay_gate(tmp_path):
     v = final_verdict_record(series)
     assert v["verified"] and v["decided_by"] == "replay_gate" and v["interpretation_checked"] is False
     row = {"analysis_id": "s1", "status": "success", "agent_name": "CurveFittingAgent", "series": True, **analysis_verdict({**series, "verdict": v})}
-    recs = board_mod.records_for({"index": 1, "label": "series", "mode": "analysis", "status": "success"},
-                                 {"key_findings": ["[s1] the series shows anatase"], "analyses": [row]})
-    assert [(r["kind"], r["status"]) for r in recs] == [("claim", "provisional")]
+    assert row["verified"] is True and row["decided_by"] == "replay_gate" and row["interpretation_checked"] is False
     # an anchor verified by its own gate with replayed followers: the series' own mechanics, qc_gate
     hs_like = {"status": "success", "individual_results": [
         {"success": True, "role": "anchor", "unit_verdict": own}, {"success": True, "role": "follower", "unit_verdict": replay}]}
@@ -360,7 +347,7 @@ def test_certification_needs_the_tight_bar_and_certifies_one_unit_references_and
     assert followers and all(isinstance(u.get("regime_checks"), dict) for u in followers)
     assert all(isinstance(u["regime_checks"]["state_distance"], (int, float)) for u in followers)
     assert all(u["unit_verdict"]["decided_by"] == "recipe" and u["unit_verdict"]["interpretation_checked"] is True for u in followers)
-    # a series whose anchor is a certified replay and whose followers are certified posts a VERIFIED claim
+    # a series whose anchor is a certified replay and whose followers are certified is certified as a whole
     replay = {"verified": True, "reason": "locked-script reuse passed the replay gate", "decided_by": "replay_gate", "interpretation_checked": True}
     follower = {"verified": True, "reason": "replayed the locked recipe", "decided_by": "recipe", "interpretation_checked": True}
     series = {"status": "success", "individual_results": [{"success": True, "role": "anchor", "unit_verdict": replay},
@@ -368,6 +355,4 @@ def test_certification_needs_the_tight_bar_and_certifies_one_unit_references_and
     v = final_verdict_record(series)
     assert v["decided_by"] == "replay_gate" and v["interpretation_checked"] is True
     row = {"analysis_id": "s1", "status": "success", "agent_name": "CurveFittingAgent", "series": True, **analysis_verdict({**series, "verdict": v})}
-    recs = board_mod.records_for({"index": 1, "label": "series", "mode": "analysis", "status": "success"},
-                                 {"key_findings": ["[s1] the series shows anatase"], "analyses": [row]})
-    assert [(r["kind"], r["status"]) for r in recs] == [("claim", "verified")]
+    assert row["verified"] is True and row["decided_by"] == "replay_gate" and row["interpretation_checked"] is True

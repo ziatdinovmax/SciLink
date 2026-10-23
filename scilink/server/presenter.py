@@ -170,8 +170,7 @@ def _notice(hreq) -> Optional[Dict[str, Any]]:
 
 
 def question_asker(origin: Dict[str, Any]) -> str:
-    """Who asks, for a question from a concurrent worker (a fan-out branch,
-    a swarm item): the label and the subject it works on, so two workers'
+    """Who asks, for a question from a concurrent worker (a fan-out branch): the label and the subject it works on, so two workers'
     plan approvals do not look identical on screen. Empty for the session's
     own agent."""
     label = origin.get("branch_label")

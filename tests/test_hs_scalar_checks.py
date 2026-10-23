@@ -1,7 +1,7 @@
 """A hyperspectral scalar that comes from a fit is checked (#722 B1).
 
 #733 kept every claim of a run that reported scalars provisional, because no
-gate looked at them; the #722 swarm run had posted "no change" read off fits
+gate looked at them; the #722 live run had posted "no change" read off fits
 railed at their window edge with depths of 1e-12. A script now returns a fitted
 number as ``{"value", "role", "bounds"}``. A deterministic fit-health check runs
 on it: a value at the bound it was fitted within fails (the curve agent's
@@ -9,7 +9,7 @@ pinned-at-bound rule), and so does an amplitude at zero (on a zero lower bound,
 or far below the field mean's noise — the floor that rule deliberately skips).
 A number that passes is gated, so a run whose numbers all pass earns its claims
 back; a number that fails is reported as a failed fit — no value in the feature
-table, named on the board and in the synthesis; a plain number stays unchecked,
+table, named on the ``analyses`` row and in the synthesis; a plain number stays unchecked,
 exactly as before.
 
   conda run -n scilink python -m pytest tests/test_hs_scalar_checks.py -q
@@ -27,7 +27,6 @@ os.environ.setdefault("UNSAFE_EXECUTION_OK", "true")
 from scilink.agents.exp_agents.controllers import hyperspectral_controllers as hc
 from scilink.agents.exp_agents.controllers import hyperspectral_series as hs
 from scilink.agents.exp_agents.controllers.hyperspectral_controllers import RunDynamicAnalysisController
-from scilink.agents.meta_agent import reactions
 
 import test_ungated_outputs as tu
 
@@ -94,22 +93,18 @@ def test_the_controller_checks_declared_fits_and_reports_failures_as_no_value(tm
 
 
 def test_a_run_whose_numbers_all_pass_earns_its_claims_back(tmp_path, monkeypatch):
-    result, recs = tu._run_task_through_the_board(tmp_path, SCRIPT_ALL_PASS, monkeypatch)
+    result = tu._run_task_row(tmp_path, SCRIPT_ALL_PASS, monkeypatch)
     row = result["analyses"][0]
-    assert row["ungated_outputs"] == [] and row["failed_outputs"] == []
-    claims = [r for r in recs if r["kind"] == "claim"]
-    assert claims and all(c["status"] == "verified" for c in claims)
-    assert all(reactions.matches(tu.ON_A_CLAIM, c) for c in claims)
+    assert row["verified"] is True
+    assert row["ungated_outputs"] == [] and row["failed_outputs"] == []     # nothing left for a reader to hold the claims on
 
 
 def test_a_failed_number_is_named_as_failed_not_unchecked(tmp_path, monkeypatch):
-    result, recs = tu._run_task_through_the_board(tmp_path, SCRIPT_ONE_FAILS, monkeypatch)
+    result = tu._run_task_row(tmp_path, SCRIPT_ONE_FAILS, monkeypatch)
     row = result["analyses"][0]
-    assert row["failed_outputs"] == ["Band1_Position_nm"]
-    claims = [r for r in recs if r["kind"] == "claim"]
-    assert claims and all(c["status"] == "provisional" for c in claims)
-    why = claims[0]["evidence"]["gate"]
-    assert "FAILED their fit-health check (Band1_Position_nm)" in why and "no gate checked" not in why
+    assert row["verified"] is True                                 # the gate passed the maps it checks
+    assert row["failed_outputs"] == ["Band1_Position_nm"]          # a failed fit, named apart from the unchecked
+    assert row["ungated_outputs"] == ["Band1_Position_nm"]         # the one that passed its check is gated
 
 
 def test_the_series_synthesis_names_checked_failed_and_unchecked_numbers(tmp_path):

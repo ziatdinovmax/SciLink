@@ -154,7 +154,7 @@ def build_series_row(index: int, data_path: str, result: Dict[str, Any],
     # — a clean status, something extracted, EVERY target approved. The
     # series' own `verified` (one approved target is enough to keep the row
     # in the table) stays as it is; this is what "verified" means to a
-    # reader of the result (the board).
+    # reader of the result (run_task's rows).
     from .._replay import verdict_record
     n_t = len(records)
     if row["verified"] is False or status != "success" or not features:

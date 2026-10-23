@@ -142,15 +142,8 @@ def main():
           any("steered at launch" in str(c) for c in fused.get("caveats") or []))
     report = json.load(open(fused["report_path"]))
     check("report persists independence", report.get("independence") is not None)
-    # Board (swarm stage 2): the hint is a measurement of techB's series filed
-    # under techB's entry, read by techA; fusion counts 1 independent of 2.
-    a_reads = by_label["techA series"].get("reads") or []
-    b_posted = by_label["techB series"].get("posted") or []
-    check("steering hint is a board measurement techA read, owned by techB (provisional, mode steering)",
-          len(a_reads) == 1 and a_reads[0] in b_posted
-          and ag.board.get(a_reads[0])["kind"] == "measurement"
-          and ag.board.get(a_reads[0])["status"] == "provisional"
-          and ag.board.get(a_reads[0])["author"]["mode"] == "steering")
+    # Independence is computed from the ledger's steering edges: fusion counts
+    # 1 independent of 2.
     _sup = fused.get("independent_support") or {}
     check("steering is stamped by sibling index as well as label",
           by_label["techA series"].get("steered_by") == ["techB series"]

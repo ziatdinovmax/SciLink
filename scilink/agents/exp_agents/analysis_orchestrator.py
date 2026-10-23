@@ -15,7 +15,7 @@ from scilink.utils.text_io import atomic_write_json
 import logging
 from ._verification_record import (analysis_verdict, replay_certification_reason, replay_escalation,
                                    series_anchor_unit, series_coverage,
-                                   series_recipes, ungated_outputs_of, failed_outputs_of)
+                                   ungated_outputs_of, failed_outputs_of)
 import os
 import time
 from pathlib import Path
@@ -1734,27 +1734,21 @@ class AnalysisOrchestratorAgent:
                     "output_directory": rec.get("output_directory"),
                     # Whether the agent's own verification approved the
                     # result (a salvaged or unverified run is still
-                    # status "success"): what the board calls verified.
+                    # status "success"): what a reader calls verified.
                     **analysis_verdict(rec.get("full_result")),
                     # a series' locked recipe is the anchor's unit script
                     "recipe_unit": series_anchor_unit(rec.get("full_result")),
                     "series": bool((rec.get("full_result") or {}).get("individual_results")),
-                    # the recipes the series driver recorded at lock time
-                    # (one per regime, script text included): what a caller
-                    # that keeps its own copy of a recipe — the meta's board
-                    # — copies from; the meta leaves it off the rows its
-                    # model reads (_summarize_delegation_result).
-                    "recipes": series_recipes(rec.get("full_result")),
                     # a replay whose certificate was withheld and was explained by
                     # the judge (#712 escalation): an opinion beside the
-                    # verdict, which the board posts as a provisional claim
+                    # verdict, never a verdict of its own
                     "escalation": replay_escalation(rec.get("full_result")),
                     # why a replay's interpretation is not certified (#753): the
-                    # board quotes it on the provisional claim
+                    # a reader quotes it beside the verdict
                     "certification_reason": replay_certification_reason(rec.get("full_result")),
                     # outputs the run reported that no gate checked (a
                     # hyperspectral task's scalars, #722): the verdict does not
-                    # cover them, so the board keeps the run's claims provisional
+                    # cover them, so a claim resting on them is unchecked
                     "ungated_outputs": ungated_outputs_of(rec.get("full_result")),
                     # of those, the numbers whose fit-health check FAILED (at a
                     # bound, at zero): failed fits, reported as no value (#722 B1)

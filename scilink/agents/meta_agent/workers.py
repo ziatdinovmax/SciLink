@@ -7,7 +7,7 @@ shared state, so two calls on one child at once would each report the other's
 output as their own. An ephemeral **worker** is built for one work item, in its
 own directory, and is never registered in ``orch._children``: nothing it holds
 is shared with another thread, so its window is correct by construction.
-Fan-out branches are analysis workers; a swarm runs workers of every mode.
+Fan-out branches are analysis workers.
 
 Building both kinds here keeps a mode's construction (keys, knowledge base,
 file fence, shared extensions) written once, so a worker is never configured

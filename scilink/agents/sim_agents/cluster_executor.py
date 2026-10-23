@@ -81,8 +81,8 @@ class ClusterExecutor(Executor):
         # job is cancelled on the scheduler instead of being left to run — so
         # a Stop does not orphan the allocation. A KeyboardInterrupt during
         # the wait is handled the same way. By default it is the waiting
-        # thread's own cancel (``log_context.is_cancelled``: a swarm item's
-        # budget or memory cancel, a fan-out branch's, the turn's Stop), so
+        # thread's own cancel (``log_context.is_cancelled``: a fan-out
+        # branch's memory cancel, the turn's Stop), so
         # a cancelled item never leaves its jobs running on the cluster; a
         # caller's own hook replaces it.
         # Under the default, a cancelled item does not go on: ``run`` refuses

@@ -2151,7 +2151,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             results["literature_files"] = state.get("literature_files")
             # what a replay of this run's script is certified against (#753),
             # recorded where the series driver locked it; it travels with
-            # the board's copy of the script. A live frame (realtime, strict
+            # a copy of the script with its sidecar. A live frame (realtime, strict
             # replay) is not a recipe source, so it writes none.
             _locked = list((state.get("locked_recipes") or {}).values())
             if (len(_locked) == 1 and isinstance(_locked[0].get("certification_reference"), dict)
@@ -2275,7 +2275,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         # The run's verdict, stamped here where the result's signals are all
         # in hand (#712): the status, the QC record, the reuse verdict, the
-        # units' stamps. What "verified" means to a reader — the board,
+        # units' stamps. What "verified" means to a reader —
         # run_task's rows — is decided here, never reconstructed later.
         from ._verification_record import final_verdict_record
         from .quality_gate import gate_record

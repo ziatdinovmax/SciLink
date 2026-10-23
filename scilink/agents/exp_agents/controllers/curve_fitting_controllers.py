@@ -1317,7 +1317,7 @@ def _load_prior_curve_fit_state(raw_path):
     """Locate a prior curve-fit run's artifacts for a single path.
 
     Accepts a directory, a file inside one, or a script FILE on its own
-    (#705: a ``.py`` is a recipe — the board's copy under ``swarm/recipes/``
+    (#705: a ``.py`` is a recipe — a copy with its ``.recipe.json`` sidecar
     — and is the script replayed even when it sits inside a run folder).
     Looks for ``series_fit_results.json`` (the structured fit record) and
     the script to replay (``prior_recipe_script``: the run's single script,
@@ -1468,7 +1468,7 @@ def _restamp_regimes(output_dir, recipe_by_regime: dict, series_results: list) -
                 rec["drift_state_units"] = len(st.get("seed") or [])      # the curves the monitor seeded
                 rec["x_range"] = float(max(float(np.nanmax(c[0]) - np.nanmin(c[0])) for c in curves))
         # what a replay of this recipe is certified against, carried WITH the
-        # recipe (#753): a copy of it (the swarm board's) is certified as a
+        # recipe (#753): a copy of it is certified as a
         # replay of the run is
         samples = [identity_features(params_of[i]) for i in sorted(units_idx)
                    if isinstance(params_of.get(i), dict)]
@@ -1625,7 +1625,7 @@ def _regime_references(state: dict, candidates: list) -> list:
         rows_by_regime.setdefault(r.get("regime"), []).append(r)
     for c in candidates:
         regime = c.get("regime")
-        # the reference the recipe CARRIES (#753): a board copy has no run
+        # the reference the recipe CARRIES (#753): a copy has no run
         # behind it, so its state and identity come from here
         cref = c.get("certification_reference") if isinstance(c.get("certification_reference"), dict) else {}
         drift = (c.get("drift_state") if isinstance(c.get("drift_state"), dict)
@@ -6253,7 +6253,7 @@ Return JSON with:
         regime's units found (``identity_check``: names, strong positions)?
         Each is a flag on the record and a caveat in the message; a replay
         is ``interpretation_checked`` only when both ran against the regime's
-        units and agreed, and the board posts its claims provisional
+        units and agreed, and its claims stay provisional
         otherwise. The verdict stays the gate's: a deterministic check asked
         an interpretive question (same phase, read the same way?) has the
         precision to withhold a certificate, not to issue a negative verdict

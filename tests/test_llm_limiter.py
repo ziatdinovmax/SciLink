@@ -1,7 +1,7 @@
 """At most ``llm_max_inflight()`` calls to one model are in flight in a process,
 and every call made for a worker is charged to that worker.
 
-A swarm puts many workers on one provider at once. The cap holds on every
+A fan-out puts many workers on one provider at once. The cap holds on every
 path a call can take (the LiteLLM completion helper, embeddings, the internal
 proxy's client), is never held across a retry's backoff sleep, and can be
 lifted. Usage recorded by the ledger names the worker beside the session.

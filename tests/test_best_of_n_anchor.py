@@ -1073,7 +1073,7 @@ def test_fanout_workers_are_log_registered(tmp_path):
 
 
 def test_candidates_inherit_the_items_cancel_and_usage_tags(tmp_path):
-    """A best-of-N candidate of a cancelled swarm item (or fan-out branch)
+    """A best-of-N candidate of a cancelled fan-out branch
     must see the cancel — it registers itself with register_worker, not
     through attributed_to_current — and its LLM calls must stay charged to
     the item."""
@@ -1097,11 +1097,11 @@ def test_candidates_inherit_the_items_cancel_and_usage_tags(tmp_path):
     stop.set()                                   # the item was cancelled already
     register_cancel(stop)
     try:
-        with tracing.attributed(session="s", worker="swarm:01_item"):
+        with tracing.attributed(session="s", worker="fanout:01_item"):
             _run(c, _base_state(2))
     finally:
         unregister_cancel()
-    assert seen == [(True, "s", "swarm:01_item")] * 2
+    assert seen == [(True, "s", "fanout:01_item")] * 2
     assert not cancel_requested()                # nothing leaked onto this thread
 
 

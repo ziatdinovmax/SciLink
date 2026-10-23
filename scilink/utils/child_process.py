@@ -19,12 +19,10 @@ later. Two rules follow:
   first agent, orchestrator or model it builds in a worker, before any model
   call or file write.
 
-The child is a process SciLink must be able to end (stage 4 of the swarm
-work): it runs through the executor's tracked runner, so it leads its own
-session, is registered to the waiting thread for a Stop and a cancel, and
-its whole tree is killed with it. A caller that needs the child's memory —
-the swarm's measured peak per item class — uses ``run_child``, which also
-reports what the child's tree held while it ran.
+The child is a process SciLink must be able to end: it runs through the
+executor's tracked runner, so it leads its own session, is registered to
+the waiting thread for a Stop and a cancel, and its whole tree is killed
+with it.
 """
 from __future__ import annotations
 
@@ -43,8 +41,6 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 _MODULE = "scilink.utils.child_process"
-#: How often a child's tree is sampled for its resident memory.
-SAMPLE_INTERVAL_S = 0.5
 
 
 class SpawnBootstrapError(RuntimeError):
@@ -102,80 +98,14 @@ def _exit_reason(returncode: int) -> str:
 
 @dataclass
 class ChildOutcome:
-    """What ``run_child`` returns: the target's value and what the child
-    cost. ``peak_rss_bytes`` is the most its process tree held at one time
-    while it ran (sampled), or its own ``ru_maxrss`` when sampling was not
-    possible; ``None`` when neither could be measured."""
+    """What ``run_child`` returns: the target's value and the child's exit code."""
     value: Any
     returncode: int
-    peak_rss_bytes: Optional[float] = None
 
 
-class TreeSampler:
-    """The resident memory of a process and its descendants, sampled while
-    it runs (``psutil``; inert without it). The SUM over the tree at one
-    instant is what the work holds on the machine — an agent's arrays beside
-    its running script's — where ``ru_maxrss`` is one process's own peak.
-    ``watch(current, peak)`` is called after every sample, for a guard that
-    wants to know what a worker holds right now."""
-
-    def __init__(self, watch: Optional[Callable[[float, float], None]] = None,
-                 interval_s: float = SAMPLE_INTERVAL_S):
-        self.peak: Optional[float] = None
-        self.current: Optional[float] = None
-        self._watch = watch
-        self._interval = interval_s
-        self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-        self._root = None
-
-    def start(self, proc: subprocess.Popen) -> None:
-        try:
-            import psutil
-            self._root = psutil.Process(proc.pid)
-        except Exception:  # noqa: BLE001 - no psutil, or the child already gone
-            return
-        self._thread = threading.Thread(target=self._run, name="scilink-rss-sampler", daemon=True)
-        self._thread.start()
-
-    def _sample(self) -> Optional[float]:
-        try:
-            procs = [self._root] + self._root.children(recursive=True)
-        except Exception:  # noqa: BLE001 - the tree is gone
-            return None
-        total = 0.0
-        for p in procs:
-            try:
-                total += float(p.memory_info().rss)
-            except Exception:  # noqa: BLE001 - a process ended between the two calls
-                continue
-        return total
-
-    def _run(self) -> None:
-        while True:
-            rss = self._sample()
-            if rss is not None:
-                self.current = rss
-                self.peak = rss if self.peak is None else max(self.peak, rss)
-                if self._watch is not None:
-                    try:
-                        self._watch(rss, self.peak)
-                    except Exception:  # noqa: BLE001 - a watcher never stops the sampler
-                        pass
-            if self._stop.wait(self._interval):
-                return
-
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
-
-
-def run_child(target: str, payload: Any, *,
-              watch: Optional[Callable[[float, float], None]] = None,
-              log_path: Optional[str] = None) -> ChildOutcome:
+def run_child(target: str, payload: Any, *, log_path: Optional[str] = None) -> ChildOutcome:
     """Call ``target`` (``"package.module:function"``) with ``payload`` in a
-    fresh interpreter and return what it returned, with what the child cost.
+    fresh interpreter and return what it returned.
 
     The child sees the parent's ``sys.path`` — exactly, as spawn passes it:
     ``-P`` keeps ``-m`` from putting the working directory first, where a
@@ -194,7 +124,7 @@ def run_child(target: str, payload: Any, *,
 
     With ``log_path`` the child's console (stdout and stderr, unbuffered)
     goes to that file instead of the caller's console, for a caller that
-    relays it (a swarm item's turn) or keeps it as the run's log.
+    relays it or keeps it as the run's log.
     """
     from scilink.executors import _run_tracked
     fd, result_path = tempfile.mkstemp(prefix="scilink_child_", suffix=".pkl")
@@ -202,7 +132,6 @@ def run_child(target: str, payload: Any, *,
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(os.path.abspath(p or os.curdir) for p in sys.path)
     caller_pythonpath = json.dumps(os.environ.get("PYTHONPATH"))
-    sampler = TreeSampler(watch)
     log_fh = None
     if log_path:
         env["PYTHONUNBUFFERED"] = "1"          # a line reaches the file as it is printed
@@ -213,9 +142,8 @@ def run_child(target: str, payload: Any, *,
                                  caller_pythonpath],
                                 input=pickle.dumps(payload), text=False,
                                 stdout=log_fh, stderr=subprocess.STDOUT if log_fh else None,
-                                env=env, on_start=sampler.start)
+                                env=env)
         finally:
-            sampler.stop()
             if log_fh is not None:
                 log_fh.close()
         returncode = proc.returncode
@@ -224,14 +152,13 @@ def run_child(target: str, payload: Any, *,
                 envelope = pickle.load(f)
         except Exception:  # noqa: BLE001 - empty or torn: nothing came back
             raise ChildLost(target, _exit_reason(returncode), returncode=returncode) from None
-        outcome, value, info = envelope
+        outcome, value = envelope
         if outcome != "returned":
             last = next((ln.strip() for ln in reversed(value.splitlines()) if ln.strip()),
                         "an exception")
             raise ChildLost(target, f"raised in the child: {last}",
                             f"raised in the child:\n{value}")
-        peaks = [p for p in (sampler.peak, info.get("ru_maxrss_bytes")) if p]
-        return ChildOutcome(value, returncode, max(peaks) if peaks else None)
+        return ChildOutcome(value, returncode)
     finally:
         try:
             os.unlink(result_path)
@@ -244,22 +171,6 @@ def run_in_child(target: str, payload: Any) -> Any:
     return run_child(target, payload).value
 
 
-def _ru_maxrss_bytes() -> Optional[float]:
-    """The most this process, or any one of its waited children, held:
-    bytes on macOS, kilobytes elsewhere."""
-    try:
-        import resource
-    except ImportError:  # pragma: no cover - Windows
-        return None
-    unit = 1.0 if sys.platform == "darwin" else 1024.0
-    try:
-        own = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        kids = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-    except Exception:  # noqa: BLE001
-        return None
-    return float(max(own, kids)) * unit
-
-
 def _child_main(target: str, result_path: str, caller_pythonpath: str) -> int:
     pythonpath = json.loads(caller_pythonpath)
     if pythonpath is None:
@@ -270,10 +181,9 @@ def _child_main(target: str, result_path: str, caller_pythonpath: str) -> int:
         payload = pickle.load(sys.stdin.buffer)
         module, _, name = target.partition(":")
         value = getattr(importlib.import_module(module), name)(payload)
-        envelope = ("returned", value, {"ru_maxrss_bytes": _ru_maxrss_bytes()})
-        blob = pickle.dumps(envelope)
+        blob = pickle.dumps(("returned", value))
     except BaseException:  # noqa: BLE001 - report everything to the parent
-        blob = pickle.dumps(("raised", traceback.format_exc(), {}))
+        blob = pickle.dumps(("raised", traceback.format_exc()))
     with open(result_path, "wb") as f:
         f.write(blob)
     return 0

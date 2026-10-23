@@ -8,7 +8,7 @@ the single-cube pipeline stubbed at the seam tests/test_hs_series.py uses:
   own sidecar fields (an exposure that differs 17x between units), and the
   unit's own value wins over a shared field built from one file;
 - a series where one unit of three produced features says so in
-  ``run_task``'s warnings, on the board's claim, in ``features.csv`` (every
+  ``run_task``'s warnings and on its ``analyses`` row, in ``features.csv`` (every
   unit listed, ``verified`` / ``flag_reason``, the series variable kept beside
   the sidecar fields, a sidecar column that only repeats it dropped), in the
   flag's recommendation (no recipe locked: nothing re-analyses it) and in the
@@ -29,7 +29,6 @@ os.environ.setdefault("ANTHROPIC_API_KEY", "sk-dummy")
 os.environ.setdefault("UNSAFE_EXECUTION_OK", "true")
 
 from scilink.agents.exp_agents import hyperspectral_analysis_agent as hsa
-from scilink.agents.meta_agent import board as board_mod
 
 AXIS = {"technique": "EELS", "sample": "TiOx",
         "energy_range": {"start": 450.0, "end": 550.0, "units": "eV"}}
@@ -136,11 +135,8 @@ def test_a_partial_series_says_how_partial_it_is(tmp_path, monkeypatch):
     assert row["series_coverage"]["unverified"] == ["cube_2"]
     assert any("(series): 1 of 3 units produced features; unverified: cube_2; failed: cube_0, cube_1" in w
                for w in result["warnings"]), result["warnings"]
-    # the board's claim carries the coverage
-    entry = {"index": 1, "label": "dose", "mode": "analysis", "status": "success"}
-    claims = [r for r in board_mod.records_for(entry, {**result, "key_findings": [
-        f"[{row['analysis_id']}] the mean rises with dose"]}) if r["kind"] == "claim"]
-    assert claims[0]["evidence"]["coverage"] == {"units": 3, "with_features": 1, "n_unverified": 1, "n_failed": 2}
+    # the row carries the coverage in full, counts included
+    assert row["series_coverage"]["n_unverified"] == 1 and row["series_coverage"]["n_failed"] == 2
     # the table: every unit, its status, the series variable beside the sidecar
     with open(Path(row["output_directory"]) / "features.csv", newline="") as fh:
         table = list(csv.DictReader(fh))

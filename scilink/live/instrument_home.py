@@ -20,7 +20,7 @@ loop. Otherwise the reference is analysed as usual and the new recipe is kept. A
 rebuild also tries them before building anything. And ``close`` writes the run's
 summary. Nothing here imports the server, chat or an orchestrator.
 
-Several loops can serve one instrument at once (two sessions, a swarm, the
+Several loops can serve one instrument at once (two sessions, the
 tab and a script), so every change to a home is made under one lock per
 instrument (``instruments/.locks/<id>.lock``, beside the homes rather than
 inside one, so forgetting an instrument removes its folder whole), and every

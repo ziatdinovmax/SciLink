@@ -41,7 +41,7 @@ class UsageLedger:
             lambda: {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0})
         self.by_session: Dict[str, Dict[str, float]] = defaultdict(
             lambda: {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0})
-        # Only calls made for a worker (a fan-out branch, a swarm item) land
+        # Only calls made for a worker (a fan-out branch) land
         # here; a session's own calls stay in by_session alone.
         self.by_worker: Dict[str, Dict[str, float]] = defaultdict(
             lambda: {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0})

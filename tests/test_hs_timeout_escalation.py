@@ -192,7 +192,7 @@ CONTEXT_ERROR_SCRIPT = _CHAINED_TEMPLATE.format(link="")           # __context__
 def test_the_escalation_happens_in_a_worker_thread_too(tmp_path, monkeypatch):
     """#715 review, item 1: off the main thread ExecutionTimeout injected a
     bare TimeoutError, which the policy did not recognise — so the CLI shell,
-    the web runner, the MCP server, fan-out and the swarm never escalated.
+    the web runner, the MCP server and the fan-out never escalated.
     One subclass (SandboxTimeout) on both paths, tested by type."""
     import threading
     from scilink.executors import ExecutionTimeout, SandboxTimeout

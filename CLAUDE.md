@@ -159,14 +159,15 @@ reuse replays the first regime's and says so (its verdict is one vision
 review, not a gate). A hyperspectral reuse falls through like the curve's, each
 regime's recipe held to ITS OWN map gate (the regime's plausible ranges), each
 replayed in its own `_candidates/recipe_NN` folder and the kept one's files made
-the run's: a series run folder or a folder of the board's copies of its regimes
+the run's: a series run folder or a folder of recipe copies of its regimes (each
+with its `.recipe.json` sidecar)
 offers one recipe per regime in lock order (else by name) and is never merged;
 of several paths the first is used and the rest named; a caller's own
 `replay_reference` (the series driver's replays, the live loop) keeps the first
 (`script_reuse.source`, `regime_choice`, #751).
 `prior_analysis_paths` also takes a recipe FILE (`.py`,
 or `dynamic_analysis_records.json` for a cube) through the same replay gate,
-so the swarm board's copy under `swarm/recipes/` is replayable — as a recipe
+so a copy of a recipe kept beside its `.recipe.json` sidecar is replayable — as a recipe
 only: a file is not a run, so the realtime profile, the live loop's anchor and
 an image strict replay (which need the run's config, fingerprint or reference
 features) refuse it. The pick and its reason are `reuse_validity.source`
@@ -226,13 +227,13 @@ analysis whose inputs are every unit, staged with a manifest
 (`exp_agents/_joint.py`: the planner rule, the declaration, staging and the
 prompt text are shared; each agent supplies only how a unit becomes an
 array). A joint run's script reads its own run's measurements by path, so it
-is a record, not a recipe: the run's `analysis_results.json` (and a board
+is a record, not a recipe: the run's `analysis_results.json` (and a recipe
 copy's sidecar) carries `analysis_shape: joint`, every reuse reader refuses it
 with the reason through one check (`_joint.replay_refusal`, consulted by
 `prior_recipe_scripts` and the hyperspectral records loader), and it is never
 banked — until a replay over a new set of measurements is designed. The live
 loop's `setup()` refuses a joint reference outright, and the fan-out's donor
-picker never takes one. A board copy separated from its sidecar carries no
+picker never takes one. A recipe copy separated from its sidecar carries no
 marker and cannot be recognised as joint: keep the two together. Every plan
 gate shows the shape (a notice when joint), so Enter accepts what was shown.
 **The measured inputs are the only inputs** (`_input_integrity.py`):
@@ -336,7 +337,7 @@ comes from a fit is returned as `{"value", "role", "bounds"}` and CHECKED
 of the field mean's noise — never judged against a declared range — measured on 1,227
 scalars of 156 real runs: failed fits at <= 2e-5 sigma, healthy from 0.65), it
 is a failed fit: no value in the feature table, `failed_outputs` on the row,
-named as FAILED on the board and in both syntheses. One that passes is
+named as FAILED in both syntheses. One that passes is
 `gated: True` — passed against the bounds the SCRIPT DECLARED, nothing ties
 them to the bounds the fit used; an amplitude is certified only from
 `AMPLITUDE_CERTIFY_SIGMA` (0.5 sigma) up, stays unchecked between the two
@@ -359,8 +360,6 @@ kept only for sibling datasets that cannot be staged as one directory. A
 fan-out branch that IS a datacube-series directory gets
 `FANOUT_SERIES_BUDGET_FACTOR` × the default wall-clock budget (the raw-
 instrument rule's shape), because the series mode is a multiple of one run.
-A swarm analysis item with a `data_path` gets the same per-branch budget
-(`resolve_branch_budget`); a caller's `item_time_budget_s` is taken as is.
 Under AUTOPILOT delegation the regime-plan gate reaches the user through the
 normal feedback channel, like the specialists' other plan gates.
 
@@ -387,7 +386,7 @@ in the parent the serial way (the lost attempt's files set aside under
 `lost_attempt/`) and named in `summary.replays_rerun_in_process`:
 a pool failure is not a recipe failure, so it never becomes a refit. A
 replay that returns a failure is the method's, and is refit as before. A
-new worker pool (the swarm's process workers included) launches through
+new worker pool launches through
 `run_in_child`.
 
 **The replay gate, the verdict and the regime choice are shared policies.**
@@ -398,8 +397,8 @@ policies by composition — no base class: a `verdict_record` (one dict shape,
 `verified` / `reason` / `decided_by` ∈ qc_gate · replay_gate · recipe ·
 excluded · none / `interpretation_checked`) that every agent STAMPS where it
 decides (a series unit at fit time, a cube or a run when its result is final,
-`results["verdict"]`) and that `analysis_verdict` and the swarm board only
-read; three replay gates with one verdict shape (`ScoreReplayGate` for the
+`results["verdict"]`) and that `analysis_verdict` only
+reads; three replay gates with one verdict shape (`ScoreReplayGate` for the
 curve's R² and the image's vision score, `FeatureHealthGate` for an image
 strict replay, `MapReplayGate` for a hyperspectral map); `select_recipe`,
 the one rule for choosing among a series' regime recipes on a reuse; and the
@@ -450,8 +449,8 @@ agent's: an image reuse has no identity check on its `reuse_validity` and
 is never certified, so its claims stay provisional. A hyperspectral
 replay's `identity_checked` is the map gate's range rule — every required
 map inside the anchor's plausible range — a weaker certificate than the
-curve's two checks. With no map gate (a single cube's run folder or its board
-copy) the run's own `certification_reference` maps certify by the same rule
+curve's two checks. With no map gate (a single cube's run folder or a recipe
+copy of it) the run's own `certification_reference` maps certify by the same rule
 and never gate: the verdict is the run's, and a single-cube reuse can now be
 certified, which it never was before #753. The verdict stays the gate's, on the fast clock and
 off it. Why not a verdict: a deterministic check asked an interpretive
@@ -465,7 +464,7 @@ is cheap. A negative verdict on interpretation is a separate, measured step:
 a fixed corpus of cases first, a rule adopted only when it measures well
 across all of them (the candidate: the monitor's distance after a bounded
 alignment, one table for the regime choice and the verdict), the declined
-variants recorded here. The swarm board posts a replay's CLAIMS as verified
+variants recorded here. A replay's CLAIMS count as verified
 only when the interpretation was checked — its recipe, a script that ran,
 stays verified by the gate — and a series whose ANCHOR replayed a prior
 recipe rests on the replay gate like the single replay does (followers that
@@ -492,7 +491,7 @@ loop had already found. Images keep the first regime's recipe and say so.
 **The replay gate is the gate the recipe was approved under, and a withheld
 certificate is explained, not re-judged.** A replayed recipe is held first to
 the gate recorded with it (`gate_record` on each regime's recipe at lock time
-and on every run's results; the swarm board's copy of a script carries it in
+and on every run's results; a copy of a script carries it in
 a `<stem>.recipe.json` sidecar with the plan's model; the live loop's
 series-derived anchor records the locked frame's regime gate) — a reuse run
 resolves a gate of its own from whatever skill it was or was not given, which
@@ -527,8 +526,8 @@ withheld with nothing to explain, and is not): one model call shown the findings
 quoted data between markers, the replayed fit and the new curve over the
 regime's anchor, and the skill's `interpretation` section, asked which regime
 the measurement belongs to and what changed. The answer is an opinion on the
-record (`reuse_validity.escalation`, `decided_by: judge`), in the message, on
-the `analyses` row and on the board as a PROVISIONAL claim; the verdict and
+record (`reuse_validity.escalation`, `decided_by: judge`), in the message and on
+the `analyses` row; the verdict and
 `interpretation_checked` do not move, nothing is re-run, and a regime the
 judge names against an ambiguous choice is `regime_choice.suggested` — listed
 for the caller, never taken. Never on a certified or clean pass, on the fast clock, when
@@ -967,191 +966,107 @@ through inherited internals), no base class is required. The contract is
 duck-typed; what the children share is *interface shape*, not
 *implementation*.
 
-## Swarms: several delegations at once, on fresh agents
+## What concurrent workers share
 
-`run_swarm(work_items)` (`scilink/agents/meta_agent/swarm.py`) runs 2-8
-delegations of any mode concurrently, each on an **ephemeral worker**
-(`workers.build_child`, the one constructor behind the persistent specialists
-too) in `<meta_session>/swarm/<NN>_<slug>/`, each an ordinary ledger
-delegation. The design, its stages and what each stage left open are in
-`docs/proposals/agent-swarms.md`; stages 0, 1 (#697) and 2 (the board, #702)
-and 3 (reactions, #708) are on `main`, the replay policies the board's
-"verified" rests on were settled between stages (#712: #713, #714, #717,
-#715), and stage 4's LOCAL scheduler is on `main` (the worker contract and
-its process placement, the measured table per item class, the token budget,
-the circuit breaker, the guard shared with the fan-out — the proposal's "Stage
-4 on `main`: the local scheduler"); the AWS worker tasks are their own later
-PR with the hosted-campaigns work (the proposal's "Between stage 3 and stage
-4" says why; "Since the stage-4 scoping" is the contract every placement
-implements).
-Settled rules, each learned from a live run or a review:
+Several delegations run at once in the fan-out (`delegate_to_analyses`),
+the hyperspectral series' replay workers run in fresh interpreters, and a
+best-of-N run has its candidates on threads. The rules below are what every
+such worker shares; each was learned from a live run, and none is about any
+one of them.
 
-- **A swarm item is a fresh agent.** It does not remember earlier delegations;
-  its task and context carry everything. The persistent specialists stay for
-  conversation, where accumulating context is the point — and two concurrent
-  `run_task` calls on one specialist would each report the other's output.
-  An analysis item carries its own depth (`profile`, `targets`,
-  `time_budget_s`) as a delegation and a fan-out branch do: one rule reads it
-  on all three paths (`fanout.analysis_depth`; a bad value is refused before
-  anything runs), it is on the entry, and a rerun or a re-run after a
-  retraction starts from it (#756).
-- **The coordinator is rules, not a model.** Admission by free memory (an
-  item is estimated by its LARGEST unit, nested data included — a series runs
-  its units one at a time, times the replay workers the agent itself resolves
-  plus the parent — and a raw-instrument file, by its own embedded contract or
-  its folder's, by its preparation, #724 — unless its CLASS was measured: a
-  process worker's peak and tokens are recorded per `mode:kind:size:units`
-  in `measured_items.json` under the SciLink home, and the next item of the
-  class is sized from the largest run seen, `meta_agent/peaks.py`), a
-  capacity plan that refuses an item larger than the machine, a memory guard
-  that cancels the running item that HOLDS the most (what its process worker
-  was last sampled at, else its estimate; never one running alone) and reruns
-  it alone once, a wall-clock budget per item, a token budget reserved per
-  item at admission and reconciled on completion (`budget.max_tokens`; a
-  cancelled item is charged for what it spends while it winds down), a
-  provider circuit breaker per model that pauses admission (never running
-  work) while a model's last minute holds at least six retryable failures
-  that are at least half its calls — a success counts toward the ratio and
-  does not end the hold, since in a brown-out running work keeps succeeding
-  now and then (`wrappers/llm_limiter.py`) — no item starting another. The capacity refusal and the guard are the fan-out's
-  too (`fanout.plan_capacity`, `fanout.guard_memory`): a branch whose
-  MEASURED class is larger than the host is not started (an input-based
-  estimate never refuses a fan-out branch; the swarm refuses on it), a
-  branch cancelled for memory reruns alone once.
-  The model decides between swarm runs and inside each item, never within a
-  run.
-- **Where an item runs is a placement behind one contract**
-  (`meta_agent/placements.py`: `submit(spec) -> handle`, `poll(handle) ->
-  {state, result, peak_rss_bytes, stop_reason}`, `cancel(handle)`; states
-  queued · running · done · failed · cancelled · out_of_memory ·
-  interrupted). An analysis item with data runs as a PROCESS when nobody
-  attends the swarm — a fresh interpreter through `run_in_child`, which now
-  goes through the executor's tracked runner, so the item's cancel, the
-  guard and the turn's Stop end its whole tree (descendants in their own
-  sessions included), its console goes to `<item dir>/worker.log` and is
-  relayed into the turn, and its memory is measured while it runs (the
-  tree's sampled sum, else the child's `ru_maxrss`); a worker killed with
-  nothing returned and no cancel asked is `out_of_memory` and runs again
-  alone, once. Planning and simulation items, and every item of an attended
-  swarm (its questions need the person's channel), stay threads in the
-  coordinator's process and measure nothing. The spec is plain data with no
-  provider key: each key travels as the NAME of the environment variable
-  that holds it and the child reads that variable (an MCP server's `env`
-  and `headers` do travel, over stdin, never on disk); a key under no
-  variable (the API, embedding or FutureHouse key), or a callable tool
-  extension, keeps the item a thread with the reason on its entry. A measured class is refused on its
-  raw peak and admitted with ×1.2 headroom; a fan-out branch is refused only
-  on a measured peak. `SCILINK_SWARM_PLACEMENT=thread|process`
-  overrides the rule (the offline tests pin threads). An HPC job
-  (`ClusterExecutor.submit/poll`, whose `cancel_check` now defaults to the
-  waiting thread's own cancel) and an ECS task are the later placements of
-  the same contract.
-- **A gate nobody answers is never a human decision.** Worker questions go
-  through one queue (`hitl.QueueChannel`), served on a thread of their own
-  (`hitl.QuestionServer`) so the coordinator keeps enforcing its rules, tagged
-  with who asks (`WorkerChannel`), and time out to the gate's default — with
-  the clock restarting when the question is shown, and the wait left out of
-  the item's budget. A timeout, including one inside a channel with its own
-  clock (`hitl.mark_timed_out`, the MCP server's), is visible to the gate
-  (`last_question_timed_out`): the planner then writes `unattended_gate`, never
-  `human_review`. A plan settled by silence would be settled by nobody.
+- **A gate nobody answers is never a human decision.** A worker's questions
+  go through one queue (`hitl.QueueChannel`), served on a thread of their own
+  (`hitl.QuestionServer`) so the thread that runs the branches keeps
+  enforcing its rules, tagged with who asks (`WorkerChannel`), and time out to
+  the gate's default, with the clock restarting when the question is shown.
+  A timeout, including one inside a channel with its own clock
+  (`hitl.mark_timed_out`, the MCP server's), is visible to the gate
+  (`last_question_timed_out`): the planner then writes `unattended_gate`,
+  never `human_review`, and the planning `run_task` reports how the plan was
+  settled (`plan_review`). A plan settled by silence would be settled by
+  nobody.
 - **A cancel must reach a waiting worker.** A print is not the only place a
   Stop lands: a parked question, an LLM-slot wait, a backoff sleep and a
   best-of-N candidate all poll the thread's cancel
-  (`log_context.register_cancel`, `inherited_context`). A new agent that spawns
-  its own threads uses `attributed_to_current` or `inherited_context`, or its
-  threads run on after their item is cancelled. A chat turn's Stop is added to its thread's cancel for the turn (`register_turn_stop`), never in place of one the thread already carries, so a new wait that polls the cancel ends on the user's Stop and on an item's own cancel alike. And every process SciLink starts is stoppable: model-written code runs through the script executor (`ScriptExecutor`, or `executors.run_generated_script` where a caller needs `subprocess.run`'s shape — SciLink's interpreter, no provider keys, the sandbox limits, consent asked first), and an external engine through `executors.run_engine` (Stop registration, its whole tree killed on a timeout, the parent environment kept); a new call site never calls `subprocess.run` on generated code or an engine (#685).
+  (`log_context.register_cancel`, `inherited_context`). A new agent that
+  spawns its own threads uses `attributed_to_current` or `inherited_context`,
+  or its threads run on after their branch is cancelled. A chat turn's Stop is
+  added to its thread's cancel for the turn (`register_turn_stop`), never in
+  place of one the thread already carries, so a new wait that polls the
+  cancel ends on the user's Stop and on a branch's own cancel alike. And
+  every process SciLink starts is stoppable: model-written code runs through
+  the script executor (`ScriptExecutor`, or `executors.run_generated_script`
+  where a caller needs `subprocess.run`'s shape — SciLink's interpreter, no
+  provider keys, the sandbox limits, consent asked first), and an external
+  engine through `executors.run_engine` (Stop registration, its whole tree
+  killed on a timeout, the parent environment kept); a new call site never
+  calls `subprocess.run` on generated code or an engine (#685).
 - **The provider and the stores are shared.** At most `SCILINK_LLM_MAX_INFLIGHT`
   calls per model are in flight (`wrappers/llm_limiter.py`, held per request,
-  never across a backoff); usage is charged per worker; the distill staging,
+  never across a backoff); usage is charged per worker through the usage
+  sink; a provider circuit breaker per model holds the fan-out's admission
+  (`fanout._admit_branch`, never running work) while a model's last minute
+  holds at least six retryable failures that are at least half its calls — a
+  success counts toward the ratio and does not end the hold, since in a
+  brown-out running work keeps succeeding now and then; the distill staging,
   graduated skills and instrument homes take a lock for every change, and a
   reviewed skill upgrade refuses a skill that changed during the review.
-- **The board is the record, and independence is a number.** Every finished
-  delegation posts typed, small records to `swarm/board.jsonl`
-  (`meta_agent/board.py`): a claim, a measurement, a recipe or structure by
-  path, a parameter point, a hazard. One writer, never edited in place (a
-  correction `supersedes`, a withdrawal is a `retraction`, and neither takes
-  effect from an unchecked record of another author), and `verified` means a
-  GATE the author's own pipeline runs passed it — the analysis verifier's
-  approval (`analysis_verdict`, read from the shapes the agents write: a
-  salvaged, unverified or unapproved result is "success" too and stays
-  provisional; a series unit carries the verdict its driver stamped at fit
-  time — an anchor or refit by its own gate, a follower by the recipe it
-  replayed — and a failed unit the agent already excluded does not block; an
-  approved fit with a parameter pinned at its bound is withheld as a
-  DEGENERATE fit, named, never called salvaged (#726); a decision about a unit is made where the information is, never reconstructed
-  afterwards from markers; the board keeps its own copy of a recipe under
-  `swarm/recipes/<NN>_<label>/<analysis_id>/`, written once and never
-  rewritten — a series' recipes from the `locked_recipes` its driver records
-  where each regime locks (the curve, image and hyperspectral drivers alike;
-  a cube's recipe is a records FILE, copied under its unit's own folder by the
-  name `prior_analysis_paths` reads, with its map gate in the sidecar, which a
-  replay of the copy is held to when its caller passes no reference, #734); and every copy carries, in its sidecar only (never in the board record: it can be large), the opaque `certification_reference` its agent stamped where it recorded the recipe — a curve regime's state and identity from its units, a cube's reference maps — so a replay of the copy is certified, flagged and escalated as a replay of the run is; a copy with none, and an image replay (no interpretation check by design), says why on its record (`_replay.NO_REFERENCE`, `NO_INTERPRETATION_CHECK`), #753 — so an agent's folder is never read again for it and the
-  agents' own layout and reuse are untouched by the swarm; a verifier's
-  physics approval inside the gate's soft band counts, a bypassed verification
-  below threshold does not; a CLAIM of a run that also reported outputs no gate
-  checked — a hyperspectral task's `scalars`, marked `gated: False` where they
-  are produced and carried as `ungated_outputs` on the `analyses` row — stays
-  provisional, its recipe verified, because the gate approved the maps and a
-  claim may rest on the numbers beside them, #722 — unless every such number
-  was declared and passed its fit-health check, B1; one that FAILED it is
-  named as a failed fit, `failed_outputs`), a human-approved plan (an unattended one stays
-  provisional; only the delegation that wrote or settled the plan posts it),
-  the structure validator. Engine output and advice that passed no gate — a BO
-  point, a steering reduction, a TEA summary, a critic's blocking finding — is
-  provisional. The board adds
-  no judge. A reader gets verified records only, as quoted data between markers,
-  clipped and budgeted, under the same additive-only rule as steering; a swarm
-  item reads once, at its start (`reads_board`, the newest 24), and a `check`
-  item is refused a read by the API, not by prompt text. Every read is
-  recorded (`reads`, exactly what was shown), so fusion's `independent_support`
-  is computed, not judged: the largest set of fused branches none of which
-  read, was steered by, or cited another in the set (the board's read graph
-  joined with the ledger's `context_from` and `steered_by` edges, keyed by
+- **Memory is admitted, never refused on an estimate.** A branch is admitted
+  by free memory (`fanout._admit_branch`): branches that do not fit together
+  wait for each other. The input-based estimate (`estimate_item`,
+  `plan_capacity`) is coarse by design and refuses nothing — there is no
+  host-size refusal. Under pressure the guard (`guard_memory`) cancels the
+  running branch with the largest estimate, never one running alone, and
+  reruns it alone once (`Drain`: one cancellation at a time, memory read again
+  only once the cancelled worker has let go of what it held).
+- **Independence is a number computed from the ledger, not judged.** Fusion's
+  `independent_support` is the largest set of fused branches none of which
+  cites, was steered by, or rests on a fusion of another in the set
+  (`fanout.independent_support_of` over `_ledger_dependents`: `context_from`
+  declared or inferred, steering, fusion feedback, transitively; keyed by
   delegation index, exact up to 12 branches and a stated lower bound beyond),
-  rendered with what it cannot see (a finding pasted by hand with no citation).
-  A shared dataset (co-registered operands) is not a coupling of findings. A
-  new way of coupling two delegations becomes a read on the board, not a new
-  prompt caveat. A
-  record describes its artifact as it was when posted; a later edit is a later
-  delegation's record.
-- **A reaction is a rule the meta declared, applied by the coordinator.** A
-  swarm's `subscriptions` (`meta_agent/reactions.py`) say *when a record of
-  this kind, subject and status is posted, enqueue this item*; the coordinator
-  fills the item from the record (a fixed vocabulary of `{finding.*}` fields,
-  one substitution pass, no model) and launches it as an ordinary item, and
-  stamps its cause and causal `chain` on the entry at that moment. Every
-  bound is a number: a finding fires a subscription once, `max_fires` per
-  subscription, two re-triggers per subject, the swarm's item limit, and a
-  cycle — the same `(mode, subject, kind)` hop twice in one chain — or a
-  record at the end of a supersede chain of three is refused with the reason
-  on the triggering entry. Workers ask (`suggested_followups` become
-  `task_request` records, never read by default) and the coordinator decides
-  (an item only through a subscription on that kind); no worker starts a
-  worker. A reaction's cause is one of its reads (its task quotes the
-  finding, as labelled data, never as an instruction), so what the cause
-  rests on, the reaction rests on. A withdrawn finding (`retract_finding`)
-  taints everything that rested on it — derived in the fold from the read
-  graph, so a late post that read it is caught — and the re-run is the next
-  swarm, with the items prepared (never a reaction the withdrawn finding
-  caused: that is a new decision). Who withdraws: a person at the gate,
-  shown the finding and its dependents, Enter keeping it; with nobody there
-  the model may withdraw the agents' findings but never a human's decision —
-  not a human-approved plan's claim, not a finding such a claim rests on, not
-  a retraction a person made (`decided_by`); a retraction is undone by
-  retracting it, which retractions stand is decided newest first, and every
-  act is judged by its previewed EFFECT (what it withdraws, taints or brings
-  back), never by the record it names. A disagreement
-  between independent results is reported, never settled by a retraction. A
-  hazard on a subject reaches every reader of that subject whatever its
-  `kinds` filter and whatever the newest-N cut, marked as the provisional
-  record it is.
-- **One PR per stage.** A stage is verified as a whole: the full suite against
-  a `main` worktree by failing-test ids, and live checks on Bedrock from a
-  frozen snapshot, one heavy run at a time.
+  rendered with what it cannot see (a finding pasted by hand with no
+  citation). A shared dataset (co-registered operands) is not a coupling of
+  findings. A new way of coupling two delegations becomes a ledger edge, not
+  a prompt caveat.
 
-A new sub-agent or skill inside a mode gets all of this without swarm code;
-a fourth mode would not, and there will not be one.
+## Swarms were tried and removed
+
+Between late September and early October 2026 the meta agent grew a swarm:
+several delegations of any mode at once on fresh agents, a board of typed
+findings every delegation posted, reactions that enqueued follow-ups from
+posted records, a local scheduler with process placement and measured
+memory classes, and worker-tagged display. Live runs showed the swarm path
+producing WORSE analyses than the same tasks run as fan-out branches (fresh
+agents without the session's context, board hints injected into tasks,
+per-item budgets and a memory guard cancelling work, questions timing out
+to their defaults), so on 2026-10-21 it was removed rather than tuned: the
+`run_swarm`, `get_board` and `retract_finding` tools, the board, reactions,
+placements and measured peaks are gone, nothing posts findings anywhere,
+and a session has no `swarm/` folder.
+
+What stayed is what the fan-out and the series drivers use, under the rules
+of "What concurrent workers share" above: the
+human-feedback question server and worker channel (`hitl.py`), the
+ephemeral worker constructor (`workers.build_child`), the store locks, the
+LLM in-flight slot and the provider breaker the fan-out's admission reads
+(`llm_limiter.py`), the per-thread cancel primitives and attribution in
+`log_context`, the fan-out's capacity plan and memory guard
+(`fanout.plan_capacity`, `guard_memory`, on the input-based estimate only;
+the host-size refusal went with the measured classes),
+the coordinator mark on the fan-out's own lines, the fresh-interpreter
+replay workers (`utils.child_process`), and the verdict record the analysis
+agents stamp (`_replay.verdict_record`, `analysis_verdict`), which the
+replay policies rest on and `run_task`'s `analyses` rows carry. A recipe
+FILE beside a `<stem>.recipe.json` sidecar (the shape the board once wrote)
+is still a replayable recipe for `prior_analysis_paths`. The fusion's
+independence count is computed from the ledger's own edges (`context_from`,
+steering, fusion feedback), no longer from board reads.
+
+The design record is `docs/proposals/agent-swarms.md`, kept with its
+status. Several delegations at once is `delegate_to_analyses` (the
+fan-out); the universe of modes is still three, and a fourth mode would not
+get a swarm either.
 
 ## The terminal is one shell over the four chat modes
 
@@ -1178,26 +1093,13 @@ The narration reader (`scilink/ui/narration.py`, TS twin
 the activity label; the web runner emits it as an `activity` event, the
 shell shows it on its status row, and one fixture pins both readers.
 **When a chat-surface label or behaviour changes, change it in the
-vocabulary or the narration reader, not in one surface.** A swarm item's
-lines carry its label at the line start (`[XRD 300 K] 💭 …`): the label is
-the thread's worker label in `log_context` (registered by the item's
-thread, inherited by every thread the item starts through
-`attributed_to_current` / `inherited_context` — a best-of-N candidate's
-lines are the item's too — and put through `narration.worker_tag`, so a
-label the model wrote is always a tag the reader accepts: one line, no
-brackets, at most 48 characters); the item's stream wrapper inserts it,
-and the process worker's relay only when its thread carries none. Both
-readers strip the tag (`split_worker_tag`), classify what follows with a
-continuation state kept PER worker (item B's indented line is never item
-A's thought), and keep the label on the line and in the activity ("XRD 300
-K · Curve Fitting Planning"). The swarm and fan-out coordinators' own lines
-are the visible `fanout` kind by a MARK the coordinators put on them
+vocabulary or the narration reader, not in one surface.** The fan-out coordinator's own lines
+are the visible `fanout` kind by a MARK the coordinator puts on them
 (`vocabulary.COORDINATOR_MARK`, through `fanout.coordinator_line` /
-`_cprint` — every coordinator print in `fanout.py`, `swarm.py` and
-`meta_orchestrator_tools.py` goes through it, and a test scans the source
-for one that does not), never by wording or by an emoji an agent may print
-too; the readers give them activity labels of their own. A fan-out
-branch's lines carry no tag.
+`_cprint` — every coordinator print in `fanout.py` goes through it, and a
+test scans the source for one that does not), never by wording or by an
+emoji an agent may print too; the readers give them activity labels of
+their own.
 
 **A human-feedback gate declares what is under review; it does not print
 it for the surfaces to parse.** Every gate holds a structured object at ask

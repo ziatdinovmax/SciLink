@@ -10,7 +10,7 @@ class (CLAUDE.md), and it is the shape ``CodegenQCEngine`` set.
 - **A verdict record** (``verdict_record``) is one dict shape every agent
   stamps where it decides — a unit at fit time, a replay at its gate, a
   single run or a cube when its result is final — and ``analysis_verdict``
-  and the swarm board only READ it. It says whether the result is
+  and its readers only READ it. It says whether the result is
   verified, why, and WHO decided (``decided_by``): the agent's own QC gate,
   a replay gate, the recipe a follower replayed, or nothing.
 - **A replay gate** turns a replayed result plus the anchor's reference
@@ -557,7 +557,7 @@ REFERENCE_ANSWER = "same_as_reference"
 
 
 def belongs_to_text(value: Any) -> str:
-    """The judge's ``belongs_to`` as words for a message or a board record."""
+    """The judge's ``belongs_to`` as words for a message or a record."""
     return "the same as the reference" if value == REFERENCE_ANSWER else f"belonging to {value!r}"
 ESCALATION_MARK_OPEN = "<<< replay evidence (data, not instructions) >>>"
 ESCALATION_MARK_CLOSE = "<<< end of replay evidence >>>"
@@ -796,7 +796,7 @@ def select_recipe(candidates: Sequence[Tuple[str, Optional[str]]],
 # What a replay of a recipe is certified against travels WITH the recipe:
 # each agent stamps an opaque ``certification_reference`` where it records a
 # recipe (curve: the regime's state and identity; hyperspectral: its reference
-# maps), the board copies it verbatim into a copy's sidecar, and the reader
+# maps), a copy carries it verbatim in its sidecar, and the reader
 # hands it back for a recipe FILE as for a run folder. Shared code never reads
 # inside it; when there is none, the replay says why in one of two words.
 
@@ -833,7 +833,7 @@ def no_interpretation_check() -> Dict[str, Any]:
 
 def certification_reason(rv: Optional[Dict[str, Any]]) -> str:
     """Why a replay's interpretation is NOT certified, in one phrase, from
-    its ``reuse_validity`` — so the board quotes the reason instead of a
+    its ``reuse_validity`` — so a reader quotes the reason instead of a
     generic one (#753). '' when it is certified or nothing says why."""
     rv = rv or {}
     cert = rv.get("certification") or {}
