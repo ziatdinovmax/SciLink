@@ -160,6 +160,29 @@ def test_check_backends_reads_skills_and_detection():
     assert out["deepmd"]["pretrained"] == []       # no deploy block
 
 
+def test_check_backends_default_is_a_live_probe(monkeypatch):
+    """The home-dir YAML cache is shared across Python envs; don't trust it."""
+    from scilink.skills._shared import mlip_tools as mt
+    from scilink.utils import available_software as asw
+
+    def no_cache(*a, **k):
+        raise AssertionError("check_backends must not read the YAML cache")
+
+    monkeypatch.setattr(asw.AvailableSoftware, "auto", classmethod(no_cache))
+    monkeypatch.setattr(asw.AvailableSoftware, "load", classmethod(no_cache))
+    monkeypatch.setattr(asw.AvailableSoftware, "detect",
+                        classmethod(lambda cls: _FakeSoftware({"orb"})))
+    out = mt.check_backends()
+    assert out["orb"]["available"] and not out["mace"]["available"]
+
+
+def test_resolve_device():
+    from scilink.skills._shared import mlip_tools as mt
+    assert mt._resolve_device("cuda:1", ["cuda", "cpu"]) == "cuda:1"
+    assert mt._resolve_device("mps", ["cuda", "cpu"]) == "cpu"
+    assert mt._resolve_device("mps", None) == "mps"
+
+
 # ── the picker ───────────────────────────────────────────────────────
 
 def _picker(td, available, reply):

@@ -142,7 +142,10 @@ def check_backends(
     Args:
         backends: Backend names to report. Default: every MLIP skill.
         available_software: An ``AvailableSoftware`` to read from.
-            Default: ``AvailableSoftware.auto()``.
+            Default: a live ``AvailableSoftware.detect()``. Not the
+            cached ``auto()``: its YAML lives in the home directory and
+            is shared by every Python environment, and whether a Python
+            package imports is a fact about this interpreter.
 
     Returns:
         ``{backend: {"available": bool, "pretrained": [
@@ -150,7 +153,7 @@ def check_backends(
     """
     if available_software is None:
         from ...utils.available_software import AvailableSoftware
-        available_software = AvailableSoftware.auto()
+        available_software = AvailableSoftware.detect()
 
     out: Dict[str, Dict[str, Any]] = {}
     for name in (backends if backends is not None else _backend_names()):
@@ -207,6 +210,16 @@ _MODEL_FILE_STRATEGIES = {
     "none":       _model_file_none,
     "torch_save": _model_file_torch_save,
 }
+
+
+def _resolve_device(device: str, devices: Optional[List[str]]) -> str:
+    """``device`` if the backend supports its kind, else "cpu".
+
+    Matches on the part before any index, so "cuda:1" counts as "cuda".
+    """
+    if not devices or (device or "").split(":")[0] in devices:
+        return device
+    return "cpu"
 
 
 def _build_calculator(import_line: str, construct_expr: str, device: str):
@@ -274,8 +287,7 @@ def deploy(
             f"skills/{_MLIP_DOMAIN}/{backend}/{backend}.md."
         )
 
-    devices = spec.get("devices")
-    use_device = device if (not devices or device in devices) else "cpu"
+    use_device = _resolve_device(device, spec.get("devices"))
     task = task_name or spec.get("default_task")
 
     if model and os.path.exists(model):
