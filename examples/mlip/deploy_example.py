@@ -451,8 +451,6 @@ def main():
     mace_available, mace_info = check_mace_availability()
     print_section("ENVIRONMENT")
     print(f"  MACE installed:  {mace_available}")
-    if mace_info.get("version"):
-        print(f"  MACE version:    {mace_info['version']}")
     if mace_available:
         n_pretrained = len(mace_info.get("pretrained", []))
         print(f"  pretrained avail: {n_pretrained}")

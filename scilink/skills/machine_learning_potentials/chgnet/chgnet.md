@@ -48,8 +48,8 @@ throughput is required, prefer MACE via `pair_style mace`.
 Check this FIRST; a system with any element outside this list
 cannot be modelled:
 - `chgnet` (MPtrj): Z = 1–94 (H to Pu) except Po, At, Rn, Fr, Ra (89 elements).
-  Noble gases are nominally in but nearly absent from the training data (Ne 7, Ar 13, He 80 frames): treat them as
-  uncovered. Actinides Ac–Pu are sparse. Z > 94 is outside the embedding and errors.
+  Noble gases are in the training data but sparse (Ne 7, Ar 13, He 80 frames):
+  results for them are unreliable; cross-check or say so. Actinides Ac–Pu are sparse. Z > 94 is outside the embedding and errors.
   (Source: chgnet `model/encoders.py` max_num_elements=94; MPtrj element counts.)
 
 ### When to pick CHGNet

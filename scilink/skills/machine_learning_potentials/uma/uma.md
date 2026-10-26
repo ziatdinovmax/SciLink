@@ -13,7 +13,7 @@ detect:
     build with the ML-IAP package linked against the fairchem library.
 deploy:
   import_line: "from fairchem.core import FAIRChemCalculator"
-  construct_expr: "FAIRChemCalculator(__import__('fairchem.core', fromlist=['pretrained_mlip']).pretrained_mlip.get_predict_unit({name!r}, device=('cuda' if DEVICE == 'cuda' else 'cpu')), task_name={task!r})"
+  construct_expr: "FAIRChemCalculator(__import__('fairchem.core', fromlist=['pretrained_mlip']).pretrained_mlip.get_predict_unit({name!r}, device=('cuda' if str(DEVICE).startswith('cuda') else 'cpu')), task_name={task!r})"
   device_env_var: UMA_DEVICE
   devices: [cuda, cpu]
   default_model: uma-s-1p2

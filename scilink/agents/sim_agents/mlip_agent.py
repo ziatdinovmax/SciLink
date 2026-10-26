@@ -287,6 +287,9 @@ class MLIPAgent:
                 eligible.append(m)
             else:
                 excluded[m["name"]] = missing if missing else "coverage unknown"
+        if not elements:
+            self.logger.warning(
+                "No system elements given: element coverage is not checked")
         if excluded:
             self.logger.info(f"Models not covering {elements}: {excluded}")
         if not eligible:
@@ -359,6 +362,16 @@ Return JSON:
 
         by_name = {m["name"]: m for m in eligible}
         picked = result.get("model_name")
+        # Accept an alias ("orb") or a case variant ("MACE-OMAT-0") of an
+        # eligible model rather than treating it as an off-list pick.
+        if picked not in by_name:
+            wanted = str(picked or "").strip().lower()
+            for m in eligible:
+                entry = mlip_tools.find_pretrained(m["backend"], wanted)
+                if wanted == m["name"].lower() or (
+                        entry is not None and entry["name"] == m["name"]):
+                    result["model_name"] = picked = m["name"]
+                    break
         if picked not in by_name:
             self.logger.warning(
                 f"Selected model {picked!r} is not an eligible option; "
@@ -431,6 +444,18 @@ Return JSON:
         self.logger.info("=" * 60)
 
         elements = sorted(system_info.get("elements", {}).keys())
+        if not elements:
+            from ...skills._shared.structure_io import structure_elements
+            elements, _ = structure_elements(structure_file)
+        if not elements:
+            # Without the elements no model choice or coverage check is
+            # possible, and a LAMMPS data file without masses would load as
+            # H, He, ... in the run script. Fail loudly instead.
+            raise ValueError(
+                f"Could not determine the system's elements (system_info has "
+                f"none and {structure_file} gives none; a LAMMPS data file "
+                f"needs a Masses section). Pass system_info['elements']."
+            )
         sim = simulation_params or {}
 
         # If the caller explicitly forces a backend, skip the LLM

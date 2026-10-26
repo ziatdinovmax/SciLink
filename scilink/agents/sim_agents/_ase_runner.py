@@ -105,18 +105,24 @@ def _load_structure():
     _path = {struct_basename!r}
     if pathlib.Path(_path).suffix.lower() in _LAMMPS_EXTS:
         from ase.io.lammpsdata import read_lammps_data
-        atoms = read_lammps_data(_path, atom_style="atomic", sort_by_id=True)
-        if ELEMENTS:
-            # write_lammps_data(masses=True) lets ASE infer real elements from
-            # masses on read, so atoms.numbers are true Zs in the typical case.
-            # Only fall back to type-index remap if mass-based inference didn't
-            # recover the expected element set.
-            actual = sorted(set(atoms.get_chemical_symbols()))
-            expected = sorted(set(ELEMENTS))
-            if actual != expected:
-                type_to_sym = {{i + 1: ELEMENTS[i] for i in range(len(ELEMENTS))}}
-                nums = atoms.get_atomic_numbers()
-                atoms.set_chemical_symbols([type_to_sym[int(n)] for n in nums])
+        # The atom style comes from the file's "Atoms # <style>" header.
+        atoms = read_lammps_data(_path, sort_by_id=True)
+        if "masses" not in atoms.arrays:
+            # Without masses ASE numbers the atom types as H, He, ... and the
+            # element of each type is unknown. Only one type is unambiguous;
+            # never guess a type order for more.
+            n_types = len(set(atoms.arrays["type"]))
+            if n_types == 1 and len(ELEMENTS) == 1:
+                atoms.set_chemical_symbols(ELEMENTS * len(atoms))
+            else:
+                raise SystemExit(
+                    f"{{_path}} has no Masses section, so the element of each "
+                    f"atom type is unknown. Add masses to the data file.")
+        actual = sorted(set(atoms.get_chemical_symbols()))
+        if ELEMENTS and actual != sorted(set(ELEMENTS)):
+            raise SystemExit(
+                f"{{_path}} contains {{actual}} but the potential was deployed "
+                f"for {{sorted(set(ELEMENTS))}}.")
     else:
         atoms = _ase_read(_path)
     return atoms

@@ -74,8 +74,8 @@ element outside the training data runs silently and gives meaningless forces:
 - `orb-v3-*-omat` (OMat24): Z = 1–94 (H to Pu) except Po, At, Rn, Fr, Ra
   (89 elements).
 - `orb-v2`, `orb-v3-*-mpa` (MPtrj + Alexandria): at least the MPtrj set,
-  Z = 1–94 (H to Pu) except Po, At, Rn, Fr, Ra. Noble gases nearly absent from
-  MPtrj: treat as uncovered.
+  Z = 1–94 (H to Pu) except Po, At, Rn, Fr, Ra. Noble gases are sparse in
+  MPtrj: results for them are unreliable; cross-check or say so.
 - Actinides Ac–Pu are sparse in all of these; nothing beyond Pu.
   (Sources: orb-models `forcefield/pretrained.py`, `MODELS.md`; OMat24 dataset card.)
 

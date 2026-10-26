@@ -123,14 +123,10 @@ def _generate_mlip_inputs(
         working_dir=output_dir,
         api_key=api_key, base_url=base_url, model_name=model_name,
     )
-    from ase.io import read as _ase_read
-    try:
-        atoms = _ase_read(structure_file)
-        elements = sorted(set(atoms.get_chemical_symbols()))
-        n_atoms = len(atoms)
-    except Exception:
-        elements = []
-        n_atoms = 0
+    # Handles LAMMPS data files too (ase.io.read cannot detect them);
+    # [] means unknown, and deploy_pretrained refuses to pick blind.
+    from ...skills._shared.structure_io import structure_elements
+    elements, n_atoms = structure_elements(structure_file)
     system_info = {"elements": {e: None for e in elements}, "n_atoms": n_atoms}
     result = agent.deploy_pretrained(
         system_info=system_info,

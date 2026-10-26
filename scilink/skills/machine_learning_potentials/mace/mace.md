@@ -30,11 +30,11 @@ deploy:
   default_model: mace-mp-0
   # LAMMPS needs an on-disk model: save the loaded torch model to working_dir.
   model_file: torch_save
-  notes: "MACE {name} ({size}, {domain}). LAMMPS-capable via pair_style mliap unified."
+  notes: "MACE {name} ({size}, {domain}). LAMMPS-capable via pair_style mace (single node)."
   trained_file:
     import_line: "from mace.calculators import MACECalculator"
     construct_expr: "MACECalculator(model_paths=[{model_file!r}], device=DEVICE, default_dtype='float64')"
-    notes: "Trained MACE model ({name}). LAMMPS-capable via pair_style mliap unified."
+    notes: "Trained MACE model ({name}). LAMMPS-capable via pair_style mace (single node)."
 # Pretrained models deploy() can load. `elements` is the set the model was
 # trained on (checked against calc.z_table, mace-torch 0.3.16): a list of
 # symbols, or {z: [lo, hi], exclude: [...]}. `offer: false` keeps a model
@@ -178,8 +178,8 @@ Lists are read from each model's own element table (`calc.z_table`, mace-torch 0
 - `mace-mp-0` / `-0b` / `-0b2` / `-0b3`, `mace-mpa-0`, `mace-omat-0`,
   `mace-matpes-pbe-0`, `mace-matpes-r2scan-0`, `mace-mh-0`, `mace-mh-1`:
   Z = 1–94 (H to Pu) except Po, At, Rn, Fr, Ra (89 elements).
-  Noble gases are nearly absent from MPtrj (Ne 7, Ar 13 frames): treat as
-  uncovered for the MPtrj-trained models. Actinides Ac–Pu are sparse.
+  Noble gases are sparse in MPtrj (Ne 7, Ar 13 frames): results for them are
+  unreliable with the MPtrj-trained models; cross-check or say so. Actinides Ac–Pu are sparse.
 - `polar-1-s` / `-m` / `-l` (OMol25): Z = 1–83 (H to Bi), noble gases included;
   no actinides (read from the released checkpoints).
 - `mace-mdp`: SPICE-trained like mace-off23 (not checked here); dipoles only, no forces.

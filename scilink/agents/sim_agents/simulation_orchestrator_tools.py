@@ -2975,12 +2975,11 @@ class SimulationOrchestratorTools:
 
             try:
                 from .mlip_agent import MLIPAgent
-                from ase.io import read as _ase_read
-                atoms = _ase_read(structure_path)
-                elements = sorted(set(atoms.get_chemical_symbols()))
+                from ...skills._shared.structure_io import structure_elements
+                elements, n_atoms = structure_elements(structure_path)
                 system_info = {
                     "elements": {e: None for e in elements},
-                    "n_atoms": len(atoms),
+                    "n_atoms": n_atoms,
                 }
                 agent = MLIPAgent(
                     working_dir=str(workdir),
