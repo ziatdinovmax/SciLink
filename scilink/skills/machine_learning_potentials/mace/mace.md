@@ -17,6 +17,87 @@ detect:
     `pip install git+https://github.com/WillBaldwin0/graph_electrostatics.git@v0.4.0`.
     A successful `from mace.calculators import mace_polar` plus `import
     graph_longrange` confirms the polar backend is usable.
+# How deploy() builds a calculator. Templates are Python str.format
+# strings filled from `defaults`, then the model's `params`, plus {name},
+# {domain}, {task} and (trained files) {model_file}. The calculator
+# expression may use DEVICE, which the run script defines.
+deploy:
+  import_line: "from mace.calculators import {loader}"
+  construct_expr: "{loader}(model={size!r}, device=DEVICE, default_dtype='float64', **{kwargs!r})"
+  device_env_var: MACE_DEVICE
+  devices: [cuda, cpu, mps]
+  defaults: {kwargs: {}}
+  default_model: mace-mp-0
+  # LAMMPS needs an on-disk model: save the loaded torch model to working_dir.
+  model_file: torch_save
+  notes: "MACE {name} ({size}, {domain}). LAMMPS-capable via pair_style mliap unified."
+  trained_file:
+    import_line: "from mace.calculators import MACECalculator"
+    construct_expr: "MACECalculator(model_paths=[{model_file!r}], device=DEVICE, default_dtype='float64')"
+    notes: "Trained MACE model ({name}). LAMMPS-capable via pair_style mliap unified."
+# Pretrained models deploy() can load. `elements` is the set the model was
+# trained on (checked against calc.z_table, mace-torch 0.3.16): a list of
+# symbols, or {z: [lo, hi], exclude: [...]}. `offer: false` keeps a model
+# loadable by name but out of the automatic picker.
+pretrained:
+  - name: mace-mp-0
+    aliases: [mace, medium]
+    domain: inorganic
+    description: Universal MPtrj potential (medium). Metals, oxides, ceramics.
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: medium}
+  - name: mace-mp-0b
+    domain: inorganic
+    description: MACE-MP-0b small. Faster inference, lower accuracy.
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: small-0b}
+  - name: mace-mpa-0
+    domain: inorganic
+    description: MPtrj + Alexandria (medium). More accurate than mace-mp-0.
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: medium-mpa-0}
+  - name: mace-omat-0
+    domain: inorganic
+    description: OMat24-trained (small). Default for inorganic materials.
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: small-omat-0}
+  - name: mace-mh-0
+    domain: mixed
+    description: Multi-head cross-domain model (omat_pbe head). Mixed inorganic/organic systems. ASE only.
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: mh-0, kwargs: {head: omat_pbe}}
+    model_file: none
+  - name: mace-off23
+    domain: organic
+    description: SPICE-trained organic model (medium). H C N O F P S Cl Br I only.
+    elements: [H, C, N, O, F, P, S, Cl, Br, I]
+    params: {loader: mace_off, size: medium}
+  - name: mace-mp-0-small
+    aliases: [small]
+    offer: false
+    domain: inorganic
+    description: Universal MPtrj potential (small).
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: small}
+  - name: mace-mp-0-large
+    aliases: [large]
+    offer: false
+    domain: inorganic
+    description: Universal MPtrj potential (large).
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: large}
+  - name: mace-off23-small
+    offer: false
+    domain: organic
+    description: SPICE-trained organic model (small).
+    elements: [H, C, N, O, F, P, S, Cl, Br, I]
+    params: {loader: mace_off, size: small}
+  - name: mace-off23-large
+    offer: false
+    domain: organic
+    description: SPICE-trained organic model (large).
+    elements: [H, C, N, O, F, P, S, Cl, Br, I]
+    params: {loader: mace_off, size: large}
 ---
 # MACE (Multi-ACE)
 
@@ -86,9 +167,28 @@ through the agent.
 
 ## planning
 
-Model selection:
+### Element coverage
+
+Check this FIRST: a model cannot run a system containing any
+element outside its list. It fails at the first force call, not with a warning.
+Lists are read from each model's own element table (`calc.z_table`, mace-torch 0.3.16).
+- `mace-off23` (small/medium/large): H C N O F P S Cl Br I only (10 elements).
+  NO Li, Na, K, Mg, Ca, B, Si, or any metal, so not usable for salts in organic
+  solvent (e.g. LiPF6 electrolytes) or organometallics.
+- `mace-mp-0` / `-0b` / `-0b2` / `-0b3`, `mace-mpa-0`, `mace-omat-0`,
+  `mace-matpes-pbe-0`, `mace-matpes-r2scan-0`, `mace-mh-0`, `mace-mh-1`:
+  Z = 1–94 (H to Pu) except Po, At, Rn, Fr, Ra (89 elements).
+  Noble gases are nearly absent from MPtrj (Ne 7, Ar 13 frames): treat as
+  uncovered for the MPtrj-trained models. Actinides Ac–Pu are sparse.
+- `polar-1-s` / `-m` / `-l` (OMol25): Z = 1–83 (H to Bi), noble gases included;
+  no actinides (read from the released checkpoints).
+- `mace-mdp`: SPICE-trained like mace-off23 (not checked here); dipoles only, no forces.
+
+### Model selection
+
+Choose only among models that cover every element:
 - Elements are inorganic (metals, oxides, ceramics) → `mace-omat-0`
-- Elements are organic (C, H, N, O, S, P, halogens) and energy/forces are needed → `mace-off23`
+- Elements are ONLY from H C N O F P S Cl Br I and energy/forces are needed → `mace-off23`
 - Mixed inorganic/organic system → `mace-mh-0` (cross domain coverage)
 - Speed over accuracy is required → `mace-mp-0b`
 - System is charged/ionic, redox-active, in an applied electric field, or has

@@ -319,6 +319,21 @@ def load_skill(skill: str, domain: str = "curve_fitting") -> Dict:
     return sections
 
 
+def get_subsection(section_text: str, heading: str) -> str:
+    """Return the body of a ``### <heading>`` block inside a skill section.
+
+    Skills can mark part of a section with a ``###`` sub-heading so an
+    agent can read just that part, e.g. ``### Element coverage`` under
+    ``## planning``. Matching is case-insensitive. The block ends at the
+    next ``###`` heading or the end of the section. Returns ``""`` if the
+    block is absent.
+    """
+    pattern = rf"^###[ \t]+{re.escape(heading)}[ \t]*\n(.*?)(?=^###[ \t]|\Z)"
+    m = re.search(pattern, section_text or "",
+                  flags=re.MULTILINE | re.DOTALL | re.IGNORECASE)
+    return m.group(1).strip() if m else ""
+
+
 def _resolve_skill_path(skill: str, domain: str) -> Path:
     """Resolve a skill name or path to an actual file path.
 

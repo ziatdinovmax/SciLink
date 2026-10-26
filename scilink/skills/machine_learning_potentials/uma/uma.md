@@ -11,6 +11,30 @@ detect:
     `from fairchem.core import FAIRChemCalculator` confirms the backend is
     usable. LAMMPS support requires the `fairchem-lammps` plugin or a LAMMPS
     build with the ML-IAP package linked against the fairchem library.
+deploy:
+  import_line: "from fairchem.core import FAIRChemCalculator"
+  construct_expr: "FAIRChemCalculator(__import__('fairchem.core', fromlist=['pretrained_mlip']).pretrained_mlip.get_predict_unit({name!r}, device=('cuda' if DEVICE == 'cuda' else 'cpu')), task_name={task!r})"
+  device_env_var: UMA_DEVICE
+  devices: [cuda, cpu]
+  default_model: uma-s-1p2
+  # UMA is multi-task: the head sets which training data (and elements) apply.
+  default_task: omat
+  model_file: none
+  notes: "UMA {name} (task head '{task}'). ASE-only: no LAMMPS pair_style in the base fairchem package; the MD agent must use the ASE runner. Pass task_name='omol' for molecular systems."
+pretrained:
+  - name: uma-s-1p2
+    aliases: [uma]
+    domain: universal
+    description: UMA small model. Fastest, good for screening.
+    elements_by_task:
+      omat: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+      omol: {z: [1, 83]}
+  - name: uma-m-1p1
+    domain: universal
+    description: UMA medium model. Best accuracy.
+    elements_by_task:
+      omat: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+      omol: {z: [1, 83]}
 ---
 # UMA (Universal Model for Atoms)
 
@@ -52,7 +76,22 @@ for large-scale production runs.
 
 ## planning
 
-When to choose UMA:
+### Element coverage
+
+Check this FIRST. UMA ACCEPTS Z = 1–99 on every head without error,
+so coverage depends on the TASK HEAD's training data. Off-list elements run
+silently on borrowed embeddings and should be treated as uncovered:
+- `omat` head (OMat24): Z = 1–94 except Po, At, Rn, Fr, Ra (89 elements).
+- `omol` head (OMol25): Z = 1–83 (H to Bi). No actinides; lanthanides limited.
+- `oc20` head: catalysts (55 bulk elements, no noble gases, lanthanides or
+  actinides) with C/H/O/N adsorbates. `odac` head: MOFs + CO2/H2O. `omc` head:
+  ~12 organic elements. Exact lists for these three are not verified here:
+  use them only for their own chemistry.
+  (Sources: fairchem `models/uma/escn_md.py` max_num_elements=100; OMol25 paper
+  arXiv 2505.08762; OMat24 dataset card; fairchem element_refs yaml.)
+
+### When to choose UMA
+
 - State-of-the-art accuracy is required and compute budget allows
 - System spans multiple chemistry classes (inorganic + molecular + catalytic)
 - Catalytic surfaces, adsorbates, or reaction pathways are the target

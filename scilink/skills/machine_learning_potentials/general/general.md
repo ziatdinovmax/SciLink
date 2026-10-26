@@ -51,7 +51,9 @@ Pretrained-first strategy (apply before any fine-tuning decision):
 
 Backend selection guide:
 - Default / inorganic systems → MACE (`mace-omat-0`) or UMA (`uma-s-1p2`)
-- Organic / drug-like molecules → MACE (`mace-off23`)
+- Organic / drug-like molecules → MACE (`mace-off23`), only if every element is
+  covered (see each backend's "Element coverage" notes; many organic models have
+  no Li, Na, or metals)
 - Magnetic systems (Fe, Co, Ni, Mn, Cr) → CHGNet (predicts magnetic moments)
 - Speed-critical screening over many structures → CHGNet or Orb
 - LAMMPS production runs at scale → MACE or DeePMD (`pair_style deepmd`)

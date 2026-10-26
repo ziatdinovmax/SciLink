@@ -10,6 +10,22 @@ detect:
     Langevin / NPT / Verlet integrators with `chgnet.model.dynamics
     .CHGNetCalculator` attached as the ASE calculator. A successful
     `import chgnet` means the backend is usable.
+deploy:
+  import_line: "from chgnet.model.dynamics import CHGNetCalculator"
+  construct_expr: "CHGNetCalculator(use_device=DEVICE)"
+  device_env_var: CHGNET_DEVICE
+  devices: [cuda, cpu, mps]
+  default_model: chgnet
+  model_file: none
+  notes: "CHGNet universal MPtrj-pretrained model. ASE-only: no LAMMPS pair_style; the MD agent must use the ASE runner."
+  trained_file:
+    construct_expr: "CHGNetCalculator(model=__import__('chgnet.model', fromlist=['CHGNet']).CHGNet.from_file({model_file!r}), use_device=DEVICE)"
+    notes: "Trained CHGNet model ({name}). ASE-only: no LAMMPS pair_style."
+pretrained:
+  - name: chgnet
+    domain: universal-inorganic
+    description: Universal MLIP pretrained on MPtrj. Predicts energies, forces, stresses and magnetic moments. ASE-only.
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
 ---
 # CHGNet (Crystal Hamiltonian Graph Neural Network)
 
@@ -27,7 +43,16 @@ throughput is required, prefer MACE via `pair_style mace`.
 
 ## planning
 
-When to pick CHGNet:
+### Element coverage
+
+Check this FIRST; a system with any element outside this list
+cannot be modelled:
+- `chgnet` (MPtrj): Z = 1–94 (H to Pu) except Po, At, Rn, Fr, Ra (89 elements).
+  Noble gases are nominally in but nearly absent from the training data (Ne 7, Ar 13, He 80 frames): treat them as
+  uncovered. Actinides Ac–Pu are sparse. Z > 94 is outside the embedding and errors.
+  (Source: chgnet `model/encoders.py` max_num_elements=94; MPtrj element counts.)
+
+### When to pick CHGNet
 
 - **System contains magnetic elements (Fe, Co, Ni, Mn, Cr, …).** CHGNet
   predicts per-atom magnetic moments alongside energies and forces, enabling

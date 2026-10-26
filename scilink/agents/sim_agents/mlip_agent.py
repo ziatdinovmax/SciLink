@@ -48,7 +48,7 @@ from ...auth import (
 )
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
-from ...skills.loader import load_skill, list_skills
+from ...skills.loader import load_skill, list_skills, get_subsection
 from ._deprecation import normalize_params
 
 try:
@@ -207,12 +207,56 @@ class MLIPAgent:
                 self._backends = {}
         return self._backends
 
+    # Engine skills mark the elements their models cover with this
+    # ``###`` sub-heading under ``## planning``.
+    _COVERAGE_HEADING = "Element coverage"
+
+    def _element_coverage_notes(self, backends: List[str]) -> str:
+        """Collect the ``### Element coverage`` block from each backend's skill.
+
+        Engine skills are only loaded after a backend is chosen, so the
+        model picker would otherwise never see their coverage lists. Each
+        engine's own skill file stays the single source: a new backend
+        needs only a skill with this block, with no change here or in
+        ``general.md``. Backends without a skill or block are skipped.
+        """
+        notes = []
+        for backend in sorted(set(backends)):
+            try:
+                parsed = load_skill(
+                    f"machine_learning_potentials/{backend}",
+                    domain="machine_learning_potentials",
+                )
+            except (FileNotFoundError, ValueError):
+                self.logger.debug(f"No skill for backend '{backend}'")
+                continue
+            block = get_subsection(parsed.get("planning", ""),
+                                   self._COVERAGE_HEADING)
+            if block:
+                notes.append(f"[{backend}]\n{block}")
+            else:
+                self.logger.debug(
+                    f"Skill '{backend}' has no '### {self._COVERAGE_HEADING}' block"
+                )
+        if not notes:
+            return ""
+        return (
+            "ELEMENT COVERAGE (from each backend's skill file):\n\n"
+            + "\n\n".join(notes)
+        )
+
     def _select_pretrained_model(
         self, elements: List[str], research_goal: str,
+        task_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Use LLM + skill knowledge to select the best pretrained model
         for the given system.
+
+        Only models trained on every element are offered. Returns
+        ``{"backend", "model_name", "justification", ...}``; any fallback
+        (one eligible model, failed call, off-list pick) says so in the
+        justification and the log.
         """
         backends = self._get_backends()
         pretrained_options = []
@@ -231,16 +275,49 @@ class MLIPAgent:
                 "Install mace-torch: pip install mace-torch"
             )
 
-        # If only one option, skip the LLM call
-        if len(pretrained_options) == 1:
-            choice = pretrained_options[0]
-            self.logger.info(
-                f"Single pretrained option: {choice['name']} ({choice['backend']})"
+        # Only models trained on every element are eligible. A model with
+        # no declared coverage is left out too: several backends run
+        # uncovered elements silently, so unknown is not safe.
+        eligible, excluded = [], {}
+        for m in pretrained_options:
+            missing = (mlip_tools.uncovered_elements(
+                m["backend"], m["name"], elements, task_name)
+                if elements else [])
+            if missing == []:
+                eligible.append(m)
+            else:
+                excluded[m["name"]] = missing if missing else "coverage unknown"
+        if excluded:
+            self.logger.info(f"Models not covering {elements}: {excluded}")
+        if not eligible:
+            raise RuntimeError(
+                f"No installed pretrained MLIP was trained on every element "
+                f"in {elements}. Missing per model: {excluded}"
             )
-            return choice
+
+        def _selection(m: Dict[str, Any], why: str) -> Dict[str, Any]:
+            return {"backend": m["backend"], "model_name": m["name"],
+                    "justification": why}
+
+        # If only one option, skip the LLM call
+        if len(eligible) == 1:
+            choice = eligible[0]
+            self.logger.info(
+                f"Single eligible pretrained option: {choice['name']} "
+                f"({choice['backend']})"
+            )
+            return _selection(choice, "only installed pretrained model "
+                                      "trained on every element")
 
         skill_context = self._get_skill_context("planning")
-        options_str = json.dumps(pretrained_options, indent=2)
+        options_str = json.dumps(eligible, indent=2)
+        coverage_notes = self._element_coverage_notes(
+            [m["backend"] for m in eligible]
+        )
+        excluded_str = (
+            f"\nNOT OFFERED (missing elements): {json.dumps(excluded)}\n"
+            if excluded else ""
+        )
 
         prompt = f"""
 Select the best pretrained ML potential for this system.
@@ -248,13 +325,17 @@ Select the best pretrained ML potential for this system.
 ELEMENTS: {elements}
 RESEARCH GOAL: {research_goal}
 
-AVAILABLE PRETRAINED MODELS:
+AVAILABLE PRETRAINED MODELS (each is trained on every element above):
 {options_str}
+{excluded_str}
+{coverage_notes}
 
 {skill_context}
 
 Selection criteria:
-- Element coverage: does the model's training data include these elements?
+- Choose only from AVAILABLE PRETRAINED MODELS, by exact name.
+- Weigh the ELEMENT COVERAGE notes: an element can be in a model's
+  training set but sparse (e.g. noble gases, actinides).
 - Domain match: inorganic model for metals/oxides, organic for molecules
 - If elements include C, H, N, O and the system is molecular → prefer organic models
 - If elements include metals, oxides → prefer inorganic models
@@ -267,16 +348,30 @@ Return JSON:
     "cautions": "any limitations to be aware of"
 }}
 """
+        fallback = eligible[0]
         try:
             result = self._generate_json(prompt)
-            # Validate the selection
-            valid_names = {m["name"] for m in pretrained_options}
-            if result.get("model_name") not in valid_names:
-                result["model_name"] = pretrained_options[0]["name"]
-                result["backend"] = pretrained_options[0]["backend"]
-            return result
-        except Exception:
-            return pretrained_options[0]
+        except Exception as e:
+            self.logger.warning(
+                f"Model selection call failed ({e}); using {fallback['name']}"
+            )
+            return _selection(fallback, f"fallback: selection call failed ({e})")
+
+        by_name = {m["name"]: m for m in eligible}
+        picked = result.get("model_name")
+        if picked not in by_name:
+            self.logger.warning(
+                f"Selected model {picked!r} is not an eligible option; "
+                f"using {fallback['name']}"
+            )
+            return _selection(
+                fallback,
+                f"fallback: the selected model {picked!r} is not installed or "
+                f"not trained on every element",
+            )
+        # The backend comes from the option list, not the LLM's reply.
+        result["backend"] = by_name[picked]["backend"]
+        return result
 
     # ================================================================
     # PUBLIC API — PRETRAINED DEPLOYMENT (the default path)
@@ -336,6 +431,7 @@ Return JSON:
         self.logger.info("=" * 60)
 
         elements = sorted(system_info.get("elements", {}).keys())
+        sim = simulation_params or {}
 
         # If the caller explicitly forces a backend, skip the LLM
         # selection step entirely — useful for benchmarks, regression
@@ -347,7 +443,8 @@ Return JSON:
                 "justification": f"caller-forced via backend={backend!r}",
             }
         else:
-            selection = self._select_pretrained_model(elements, research_goal)
+            selection = self._select_pretrained_model(
+                elements, research_goal, task_name=sim.get("task_name"))
         backend = selection.get("backend", "mace")
         model_name = selection.get("model_name") or backend
 
@@ -356,8 +453,6 @@ Return JSON:
 
         # Load backend-specific skill
         self._load_backend_skill(backend)
-
-        sim = simulation_params or {}
 
         # Deploy -- constructs the calculator once (validates the
         # install, locates the model file), returns an engine-neutral
@@ -1192,15 +1287,17 @@ Return JSON:
 
         # If only MACE is available, skip LLM call
         if list(available.keys()) == ["mace"]:
-            # Pick foundation model based on elements
-            organic_elements = {"C", "H", "N", "O", "S", "P", "F", "Cl", "Br", "I"}
-            if set(elements).issubset(organic_elements):
+            # Organic model only if it was trained on every element
+            # (coverage comes from the mace skill's frontmatter).
+            if mlip_tools.uncovered_elements(
+                    "mace", "mace-off23", elements) == []:
                 model = "mace-off23"
             else:
                 model = "mace-mp-0"
             return {"backend": "mace", "foundation_model": model}
 
         skill_context = self._get_skill_context("planning")
+        coverage_notes = self._element_coverage_notes(list(available))
 
         prompt = f"""
 Select the best MLIP backend and foundation model for fine-tuning.
@@ -1211,9 +1308,12 @@ RESEARCH GOAL: {research_goal}
 
 AVAILABLE BACKENDS: {json.dumps({k: v.get('pretrained', []) for k, v in available.items()}, indent=2)}
 
+{coverage_notes}
+
 {skill_context}
 
-For fine-tuning, prefer backends with relevant foundation models.
+For fine-tuning, prefer backends with relevant foundation models, and only
+foundation models trained on every element in ELEMENTS.
 For training from scratch, any backend works.
 
 Return JSON:

@@ -9,6 +9,26 @@ detect:
     (`pip install orb-models`). Model weights are downloaded on first use.
     A successful `from orb_models.forcefield import pretrained` confirms the
     backend is usable.
+deploy:
+  import_line: "from orb_models.forcefield import pretrained; from orb_models.forcefield.inference.calculator import ORBCalculator"
+  construct_expr: "ORBCalculator(*pretrained.{loader}(device=DEVICE, precision='float32-high'), device=DEVICE)"
+  device_env_var: ORB_DEVICE
+  devices: [cuda, cpu]
+  default_model: orb-v3-conservative-inf-omat
+  model_file: none
+  notes: "Orb {name}. ASE-only: the MD agent must use the ASE runner."
+pretrained:
+  - name: orb-v3-conservative-inf-omat
+    aliases: [orb]
+    domain: universal-inorganic
+    description: Orb v3 conservative model trained on OMat24. Fast universal MLIP for inorganic materials.
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: orb_v3_conservative_inf_omat}
+  - name: orb-v3-conservative-inf-mpa
+    domain: universal-inorganic
+    description: Orb v3 conservative model trained on MPtrj + Alexandria.
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: orb_v3_conservative_inf_mpa}
 ---
 # Orb (Orbital Materials)
 
@@ -47,7 +67,20 @@ Orb supports the Python/ASE calculator path.
 
 ## planning
 
-When to choose Orb:
+### Element coverage
+
+Check this FIRST. Orb ACCEPTS any Z ≤ 117 without error, so an
+element outside the training data runs silently and gives meaningless forces:
+- `orb-v3-*-omat` (OMat24): Z = 1–94 (H to Pu) except Po, At, Rn, Fr, Ra
+  (89 elements).
+- `orb-v2`, `orb-v3-*-mpa` (MPtrj + Alexandria): at least the MPtrj set,
+  Z = 1–94 (H to Pu) except Po, At, Rn, Fr, Ra. Noble gases nearly absent from
+  MPtrj: treat as uncovered.
+- Actinides Ac–Pu are sparse in all of these; nothing beyond Pu.
+  (Sources: orb-models `forcefield/pretrained.py`, `MODELS.md`; OMat24 dataset card.)
+
+### When to choose Orb
+
 - High-throughput screening over many structures where inference speed is
   the primary constraint
 - Rapid equilibration before switching to a more accurate backend for
@@ -70,22 +103,25 @@ ASE calculator path:
 
 ```python
 from orb_models.forcefield import pretrained
-from orb_models.forcefield.calculator import ORBCalculator
+from orb_models.forcefield.inference.calculator import ORBCalculator
 from ase.io import read
 from ase.md.langevin import Langevin
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from ase import units
 
-orbff = pretrained.orb_v3_conservative_inf_omat()          # downloads weights on first call
+# Returns (model, atoms_adapter); downloads weights on first call.
+orbff, adapter = pretrained.orb_v3_conservative_inf_omat(device="cuda", precision="float32-high")
 atoms = read("structure.xyz")
-atoms.calc = ORBCalculator(orbff, device="cuda")
+atoms.calc = ORBCalculator(orbff, atoms_adapter=adapter, device="cuda")
 
 MaxwellBoltzmannDistribution(atoms, temperature_K=300)
 dyn = Langevin(atoms, timestep=1.0 * units.fs, temperature_K=300, friction=0.01)
 dyn.run(1000)
 ```
 
-For CPU-only runs, pass `device="cpu"` to `ORBCalculator`. The model is
+For CPU-only runs, pass `device="cpu"` to both calls. (API as of
+orb-models 0.7.0; older releases imported `ORBCalculator` from
+`orb_models.forcefield.calculator` and returned the model alone.) The model is
 loaded once and reused across all calculator calls within the session.
 
 Structure relaxation:
