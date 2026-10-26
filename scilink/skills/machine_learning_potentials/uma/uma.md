@@ -25,13 +25,13 @@ pretrained:
   - name: uma-s-1p2
     aliases: [uma]
     domain: universal
-    description: UMA small model. Fastest, good for screening.
+    description: 'UMA small, latest. Fastest UMA while still state of the art on most benchmarks. Heads: oc20, oc22, oc25, omat, omol, odac, omc (omol supports charged and open-shell molecules). ASE only in base fairchem.'
     elements_by_task:
       omat: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
       omol: {z: [1, 83]}
   - name: uma-m-1p1
     domain: universal
-    description: UMA medium model. Best accuracy.
+    description: 'UMA medium: best in class across all metrics; slower and more memory intensive. Recommended for quantitative results. Heads: oc20, omat, omol, odac, omc. ASE only in base fairchem.'
     elements_by_task:
       omat: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
       omol: {z: [1, 83]}

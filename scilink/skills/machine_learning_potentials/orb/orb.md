@@ -21,12 +21,12 @@ pretrained:
   - name: orb-v3-conservative-inf-omat
     aliases: [orb]
     domain: universal-inorganic
-    description: Orb v3 conservative model trained on OMat24. Fast universal MLIP for inorganic materials.
+    description: Most performant orb-v3 for inorganic materials (OMat24); good on surfaces and defects. Conservative forces. Optimised for speed; cross-check before reporting barriers, phonons or elastic constants. ASE only.
     elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
     params: {loader: orb_v3_conservative_inf_omat}
   - name: orb-v3-conservative-inf-mpa
     domain: universal-inorganic
-    description: Orb v3 conservative model trained on MPtrj + Alexandria.
+    description: Orb v3 on MPtrj + Alexandria. Better for molecular systems and materials not covered by omat. ASE only.
     elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
     params: {loader: orb_v3_conservative_inf_mpa}
 ---

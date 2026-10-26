@@ -43,33 +43,33 @@ pretrained:
   - name: mace-mp-0
     aliases: [mace, medium]
     domain: inorganic
-    description: Universal MPtrj potential (medium). Metals, oxides, ceramics.
+    description: Universal MPtrj potential (medium), DFT PBE+U. Metals, oxides, ceramics. LAMMPS-capable (single node).
     elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
     params: {loader: mace_mp, size: medium}
   - name: mace-mp-0b
     domain: inorganic
-    description: MACE-MP-0b small. Faster inference, lower accuracy.
+    description: MACE-MP-0b (small). Faster inference; improved pair repulsion and corrected isolated atoms. LAMMPS-capable (single node).
     elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
     params: {loader: mace_mp, size: small-0b}
   - name: mace-mpa-0
     domain: inorganic
-    description: MPtrj + Alexandria (medium). More accurate than mace-mp-0.
+    description: MPtrj + sAlex (medium). State of the art on Matbench; improved high-pressure stability. LAMMPS-capable (single node).
     elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
     params: {loader: mace_mp, size: medium-mpa-0}
   - name: mace-omat-0
     domain: inorganic
-    description: OMat24-trained (small). Default for inorganic materials.
+    description: OMat24-trained (small), DFT PBE+U. Excellent phonons. Default for inorganic materials. LAMMPS-capable (single node).
     elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
     params: {loader: mace_mp, size: small-omat-0}
   - name: mace-mh-0
     domain: mixed
-    description: Multi-head cross-domain model (omat_pbe head). Mixed inorganic/organic systems. ASE only.
+    description: Multi-head cross-domain model (OMAT/OMOL/OC20/MATPES), deployed with the omat_pbe head. Surfaces, bulk, mixed inorganic/organic. ASE only.
     elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
     params: {loader: mace_mp, size: mh-0, kwargs: {head: omat_pbe}}
     model_file: none
   - name: mace-off23
     domain: organic
-    description: SPICE-trained organic model (medium). H C N O F P S Cl Br I only.
+    description: SPICE-trained, wB97M-D3(BJ)/def2-TZVPP (medium). Organic molecules, peptides, drug-like compounds; H C N O F P S Cl Br I only. Neutral, non-radical, non-reactive systems only. LAMMPS-capable (single node).
     elements: [H, C, N, O, F, P, S, Cl, Br, I]
     params: {loader: mace_off, size: medium}
   - name: mace-mp-0-small

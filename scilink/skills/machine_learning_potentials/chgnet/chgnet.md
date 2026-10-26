@@ -24,7 +24,7 @@ deploy:
 pretrained:
   - name: chgnet
     domain: universal-inorganic
-    description: Universal MLIP pretrained on MPtrj. Predicts energies, forces, stresses and magnetic moments. ASE-only.
+    description: 'MPtrj-pretrained (~1.5M DFT relaxations). Predicts energies, forces, stresses and per-atom magnetic moments (unique among universal MLIPs). Fast. ASE only: no LAMMPS pair_style. Not for phonons, NEB barriers or elastic constants.'
     elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
 ---
 # CHGNet (Crystal Hamiltonian Graph Neural Network)
