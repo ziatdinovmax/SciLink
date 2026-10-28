@@ -71,6 +71,54 @@ def element_from_mass(mass: float, tolerance: float = 1.5) -> Optional[str]:
     return best_symbol
 
 
+# Established ion type names whose letters are not the element symbol
+# (CHARMM: SOD = Na, POT = K, ...). Still checked against the mass.
+_ION_TYPE_NAMES = {
+    "SOD": "Na", "POT": "K", "CAL": "Ca", "CES": "Cs", "LIT": "Li",
+    "RUB": "Rb", "BAR": "Ba", "ZN2": "Zn",
+}
+
+
+# How close a declared mass must be to an element's standard mass for the
+# element to count as identified (rounded masses such as "59.0 # Ni" are
+# 0.31 off; united-atom "CH" at 13.02 or a repartitioned "HE1" at 3.02 are
+# about 1 off and must not pass).
+_ELEMENT_MASS_TOLERANCE = 0.5
+
+
+def element_from_label(label: str, mass: float,
+                       tolerance: float = _ELEMENT_MASS_TOLERANCE) -> Optional[str]:
+    """Element named by a Masses comment, but only if its mass agrees.
+
+    Reads the comment's first word as a full element name ("Carbon"), its
+    first two letters ("Na" from "NA" or "Na+"), or its first letter ("O"
+    from "OW", "C" from "CT"), and returns the first reading whose atomic
+    mass is within ``tolerance`` of ``mass``. Taking the first letters
+    blindly turned "Carbon" into Ca and "Nitrogen" into Ni. Returns None
+    when no reading matches the mass (e.g. a united-atom "CH2" at 14.03, or
+    a coarse-grained "X" bead).
+    """
+    word = re.match(r"[A-Za-z0-9]+", (label or "").strip())
+    if not word or not word.group()[0].isalpha():
+        return None
+    w = word.group()
+    candidates = []
+    if w.upper() in _ION_TYPE_NAMES:
+        candidates.append(_ION_TYPE_NAMES[w.upper()])
+    w = re.match(r"[A-Za-z]+", w).group()
+    candidates += [ase.data.chemical_symbols[z]
+                   for z, name in enumerate(ase.data.atomic_names)
+                   if z > 0 and name.lower() == w.lower()]
+    if len(w) >= 2:
+        candidates.append(w[0].upper() + w[1].lower())
+    candidates.append(w[0].upper())
+    for sym in candidates:
+        z = ase.data.atomic_numbers.get(sym, 0)
+        if z > 0 and abs(ase.data.atomic_masses[z] - mass) <= tolerance:
+            return sym
+    return None
+
+
 # ─── System Classification Constants ─────────────────────────────────
 
 _METALS = {
@@ -321,6 +369,7 @@ def parse_data_file(data_file: str) -> Dict[str, Any]:
         "atom_style": "unknown",
         "atom_type_labels": {},
         "mass_map": {},
+        "mass_label_conflicts": {},
         "elements": [],
         "element_counts": {},
         "has_bonds": False,
@@ -396,17 +445,21 @@ def parse_data_file(data_file: str) -> Dict[str, Any]:
     }
     for line in lines:
         stripped = line.strip()
-        if stripped == "Masses":
+        if stripped.split("#", 1)[0].strip() == "Masses":
             in_masses = True
             continue
         if in_masses:
-            # Section headers end the block
-            if stripped in _SECTION_HEADERS or stripped.startswith("Atoms"):
-                break
             # Skip blank lines and comments (LAMMPS always has a blank
             # line between the section header and the data)
             if not stripped or stripped.startswith("#"):
                 continue
+            # Any other line not starting with a type number is the next
+            # section header. write_data writes them with a style comment
+            # ("Pair Coeffs # lj/cut/coul/long"), and "PairIJ Coeffs" was
+            # not in the list: their rows overwrote the masses.
+            if (stripped in _SECTION_HEADERS or stripped.startswith("Atoms")
+                    or not stripped.split()[0].isdigit()):
+                break
             parts = stripped.split()
             if len(parts) < 2:
                 continue
@@ -422,12 +475,27 @@ def parse_data_file(data_file: str) -> Dict[str, Any]:
 
             element = None
             if label:
+                element = element_from_label(label, mass)
                 match = re.match(r'[A-Z][a-z]?', label)
-                if match:
+                if element is None and match:
+                    # A capitalised label reads as an element claim ("CH2",
+                    # "X") but names no element of this mass. Keep the
+                    # previous reading for existing callers, and record the
+                    # disagreement so element-sensitive callers can refuse.
+                    # A lowercase label that matches nothing is a type name
+                    # ("opls_140", "type1"): use the mass, as before.
+                    info["mass_label_conflicts"][type_id] = (label, mass)
                     element = match.group()
 
             if not element:
                 element = element_from_mass(mass)
+                # The mass alone decides here (no label, or a lowercase type
+                # name). A mass that is not close to any element (a
+                # united-atom "ch3" at 15.035 reads as O) is recorded too.
+                if element and abs(ase.data.atomic_masses[
+                        ase.data.atomic_numbers[element]] - mass
+                        ) > _ELEMENT_MASS_TOLERANCE:
+                    info["mass_label_conflicts"].setdefault(type_id, (label, mass))
 
             if not element:
                 element = f"X{type_id}"
@@ -1426,12 +1494,12 @@ def _pair_coeff_elements(structure_file: str, elements: list) -> list:
     ``pair_coeff * * model A B`` maps atom type 1 to A, type 2 to B. The
     order must follow the data file's types, not an alphabetical element
     list: a file with type 1 = Na and type 2 = Cl run as "Cl Na" swaps the
-    species silently. The mapping comes from the data file's Masses
-    section (``parse_data_file``: ``# El`` labels, then nearest mass), and
-    covers declared types that have no atoms.
+    species silently. The mapping comes from the data file's Masses section
+    and covers declared types that have no atoms. ``elements`` (what the
+    potential was deployed for) may be a superset of the file's elements,
+    e.g. a model fine-tuned on a larger system.
     """
-    from ..._shared.structure_io import (
-        is_lammps_data, lammps_type_elements, structure_elements)
+    from ..._shared.structure_io import is_lammps_data, inspect_lammps_data
     if not is_lammps_data(structure_file):
         return elements
     if not os.path.isfile(structure_file):
@@ -1440,20 +1508,26 @@ def _pair_coeff_elements(structure_file: str, elements: list) -> list:
                 f"{structure_file} is not readable here, so pair_coeff order "
                 f"{elements} cannot be checked against its atom types")
         return elements
-    mapping = lammps_type_elements(structure_file)
+    info = inspect_lammps_data(structure_file)       # parsed once
+    mapping = info["type_elements"]
     if mapping is None:
-        if len(elements) == 1 and parse_data_file(structure_file).get("atom_types") == 1:
+        if len(elements) == 1 and info["n_types"] == 1:
             return elements
         raise ValueError(
-            f"{structure_file}: the Masses section does not identify every "
-            f"atom type's element, so pair_coeff cannot be ordered safely. "
-            f"Add masses (ideally labelled, e.g. '1 22.99 # Na')."
+            f"Cannot order pair_coeff: the element of every atom type is not "
+            f"known ({info['problem']}). Add masses, ideally labelled "
+            f"('1 22.99 # Na')."
         )
-    present = structure_elements(structure_file)[0]
-    if elements and set(present) != set(elements):
+    present = info["present"]
+    if present is None:
+        logger.warning(
+            f"pair_coeff written from {structure_file}'s Masses section; its "
+            f"atoms could not be read to check them ({info['problem']})")
+    elif elements and not set(present) <= set(elements):
         raise ValueError(
-            f"{structure_file} contains {present} but the potential was "
-            f"deployed for {sorted(set(elements))}."
+            f"{structure_file} contains {sorted(set(present) - set(elements))}, "
+            f"which the potential (deployed for {sorted(set(elements))}) does "
+            f"not cover."
         )
     return [mapping[t] for t in sorted(mapping)]
 

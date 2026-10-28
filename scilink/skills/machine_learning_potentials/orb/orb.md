@@ -9,14 +9,6 @@ detect:
     (`pip install orb-models`). Model weights are downloaded on first use.
     A successful `from orb_models.forcefield import pretrained` confirms the
     backend is usable.
-deploy:
-  import_line: "from orb_models.forcefield import pretrained; from orb_models.forcefield.inference.calculator import ORBCalculator"
-  construct_expr: "ORBCalculator(*pretrained.{loader}(device=DEVICE, precision='float32-high'), device=DEVICE)"
-  device_env_var: ORB_DEVICE
-  devices: [cuda, cpu]
-  default_model: orb-v3-conservative-inf-omat
-  model_file: none
-  notes: "Orb {name}. ASE-only: the MD agent must use the ASE runner."
 pretrained:
   - name: orb-v3-conservative-inf-omat
     aliases: [orb]

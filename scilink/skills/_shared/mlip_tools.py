@@ -2,8 +2,9 @@
 Backend-agnostic tools for ML interatomic potentials.
 
 Detection, the pretrained-model list and deployment are driven by each
-backend's skill bundle (its ``detect:``, ``pretrained:`` and ``deploy:``
-frontmatter), so adding a backend is adding a skill bundle. Uncertainty
+backend's built-in skill bundle (``detect:`` and ``pretrained:`` frontmatter
+plus a ``<backend>_deploy.py`` recipe), so adding a backend is adding a
+bundle. Uncertainty
 estimation and training still dispatch on ``backend`` to private
 implementations; only MACE has them today, and the others raise
 NotImplementedError with actionable messages so failures are obvious
@@ -38,23 +39,27 @@ logger = logging.getLogger(__name__)
 #  BACKENDS COME FROM SKILL BUNDLES
 # ═══════════════════════════════════════════════════════════════════
 #
-# Each MLIP backend is described by its skill bundle's frontmatter
-# (skills/machine_learning_potentials/<backend>/<backend>.md):
+# Each MLIP backend is a built-in skill bundle,
+# skills/machine_learning_potentials/<backend>/:
 #
-#   detect:      is it installed?  (read by AvailableSoftware, as for
-#                every other engine)
-#   deploy:      templates for building its ASE calculator
-#   pretrained:  the models deploy() can load, and the elements each
-#                one was trained on
+#   <backend>.md frontmatter (declarative data only)
+#     detect:      is it installed?  (the probe AvailableSoftware uses for
+#                  every engine)
+#     pretrained:  the models SciLink can deploy, their template params,
+#                  and the elements each one was trained on
+#   <backend>_deploy.py
+#     DEPLOY:      the recipe for building its ASE calculator
 #
-# So a new backend is a new skill bundle; no code here changes.
+# So a new backend is a new bundle (markdown + a small DEPLOY module); no
+# code here changes.
 #
-# ONLY BUILT-IN BUNDLES are read for `deploy:` and `pretrained:`. The
-# `deploy:` templates are executed, and skill markdown from a user root
-# ($SCILINK_SKILLS_PATH) or the persistent store (where the UI uploader
-# saves) must stay non-executable. This is the same packaging boundary as
-# TOOL_SPEC (see _registry): a user skill may still override a backend's
-# guidance text, but cannot add or change what runs.
+# The recipe is Python, so it lives in a package .py file and never in
+# skill markdown (CLAUDE.md: markdown is not an executable surface). Both
+# the recipe and `pretrained:` are read only from BUILT-IN bundles, never
+# from $SCILINK_SKILLS_PATH or the persistent store the UI uploader writes
+# to: the same packaging boundary as TOOL_SPEC (see _registry). A user skill
+# may still override a backend's guidance text, but cannot add or change
+# what runs, or the element lists the coverage guard uses.
 
 _MLIP_DOMAIN = "machine_learning_potentials"
 
@@ -73,6 +78,26 @@ def _builtin_meta(backend: str) -> Dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(f"no built-in MLIP skill bundle {backend!r}")
     return load_skill(str(path), domain=_MLIP_DOMAIN).get("meta") or {}
+
+
+@functools.lru_cache(maxsize=None)
+def deploy_spec(backend: str) -> Optional[Dict[str, Any]]:
+    """The backend's ``DEPLOY`` recipe from ``<backend>_deploy.py``, or None.
+
+    Imported as a package module, so only built-in bundles can supply one.
+    Callers must treat the result as read-only.
+    """
+    import importlib
+    modname = f"scilink.skills.{_MLIP_DOMAIN}.{backend}.{backend}_deploy"
+    try:
+        mod = importlib.import_module(modname)
+    except ModuleNotFoundError as e:
+        # Only "this backend has no recipe module" means no recipe; a
+        # recipe that fails to import must fail loudly.
+        if e.name and modname.startswith(e.name):
+            return None
+        raise
+    return getattr(mod, "DEPLOY", None)
 
 
 def _backend_names() -> List[str]:
@@ -128,8 +153,7 @@ def model_elements(
     if entry is None:
         return None
     if "elements_by_task" in entry:
-        task = task_name or (_skill_meta(backend).get("deploy") or {}).get(
-            "default_task")
+        task = task_name or (deploy_spec(backend) or {}).get("default_task")
         return _element_set((entry["elements_by_task"] or {}).get(task))
     return _element_set(entry.get("elements"))
 
@@ -162,8 +186,8 @@ def check_backends(
     that YAML are not used: it lives in the home directory and is shared by
     every Python environment. The model list is
     each skill's ``pretrained:`` entries (minus ``offer: false``). A
-    backend whose skill has no ``deploy:`` block offers no models, since
-    deploy() could not load them.
+    backend with no ``DEPLOY`` recipe offers no models, since deploy()
+    could not load them.
 
     Args:
         backends: Backend names to report. Default: every MLIP skill.
@@ -184,7 +208,7 @@ def check_backends(
         info = (available_software.get(_MLIP_DOMAIN, name)
                 if available_software is not None else _probe_installed(name))
         offered = []
-        if meta.get("deploy"):
+        if deploy_spec(name):
             for entry in meta.get("pretrained") or []:
                 if entry.get("offer", True):
                     offered.append({k: entry[k] for k in
@@ -218,8 +242,23 @@ def model_file_strategy(backend: str, model: str) -> Optional[str]:
     if entry is None:
         return None
     return entry.get("model_file",
-                     (_skill_meta(backend).get("deploy") or {}).get(
-                         "model_file", "none"))
+                     (deploy_spec(backend) or {}).get("model_file", "none"))
+
+
+def fallback_rank(backend: str, model: str) -> Tuple[int, int, int]:
+    """Sort key for falling back without an LLM pick: lower is tried first.
+
+    Backends by their recipe's ``fallback_rank`` (a design choice in each
+    ``<backend>_deploy.py``), then the backend's ``default_model``, then the
+    skill's listed order. Never by directory name.
+    """
+    spec = deploy_spec(backend) or {}
+    entry = find_pretrained(backend, model)
+    names = [e.get("name") for e in (_skill_meta(backend).get("pretrained") or [])]
+    is_default = entry is not None and entry.get("name") == (
+        find_pretrained(backend, spec.get("default_model", "")) or {}).get("name")
+    return (int(spec.get("fallback_rank", 100)), 0 if is_default else 1,
+            names.index(model) if model in names else len(names))
 
 
 def can_run_in(backend: str, model: str, runner: Optional[str]) -> bool:
@@ -289,9 +328,9 @@ def _resolve_device(device: str, devices: Optional[List[str]]) -> str:
 def _build_calculator(import_line: str, construct_expr: str, device: str):
     """Construct the calculator once, exactly as the run script will.
 
-    Validates the install and triggers any weight download. The
-    templates come from a skill bundle; skill bundles already supply
-    code that runs (this same expression goes into the run script).
+    Validates the install and triggers any weight download. The templates
+    come from a built-in ``<backend>_deploy.py`` (package code), and the same
+    expression goes into the generated run script.
     """
     ns: Dict[str, Any] = {"DEVICE": device}
     exec(import_line, ns)
@@ -313,8 +352,8 @@ def deploy(
     skill's ``pretrained:`` list (``"mace-mp-0"``, ``"chgnet"``,
     ``"uma"``), or an on-disk path to a trained/fine-tuned model (the
     output of ``train()`` / ``fine_tune()``). Everything backend-specific
-    comes from the skill's ``deploy:`` block, so a new backend needs no
-    code here.
+    comes from the bundle's ``DEPLOY`` recipe and ``pretrained:`` list, so a
+    new backend needs no code here.
 
     A pretrained model is refused if the system has an element the model
     was not trained on. Several backends (Orb, UMA, DeePMD) would
@@ -328,8 +367,8 @@ def deploy(
         device:      "cpu", "cuda", ...; falls back to "cpu" if the
                      backend does not list it
         task_name:   Prediction head for multi-task models (UMA: "omat",
-                     "omol", ...). Defaults to the skill's
-                     ``deploy.default_task``.
+                     "omol", ...). Defaults to the recipe's
+                     ``default_task``.
 
     Returns:
         A DeployedPotential descriptor — the engine-neutral contract
@@ -343,12 +382,11 @@ def deploy(
     except FileNotFoundError:
         raise ValueError(f"Unknown backend: {backend} "
                          f"(known: {', '.join(_backend_names())})")
-    spec = meta.get("deploy")
+    spec = deploy_spec(backend)
     if not spec:
         raise NotImplementedError(
-            f"The {backend} skill has no `deploy:` block, so SciLink cannot "
-            f"load {backend} models yet. Add one to "
-            f"skills/{_MLIP_DOMAIN}/{backend}/{backend}.md."
+            f"SciLink has no deploy recipe for {backend} yet: add a DEPLOY "
+            f"dict in skills/{_MLIP_DOMAIN}/{backend}/{backend}_deploy.py."
         )
 
     use_device = _resolve_device(device, spec.get("devices"))
@@ -360,7 +398,7 @@ def deploy(
         trained = spec.get("trained_file")
         if not trained:
             raise NotImplementedError(
-                f"The {backend} skill has no `deploy.trained_file` block, so "
+                f"The {backend} deploy recipe has no `trained_file` entry, so "
                 f"trained {backend} model files cannot be loaded yet."
             )
         name = os.path.basename(model)
@@ -401,12 +439,14 @@ def deploy(
         # A model may override the backend's notes (e.g. an ASE-only model
         # of a LAMMPS-capable backend).
         notes = entry.get("notes", spec.get("notes", "")).format(**ctx)
-        calc = _build_calculator(import_line, construct_expr, use_device)
+        # Validate metadata before loading anything: building the
+        # calculator imports the backend and may download weights.
         strategy = entry.get("model_file", spec.get("model_file", "none"))
         if strategy not in _MODEL_FILE_STRATEGIES:
             raise ValueError(f"Unknown model_file strategy {strategy!r} "
                              f"for {name}; use one of "
                              f"{sorted(_MODEL_FILE_STRATEGIES)}")
+        calc = _build_calculator(import_line, construct_expr, use_device)
         model_file = _MODEL_FILE_STRATEGIES[strategy](calc, name, working_dir)
 
     logger.info(f"Deployed {backend} {name} (device={use_device})")

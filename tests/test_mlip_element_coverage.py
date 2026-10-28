@@ -72,10 +72,11 @@ def test_every_pretrained_model_is_deployable_and_declares_elements():
     from scilink.skills._shared import mlip_tools as mt
     for name, skill in _engine_skills().items():
         meta = skill["meta"]
-        spec = meta.get("deploy")
+        assert "deploy" not in meta, f"{name}.md: deploy recipes belong in {name}_deploy.py"
+        spec = mt.deploy_spec(name)
         entries = meta.get("pretrained") or []
         if not spec:
-            assert not entries, f"{name}: lists models but has no deploy block"
+            assert not entries, f"{name}: lists models but has no DEPLOY recipe"
             continue
         for key in ("import_line", "construct_expr", "device_env_var"):
             assert spec.get(key), f"{name}: deploy.{key} missing"
@@ -223,10 +224,11 @@ def test_deploy_metadata_comes_only_from_builtin_bundles(monkeypatch, tmp_path):
     assert "evil" not in mt._backend_names()
     with pytest.raises(ValueError, match="Unknown backend"):
         mt.deploy("evil", "e", ["Cu"], str(tmp_path / "w"))
-    # The user's mace.md overrides guidance text but not what runs.
-    assert "mace_mp" in str(mt._skill_meta("mace")["deploy"]["import_line"]) or \
-        "{loader}" in mt._skill_meta("mace")["deploy"]["import_line"]
+    # The user's mace.md overrides guidance text but not what runs or the
+    # model list the coverage guard uses.
+    assert mt.deploy_spec("mace")["import_line"] == "from mace.calculators import {loader}"
     assert mt.find_pretrained("mace", "e") is None
+    assert mt.find_pretrained("mace", "mace-mp-0") is not None
     assert not mark.exists()
 
 
@@ -282,6 +284,83 @@ def test_ase_only_model_notes_say_so():
     from scilink.skills._shared import mlip_tools as mt
     entry = mt.find_pretrained("mace", "mace-mh-0")
     assert "ASE only" in entry["notes"] and "LAMMPS-capable" not in entry["notes"]
+
+
+# ── review round 2: recipes in .py, fallback policy, order of checks ─
+
+def test_deploy_recipes_are_side_effect_free_python_modules():
+    """Recipes live in <backend>_deploy.py; markdown has none; no imports.
+
+    The skill registry imports every public .py in a skill folder, so a
+    recipe module must not import its MLIP package.
+    """
+    import ast
+    import importlib
+    from scilink.skills._shared import mlip_tools as mt
+    for name, skill in _engine_skills().items():
+        assert "deploy" not in skill["meta"], name
+        try:
+            mod = importlib.import_module(
+                f"scilink.skills.{DOMAIN}.{name}.{name}_deploy")
+        except ModuleNotFoundError:
+            assert not skill["meta"].get("pretrained"), name
+            continue
+        tree = ast.parse(open(mod.__file__).read())
+        assert not [n for n in ast.walk(tree)
+                    if isinstance(n, (ast.Import, ast.ImportFrom))], name
+        assert mt.deploy_spec(name) is mod.DEPLOY
+
+
+def test_broken_recipe_module_fails_loudly(monkeypatch):
+    """A recipe that cannot import must not silently become "no recipe"."""
+    import importlib
+    from scilink.skills._shared import mlip_tools as mt
+    mt.deploy_spec.cache_clear()
+    real = importlib.import_module
+
+    def broken(name, *a, **k):
+        if name.endswith(".mace.mace_deploy"):
+            raise ModuleNotFoundError("No module named 'somedep'", name="somedep")
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(importlib, "import_module", broken)
+    try:
+        with pytest.raises(ModuleNotFoundError):
+            mt.deploy_spec("mace")
+        assert mt.deploy_spec("deepmd") is None      # genuinely no recipe
+    finally:
+        mt.deploy_spec.cache_clear()
+
+
+def test_fallback_follows_policy_not_directory_order():
+    """Off-list pick under ASE falls back to MACE's default, not chgnet."""
+    with tempfile.TemporaryDirectory() as td:
+        agent, _ = _picker(td, {"mace", "chgnet", "orb", "uma"},
+                           {"model_name": "mace-mpa0", "justification": "x"})
+        result = agent._select_pretrained_model(["Cu"], "Cu MD")
+    assert (result["backend"], result["model_name"]) == ("mace", "mace-mp-0")
+    assert "fallback" in result["justification"]
+
+
+def test_finetune_selector_needs_elements_for_organic_model():
+    with tempfile.TemporaryDirectory() as td:
+        agent = _agent(td)
+        agent._backends = {"mace": {"available": True, "pretrained": []}}
+        assert agent._select_backend_for_finetuning(
+            {"n_train": 10}, [], "x")["foundation_model"] == "mace-mp-0"
+        assert agent._select_backend_for_finetuning(
+            {"n_train": 10}, ["C", "H", "O"], "x")["foundation_model"] == "mace-off23"
+
+
+def test_bad_model_file_strategy_fails_before_loading(monkeypatch):
+    from scilink.skills._shared import mlip_tools as mt
+    entry = dict(mt.find_pretrained("mace", "mace-mp-0"), model_file="torch-save")
+    monkeypatch.setattr(mt, "find_pretrained", lambda b, m: entry)
+    monkeypatch.setattr(mt, "_build_calculator", lambda *a, **k: pytest.fail(
+        "loaded the model before validating its metadata"))
+    with tempfile.TemporaryDirectory() as td:
+        with pytest.raises(ValueError, match="model_file strategy"):
+            mt.deploy("mace", "mace-mp-0", ["Cu"], td)
 
 
 # ── the picker ───────────────────────────────────────────────────────

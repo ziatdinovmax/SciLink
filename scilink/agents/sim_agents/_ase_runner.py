@@ -16,10 +16,13 @@ the backend's deploy function; it never means writing a new script
 generator here.
 """
 
+import logging
 import os
 from typing import Optional
 
 from ._potential import DeployedPotential
+
+logger = logging.getLogger(__name__)
 
 
 def generate_ase_script(
@@ -68,13 +71,26 @@ def generate_ase_script(
     # into the run dir next to the script); the caller may pass any path.
     struct_basename = os.path.basename(structure_file)
     # For LAMMPS data, resolve each atom type's element now, from the data
-    # file's Masses section (labels first, then nearest mass), and write the
-    # map into the script. ASE's own nearest-mass guess can mislabel (a
-    # labelled "59.0 # Ni" reads as Co) and has no answer without masses.
-    type_elements = None
-    from ...skills._shared.structure_io import is_lammps_data, lammps_type_elements
+    # file's Masses section (a label is used only if its element's mass
+    # agrees), and write the map into the script. ASE's own nearest-mass
+    # guess can mislabel (a labelled "59.0 # Ni" reads as Co) and has no
+    # answer without masses. Also pass ASE an atom style when the file has no
+    # "# <style>" header and ASE cannot guess it.
+    type_elements, atom_style = None, None
+    from ...skills._shared.structure_io import is_lammps_data, inspect_lammps_data
+    if is_lammps_data(structure_file) and not os.path.isfile(structure_file):
+        logger.warning(
+            f"{structure_file} is not readable now, so its atom types cannot "
+            f"be mapped to elements; the script will refuse a multi-type file.")
     if is_lammps_data(structure_file) and os.path.isfile(structure_file):
-        type_elements = lammps_type_elements(structure_file)
+        info = inspect_lammps_data(structure_file)
+        type_elements, atom_style = info["type_elements"], info["atom_style"]
+        if type_elements is None and not (
+                info["n_types"] == 1 and len(potential.elements) == 1):
+            raise ValueError(
+                f"Cannot tell which element each atom type is "
+                f"({info['problem']}). Add masses, ideally labelled "
+                f"('1 22.99 # Na').")
 
     # ── shared scaffold: imports, device, structure read, calc attach ──
     header = f'''"""
@@ -98,6 +114,7 @@ from ase.io import read as _ase_read
 
 ELEMENTS = [{el_repr}]
 TYPE_ELEMENTS = {type_elements!r}   # LAMMPS atom type -> element, from the data file
+ATOM_STYLE = {atom_style!r}   # None: from the file's "Atoms # <style>" header
 DEVICE = os.environ.get({spec.device_env_var!r}, {device!r})
 
 # LAMMPS data files are not auto-detected by extension; everything else
@@ -114,27 +131,28 @@ def _load_structure():
     _path = {struct_basename!r}
     if pathlib.Path(_path).suffix.lower() in _LAMMPS_EXTS:
         from ase.io.lammpsdata import read_lammps_data
-        # The atom style comes from the file's "Atoms # <style>" header.
-        atoms = read_lammps_data(_path, sort_by_id=True)
+        atoms = read_lammps_data(_path, sort_by_id=True, atom_style=ATOM_STYLE)
         if TYPE_ELEMENTS:
             atoms.set_chemical_symbols(
                 [TYPE_ELEMENTS[int(t)] for t in atoms.arrays["type"]])
-        elif "masses" not in atoms.arrays:
-            # Without masses ASE numbers the atom types as H, He, ... and the
-            # element of each type is unknown. Only one type is unambiguous;
-            # never guess a type order for more.
-            n_types = len(set(atoms.arrays["type"]))
-            if n_types == 1 and len(ELEMENTS) == 1:
-                atoms.set_chemical_symbols(ELEMENTS * len(atoms))
-            else:
-                raise SystemExit(
-                    f"{{_path}} has no Masses section, so the element of each "
-                    f"atom type is unknown. Add masses to the data file.")
-        actual = sorted(set(atoms.get_chemical_symbols()))
-        if ELEMENTS and actual != sorted(set(ELEMENTS)):
+        elif len(set(atoms.arrays["type"])) == 1 and len(ELEMENTS) == 1:
+            # One type, one element: unambiguous.
+            atoms.set_chemical_symbols(ELEMENTS * len(atoms))
+        else:
+            # Never fall back to ASE's nearest-mass guess: it ignores mass
+            # labels (a "59.0 # Ni" reads as Co) and numbers types without
+            # masses as H, He, ...
             raise SystemExit(
-                f"{{_path}} contains {{actual}} but the potential was deployed "
-                f"for {{sorted(set(ELEMENTS))}}.")
+                f"{{_path}}: the element of each atom type was not resolved "
+                f"when this script was generated (the data file was not "
+                f"readable then). Regenerate it with the file in place.")
+        # The potential may cover more elements than this file (e.g. a
+        # model fine-tuned on a larger system); every atom must be covered.
+        uncovered = sorted(set(atoms.get_chemical_symbols()) - set(ELEMENTS))
+        if ELEMENTS and uncovered:
+            raise SystemExit(
+                f"{{_path}} contains {{uncovered}}, which the potential "
+                f"(deployed for {{sorted(set(ELEMENTS))}}) does not cover.")
     else:
         atoms = _ase_read(_path)
     return atoms

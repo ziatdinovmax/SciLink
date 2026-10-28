@@ -11,16 +11,6 @@ detect:
     `from fairchem.core import FAIRChemCalculator` confirms the backend is
     usable. LAMMPS support requires the `fairchem-lammps` plugin or a LAMMPS
     build with the ML-IAP package linked against the fairchem library.
-deploy:
-  import_line: "from fairchem.core import FAIRChemCalculator"
-  construct_expr: "FAIRChemCalculator(__import__('fairchem.core', fromlist=['pretrained_mlip']).pretrained_mlip.get_predict_unit({name!r}, device=('cuda' if str(DEVICE).startswith('cuda') else 'cpu')), task_name={task!r})"
-  device_env_var: UMA_DEVICE
-  devices: [cuda, cpu]
-  default_model: uma-s-1p2
-  # UMA is multi-task: the head sets which training data (and elements) apply.
-  default_task: omat
-  model_file: none
-  notes: "UMA {name} (task head '{task}'). ASE-only: no LAMMPS pair_style in the base fairchem package; the MD agent must use the ASE runner. Pass task_name='omol' for molecular systems."
 pretrained:
   - name: uma-s-1p2
     aliases: [uma]

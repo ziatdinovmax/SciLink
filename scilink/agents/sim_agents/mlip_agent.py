@@ -359,7 +359,10 @@ Return JSON:
     "cautions": "any limitations to be aware of"
 }}
 """
-        fallback = eligible[0]
+        # Fallback by design (each recipe's fallback_rank, then the
+        # backend's default model), not by directory-name order.
+        fallback = min(eligible, key=lambda m: mlip_tools.fallback_rank(
+            m["backend"], m["name"]))
         try:
             result = self._generate_json(prompt)
         except Exception as e:
@@ -452,17 +455,18 @@ Return JSON:
         self.logger.info("=" * 60)
 
         elements = sorted(system_info.get("elements", {}).keys())
+        problem = None
         if not elements:
-            from ...skills._shared.structure_io import structure_elements
-            elements, _ = structure_elements(structure_file)
+            from ...skills._shared.structure_io import read_structure_elements
+            elements, _, problem = read_structure_elements(structure_file)
         if not elements:
             # Without the elements no model choice or coverage check is
             # possible, and a LAMMPS data file without masses would load as
             # H, He, ... in the run script. Fail loudly instead.
             raise ValueError(
-                f"Could not determine the system's elements (system_info has "
-                f"none and {structure_file} gives none; a LAMMPS data file "
-                f"needs a Masses section). Pass system_info['elements']."
+                f"Could not determine the system's elements: system_info has "
+                f"none, and {problem or f'{structure_file} gives none'}. "
+                f"Fix the structure file or pass system_info['elements']."
             )
         sim = simulation_params or {}
 
@@ -1321,9 +1325,10 @@ Return JSON:
 
         # If only MACE is available, skip LLM call
         if list(available.keys()) == ["mace"]:
-            # Organic model only if it was trained on every element
-            # (coverage comes from the mace skill's frontmatter).
-            if mlip_tools.uncovered_elements(
+            # Organic model only if it was trained on every element, which
+            # needs the elements: unknown ([]) must not select the
+            # organic-only model.
+            if elements and mlip_tools.uncovered_elements(
                     "mace", "mace-off23", elements) == []:
                 model = "mace-off23"
             else:

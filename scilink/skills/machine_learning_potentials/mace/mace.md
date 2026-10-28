@@ -17,25 +17,7 @@ detect:
     `pip install git+https://github.com/WillBaldwin0/graph_electrostatics.git@v0.4.0`.
     A successful `from mace.calculators import mace_polar` plus `import
     graph_longrange` confirms the polar backend is usable.
-# How deploy() builds a calculator. Templates are Python str.format
-# strings filled from `defaults`, then the model's `params`, plus {name},
-# {domain}, {task} and (trained files) {model_file}. The calculator
-# expression may use DEVICE, which the run script defines.
-deploy:
-  import_line: "from mace.calculators import {loader}"
-  construct_expr: "{loader}(model={size!r}, device=DEVICE, default_dtype='float64', **{kwargs!r})"
-  device_env_var: MACE_DEVICE
-  devices: [cuda, cpu, mps]
-  defaults: {kwargs: {}}
-  default_model: mace-mp-0
-  # LAMMPS needs an on-disk model: save the loaded torch model to working_dir.
-  model_file: torch_save
-  notes: "MACE {name} ({size}, {domain}). LAMMPS-capable via pair_style mace (single node)."
-  trained_file:
-    import_line: "from mace.calculators import MACECalculator"
-    construct_expr: "MACECalculator(model_paths=[{model_file!r}], device=DEVICE, default_dtype='float64')"
-    notes: "Trained MACE model ({name}). LAMMPS-capable via pair_style mace (single node)."
-# Pretrained models deploy() can load. `elements` is the set the model was
+# Pretrained models SciLink can deploy (the recipe is in mace_deploy.py). `elements` is the set the model was
 # trained on (checked against calc.z_table, mace-torch 0.3.16): a list of
 # symbols, or {z: [lo, hi], exclude: [...]}. `offer: false` keeps a model
 # loadable by name but out of the automatic picker.
