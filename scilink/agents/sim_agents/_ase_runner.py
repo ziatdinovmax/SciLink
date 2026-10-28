@@ -67,6 +67,14 @@ def generate_ase_script(
     # The generated script reads the structure by basename (the file is staged
     # into the run dir next to the script); the caller may pass any path.
     struct_basename = os.path.basename(structure_file)
+    # For LAMMPS data, resolve each atom type's element now, from the data
+    # file's Masses section (labels first, then nearest mass), and write the
+    # map into the script. ASE's own nearest-mass guess can mislabel (a
+    # labelled "59.0 # Ni" reads as Co) and has no answer without masses.
+    type_elements = None
+    from ...skills._shared.structure_io import is_lammps_data, lammps_type_elements
+    if is_lammps_data(structure_file) and os.path.isfile(structure_file):
+        type_elements = lammps_type_elements(structure_file)
 
     # ── shared scaffold: imports, device, structure read, calc attach ──
     header = f'''"""
@@ -89,6 +97,7 @@ from ase.io import read as _ase_read
 {spec.import_line}
 
 ELEMENTS = [{el_repr}]
+TYPE_ELEMENTS = {type_elements!r}   # LAMMPS atom type -> element, from the data file
 DEVICE = os.environ.get({spec.device_env_var!r}, {device!r})
 
 # LAMMPS data files are not auto-detected by extension; everything else
@@ -107,7 +116,10 @@ def _load_structure():
         from ase.io.lammpsdata import read_lammps_data
         # The atom style comes from the file's "Atoms # <style>" header.
         atoms = read_lammps_data(_path, sort_by_id=True)
-        if "masses" not in atoms.arrays:
+        if TYPE_ELEMENTS:
+            atoms.set_chemical_symbols(
+                [TYPE_ELEMENTS[int(t)] for t in atoms.arrays["type"]])
+        elif "masses" not in atoms.arrays:
             # Without masses ASE numbers the atom types as H, He, ... and the
             # element of each type is unknown. Only one type is unambiguous;
             # never guess a type order for more.

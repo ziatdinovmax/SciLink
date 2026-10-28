@@ -67,6 +67,7 @@ pretrained:
     elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
     params: {loader: mace_mp, size: mh-0, kwargs: {head: omat_pbe}}
     model_file: none
+    notes: "MACE {name} ({size}, {domain}, omat_pbe head). ASE only: no on-disk model file for LAMMPS; the MD agent must use the ASE runner."
   - name: mace-off23
     domain: organic
     description: SPICE-trained, wB97M-D3(BJ)/def2-TZVPP (medium). Organic molecules, peptides, drug-like compounds; H C N O F P S Cl Br I only. Neutral, non-radical, non-reactive systems only. LAMMPS-capable (single node).

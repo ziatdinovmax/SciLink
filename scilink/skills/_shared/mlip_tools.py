@@ -13,6 +13,7 @@ rather than silent.
 from scilink.executors import run_engine  # stoppable, whole-tree kill (#685)
 import os
 import json
+import functools
 import logging
 import subprocess
 import shutil
@@ -47,20 +48,41 @@ logger = logging.getLogger(__name__)
 #                one was trained on
 #
 # So a new backend is a new skill bundle; no code here changes.
+#
+# ONLY BUILT-IN BUNDLES are read for `deploy:` and `pretrained:`. The
+# `deploy:` templates are executed, and skill markdown from a user root
+# ($SCILINK_SKILLS_PATH) or the persistent store (where the UI uploader
+# saves) must stay non-executable. This is the same packaging boundary as
+# TOOL_SPEC (see _registry): a user skill may still override a backend's
+# guidance text, but cannot add or change what runs.
 
 _MLIP_DOMAIN = "machine_learning_potentials"
 
 
 def _skill_meta(backend: str) -> Dict[str, Any]:
-    """Frontmatter of a backend's skill bundle (raises FileNotFoundError)."""
-    from ..loader import load_skill
-    parsed = load_skill(f"{_MLIP_DOMAIN}/{backend}", domain=_MLIP_DOMAIN)
-    return parsed.get("meta") or {}
+    """Frontmatter of a backend's BUILT-IN skill bundle (FileNotFoundError if none)."""
+    return _builtin_meta(backend)
+
+
+@functools.lru_cache(maxsize=None)
+def _builtin_meta(backend: str) -> Dict[str, Any]:
+    # Cached: built-in bundles ship with the package and do not change
+    # during a process. Callers must treat the result as read-only.
+    from ..loader import load_skill, _SKILLS_DIR
+    path = _SKILLS_DIR / _MLIP_DOMAIN / backend / f"{backend}.md"
+    if not path.is_file():
+        raise FileNotFoundError(f"no built-in MLIP skill bundle {backend!r}")
+    return load_skill(str(path), domain=_MLIP_DOMAIN).get("meta") or {}
 
 
 def _backend_names() -> List[str]:
-    from ..loader import list_skills
-    return [s for s in list_skills(domain=_MLIP_DOMAIN) if s != "general"]
+    """Built-in MLIP skill bundles (never user roots; see above)."""
+    from ..loader import _SKILLS_DIR
+    root = _SKILLS_DIR / _MLIP_DOMAIN
+    return sorted(d.name for d in root.iterdir()
+                  if d.is_dir() and d.name not in ("general",)
+                  and not d.name.startswith(("_", "."))
+                  and (d / f"{d.name}.md").is_file())
 
 
 def _element_set(spec: Any) -> Optional[set]:
@@ -133,35 +155,34 @@ def check_backends(
 ) -> Dict[str, Dict[str, Any]]:
     """Which MLIP backends are installed, and which models each offers.
 
-    Installation is read through ``AvailableSoftware`` from each skill's
-    ``detect:`` block, the same as every other engine. The model list is
+    Installation comes from each skill's ``detect:`` block, probed live for
+    just the requested backends (``_probe_from_frontmatter``, the probe
+    ``AvailableSoftware`` uses for every engine), plus any ``user_confirmed``
+    override in the available-software YAML. The cached probe results in
+    that YAML are not used: it lives in the home directory and is shared by
+    every Python environment. The model list is
     each skill's ``pretrained:`` entries (minus ``offer: false``). A
     backend whose skill has no ``deploy:`` block offers no models, since
     deploy() could not load them.
 
     Args:
         backends: Backend names to report. Default: every MLIP skill.
-        available_software: An ``AvailableSoftware`` to read from.
-            Default: a live ``AvailableSoftware.detect()``. Not the
-            cached ``auto()``: its YAML lives in the home directory and
-            is shared by every Python environment, and whether a Python
-            package imports is a fact about this interpreter.
+        available_software: Optional object with
+            ``get(domain, engine) -> {"available": bool}`` to use instead
+            of probing (tests, benchmarks).
 
     Returns:
         ``{backend: {"available": bool, "pretrained": [
             {"name", "domain", "description"}, ...]}}``
     """
-    if available_software is None:
-        from ...utils.available_software import AvailableSoftware
-        available_software = AvailableSoftware.detect()
-
     out: Dict[str, Dict[str, Any]] = {}
     for name in (backends if backends is not None else _backend_names()):
         try:
             meta = _skill_meta(name)
         except FileNotFoundError:
             continue
-        info = available_software.get(_MLIP_DOMAIN, name)
+        info = (available_software.get(_MLIP_DOMAIN, name)
+                if available_software is not None else _probe_installed(name))
         offered = []
         if meta.get("deploy"):
             for entry in meta.get("pretrained") or []:
@@ -172,6 +193,49 @@ def check_backends(
         out[name] = {"available": bool(info.get("available")),
                      "pretrained": offered}
     return out
+
+
+def _probe_installed(backend: str) -> Dict[str, Any]:
+    """Live ``detect:`` probe for one backend, or a user_confirmed override."""
+    from ...utils.available_software import (
+        AvailableSoftware, _probe_from_frontmatter, _yaml_path)
+    live = _probe_from_frontmatter(_MLIP_DOMAIN, backend)
+    if live.get("available"):
+        return live
+    try:
+        if _yaml_path().is_file():
+            cached = AvailableSoftware.load().get(_MLIP_DOMAIN, backend)
+            if cached.get("user_confirmed"):
+                return {**cached, "available": True}
+    except Exception as e:
+        logger.debug(f"Could not read available-software YAML: {e}")
+    return live
+
+
+def model_file_strategy(backend: str, model: str) -> Optional[str]:
+    """The ``model_file`` strategy of a pretrained model (None if unknown)."""
+    entry = find_pretrained(backend, model)
+    if entry is None:
+        return None
+    return entry.get("model_file",
+                     (_skill_meta(backend).get("deploy") or {}).get(
+                         "model_file", "none"))
+
+
+def can_run_in(backend: str, model: str, runner: Optional[str]) -> bool:
+    """Whether a pretrained model can run in ``runner`` ("ase", "lammps", ...).
+
+    ASE runs every backend. Another engine needs the backend in its tools
+    module's ``supported_mlip_backends()`` and an on-disk model file.
+    """
+    if runner in (None, "", "ase"):
+        return True
+    if model_file_strategy(backend, model) in (None, "none"):
+        return False
+    from ...agents.sim_agents.md_simulation_agent import MDSimulationAgent
+    engine = MDSimulationAgent.TOOL_REGISTRY.get(runner)
+    supported = getattr(engine, "supported_mlip_backends", None)
+    return bool(supported and backend in supported())
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -290,7 +354,9 @@ def deploy(
     use_device = _resolve_device(device, spec.get("devices"))
     task = task_name or spec.get("default_task")
 
-    if model and os.path.exists(model):
+    # isfile, not exists: a folder named like an alias ("mace", "orb") in
+    # the working directory must not be taken for a model file.
+    if model and os.path.isfile(model):
         trained = spec.get("trained_file")
         if not trained:
             raise NotImplementedError(
@@ -332,7 +398,9 @@ def deploy(
                "name": name, "domain": entry.get("domain", ""), "task": task}
         import_line = spec["import_line"].format(**ctx)
         construct_expr = spec["construct_expr"].format(**ctx)
-        notes = spec.get("notes", "").format(**ctx)
+        # A model may override the backend's notes (e.g. an ASE-only model
+        # of a LAMMPS-capable backend).
+        notes = entry.get("notes", spec.get("notes", "")).format(**ctx)
         calc = _build_calculator(import_line, construct_expr, use_device)
         strategy = entry.get("model_file", spec.get("model_file", "none"))
         if strategy not in _MODEL_FILE_STRATEGIES:

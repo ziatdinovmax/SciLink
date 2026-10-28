@@ -248,12 +248,14 @@ class MLIPAgent:
     def _select_pretrained_model(
         self, elements: List[str], research_goal: str,
         task_name: Optional[str] = None,
+        runner: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Use LLM + skill knowledge to select the best pretrained model
         for the given system.
 
-        Only models trained on every element are offered. Returns
+        Only models trained on every element, and able to run in
+        ``runner`` (e.g. an on-disk model for LAMMPS), are offered. Returns
         ``{"backend", "model_name", "justification", ...}``; any fallback
         (one eligible model, failed call, off-list pick) says so in the
         justification and the log.
@@ -283,10 +285,12 @@ class MLIPAgent:
             missing = (mlip_tools.uncovered_elements(
                 m["backend"], m["name"], elements, task_name)
                 if elements else [])
-            if missing == []:
-                eligible.append(m)
-            else:
+            if missing != []:
                 excluded[m["name"]] = missing if missing else "coverage unknown"
+            elif not mlip_tools.can_run_in(m["backend"], m["name"], runner):
+                excluded[m["name"]] = f"cannot run in {runner}"
+            else:
+                eligible.append(m)
         if not elements:
             self.logger.warning(
                 "No system elements given: element coverage is not checked")
@@ -295,7 +299,9 @@ class MLIPAgent:
         if not eligible:
             raise RuntimeError(
                 f"No installed pretrained MLIP was trained on every element "
-                f"in {elements}. Missing per model: {excluded}"
+                f"in {elements}"
+                + (f" and can run in {runner}" if runner not in (None, "ase") else "")
+                + f". Excluded: {excluded}"
             )
 
         def _selection(m: Dict[str, Any], why: str) -> Dict[str, Any]:
@@ -318,16 +324,18 @@ class MLIPAgent:
             [m["backend"] for m in eligible]
         )
         excluded_str = (
-            f"\nNOT OFFERED (missing elements): {json.dumps(excluded)}\n"
+            f"\nNOT OFFERED (and why): {json.dumps(excluded)}\n"
             if excluded else ""
         )
+        runner_str = (f"RUNNER: {runner} (every model listed can run in it)\n"
+                      if runner else "")
 
         prompt = f"""
 Select the best pretrained ML potential for this system.
 
 ELEMENTS: {elements}
 RESEARCH GOAL: {research_goal}
-
+{runner_str}
 AVAILABLE PRETRAINED MODELS (each is trained on every element above):
 {options_str}
 {excluded_str}
@@ -469,7 +477,8 @@ Return JSON:
             }
         else:
             selection = self._select_pretrained_model(
-                elements, research_goal, task_name=sim.get("task_name"))
+                elements, research_goal, task_name=sim.get("task_name"),
+                runner=runner)
         backend = selection.get("backend", "mace")
         model_name = selection.get("model_name") or backend
 
@@ -1422,5 +1431,14 @@ Return JSON:
         except Exception as e:
             self.logger.debug(f"Could not resolve foundation model: {e}")
 
-        # Return the name as-is — the training backend may resolve it
+        # No file to hand over (unknown name, or an ASE-only model such as
+        # mace-mh-0): give the trainer a name it resolves itself.
+        # mace_run_train accepts every mace_mp keyword ("medium-omat-0",
+        # "mh-0", ...) and "<size>_off", so map SciLink's names to those.
+        entry = mlip_tools.find_pretrained("mace", foundation_model)
+        params = (entry or {}).get("params") or {}
+        if params.get("loader") == "mace_mp":
+            return params["size"]
+        if params.get("loader") == "mace_off":
+            return f"{params['size']}_off"
         return foundation_model

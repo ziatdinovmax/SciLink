@@ -1426,10 +1426,12 @@ def _pair_coeff_elements(structure_file: str, elements: list) -> list:
     ``pair_coeff * * model A B`` maps atom type 1 to A, type 2 to B. The
     order must follow the data file's types, not an alphabetical element
     list: a file with type 1 = Na and type 2 = Cl run as "Cl Na" swaps the
-    species silently. The data file's masses give the true mapping; without
-    them the order is only safe when there is one type.
+    species silently. The mapping comes from the data file's Masses
+    section (``parse_data_file``: ``# El`` labels, then nearest mass), and
+    covers declared types that have no atoms.
     """
-    from ..._shared.structure_io import is_lammps_data, lammps_type_elements
+    from ..._shared.structure_io import (
+        is_lammps_data, lammps_type_elements, structure_elements)
     if not is_lammps_data(structure_file):
         return elements
     if not os.path.isfile(structure_file):
@@ -1440,20 +1442,20 @@ def _pair_coeff_elements(structure_file: str, elements: list) -> list:
         return elements
     mapping = lammps_type_elements(structure_file)
     if mapping is None:
-        if len(elements) == 1:
+        if len(elements) == 1 and parse_data_file(structure_file).get("atom_types") == 1:
             return elements
         raise ValueError(
-            f"{structure_file} has no Masses section, so the element of each "
-            f"atom type is unknown and pair_coeff cannot be ordered safely. "
-            f"Add masses to the data file."
+            f"{structure_file}: the Masses section does not identify every "
+            f"atom type's element, so pair_coeff cannot be ordered safely. "
+            f"Add masses (ideally labelled, e.g. '1 22.99 # Na')."
         )
-    ordered = [mapping[t] for t in sorted(mapping)]
-    if elements and set(ordered) != set(elements):
+    present = structure_elements(structure_file)[0]
+    if elements and set(present) != set(elements):
         raise ValueError(
-            f"{structure_file} contains {sorted(set(ordered))} but the "
-            f"potential was deployed for {sorted(set(elements))}."
+            f"{structure_file} contains {present} but the potential was "
+            f"deployed for {sorted(set(elements))}."
         )
-    return ordered
+    return [mapping[t] for t in sorted(mapping)]
 
 
 def supported_mlip_backends() -> list:

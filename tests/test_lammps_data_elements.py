@@ -83,7 +83,7 @@ def test_deploy_pretrained_fills_elements_from_lammps_data():
         agent = MLIPAgent(working_dir=td, api_key="sk-not-real",
                           model_name="gpt-4o-mini")
 
-        def stop(elements, goal, task_name=None):
+        def stop(elements, goal, task_name=None, runner=None):
             seen["elements"] = elements
             raise RuntimeError("stop after selection")
 
@@ -99,9 +99,10 @@ def test_deploy_pretrained_fills_elements_from_lammps_data():
 
 def _load_in_script(td, structure_name, elements):
     from scilink.agents.sim_agents._ase_runner import generate_ase_script
+    # Callers pass the real path; the script itself reads the basename.
     path = generate_ase_script(_potential(elements), td,
-                               structure_file=structure_name, task="relax",
-                               device="cpu")
+                               structure_file=os.path.join(td, structure_name),
+                               task="relax", device="cpu")
     cwd = os.getcwd()
     os.chdir(td)
     try:
@@ -164,7 +165,7 @@ def test_pair_coeff_refuses_ambiguous_or_mismatched_data():
     from scilink.skills.molecular_dynamics.lammps.lammps import _pair_coeff_elements
     with tempfile.TemporaryDirectory() as td:
         nomass = _data(td, "n.data", masses=False)
-        with pytest.raises(ValueError, match="no Masses section"):
+        with pytest.raises(ValueError, match="does not identify every"):
             _pair_coeff_elements(nomass, ["Cl", "Na"])
         f = _data(td, "s.data", masses=True)
         with pytest.raises(ValueError, match="deployed for"):
@@ -201,3 +202,68 @@ def test_picker_accepts_alias_and_case_variants():
             result = agent._select_pretrained_model(["Cu"], "Cu MD")
         assert result["model_name"] == expected
         assert "fallback" not in result["justification"]
+
+
+# ── review: data files the ASE mass guess got wrong ──────────────────
+
+_HAND_WRITTEN = """{title}
+2 atoms
+{ntypes} atom types
+0 4 xlo xhi
+0 4 ylo yhi
+0 4 zlo zhi
+
+Masses
+
+{masses}
+
+Atoms # atomic
+
+1 1 0 0 0
+2 {t2} 2 2 2
+"""
+
+
+def _hand(td, name, title="LAMMPS data", ntypes=2, t2=2,
+          masses="1 22.98977 # Na\n2 35.453 # Cl"):
+    path = os.path.join(td, name)
+    open(path, "w").write(_HAND_WRITTEN.format(
+        title=title, ntypes=ntypes, t2=t2, masses=masses))
+    return path
+
+
+def test_unused_declared_type_is_kept():
+    from scilink.skills._shared.structure_io import (
+        lammps_type_elements, structure_elements)
+    from scilink.skills.molecular_dynamics.lammps.lammps import _pair_coeff_elements
+    with tempfile.TemporaryDirectory() as td:
+        f = _hand(td, "u.data", ntypes=3,
+                  masses="1 22.98977 # Na\n2 35.453 # Cl\n3 39.0983 # K")
+        assert lammps_type_elements(f) == {1: "Na", 2: "Cl", 3: "K"}
+        assert structure_elements(f) == (["Cl", "Na"], 2)    # present atoms
+        assert _pair_coeff_elements(f, ["Cl", "Na"]) == ["Na", "Cl", "K"]
+
+
+def test_mass_label_wins_over_nearest_mass():
+    """'59.0 # Ni' is Ni; the nearest atomic mass would say Co."""
+    from scilink.skills._shared.structure_io import structure_elements
+    with tempfile.TemporaryDirectory() as td:
+        f = _hand(td, "ni.data", ntypes=1, t2=1, masses="1 59.0 # Ni")
+        assert structure_elements(f)[0] == ["Ni"]
+        atoms = _load_in_script(td, "ni.data", ["Ni"])
+        assert set(atoms.get_chemical_symbols()) == {"Ni"}
+
+
+def test_title_line_starting_with_atoms():
+    from scilink.skills._shared.structure_io import lammps_type_elements
+    with tempfile.TemporaryDirectory() as td:
+        f = _hand(td, "t.data", title="Atoms of NaCl supercell", ntypes=3,
+                  masses="1 22.98977 # Na\n2 35.453 # Cl\n3 39.0983 # K")
+        assert lammps_type_elements(f) == {1: "Na", 2: "Cl", 3: "K"}
+
+
+def test_masses_missing_a_declared_type_is_unknown():
+    from scilink.skills._shared.structure_io import structure_elements
+    with tempfile.TemporaryDirectory() as td:
+        f = _hand(td, "m.data", ntypes=3)       # type 3 has no Masses line
+        assert structure_elements(f)[0] == []

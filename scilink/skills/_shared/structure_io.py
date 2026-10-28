@@ -3,13 +3,16 @@ Read which elements a structure file contains, including LAMMPS data files.
 
 ``ase.io.read`` cannot detect the LAMMPS data format from a ``.data`` /
 ``.lmp`` extension, and a LAMMPS data file only says which element each atom
-type is through its ``Masses`` section. These helpers read LAMMPS data with
-ASE's LAMMPS reader (which takes the atom style from the file's ``Atoms #
-<style>`` header) and report "unknown" rather than guess when there are no
-masses: without them ASE numbers the atom types as H, He, ...
+type is through its ``Masses`` section. For LAMMPS data these helpers use
+the LAMMPS skill's own ``parse_data_file`` for the Masses section: it reads
+``# El`` mass labels first and falls back to the nearest atomic mass, keeps
+declared types that have no atoms, and skips the free-form title line. The
+atoms themselves are read with ASE, which honours the file's atom style.
+They report "unknown" rather than guess when the masses don't say.
 """
 
 import logging
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -17,64 +20,65 @@ logger = logging.getLogger(__name__)
 
 LAMMPS_DATA_SUFFIXES = (".data", ".lammps", ".lmp")
 
+_SYMBOL = re.compile(r"^[A-Z][a-z]?$")
+
 
 def is_lammps_data(path: str) -> bool:
     return Path(path).suffix.lower() in LAMMPS_DATA_SUFFIXES
 
 
-def lammps_type_elements(path: str) -> Optional[Dict[int, str]]:
-    """``{atom type: element}`` from a LAMMPS data file's masses.
+def _parse(path: str) -> Dict:
+    from ..molecular_dynamics.lammps.lammps import parse_data_file
+    return parse_data_file(path)
 
-    Returns None when the file has no ``Masses`` section, since the element
-    of each type is then unknowable. Raises ValueError if a declared atom
-    type has no atoms (its element cannot be read from the atoms either).
+
+def _is_element(sym: str) -> bool:
+    from ase.data import chemical_symbols
+    return bool(_SYMBOL.match(sym or "")) and sym in chemical_symbols
+
+
+def lammps_type_elements(path: str) -> Optional[Dict[int, str]]:
+    """``{atom type: element}`` for every declared type of a LAMMPS data file.
+
+    Returns None when that cannot be known: no ``Masses`` section, a type
+    missing from it, or a mass that matches no element.
     """
-    from ase.io.lammpsdata import read_lammps_data
-    atoms = read_lammps_data(path, sort_by_id=True)
-    if "masses" not in atoms.arrays or "type" not in atoms.arrays:
+    info = _parse(path)
+    mass_map = info.get("mass_map") or {}
+    if not mass_map:
         return None
-    mapping: Dict[int, str] = {}
-    for t, sym in zip(atoms.arrays["type"], atoms.get_chemical_symbols()):
-        mapping[int(t)] = sym
-    n_types = _declared_atom_types(path)
-    if n_types is not None:
-        missing = [t for t in range(1, n_types + 1) if t not in mapping]
-        if missing:
-            raise ValueError(
-                f"{path}: atom types {missing} have no atoms, so their "
-                f"elements cannot be determined")
+    mapping = {int(t): el for t, (_mass, el) in mass_map.items()}
+    if not all(_is_element(el) for el in mapping.values()):
+        return None
+    n_types = info.get("atom_types") or 0
+    if n_types and set(mapping) != set(range(1, n_types + 1)):
+        return None
     return mapping
 
 
-def _declared_atom_types(path: str) -> Optional[int]:
-    with open(path, errors="ignore") as fh:
-        for line in fh:
-            parts = line.split()
-            if len(parts) >= 3 and parts[1:3] == ["atom", "types"]:
-                return int(parts[0])
-            if line.strip().startswith(("Masses", "Atoms")):
-                break
-    return None
-
-
 def structure_elements(path: str) -> Tuple[List[str], int]:
-    """``(sorted elements, n_atoms)`` of a structure file.
+    """``(sorted elements present, n_atoms)`` of a structure file.
 
     Elements are ``[]`` when they cannot be determined: an unreadable file,
-    or a LAMMPS data file without masses. Callers should treat ``[]`` as
-    unknown, never as "no elements".
+    or a LAMMPS data file whose masses don't identify every type. Callers
+    should treat ``[]`` as unknown, never as "no elements".
     """
     try:
         if is_lammps_data(path):
-            mapping = lammps_type_elements(path)
+            # Masses -> elements from parse_data_file (style-independent);
+            # which types the atoms use from ASE, which takes the atom style
+            # from the "Atoms # <style>" header (parse_data_file guesses the
+            # style from column counts and can misread a full-style file).
             from ase.io.lammpsdata import read_lammps_data
-            n_atoms = len(read_lammps_data(path, sort_by_id=True))
+            atoms = read_lammps_data(path, sort_by_id=True)
+            mapping = lammps_type_elements(path)
             if mapping is None:
                 logger.warning(
-                    f"{path} has no Masses section: cannot tell which element "
-                    f"each atom type is")
-                return [], n_atoms
-            return sorted(set(mapping.values())), n_atoms
+                    f"{path}: the Masses section does not identify every atom "
+                    f"type's element")
+                return [], len(atoms)
+            present = {mapping[int(t)] for t in atoms.arrays["type"]}
+            return sorted(present), len(atoms)
         from ase.io import read
         atoms = read(path)
         return sorted(set(atoms.get_chemical_symbols())), len(atoms)
