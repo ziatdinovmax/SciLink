@@ -119,12 +119,18 @@ def _element_set(spec: Any) -> Optional[set]:
     if spec is None:
         return None
     if isinstance(spec, (list, tuple)):
-        return {str(s) for s in spec}
+        # YAML 1.1 reads an unquoted No (nobelium) as False: refuse it
+        # rather than silently drop the element.
+        bad = [s for s in spec if not isinstance(s, str)]
+        if bad:
+            raise ValueError(f"elements entries must be symbols; got {bad!r} "
+                             f"(quote No, nobelium: YAML reads it as false)")
+        return set(spec)
     if isinstance(spec, dict) and "z" in spec:
         from ase.data import chemical_symbols
         lo, hi = spec["z"]
         out = {chemical_symbols[z] for z in range(int(lo), int(hi) + 1)}
-        return out - {str(s) for s in spec.get("exclude", [])}
+        return out - _element_set(list(spec.get("exclude", [])))
     raise ValueError(f"Bad elements spec: {spec!r}")
 
 
@@ -269,7 +275,10 @@ def can_run_in(backend: str, model: str, runner: Optional[str]) -> bool:
     """
     if runner in (None, "", "ase"):
         return True
-    if model_file_strategy(backend, model) in (None, "none"):
+    # A trained model is already a file; a pretrained one needs a strategy
+    # that writes one.
+    if not (model and os.path.isfile(model)) and \
+            model_file_strategy(backend, model) in (None, "none"):
         return False
     from ...agents.sim_agents.md_simulation_agent import MDSimulationAgent
     engine = MDSimulationAgent.TOOL_REGISTRY.get(runner)
@@ -427,10 +436,15 @@ def deploy(
                     f"every element."
                 )
             if missing is None:
-                logger.warning(
+                # Same policy as the picker: coverage that cannot be checked
+                # is refused, since several backends run uncovered elements
+                # silently.
+                raise ValueError(
                     f"{name} declares no element coverage"
-                    f"{f' for task {task!r}' if task else ''}; "
-                    f"cannot check {sorted(set(elements))}."
+                    f"{f' for task {task!r}' if task else ''}, so "
+                    f"{sorted(set(elements))} cannot be checked. Use a task "
+                    f"whose coverage the {backend} skill declares, or add it "
+                    f"to the skill's pretrained: list."
                 )
         ctx = {**(spec.get("defaults") or {}), **(entry.get("params") or {}),
                "name": name, "domain": entry.get("domain", ""), "task": task}

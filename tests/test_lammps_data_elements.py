@@ -70,7 +70,7 @@ def test_deploy_pretrained_refuses_unknown_elements():
         agent._select_pretrained_model = lambda *a, **k: pytest.fail(
             "must not pick a model without elements")
         nomass = _data(td, "n.data", masses=False)
-        with pytest.raises(ValueError, match="Could not determine"):
+        with pytest.raises(ValueError, match="no Masses section"):
             agent.deploy_pretrained(system_info={"elements": {}},
                                     research_goal="NaCl MD",
                                     structure_file=nomass)
@@ -83,7 +83,7 @@ def test_deploy_pretrained_fills_elements_from_lammps_data():
         agent = MLIPAgent(working_dir=td, api_key="sk-not-real",
                           model_name="gpt-4o-mini")
 
-        def stop(elements, goal, task_name=None, runner=None):
+        def stop(elements, goal, task_name=None, runner=None, **kw):
             seen["elements"] = elements
             raise RuntimeError("stop after selection")
 
@@ -242,7 +242,10 @@ def test_unused_declared_type_is_kept():
                   masses="1 22.98977 # Na\n2 35.453 # Cl\n3 39.0983 # K")
         assert lammps_type_elements(f) == {1: "Na", 2: "Cl", 3: "K"}
         assert structure_elements(f) == (["Cl", "Na"], 2)    # present atoms
-        assert _pair_coeff_elements(f, ["Cl", "Na"]) == ["Na", "Cl", "K"]
+        assert _pair_coeff_elements(f, ["Cl", "K", "Na"]) == ["Na", "Cl", "K"]
+        # pair_coeff names K too, so the potential must cover it (review 3).
+        with pytest.raises(ValueError, match=r"declares atom types of \['K'\]"):
+            _pair_coeff_elements(f, ["Cl", "Na"])
 
 
 def test_mass_label_wins_over_nearest_mass():
@@ -297,7 +300,7 @@ def test_coarse_grained_bead_is_not_an_element():
     with tempfile.TemporaryDirectory() as td:
         f = _hand(td, "x.data", ntypes=1, t2=1, masses="1 1.0 # X")
         elements, _, problem = read_structure_elements(f)
-        assert elements == [] and "Masses" in problem
+        assert elements == [] and "'# X' names no element" in problem
 
 
 def test_superset_potential_is_accepted():
@@ -357,10 +360,11 @@ def test_unreadable_atoms_are_unknown_not_none():
 
 def test_pair_coeff_parses_the_data_file_once(monkeypatch):
     import scilink.skills.molecular_dynamics.lammps.lammps as L
+    from scilink.skills._shared import lammps_types
     calls = []
-    real = L.parse_data_file
-    monkeypatch.setattr(L, "parse_data_file",
-                        lambda p: calls.append(p) or real(p))
+    real = lammps_types.parse_masses
+    monkeypatch.setattr(lammps_types, "parse_masses",
+                        lambda lines: calls.append(1) or real(lines))
     with tempfile.TemporaryDirectory() as td:
         f = _data(td, "s.data", masses=True)
         L._pair_coeff_elements(f, ["Cl", "Na"])
@@ -397,13 +401,18 @@ def test_capitalised_label_contradicting_mass_is_unknown():
     ("SI", 28.086, "Si"), ("FE", 55.845, "Fe"), ("MG", 24.305, "Mg"),
     # established ion type names (CHARMM)
     ("SOD", 22.99, "Na"), ("POT", 39.098, "K"),
-    # no reading matches the mass
-    ("CH2", 14.027, None), ("H2O", 18.015, None), ("D", 2.014, None),
-    ("X", 1.0, None), ("opls_140", 1.008, None), ("1", 22.99, None),
+    # isotopes of an exact symbol, and D / T (review 3)
+    ("D", 2.014, "H"), ("H", 2.014, "H"), ("T", 3.016, "H"),
+    # a lowercase type name or a number is not a claim: the mass decides
+    ("opls_140", 1.008, "H"), ("1", 22.99, "Na"),
+    # a capitalised label that no reading accepts is a conflict
+    ("CH2", 14.027, None), ("H2O", 18.015, None), ("X", 1.0, None),
 ])
-def test_element_from_label(label, mass, expected):
-    from scilink.skills.molecular_dynamics.lammps.lammps import element_from_label
-    assert element_from_label(label, mass) == expected
+def test_read_type_from_label(label, mass, expected):
+    from scilink.skills._shared.lammps_types import read_type
+    rec = read_type(1, mass, label)
+    assert rec["element"] == expected
+    assert (rec["conflict"] is None) == (expected is not None)
 
 
 # ── review round 3 (independent pass) ────────────────────────────────
@@ -509,3 +518,188 @@ def test_mass_not_close_to_any_element_is_unknown(masses):
     with tempfile.TemporaryDirectory() as td:
         f = _hand(td, "ua.data", ntypes=1, t2=1, masses=masses)
         assert read_structure_elements(f)[0] == []
+
+
+# ── review round 3 (Maxim): one reader, overrides, parameters ────────
+
+def _types(masses, **kw):
+    from scilink.skills._shared.lammps_types import read_types
+    return {t: (r["element"], r["basis"], r["isotope"], r["conflict"] is None)
+            for t, r in read_types(["Masses", ""] + masses.splitlines(), **kw).items()}
+
+
+def test_labelled_isotope_is_that_element_not_a_conflict():
+    """D2O ('2.014 # H') ran as H on main; it must not refuse the run."""
+    assert _types("1 15.999 # O\n2 2.014 # H") == {
+        1: ("O", "label", False, True), 2: ("H", "label", True, True)}
+    both = _types("1 2.014 # D\n2 3.024 # H")
+    assert both[1][:3] == ("H", "label", True) and both[2][:3] == ("H", "label", True)
+    with tempfile.TemporaryDirectory() as td:
+        f = _hand(td, "d2o.data", masses="1 15.999 # O\n2 2.014 # H")
+        atoms = _load_in_script(td, "d2o.data", ["H", "O"])
+        assert atoms.get_chemical_symbols() == ["O", "H"]
+        from scilink.skills.molecular_dynamics.lammps.lammps import _pair_coeff_elements
+        assert _pair_coeff_elements(f, ["H", "O"]) == ["O", "H"]
+
+
+@pytest.mark.parametrize("masses,why", [
+    ("1 72.0 # W", "Martini water bead, not tungsten"),
+    ("1 2.014 # HW", "a derived reading gets no isotope window"),
+])
+def test_symbol_window_does_not_admit_pseudo_atoms(masses, why):
+    assert _types(masses)[1][3] is False, why
+
+
+@pytest.mark.parametrize("mass,pair", [(40.0, "Ar and Ca"), (59.0, "Co and Ni"),
+                                       (39.948, "Ar and Ca")])
+def test_mass_only_reading_needs_exactly_one_element(mass, pair):
+    """An unlabelled 40.0 calcium file was simulated as argon."""
+    from scilink.skills._shared.lammps_types import read_type
+    rec = read_type(1, mass)
+    assert rec["element"] is None and pair in rec["conflict"]
+
+
+def test_mass_tolerance_is_a_parameter_with_a_direction():
+    from scilink.skills._shared.lammps_types import read_type
+    assert read_type(1, 39.948, tolerance=0.1)["element"] == "Ar"   # stricter
+    assert read_type(1, 13.019, "CH")["element"] is None
+    assert read_type(1, 13.019, "CH", tolerance=1.1)["element"] == "C"  # looser
+    from scilink.skills.molecular_dynamics.lammps.lammps import parse_data_file
+    with tempfile.TemporaryDirectory() as td:
+        f = _hand(td, "ar.data", ntypes=1, t2=1, masses="1 39.948")
+        assert parse_data_file(f)["type_readings"][1]["element"] is None
+        assert parse_data_file(f, mass_tolerance=0.1)["type_readings"][1]["element"] == "Ar"
+        # Callers that only need a label keep a best guess.
+        assert parse_data_file(f)["mass_map"][1] == (39.948, "Ar")
+
+
+def test_type_elements_override_is_applied_checked_and_recorded():
+    from scilink.skills._shared.structure_io import inspect_lammps_data
+    from scilink.skills.molecular_dynamics.lammps.lammps import _pair_coeff_elements
+    with tempfile.TemporaryDirectory() as td:
+        f = _hand(td, "ua.data", masses="1 14.027 # CH2\n2 15.999 # O")
+        assert inspect_lammps_data(f)["type_elements"] is None
+        info = inspect_lammps_data(f, type_elements={"1": "C"})
+        assert info["type_elements"] == {1: "C", 2: "O"}
+        rec = info["readings"][1]
+        assert rec["source"] == "override" and rec["element"] == "C"
+        assert rec["file_reading"]["element"] is None
+        assert "names no element" in rec["file_reading"]["conflict"]
+        assert info["readings"][2]["source"] == "file"
+        assert _pair_coeff_elements(f, ["C", "O"], type_elements={1: "C"}) == ["C", "O"]
+        with pytest.raises(ValueError, match="not an element symbol"):
+            inspect_lammps_data(f, type_elements={1: "CH2"})
+        with pytest.raises(ValueError, match="declares 2 atom types"):
+            inspect_lammps_data(f, type_elements={3: "C"})
+
+
+def test_type_elements_rescues_the_run_script():
+    """generate_ase_script raised regardless of what the caller knew."""
+    from scilink.agents.sim_agents._ase_runner import generate_ase_script
+    with tempfile.TemporaryDirectory() as td:
+        f = _hand(td, "hw.data", masses="1 15.999 # OW\n2 2.014 # HW")
+        with pytest.raises(ValueError, match="type_elements"):
+            generate_ase_script(_potential(["H", "O"]), td, structure_file=f)
+        path = generate_ase_script(_potential(["H", "O"]), td, structure_file=f,
+                                   task="relax", device="cpu",
+                                   type_elements={2: "H"})
+        assert "TYPE_ELEMENTS = {1: 'O', 2: 'H'}" in open(path).read()
+
+
+def test_atom_style_override_reads_an_ambiguous_file():
+    from scilink.skills._shared.structure_io import inspect_lammps_data
+    with tempfile.TemporaryDirectory() as td:
+        f = os.path.join(td, "m.data")
+        open(f, "w").write(_SIX_COLUMNS)
+        info = inspect_lammps_data(f, atom_style="molecular")
+        assert info["present"] == ["H", "O"] and info["atom_style"] == "molecular"
+
+
+def test_pair_coeff_refuses_alphabetical_order_when_file_unreadable():
+    """type 1 = Na, type 2 = Cl must never be written as 'Cl Na' unchecked."""
+    from scilink.skills.molecular_dynamics.lammps.lammps import _pair_coeff_elements
+    with tempfile.TemporaryDirectory() as td:
+        missing = os.path.join(td, "later.data")
+        with pytest.raises(ValueError, match="not readable"):
+            _pair_coeff_elements(missing, ["Cl", "Na"])
+        assert _pair_coeff_elements(missing, ["Cu"]) == ["Cu"]
+        assert _pair_coeff_elements(missing, ["Cl", "Na"],
+                                    type_elements={1: "Na", 2: "Cl"}) == ["Na", "Cl"]
+        with pytest.raises(ValueError, match="every type"):
+            _pair_coeff_elements(missing, ["Cl", "Na"], type_elements={2: "Cl"})
+
+
+def test_deploy_pretrained_takes_type_elements():
+    from scilink.agents.sim_agents.mlip_agent import MLIPAgent
+    seen = {}
+    with tempfile.TemporaryDirectory() as td:
+        agent = MLIPAgent(working_dir=td, api_key="sk-not-real",
+                          model_name="gpt-4o-mini")
+
+        def stop(elements, goal, **kw):
+            seen["elements"] = elements
+            raise RuntimeError("stop after selection")
+
+        agent._select_pretrained_model = stop
+        f = _hand(td, "ua.data", masses="1 14.027 # CH2\n2 15.999 # O")
+        with pytest.raises(ValueError, match="CH2"):
+            agent.deploy_pretrained(system_info={"elements": {"C": 1, "O": 1}},
+                                    research_goal="x", structure_file=f)
+        with pytest.raises(RuntimeError, match="stop after selection"):
+            agent.deploy_pretrained(system_info={"elements": {}},
+                                    research_goal="x", structure_file=f,
+                                    type_elements={1: "C"})
+    assert seen["elements"] == ["C", "O"]
+
+
+def test_shared_reader_does_not_import_the_lammps_bundle():
+    """_shared -> bundle -> _shared was held apart only by local imports."""
+    import subprocess, sys
+    code = ("import sys, scilink.skills._shared.structure_io, "
+            "scilink.skills._shared.lammps_types; "
+            "print('scilink.skills.molecular_dynamics.lammps.lammps' in sys.modules)")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert out.stdout.strip() == "False", out.stderr
+
+
+@pytest.mark.parametrize("label,mass", [
+    ("N", 15.999), ("O", 14.007), ("Na", 24.305), ("Li", 9.012), ("S", 30.974),
+    ("P", 32.06), ("Ar", 39.098), ("K", 40.078), ("B", 12.011), ("C", 14.027),
+])
+def test_swapped_label_is_not_an_isotope(label, mass):
+    """A symbol label carrying another element's standard mass is a swap."""
+    from scilink.skills._shared.lammps_types import read_type
+    rec = read_type(1, mass, label)
+    assert rec["element"] is None and rec["conflict"], (label, mass)
+
+
+def test_swapped_file_is_refused_and_he_label_keeps_heads_reading():
+    from scilink.skills._shared.structure_io import inspect_lammps_data
+    from scilink.skills._shared.lammps_types import read_type
+    with tempfile.TemporaryDirectory() as td:
+        f = _hand(td, "swap.data", masses="1 15.999 # N\n2 14.007 # O")
+        assert inspect_lammps_data(f)["type_elements"] is None
+    # CHARMM-style "HE" hydrogen at 1.008: the prefix row reads H, as before.
+    assert read_type(1, 1.008, "He")["element"] == "H"
+
+
+def test_overrides_are_validated_even_without_the_file():
+    from scilink.skills.molecular_dynamics.lammps.lammps import _pair_coeff_elements
+    from scilink.agents.sim_agents._ase_runner import generate_ase_script
+    with tempfile.TemporaryDirectory() as td:
+        missing = os.path.join(td, "later.data")
+        with pytest.raises(ValueError, match="not an element symbol"):
+            _pair_coeff_elements(missing, ["Cl", "Na"], type_elements={"1": "Xx", "2": "Na"})
+        with pytest.raises(ValueError, match="does not cover"):
+            _pair_coeff_elements(missing, ["H", "O"], type_elements={"1": "Na", "2": "Cl"})
+        with pytest.raises(ValueError, match="not an element symbol"):
+            generate_ase_script(_potential(["Na"]), td, structure_file=missing,
+                                type_elements={"1": "q"})
+
+
+def test_override_needs_a_mass_for_its_type():
+    from scilink.skills._shared.structure_io import inspect_lammps_data
+    with tempfile.TemporaryDirectory() as td:
+        f = _hand(td, "nm.data", masses="1 22.98977 # Na")       # type 2 unset
+        with pytest.raises(ValueError, match="type 2 has no Masses entry"):
+            inspect_lammps_data(f, type_elements={"2": "Cl"})

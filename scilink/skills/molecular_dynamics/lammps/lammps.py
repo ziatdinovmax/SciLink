@@ -27,6 +27,9 @@ from typing import Dict, Any, List, Optional, Tuple
 import ase.data
 
 from ..._shared._spec import ToolSpec
+from ..._shared import lammps_types
+from ..._shared.lammps_types import DEFAULT_ISOTOPE_WINDOW, DEFAULT_MASS_TOLERANCE
+from ..._shared.structure_io import is_lammps_data, inspect_lammps_data
 
 logger = logging.getLogger(__name__)
 
@@ -69,54 +72,6 @@ def element_from_mass(mass: float, tolerance: float = 1.5) -> Optional[str]:
             best_delta = delta
             best_symbol = symbol
     return best_symbol
-
-
-# Established ion type names whose letters are not the element symbol
-# (CHARMM: SOD = Na, POT = K, ...). Still checked against the mass.
-_ION_TYPE_NAMES = {
-    "SOD": "Na", "POT": "K", "CAL": "Ca", "CES": "Cs", "LIT": "Li",
-    "RUB": "Rb", "BAR": "Ba", "ZN2": "Zn",
-}
-
-
-# How close a declared mass must be to an element's standard mass for the
-# element to count as identified (rounded masses such as "59.0 # Ni" are
-# 0.31 off; united-atom "CH" at 13.02 or a repartitioned "HE1" at 3.02 are
-# about 1 off and must not pass).
-_ELEMENT_MASS_TOLERANCE = 0.5
-
-
-def element_from_label(label: str, mass: float,
-                       tolerance: float = _ELEMENT_MASS_TOLERANCE) -> Optional[str]:
-    """Element named by a Masses comment, but only if its mass agrees.
-
-    Reads the comment's first word as a full element name ("Carbon"), its
-    first two letters ("Na" from "NA" or "Na+"), or its first letter ("O"
-    from "OW", "C" from "CT"), and returns the first reading whose atomic
-    mass is within ``tolerance`` of ``mass``. Taking the first letters
-    blindly turned "Carbon" into Ca and "Nitrogen" into Ni. Returns None
-    when no reading matches the mass (e.g. a united-atom "CH2" at 14.03, or
-    a coarse-grained "X" bead).
-    """
-    word = re.match(r"[A-Za-z0-9]+", (label or "").strip())
-    if not word or not word.group()[0].isalpha():
-        return None
-    w = word.group()
-    candidates = []
-    if w.upper() in _ION_TYPE_NAMES:
-        candidates.append(_ION_TYPE_NAMES[w.upper()])
-    w = re.match(r"[A-Za-z]+", w).group()
-    candidates += [ase.data.chemical_symbols[z]
-                   for z, name in enumerate(ase.data.atomic_names)
-                   if z > 0 and name.lower() == w.lower()]
-    if len(w) >= 2:
-        candidates.append(w[0].upper() + w[1].lower())
-    candidates.append(w[0].upper())
-    for sym in candidates:
-        z = ase.data.atomic_numbers.get(sym, 0)
-        if z > 0 and abs(ase.data.atomic_masses[z] - mass) <= tolerance:
-            return sym
-    return None
 
 
 # ─── System Classification Constants ─────────────────────────────────
@@ -346,12 +301,17 @@ def _detect_ff_styles(lines: List[str]) -> Dict[str, str]:
     return {k: v for k, v in styles.items() if v}
 
 
-def parse_data_file(data_file: str) -> Dict[str, Any]:
+def parse_data_file(data_file: str,
+                    mass_tolerance: float = DEFAULT_MASS_TOLERANCE,
+                    isotope_window: float = DEFAULT_ISOTOPE_WINDOW) -> Dict[str, Any]:
     """
     Parse a LAMMPS data file to extract system information.
 
     Handles atom_style atomic, charge, molecular, and full.
-    Detects system category and vacuum gaps.
+    Detects system category and vacuum gaps. ``type_readings`` holds the
+    shared reader's record for each atom type (element, basis, conflict;
+    see ``_shared/lammps_types``); ``mass_map`` keeps a best guess for every
+    type, for callers that only need a label.
     """
     info: Dict[str, Any] = {
         "atom_count": 0,
@@ -369,7 +329,7 @@ def parse_data_file(data_file: str) -> Dict[str, Any]:
         "atom_style": "unknown",
         "atom_type_labels": {},
         "mass_map": {},
-        "mass_label_conflicts": {},
+        "type_readings": {},
         "elements": [],
         "element_counts": {},
         "has_bonds": False,
@@ -437,71 +397,24 @@ def parse_data_file(data_file: str) -> Dict[str, Any]:
     # Styles implied by the Coeffs arity (the deck must declare these exactly).
     info["required_styles"] = _detect_ff_styles(lines)
 
-    # ── Parse Masses ──
-    in_masses = False
+    # ── Parse Masses (the shared reader; see _shared/lammps_types) ──
     _SECTION_HEADERS = {
         "Atoms", "Pair Coeffs", "Bond Coeffs", "Velocities",
         "Bonds", "Angles", "Dihedrals", "Impropers",
     }
-    for line in lines:
-        stripped = line.strip()
-        if stripped.split("#", 1)[0].strip() == "Masses":
-            in_masses = True
-            continue
-        if in_masses:
-            # Skip blank lines and comments (LAMMPS always has a blank
-            # line between the section header and the data)
-            if not stripped or stripped.startswith("#"):
-                continue
-            # Any other line not starting with a type number is the next
-            # section header. write_data writes them with a style comment
-            # ("Pair Coeffs # lj/cut/coul/long"), and "PairIJ Coeffs" was
-            # not in the list: their rows overwrote the masses.
-            if (stripped in _SECTION_HEADERS or stripped.startswith("Atoms")
-                    or not stripped.split()[0].isdigit()):
-                break
-            parts = stripped.split()
-            if len(parts) < 2:
-                continue
-            try:
-                type_id = int(parts[0])
-                mass = float(parts[1])
-            except (ValueError, IndexError):
-                continue
-
-            label = ""
-            if "#" in stripped:
-                label = stripped.split("#", 1)[1].strip()
-
-            element = None
-            if label:
-                element = element_from_label(label, mass)
-                match = re.match(r'[A-Z][a-z]?', label)
-                if element is None and match:
-                    # A capitalised label reads as an element claim ("CH2",
-                    # "X") but names no element of this mass. Keep the
-                    # previous reading for existing callers, and record the
-                    # disagreement so element-sensitive callers can refuse.
-                    # A lowercase label that matches nothing is a type name
-                    # ("opls_140", "type1"): use the mass, as before.
-                    info["mass_label_conflicts"][type_id] = (label, mass)
-                    element = match.group()
-
-            if not element:
-                element = element_from_mass(mass)
-                # The mass alone decides here (no label, or a lowercase type
-                # name). A mass that is not close to any element (a
-                # united-atom "ch3" at 15.035 reads as O) is recorded too.
-                if element and abs(ase.data.atomic_masses[
-                        ase.data.atomic_numbers[element]] - mass
-                        ) > _ELEMENT_MASS_TOLERANCE:
-                    info["mass_label_conflicts"].setdefault(type_id, (label, mass))
-
-            if not element:
-                element = f"X{type_id}"
-
-            info["mass_map"][type_id] = (mass, element)
-            info["atom_type_labels"][type_id] = label or element
+    for type_id, mass, label in lammps_types.parse_masses(lines):
+        rec = lammps_types.read_type(type_id, mass, label, mass_tolerance,
+                                     isotope_window)
+        info["type_readings"][type_id] = rec
+        element = rec["element"]
+        if element is None:
+            # The reader cannot tell (rec["conflict"] says why). Keep the
+            # previous best guess for callers that only need a label;
+            # element-sensitive callers use type_readings and refuse.
+            match = re.match(r"[A-Z][a-z]?", label)
+            element = (match.group() if match else None) or element_from_mass(mass)
+        info["mass_map"][type_id] = (mass, element or f"X{type_id}")
+        info["atom_type_labels"][type_id] = label or element or f"X{type_id}"
 
     # ── Extract Atoms section ──
     atoms_lines: List[str] = []
@@ -1488,46 +1401,67 @@ _MLIP_PAIR_BUILDERS = {
 }
 
 
-def _pair_coeff_elements(structure_file: str, elements: list) -> list:
+def _pair_coeff_elements(structure_file: str, elements: list,
+                         type_elements: Optional[Dict[Any, str]] = None,
+                         atom_style: Optional[str] = None,
+                         mass_tolerance: float = DEFAULT_MASS_TOLERANCE,
+                         isotope_window: float = DEFAULT_ISOTOPE_WINDOW) -> list:
     """Elements for ``pair_coeff * *``, one per atom type, in type order.
 
     ``pair_coeff * * model A B`` maps atom type 1 to A, type 2 to B. The
     order must follow the data file's types, not an alphabetical element
     list: a file with type 1 = Na and type 2 = Cl run as "Cl Na" swaps the
     species silently. The mapping comes from the data file's Masses section
-    and covers declared types that have no atoms. ``elements`` (what the
-    potential was deployed for) may be a superset of the file's elements,
-    e.g. a model fine-tuned on a larger system.
+    (the shared reader, see ``_shared/lammps_types``) with any
+    ``type_elements`` the caller passes applied on top, and covers declared
+    types that have no atoms. ``elements`` (what the potential was deployed
+    for) may be a superset of the file's elements, e.g. a model fine-tuned on
+    a larger system, but must cover the element of every declared type.
     """
-    from ..._shared.structure_io import is_lammps_data, inspect_lammps_data
     if not is_lammps_data(structure_file):
         return elements
     if not os.path.isfile(structure_file):
+        # Without the file the type order is only known from type_elements.
+        if type_elements:
+            order = lammps_types.check_type_elements(type_elements)
+            if sorted(order) != list(range(1, len(order) + 1)):
+                raise ValueError(
+                    f"{structure_file} is not readable here, and type_elements "
+                    f"{order} does not name every type 1..N")
+            if elements and not set(order.values()) <= set(elements):
+                raise ValueError(
+                    f"type_elements names {sorted(set(order.values()) - set(elements))}, "
+                    f"which the potential (deployed for {sorted(set(elements))}) "
+                    f"does not cover.")
+            return [order[t] for t in sorted(order)]
         if len(elements) > 1:
-            logger.warning(
-                f"{structure_file} is not readable here, so pair_coeff order "
-                f"{elements} cannot be checked against its atom types")
+            raise ValueError(
+                f"{structure_file} is not readable here, so the order of "
+                f"{elements} in pair_coeff cannot be matched to its atom types. "
+                f"Generate the input with the file in place, or pass "
+                f"type_elements={{type: element}}.")
         return elements
-    info = inspect_lammps_data(structure_file)       # parsed once
+    info = inspect_lammps_data(structure_file, type_elements=type_elements,
+                               atom_style=atom_style, mass_tolerance=mass_tolerance,
+                               isotope_window=isotope_window)
     mapping = info["type_elements"]
     if mapping is None:
         if len(elements) == 1 and info["n_types"] == 1:
             return elements
         raise ValueError(
             f"Cannot order pair_coeff: the element of every atom type is not "
-            f"known ({info['problem']}). Add masses, ideally labelled "
-            f"('1 22.99 # Na')."
+            f"known ({info['problem']})."
         )
-    present = info["present"]
-    if present is None:
+    if info["present"] is None:
         logger.warning(
             f"pair_coeff written from {structure_file}'s Masses section; its "
             f"atoms could not be read to check them ({info['problem']})")
-    elif elements and not set(present) <= set(elements):
+    declared = set(mapping.values())
+    if elements and not declared <= set(elements):
         raise ValueError(
-            f"{structure_file} contains {sorted(set(present) - set(elements))}, "
-            f"which the potential (deployed for {sorted(set(elements))}) does "
-            f"not cover."
+            f"{structure_file} declares atom types of "
+            f"{sorted(declared - set(elements))}, which the potential "
+            f"(deployed for {sorted(set(elements))}) does not cover."
         )
     return [mapping[t] for t in sorted(mapping)]
 
@@ -1546,6 +1480,10 @@ def run_with_potential(
     temperature: float = 300.0,
     pressure=None,
     n_steps: int = 100000,
+    type_elements: Optional[Dict[Any, str]] = None,
+    atom_style: Optional[str] = None,
+    mass_tolerance: float = DEFAULT_MASS_TOLERANCE,
+    isotope_window: float = DEFAULT_ISOTOPE_WINDOW,
 ) -> str:
     """
     Generate a LAMMPS input file that runs a deployed MLIP potential.
@@ -1570,6 +1508,13 @@ def run_with_potential(
         geometry optimization, no dynamics).
     pressure:
         ``None`` → NVT for MD; a value → NPT. Ignored for ``relax``.
+    type_elements:
+        ``{type: element}`` for atom types the data file's masses cannot
+        tell (a coarse-grained bead, a united-atom type); applied on top of
+        the file's readings and checked against it. See
+        ``_shared/lammps_types``.
+    atom_style, mass_tolerance, isotope_window:
+        Passed to the data-file reader (``inspect_lammps_data``).
 
     Returns
     -------
@@ -1601,8 +1546,10 @@ def run_with_potential(
             f"run via LAMMPS. Use the ASE runner."
         )
 
-    elements = _pair_coeff_elements(structure_file,
-                                    list(getattr(potential, "elements", []) or []))
+    elements = _pair_coeff_elements(
+        structure_file, list(getattr(potential, "elements", []) or []),
+        type_elements=type_elements, atom_style=atom_style,
+        mass_tolerance=mass_tolerance, isotope_window=isotope_window)
     el_str = " ".join(elements)
     pair_style, pair_coeff = builder(model_file, el_str)
     data_name = os.path.basename(structure_file)

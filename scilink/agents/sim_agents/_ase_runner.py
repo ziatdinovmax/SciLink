@@ -18,9 +18,10 @@ generator here.
 
 import logging
 import os
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from ._potential import DeployedPotential
+from ...skills._shared.lammps_types import DEFAULT_ISOTOPE_WINDOW, DEFAULT_MASS_TOLERANCE
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,10 @@ def generate_ase_script(
     output_interval: int = 50,
     device: str = "cuda",
     fmax: float = 0.02,
+    type_elements: Optional[Dict[Any, str]] = None,
+    atom_style: Optional[str] = None,
+    mass_tolerance: float = DEFAULT_MASS_TOLERANCE,
+    isotope_window: float = DEFAULT_ISOTOPE_WINDOW,
 ) -> str:
     """
     Write a runnable ASE driver script (``run_md.py`` for MD,
@@ -61,6 +66,14 @@ def generate_ase_script(
         lattice-parameter readout. ``temperature`` / ``pressure`` /
         ``n_steps`` (as a step cap) still apply where meaningful;
         ``fmax`` is the force convergence threshold.
+    type_elements:
+        For a LAMMPS data file, ``{type: element}`` for atom types its
+        masses cannot tell (a deuterated "HW", a coarse-grained bead);
+        applied on top of the file's readings, checked against the file,
+        and written into the script. See ``_shared/lammps_types``.
+    atom_style, mass_tolerance, isotope_window:
+        Passed to the data-file reader (``inspect_lammps_data``);
+        ``atom_style`` is also what the script passes ASE.
     """
     if task not in ("md", "relax"):
         raise ValueError(f"task must be 'md' or 'relax', got {task!r}")
@@ -76,21 +89,30 @@ def generate_ase_script(
     # guess can mislabel (a labelled "59.0 # Ni" reads as Co) and has no
     # answer without masses. Also pass ASE an atom style when the file has no
     # "# <style>" header and ASE cannot guess it.
-    type_elements, atom_style = None, None
     from ...skills._shared.structure_io import is_lammps_data, inspect_lammps_data
-    if is_lammps_data(structure_file) and not os.path.isfile(structure_file):
-        logger.warning(
-            f"{structure_file} is not readable now, so its atom types cannot "
-            f"be mapped to elements; the script will refuse a multi-type file.")
     if is_lammps_data(structure_file) and os.path.isfile(structure_file):
-        info = inspect_lammps_data(structure_file)
-        type_elements, atom_style = info["type_elements"], info["atom_style"]
-        if type_elements is None and not (
+        info = inspect_lammps_data(structure_file, type_elements=type_elements,
+                                   atom_style=atom_style,
+                                   mass_tolerance=mass_tolerance,
+                                   isotope_window=isotope_window)
+        if info["type_elements"] is None and not (
                 info["n_types"] == 1 and len(potential.elements) == 1):
             raise ValueError(
                 f"Cannot tell which element each atom type is "
-                f"({info['problem']}). Add masses, ideally labelled "
-                f"('1 22.99 # Na').")
+                f"({info['problem']}).")
+        type_elements, atom_style = info["type_elements"], info["atom_style"]
+    elif is_lammps_data(structure_file):
+        # Not readable now: only the caller's type_elements (written in as
+        # given) can map types; without it the script refuses a multi-type file.
+        from ...skills._shared.lammps_types import check_type_elements
+        type_elements = check_type_elements(type_elements) or None
+        if not type_elements:
+            logger.warning(
+                f"{structure_file} is not readable now, so its atom types "
+                f"cannot be mapped to elements; the script will refuse a "
+                f"multi-type file. Pass type_elements to map them.")
+    else:
+        type_elements = atom_style = None
 
     # ── shared scaffold: imports, device, structure read, calc attach ──
     header = f'''"""

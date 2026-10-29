@@ -16,7 +16,9 @@ DEPLOY = {
     "devices": ["cuda", "cpu", "mps"],
     "defaults": {"kwargs": {}},
     "default_model": "mace-mp-0",
-    # Lower = tried first when the picker must fall back without an LLM pick.
+    # Lower = tried first when the picker must fall back without an LLM pick
+    # (mace 10, uma 20, orb 30, chgnet 40). A caller reorders it per call
+    # with deploy_pretrained(fallback_order=[...]).
     "fallback_rank": 10,
     # LAMMPS needs an on-disk model: save the loaded torch model to working_dir.
     "model_file": "torch_save",

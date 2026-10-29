@@ -74,7 +74,7 @@ dependencies = [
 
 [project.optional-dependencies]
 sim = [
-    "ase>=0.8.5",
+    "ase>=3.23",   # read_lammps_data(atom_style=...)
     "aimsgb>=1.1.1",
     "atomate2>=0.0.21",
     "mdanalysis>=2.9.0",

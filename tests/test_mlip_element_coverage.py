@@ -435,6 +435,88 @@ def test_picker_raises_when_nothing_covers():
             agent._select_pretrained_model(["Cu", "Og"], "superheavy")
 
 
+# ── review round 3 ───────────────────────────────────────────────────
+
+def test_yaml_boolean_symbol_is_refused_not_dropped():
+    """Unquoted No (nobelium) is YAML False; dropping it hid the element."""
+    import yaml
+    from scilink.skills._shared import mlip_tools as mt
+    with pytest.raises(ValueError, match="quote"):
+        mt._element_set(yaml.safe_load("[No, H]"))
+    assert mt._element_set(yaml.safe_load("['No', H]")) == {"No", "H"}
+
+
+def test_mace_models_named_in_the_skill_prose_are_deployable_by_name():
+    """mace.md's prose names these; a forced deploy must not say 'Unknown'."""
+    from scilink.skills._shared import mlip_tools as mt
+    for name, canonical in [("mace-matpes-pbe-0", "mace-matpes-pbe-0"),
+                            ("mace-matpes-r2scan-0", "mace-matpes-r2scan-0"),
+                            ("mace-mh-1", "mace-mh-1"), ("mh-1", "mace-mh-1"),
+                            ("mace-mp-0b2", "mace-mp-0b2"),
+                            ("mace-mp-0b3", "mace-mp-0b3"),
+                            ("medium-omat-0", "mace-omat-0-medium"),
+                            ("small-omat-0", "mace-omat-0")]:
+        entry = mt.find_pretrained("mace", name)
+        assert entry and entry["name"] == canonical, name
+        assert len(mt.model_elements("mace", canonical)) == 89
+    assert not mt.can_run_in("mace", "mace-mh-1", "lammps")      # ASE only
+    # Loadable by name, but the picker's roster is unchanged.
+    offered = {e["name"] for e in mt.check_backends(
+        available_software=_FakeSoftware({"mace"}))["mace"]["pretrained"]}
+    assert "mace-matpes-pbe-0" not in offered and "mace-mp-0" in offered
+
+
+def test_unknown_coverage_has_one_policy_and_its_own_reason():
+    """UMA oc20 declares no coverage: picker and deploy() both refuse, and
+    say so, rather than 'not trained on every element'."""
+    from scilink.skills._shared import mlip_tools as mt
+    with tempfile.TemporaryDirectory() as td:
+        with pytest.raises(ValueError, match="declares no element coverage for task 'oc20'"):
+            mt.deploy("uma", "uma-s-1p2", ["Cu", "O"], td, task_name="oc20")
+        agent, _ = _picker(td, {"uma"}, RuntimeError("must not be called"))
+        with pytest.raises(RuntimeError, match="declares its element coverage") as e:
+            agent._select_pretrained_model(["Cu", "O"], "CO on Cu",
+                                           task_name="oc20")
+    assert "trained on every element" not in str(e.value)
+
+
+def test_fallback_order_is_a_per_call_parameter():
+    with tempfile.TemporaryDirectory() as td:
+        agent, _ = _picker(td, {"mace", "orb"}, RuntimeError("LLM down"))
+        default = agent._select_pretrained_model(["Cu"], "Cu MD")
+        chosen = agent._select_pretrained_model(["Cu"], "Cu MD",
+                                                fallback_order=["orb"])
+    assert default["backend"] == "mace"
+    assert chosen["backend"] == "orb" and "fallback" in chosen["justification"]
+    with tempfile.TemporaryDirectory() as td:
+        agent, _ = _picker(td, {"mace"}, RuntimeError("LLM down"))
+        by_alias = agent._select_pretrained_model(["Cu"], "Cu MD",
+                                                  fallback_order=["small-omat-0"])
+    assert by_alias["model_name"] == "mace-omat-0"
+
+
+def test_forced_backend_is_checked_against_the_runner_before_deploy(monkeypatch):
+    """backend='chgnet' under LAMMPS used to download weights, then fail."""
+    import os
+    from ase.build import bulk
+    from ase.io import write
+    from scilink.skills._shared import mlip_tools as mt
+    monkeypatch.setattr(mt, "deploy", lambda *a, **k: pytest.fail(
+        "deploy must not run for a model the runner cannot use"))
+    with tempfile.TemporaryDirectory() as td:
+        f = os.path.join(td, "cu.data")
+        write(f, bulk("Cu", "fcc", a=3.6, cubic=True), format="lammps-data",
+              masses=True)
+        with pytest.raises(ValueError, match="cannot run in lammps"):
+            _agent(td).deploy_pretrained(
+                system_info={"elements": {}}, research_goal="Cu MD",
+                structure_file=f, backend="chgnet", runner="lammps")
+    # A trained model file has its file: only engine support matters.
+    with tempfile.NamedTemporaryFile(suffix=".model") as m:
+        assert mt.can_run_in("mace", m.name, "lammps")
+        assert not mt.can_run_in("chgnet", m.name, "lammps")
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-q"]))

@@ -19,8 +19,9 @@ detect:
     graph_longrange` confirms the polar backend is usable.
 # Pretrained models SciLink can deploy (the recipe is in mace_deploy.py). `elements` is the set the model was
 # trained on (checked against calc.z_table, mace-torch 0.3.16): a list of
-# symbols, or {z: [lo, hi], exclude: [...]}. `offer: false` keeps a model
-# loadable by name but out of the automatic picker.
+# symbols, or {z: [lo, hi], exclude: [...]}; quote symbols YAML reads as
+# booleans ('No'). `offer: false` keeps a model loadable by name but out of
+# the automatic picker. Aliases include the mace_mp keyword where it differs.
 pretrained:
   - name: mace-mp-0
     aliases: [mace, medium]
@@ -29,21 +30,25 @@ pretrained:
     elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
     params: {loader: mace_mp, size: medium}
   - name: mace-mp-0b
+    aliases: [small-0b]
     domain: inorganic
     description: MACE-MP-0b (small). Faster inference; improved pair repulsion and corrected isolated atoms. LAMMPS-capable (single node).
     elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
     params: {loader: mace_mp, size: small-0b}
   - name: mace-mpa-0
+    aliases: [medium-mpa-0]
     domain: inorganic
     description: MPtrj + sAlex (medium). State of the art on Matbench; improved high-pressure stability. LAMMPS-capable (single node).
     elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
     params: {loader: mace_mp, size: medium-mpa-0}
   - name: mace-omat-0
+    aliases: [small-omat-0]
     domain: inorganic
     description: OMat24-trained (small), DFT PBE+U. Excellent phonons. Default for inorganic materials. LAMMPS-capable (single node).
     elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
     params: {loader: mace_mp, size: small-omat-0}
   - name: mace-mh-0
+    aliases: [mh-0]
     domain: mixed
     description: Multi-head cross-domain model (OMAT/OMOL/OC20/MATPES), deployed with the omat_pbe head. Surfaces, bulk, mixed inorganic/organic. ASE only.
     elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
@@ -81,6 +86,48 @@ pretrained:
     description: SPICE-trained organic model (large).
     elements: [H, C, N, O, F, P, S, Cl, Br, I]
     params: {loader: mace_off, size: large}
+  - name: mace-mp-0b2
+    aliases: [medium-0b2]
+    offer: false
+    domain: inorganic
+    description: MACE-MP-0b2 (medium). Improved stability at high pressure. LAMMPS-capable (single node).
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: medium-0b2}
+  - name: mace-mp-0b3
+    aliases: [medium-0b3]
+    offer: false
+    domain: inorganic
+    description: MACE-MP-0b3 (medium). Fixes some phonon issues of 0b2. LAMMPS-capable (single node).
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: medium-0b3}
+  - name: mace-omat-0-medium
+    aliases: [medium-omat-0]
+    offer: false
+    domain: inorganic
+    description: OMat24-trained (medium), DFT PBE+U. LAMMPS-capable (single node).
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: medium-omat-0}
+  - name: mace-matpes-pbe-0
+    offer: false
+    domain: inorganic
+    description: MATPES-PBE (medium), DFT PBE without +U. LAMMPS-capable (single node).
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: mace-matpes-pbe-0}
+  - name: mace-matpes-r2scan-0
+    offer: false
+    domain: inorganic
+    description: MATPES-r2SCAN (medium), DFT r2SCAN. LAMMPS-capable (single node).
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: mace-matpes-r2scan-0}
+  - name: mace-mh-1
+    aliases: [mh-1]
+    offer: false
+    domain: mixed
+    description: Multi-head cross-domain model, second release, deployed with the omat_pbe head. ASE only.
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: mh-1, kwargs: {head: omat_pbe}}
+    model_file: none
+    notes: "MACE {name} ({size}, {domain}, omat_pbe head). ASE only: no on-disk model file for LAMMPS; the MD agent must use the ASE runner."
 ---
 # MACE (Multi-ACE)
 
