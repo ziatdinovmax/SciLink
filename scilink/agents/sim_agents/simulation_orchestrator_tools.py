@@ -2993,8 +2993,17 @@ class SimulationOrchestratorTools:
 
             try:
                 from .mlip_agent import MLIPAgent
-                from ...skills._shared.structure_io import structure_elements
-                elements, n_atoms = structure_elements(structure_path)
+                from ...skills._shared.structure_io import (
+                    inspect_lammps_data, is_lammps_data, structure_elements)
+                if is_lammps_data(structure_path):
+                    # Read with the caller's overrides: the files that need
+                    # them would otherwise log "Could not determine" here.
+                    info = inspect_lammps_data(structure_path,
+                                               type_elements=type_elements,
+                                               atom_style=atom_style)
+                    elements, n_atoms = info["present"] or [], info["n_atoms"]
+                else:
+                    elements, n_atoms = structure_elements(structure_path)
                 system_info = {
                     "elements": {e: None for e in elements},
                     "n_atoms": n_atoms,

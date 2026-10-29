@@ -29,7 +29,9 @@ an isotope of nitrogen, and the later rows are tried instead.
 A capitalised label that no reading accepts is a conflict ("CH2" at 14.03, a
 coarse-grained "W" bead), and so is a mass with no element, or several, within
 ``tolerance``. A lowercase label that no reading accepts is a type name
-("opls_140") and the mass decides. A conflict is reported, never guessed: a
+("opls_140") and the mass decides, unless its prefix names an element within
+the isotope window of the mass: "c2" at 14.03 is a united-atom carbon, not
+nitrogen, so it is a conflict too. A conflict is reported, never guessed: a
 caller passes ``type_elements`` to say what the file cannot (see
 ``apply_type_elements``). A new case is a new row plus a test.
 """
@@ -161,7 +163,16 @@ def read_type(type_id: int, mass: float, label: str = "",
             rec["conflict"] = (f"label '# {label}' names no element of mass "
                                f"{mass:g} (tolerance {tolerance:g} amu)")
             return rec
-        # A lowercase label ("opls_140", "type1") is a type name: the mass decides.
+        # A lowercase label ("opls_140", "type1") is a type name: the mass
+        # decides, unless its prefix is a plausible pseudo-atom of an element
+        # ("c2" at 14.03 is a united-atom CH2, not N).
+        plausible = [s for s in _prefixes(word, letters)
+                     if abs(_std_mass(s) - mass) <= isotope_window]
+        if plausible and plausible[0] not in elements_near(mass, tolerance):
+            rec["conflict"] = (f"label '# {label}' reads as {plausible[0]}, "
+                               f"but mass {mass:g} is not {plausible[0]}'s "
+                               f"(a united-atom or pseudo-atom type?)")
+            return rec
     near = elements_near(mass, tolerance)
     if len(near) == 1:
         rec.update(element=near[0], basis="mass")

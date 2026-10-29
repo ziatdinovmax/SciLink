@@ -517,6 +517,30 @@ def test_forced_backend_is_checked_against_the_runner_before_deploy(monkeypatch)
         assert not mt.can_run_in("chgnet", m.name, "lammps")
 
 
+
+@pytest.mark.parametrize("reply", [["mace-mp-0"], "mace-mp-0",
+                                   {"model_name": ["mace-mp-0"]}])
+def test_picker_malformed_reply_falls_back(reply):
+    """A list or bare-string reply used to abort deploy_pretrained."""
+    with tempfile.TemporaryDirectory() as td:
+        agent, _ = _picker(td, {"mace", "orb"}, None)
+        agent._generate_json = lambda prompt: reply
+        result = agent._select_pretrained_model(["Cu"], "Cu MD")
+    assert result["backend"] == "mace" and "fallback" in result["justification"]
+
+
+def test_uma_menus_list_only_heads_that_deploy():
+    """Every head a UMA description advertises has declared coverage."""
+    import re
+    from scilink.skills._shared import mlip_tools as mt
+    for entry in mt._skill_meta("uma")["pretrained"]:
+        heads = re.search(r"Heads SciLink deploys: ([^.]*)", entry["description"])
+        assert heads, entry["name"]
+        named = set(re.findall(r"\b(omat|omol|oc\d+|odac|omc)\b", heads.group(1)))
+        assert named and named <= set(entry["elements_by_task"]), (entry["name"], named)
+        assert "oc20" not in entry["description"]
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-q"]))

@@ -389,8 +389,18 @@ Return JSON:
             )
             return _selection(fallback, f"fallback: selection call failed ({e})")
 
+        if not isinstance(result, dict):
+            # A list or bare string is an observed malformed reply: fall back
+            # rather than abort the deploy.
+            self.logger.warning(
+                f"Model selection reply is not a JSON object ({result!r:.80}); "
+                f"using {fallback['name']}")
+            return _selection(fallback, "fallback: the selection reply was "
+                                        "not a JSON object")
         by_name = {m["name"]: m for m in eligible}
         picked = result.get("model_name")
+        if not isinstance(picked, str):
+            picked = None
         # Accept an alias ("orb") or a case variant ("MACE-OMAT-0") of an
         # eligible model rather than treating it as an off-list pick.
         if picked not in by_name:
@@ -515,6 +525,10 @@ Return JSON:
                 raise ValueError(
                     f"Cannot tell which element each atom type is "
                     f"({info['problem']}).")
+            if info["atoms_error"] and runner == "ase":
+                # The ASE script would fail at run time; refuse before any
+                # weights download. (LAMMPS reads the file with its own style.)
+                raise ValueError(f"Cannot read the atoms ({info['problem']}).")
         elif is_lammps_data(structure_file) and type_elements:
             # Not readable here: the caller's map is all there is; its
             # elements must be covered too.

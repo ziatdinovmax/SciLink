@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 
 LAMMPS_DATA_SUFFIXES = (".data", ".lammps", ".lmp")
 
+# (path, type) pairs already warned about as isotopes: one deploy reads the
+# file two or three times.
+_ISOTOPE_WARNED = set()
+
 
 def is_lammps_data(path: str) -> bool:
     return Path(path).suffix.lower() in LAMMPS_DATA_SUFFIXES
@@ -114,6 +118,7 @@ def inspect_lammps_data(
       ``n_atoms``        atom count
       ``n_types``        declared atom types
       ``atom_style``     style to pass ASE explicitly, or None (header/guess)
+      ``atoms_error``    why the Atoms section could not be read, or None
       ``problem``        why something is unknown, or None
     Raises ValueError for an override that names no element or no type.
     """
@@ -126,10 +131,11 @@ def inspect_lammps_data(
     out: Dict[str, Any] = {
         "readings": readings, "type_elements": None, "present": None,
         "n_atoms": counts["atoms"], "n_types": n_types,
-        "atom_style": None, "problem": None,
+        "atom_style": None, "problem": None, "atoms_error": None,
     }
     for r in readings.values():
-        if r["isotope"]:
+        if r["isotope"] and (path, r["type"]) not in _ISOTOPE_WARNED:
+            _ISOTOPE_WARNED.add((path, r["type"]))
             logger.warning(f"{path}: type {r['type']} '# {r['label']}' at "
                            f"{r['mass']:g} read as an isotope of {r['element']}")
         if r["source"] == "override" and r["file_reading"]["element"] not in (
@@ -158,7 +164,12 @@ def inspect_lammps_data(
         out["atom_style"] = style
         if mapping is not None:
             out["present"] = sorted({mapping[int(t)] for t in atoms.arrays["type"]})
+    except KeyError as e:
+        # ASE meets an atom whose type has no Masses entry.
+        out["atoms_error"] = f"atom type {e.args[0]} has no Masses entry"
+        problems.append(f"its Atoms section could not be read ({out['atoms_error']})")
     except Exception as e:
+        out["atoms_error"] = str(e)
         problems.append(f"its Atoms section could not be read ({e})")
 
     if problems:

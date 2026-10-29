@@ -567,10 +567,12 @@ def test_mass_tolerance_is_a_parameter_with_a_direction():
     from scilink.skills.molecular_dynamics.lammps.lammps import parse_data_file
     with tempfile.TemporaryDirectory() as td:
         f = _hand(td, "ar.data", ntypes=1, t2=1, masses="1 39.948")
-        assert parse_data_file(f)["type_readings"][1]["element"] is None
-        assert parse_data_file(f, mass_tolerance=0.1)["type_readings"][1]["element"] == "Ar"
-        # Callers that only need a label keep a best guess.
+        from scilink.skills._shared.structure_io import inspect_lammps_data
+        assert inspect_lammps_data(f)["type_elements"] is None
+        assert inspect_lammps_data(f, mass_tolerance=0.1)["type_elements"] == {1: "Ar"}
+        # parse_data_file's callers only need a label: they keep a best guess.
         assert parse_data_file(f)["mass_map"][1] == (39.948, "Ar")
+        assert parse_data_file(f, mass_tolerance=0.1)["mass_map"][1] == (39.948, "Ar")
 
 
 def test_type_elements_override_is_applied_checked_and_recorded():
@@ -703,3 +705,41 @@ def test_override_needs_a_mass_for_its_type():
         f = _hand(td, "nm.data", masses="1 22.98977 # Na")       # type 2 unset
         with pytest.raises(ValueError, match="type 2 has no Masses entry"):
             inspect_lammps_data(f, type_elements={"2": "Cl"})
+
+
+# ── approval-round comments ──────────────────────────────────────────
+
+@pytest.mark.parametrize("label,mass,expected", [
+    ("c2", 14.027, None),         # lowercase united-atom CH2: not N
+    ("c3", 15.035, None),         # lowercase united-atom CH3: not O
+    ("opls_140", 1.008, "H"),     # OPLS type name: the mass still decides
+    ("type1", 15.999, "O"),
+    ("ca", 12.011, "C"), ("na", 14.007, "N"), ("os", 15.999, "O"),   # GAFF
+])
+def test_lowercase_prefix_pseudo_atom_is_a_conflict(label, mass, expected):
+    from scilink.skills._shared.lammps_types import read_type
+    assert read_type(1, mass, label)["element"] == expected
+
+
+def test_script_refuses_unreadable_atoms_with_the_reason():
+    """Good masses, ambiguous columns: say 'pass atom_style' now, not in ASE."""
+    from scilink.agents.sim_agents._ase_runner import generate_ase_script
+    with tempfile.TemporaryDirectory() as td:
+        f = os.path.join(td, "m.data")
+        open(f, "w").write(_SIX_COLUMNS)
+        with pytest.raises(ValueError, match="pass atom_style"):
+            generate_ase_script(_potential(["H", "O"]), td, structure_file=f)
+        path = generate_ase_script(_potential(["H", "O"]), td, structure_file=f,
+                                   atom_style="molecular")
+        assert "ATOM_STYLE = 'molecular'" in open(path).read()
+
+
+def test_atom_without_a_mass_is_named_in_the_problem():
+    from scilink.skills._shared.structure_io import inspect_lammps_data
+    with tempfile.TemporaryDirectory() as td:
+        f = os.path.join(td, "nt.data")       # no "atom types" header line
+        open(f, "w").write(_SIX_COLUMNS.replace("2 atom types\n", "")
+                           .replace("2 1.008 # H\n", "")
+                           .replace("Atoms\n", "Atoms # molecular\n"))
+        info = inspect_lammps_data(f)
+        assert "atom type 2 has no Masses entry" in info["problem"]

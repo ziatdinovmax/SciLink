@@ -100,6 +100,9 @@ def generate_ase_script(
             raise ValueError(
                 f"Cannot tell which element each atom type is "
                 f"({info['problem']}).")
+        if info["atoms_error"]:
+            # The script would die inside ASE with a generic error; say why now.
+            raise ValueError(f"Cannot read the atoms ({info['problem']}).")
         type_elements, atom_style = info["type_elements"], info["atom_style"]
     elif is_lammps_data(structure_file):
         # Not readable now: only the caller's type_elements (written in as

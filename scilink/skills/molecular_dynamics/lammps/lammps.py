@@ -308,10 +308,12 @@ def parse_data_file(data_file: str,
     Parse a LAMMPS data file to extract system information.
 
     Handles atom_style atomic, charge, molecular, and full.
-    Detects system category and vacuum gaps. ``type_readings`` holds the
-    shared reader's record for each atom type (element, basis, conflict;
-    see ``_shared/lammps_types``); ``mass_map`` keeps a best guess for every
-    type, for callers that only need a label.
+    Detects system category and vacuum gaps. ``mass_map`` gives each atom
+    type an element from the shared reader (``_shared/lammps_types``), or a
+    best guess where the reader reports a conflict: a label for molecule
+    selection and system classification. Element-sensitive callers (the MLIP
+    path) use ``structure_io.inspect_lammps_data``, the reader of record,
+    which refuses instead of guessing.
     """
     info: Dict[str, Any] = {
         "atom_count": 0,
@@ -329,7 +331,6 @@ def parse_data_file(data_file: str,
         "atom_style": "unknown",
         "atom_type_labels": {},
         "mass_map": {},
-        "type_readings": {},
         "elements": [],
         "element_counts": {},
         "has_bonds": False,
@@ -405,12 +406,11 @@ def parse_data_file(data_file: str,
     for type_id, mass, label in lammps_types.parse_masses(lines):
         rec = lammps_types.read_type(type_id, mass, label, mass_tolerance,
                                      isotope_window)
-        info["type_readings"][type_id] = rec
         element = rec["element"]
         if element is None:
             # The reader cannot tell (rec["conflict"] says why). Keep the
             # previous best guess for callers that only need a label;
-            # element-sensitive callers use type_readings and refuse.
+            # element-sensitive callers use inspect_lammps_data and refuse.
             match = re.match(r"[A-Z][a-z]?", label)
             element = (match.group() if match else None) or element_from_mass(mass)
         info["mass_map"][type_id] = (mass, element or f"X{type_id}")
