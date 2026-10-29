@@ -486,6 +486,12 @@ class MDSimulationAgent(SimulationAgent):
         # pressure: None -> NVT, a value -> NPT. An explicit
         # pressure in sim overrides the positional arg.
         pressure = sim.get("pressure", pressure)
+        # Structure-reading overrides (type_elements, atom_style,
+        # mass_tolerance, isotope_window) go to whichever runner reads the structure, and only
+        # when set, so an engine without them is not handed unknown kwargs.
+        reading = {k: sim[k] for k in ("type_elements", "atom_style",
+                                       "mass_tolerance", "isotope_window")
+                   if sim.get(k) is not None}
 
         if runner == "ase":
             from ._ase_runner import generate_ase_script
@@ -501,6 +507,7 @@ class MDSimulationAgent(SimulationAgent):
                 output_interval=sim.get("output_interval", 50),
                 device=sim.get("device", "cuda"),
                 fmax=sim.get("fmax", 0.02),
+                **reading,
             )
             self.logger.info(
                 f"Generated ASE {task} script for {potential.backend}: "
@@ -529,6 +536,7 @@ class MDSimulationAgent(SimulationAgent):
                 temperature=temperature,
                 pressure=pressure,
                 n_steps=sim.get("n_steps", 100000),
+                **reading,
             )
             self.logger.info(
                 f"Generated {runner} input for {potential.backend}: "

@@ -2962,11 +2962,29 @@ class SimulationOrchestratorTools:
             temperature: float = 300.0,
             n_steps: int = 10000,
             device: str = "cpu",
+            type_elements: str = None,
+            atom_style: str = None,
         ) -> str:
             if not Path(structure_path).exists():
                 return json.dumps({
                     "status": "error",
                     "message": f"Structure file not found: {structure_path}",
+                })
+            if isinstance(type_elements, str) and not type_elements.strip():
+                type_elements = None    # models often send "" for "not set"
+            if isinstance(type_elements, str):
+                try:
+                    type_elements = json.loads(type_elements)
+                except json.JSONDecodeError as e:
+                    return json.dumps({
+                        "status": "error",
+                        "message": f"type_elements is not a JSON object: {e}",
+                    })
+            if type_elements is not None and not isinstance(type_elements, dict):
+                return json.dumps({
+                    "status": "error",
+                    "message": "type_elements must be a JSON object "
+                               "like {\"1\": \"O\", \"2\": \"H\"}",
                 })
 
             slug = self._make_slug(research_goal)
@@ -2975,12 +2993,20 @@ class SimulationOrchestratorTools:
 
             try:
                 from .mlip_agent import MLIPAgent
-                from ase.io import read as _ase_read
-                atoms = _ase_read(structure_path)
-                elements = sorted(set(atoms.get_chemical_symbols()))
+                from ...skills._shared.structure_io import (
+                    inspect_lammps_data, is_lammps_data, structure_elements)
+                if is_lammps_data(structure_path):
+                    # Read with the caller's overrides: the files that need
+                    # them would otherwise log "Could not determine" here.
+                    info = inspect_lammps_data(structure_path,
+                                               type_elements=type_elements,
+                                               atom_style=atom_style)
+                    elements, n_atoms = info["present"] or [], info["n_atoms"]
+                else:
+                    elements, n_atoms = structure_elements(structure_path)
                 system_info = {
                     "elements": {e: None for e in elements},
-                    "n_atoms": len(atoms),
+                    "n_atoms": n_atoms,
                 }
                 agent = MLIPAgent(
                     working_dir=str(workdir),
@@ -3002,6 +3028,8 @@ class SimulationOrchestratorTools:
                     model_name=model_name,
                     simulation_params=sim_params,
                     runner="ase",
+                    type_elements=type_elements,
+                    atom_style=atom_style,
                 )
             except Exception as e:
                 return json.dumps({
@@ -3034,6 +3062,7 @@ class SimulationOrchestratorTools:
                 "slug": slug,
                 "backend": result.get("backend"),
                 "model_name": result.get("model_name"),
+                "atom_types": result.get("atom_types"),
                 "run_script": run_path,
                 "workdir": str(workdir),
                 "task": task,
@@ -3100,6 +3129,25 @@ class SimulationOrchestratorTools:
                 "device": {
                     "type": "string",
                     "description": "'cpu' (default) or 'cuda'. Use 'cuda' when a GPU is available.",
+                },
+                "type_elements": {
+                    "type": "string",
+                    "description": (
+                        "LAMMPS data only: a JSON object {atom type: element} "
+                        "for types the file's masses cannot tell (e.g. "
+                        "'{\"2\": \"H\"}' for a "
+                        "deuterated 'HW', or a coarse-grained bead). Use when "
+                        "an error says an atom type's element cannot be told. "
+                        "Checked against the file and recorded with the result."
+                    ),
+                },
+                "atom_style": {
+                    "type": "string",
+                    "description": (
+                        "LAMMPS data only: the atom style (e.g. 'charge', "
+                        "'molecular') when the file has no 'Atoms # <style>' "
+                        "header and an error says the style is ambiguous."
+                    ),
                 },
             },
             required=["structure_path", "research_goal"],

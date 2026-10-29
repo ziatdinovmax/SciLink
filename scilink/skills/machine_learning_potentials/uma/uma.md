@@ -11,6 +11,23 @@ detect:
     `from fairchem.core import FAIRChemCalculator` confirms the backend is
     usable. LAMMPS support requires the `fairchem-lammps` plugin or a LAMMPS
     build with the ML-IAP package linked against the fairchem library.
+pretrained:
+  - name: uma-s-1p2
+    aliases: [uma]
+    domain: universal
+    description: 'UMA small, latest. Fastest UMA while still state of the art on most benchmarks. Heads SciLink deploys: omat (default), omol (supports charged and open-shell molecules). ASE only in base fairchem.'
+    # Only heads listed here deploy: a head with no declared coverage is
+    # refused. Add oc20 / odac / omc here once their element lists are read
+    # from the released checkpoints.
+    elements_by_task:
+      omat: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+      omol: {z: [1, 83]}
+  - name: uma-m-1p1
+    domain: universal
+    description: 'UMA medium: best in class across all metrics; slower and more memory intensive. Recommended for quantitative results. Heads SciLink deploys: omat (default), omol. ASE only in base fairchem.'
+    elements_by_task:
+      omat: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+      omol: {z: [1, 83]}
 ---
 # UMA (Universal Model for Atoms)
 
@@ -52,7 +69,24 @@ for large-scale production runs.
 
 ## planning
 
-When to choose UMA:
+### Element coverage
+
+Check this FIRST. UMA ACCEPTS Z = 1–99 on every head without error,
+so coverage depends on the TASK HEAD's training data. Off-list elements run
+silently on borrowed embeddings and should be treated as uncovered:
+- `omat` head (OMat24): Z = 1–94 except Po, At, Rn, Fr, Ra (89 elements).
+- `omol` head (OMol25): Z = 1–83 (H to Bi). No actinides; lanthanides limited.
+- `oc20`, `oc22`, `oc25`, `odac` and `omc` heads: SciLink does not deploy
+  them yet. Their exact element lists are not verified here (oc20: catalysts,
+  55 bulk elements with C/H/O/N adsorbates; odac: MOFs + CO2/H2O; omc: ~12
+  organic elements), and a head whose coverage cannot be checked is refused.
+  For catalysis, MOFs or molecular crystals use `omat` / `omol` when the
+  elements are covered, or another backend.
+  (Sources: fairchem `models/uma/escn_md.py` max_num_elements=100; OMol25 paper
+  arXiv 2505.08762; OMat24 dataset card; fairchem element_refs yaml.)
+
+### When to choose UMA
+
 - State-of-the-art accuracy is required and compute budget allows
 - System spans multiple chemistry classes (inorganic + molecular + catalytic)
 - Catalytic surfaces, adsorbates, or reaction pathways are the target
@@ -95,7 +129,9 @@ dyn.run(1000)
 `pretrained_mlip.get_predict_unit(name, device=...)`, then wrap it, selecting
 the prediction head with `task_name`.
 
-`task_name` selects the prediction head:
+`task_name` selects the prediction head. SciLink deploys `"omat"` and
+`"omol"`; fairchem also has the others below, which SciLink refuses until
+their element coverage is declared in this skill's `pretrained:` list:
 - `"oc20"` — use for catalysis
 - `"oc22"` — use for oxide catalysis (-1p2 only)
 - `"oc25"` — use for (electro)catalysis (-1p2 only)

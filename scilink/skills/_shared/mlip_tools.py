@@ -1,20 +1,20 @@
 """
 Backend-agnostic tools for ML interatomic potentials.
 
-Design: every public function accepts a `backend` parameter and dispatches
-to private backend-specific implementations.  This keeps the agent code
-clean while making it easy to add NequIP / DeePMD / Allegro later without
-touching the agent.
-
-The heavy MACE coverage reflects reality: MACE currently has the only
-production-ready foundation model ecosystem.  NequIP and DeePMD dispatch
-points raise NotImplementedError with actionable messages so failures are
-obvious rather than silent.
+Detection, the pretrained-model list and deployment are driven by each
+backend's built-in skill bundle (``detect:`` and ``pretrained:`` frontmatter
+plus a ``<backend>_deploy.py`` recipe), so adding a backend is adding a
+bundle. Uncertainty
+estimation and training still dispatch on ``backend`` to private
+implementations; only MACE has them today, and the others raise
+NotImplementedError with actionable messages so failures are obvious
+rather than silent.
 """
 
 from scilink.executors import run_engine  # stoppable, whole-tree kill (#685)
 import os
 import json
+import functools
 import logging
 import subprocess
 import shutil
@@ -36,171 +36,315 @@ logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  BACKEND AVAILABILITY
+#  BACKENDS COME FROM SKILL BUNDLES
 # ═══════════════════════════════════════════════════════════════════
+#
+# Each MLIP backend is a built-in skill bundle,
+# skills/machine_learning_potentials/<backend>/:
+#
+#   <backend>.md frontmatter (declarative data only)
+#     detect:      is it installed?  (the probe AvailableSoftware uses for
+#                  every engine)
+#     pretrained:  the models SciLink can deploy, their template params,
+#                  and the elements each one was trained on
+#   <backend>_deploy.py
+#     DEPLOY:      the recipe for building its ASE calculator
+#
+# So a new backend is a new bundle (markdown + a small DEPLOY module); no
+# code here changes.
+#
+# The recipe is Python, so it lives in a package .py file and never in
+# skill markdown (CLAUDE.md: markdown is not an executable surface). Both
+# the recipe and `pretrained:` are read only from BUILT-IN bundles, never
+# from $SCILINK_SKILLS_PATH or the persistent store the UI uploader writes
+# to: the same packaging boundary as TOOL_SPEC (see _registry). A user skill
+# may still override a backend's guidance text, but cannot add or change
+# what runs, or the element lists the coverage guard uses.
 
-def _probe_mace() -> Dict[str, Any]:
+_MLIP_DOMAIN = "machine_learning_potentials"
+
+
+def _skill_meta(backend: str) -> Dict[str, Any]:
+    """Frontmatter of a backend's BUILT-IN skill bundle (FileNotFoundError if none)."""
+    return _builtin_meta(backend)
+
+
+@functools.lru_cache(maxsize=None)
+def _builtin_meta(backend: str) -> Dict[str, Any]:
+    # Cached: built-in bundles ship with the package and do not change
+    # during a process. Callers must treat the result as read-only.
+    from ..loader import load_skill, _SKILLS_DIR
+    path = _SKILLS_DIR / _MLIP_DOMAIN / backend / f"{backend}.md"
+    if not path.is_file():
+        raise FileNotFoundError(f"no built-in MLIP skill bundle {backend!r}")
+    return load_skill(str(path), domain=_MLIP_DOMAIN).get("meta") or {}
+
+
+@functools.lru_cache(maxsize=None)
+def deploy_spec(backend: str) -> Optional[Dict[str, Any]]:
+    """The backend's ``DEPLOY`` recipe from ``<backend>_deploy.py``, or None.
+
+    Imported as a package module, so only built-in bundles can supply one.
+    Callers must treat the result as read-only.
+    """
+    import importlib
+    modname = f"scilink.skills.{_MLIP_DOMAIN}.{backend}.{backend}_deploy"
     try:
-        import mace
-        return {
-            "available": True,
-            "version": getattr(mace, "__version__", "unknown"),
-            "lammps_pair_style": "mace",
-            "pretrained": [
-                {
-                    "name": "mace-mp-0",
-                    "domain": "inorganic",
-                    "description": (
-                        "Universal potential trained on MPtrj dataset "
-                        "(~150k inorganic materials). Good for metals, "
-                        "oxides, ceramics."
-                    ),
-                },
-                {
-                    "name": "mace-mp-0b",
-                    "domain": "inorganic",
-                    "description": "Medium-accuracy variant, faster inference.",
-                },
-                {
-                    "name": "mace-off23",
-                    "domain": "organic",
-                    "description": (
-                        "Trained on SPICE dataset. Covers organic molecules, "
-                        "peptides, drug-like compounds."
-                    ),
-                },
-            ],
-        }
-    except ImportError:
-        return {"available": False, "version": None, "pretrained": []}
+        mod = importlib.import_module(modname)
+    except ModuleNotFoundError as e:
+        # Only "this backend has no recipe module" means no recipe; a
+        # recipe that fails to import must fail loudly.
+        if e.name and modname.startswith(e.name):
+            return None
+        raise
+    return getattr(mod, "DEPLOY", None)
 
 
-def _probe_nequip() -> Dict[str, Any]:
+def _backend_names() -> List[str]:
+    """Built-in MLIP skill bundles (never user roots; see above)."""
+    from ..loader import _SKILLS_DIR
+    root = _SKILLS_DIR / _MLIP_DOMAIN
+    return sorted(d.name for d in root.iterdir()
+                  if d.is_dir() and d.name not in ("general",)
+                  and not d.name.startswith(("_", "."))
+                  and (d / f"{d.name}.md").is_file())
+
+
+def _element_set(spec: Any) -> Optional[set]:
+    """Turn an ``elements`` spec into a set of symbols.
+
+    A spec is a list of symbols, or ``{z: [lo, hi], exclude: [...]}``.
+    Returns None when no spec is given (coverage unknown).
+    """
+    if spec is None:
+        return None
+    if isinstance(spec, (list, tuple)):
+        # YAML 1.1 reads an unquoted No (nobelium) as False: refuse it
+        # rather than silently drop the element.
+        bad = [s for s in spec if not isinstance(s, str)]
+        if bad:
+            raise ValueError(f"elements entries must be symbols; got {bad!r} "
+                             f"(quote No, nobelium: YAML reads it as false)")
+        return set(spec)
+    if isinstance(spec, dict) and "z" in spec:
+        from ase.data import chemical_symbols
+        lo, hi = spec["z"]
+        out = {chemical_symbols[z] for z in range(int(lo), int(hi) + 1)}
+        return out - _element_set(list(spec.get("exclude", [])))
+    raise ValueError(f"Bad elements spec: {spec!r}")
+
+
+def find_pretrained(backend: str, model: str) -> Optional[Dict[str, Any]]:
+    """The ``pretrained`` entry for ``model`` (by name or alias), or None."""
     try:
-        import nequip
-        return {
-            "available": True,
-            "version": getattr(nequip, "__version__", "unknown"),
-            "lammps_pair_style": "nequip",
-            "pretrained": [],
-        }
-    except ImportError:
-        return {"available": False, "version": None, "pretrained": []}
+        meta = _skill_meta(backend)
+    except FileNotFoundError:
+        return None
+    for entry in meta.get("pretrained") or []:
+        if model == entry.get("name") or model in (entry.get("aliases") or []):
+            return entry
+    return None
 
 
-def _probe_deepmd() -> Dict[str, Any]:
-    try:
-        import deepmd
-        return {
-            "available": True,
-            "version": getattr(deepmd, "__version__", "unknown"),
-            "lammps_pair_style": "deepmd",
-            "pretrained": [],
-        }
-    except ImportError:
-        return {"available": False, "version": None, "pretrained": []}
+def model_elements(
+    backend: str, model: str, task_name: Optional[str] = None,
+) -> Optional[set]:
+    """Elements a pretrained model was trained on, or None if unknown.
+
+    Multi-task models (UMA) declare ``elements_by_task``; the head in
+    use (``task_name``, else the skill's ``deploy.default_task``) picks
+    the set.
+    """
+    entry = find_pretrained(backend, model)
+    if entry is None:
+        return None
+    if "elements_by_task" in entry:
+        task = task_name or (deploy_spec(backend) or {}).get("default_task")
+        return _element_set((entry["elements_by_task"] or {}).get(task))
+    return _element_set(entry.get("elements"))
 
 
-def _probe_chgnet() -> Dict[str, Any]:
-    # ASE-only — no LAMMPS pair_style.
-    try:
-        import chgnet
-        return {
-            "available": True,
-            "version": getattr(chgnet, "__version__", "unknown"),
-            "lammps_pair_style": None,
-            "pretrained": [
-                {
-                    "name": "chgnet",
-                    "domain": "universal-inorganic",
-                    "description": (
-                        "Universal MLIP pretrained on MPtrj (~1.5M DFT "
-                        "relaxations). Predicts energies, forces, "
-                        "stresses, and magnetic moments. ASE-only — "
-                        "no LAMMPS pair_style; use runner='ase'."
-                    ),
-                },
-            ],
-        }
-    except ImportError:
-        return {"available": False, "version": None, "pretrained": []}
+def uncovered_elements(
+    backend: str, model: str, elements: List[str],
+    task_name: Optional[str] = None,
+) -> Optional[List[str]]:
+    """Elements of the system that the model was not trained on.
 
-
-def _probe_uma() -> Dict[str, Any]:
-    try:
-        import fairchem.core
-        return {
-            "available": True,
-            "version": getattr(fairchem.core, "__version__", "unknown"),
-            "lammps_pair_style": None,
-            "pretrained": [
-                {
-                    "name": "uma-s-1p2",
-                    "domain": "universal",
-                    "description": "UMA small model — fastest, good for screening.",
-                },
-                {
-                    "name": "uma-m-1p1",
-                    "domain": "universal",
-                    "description": "UMA medium model — best accuracy.",
-                },
-            ],
-        }
-    except ImportError:
-        return {"available": False, "version": None, "pretrained": []}
-
-
-def _probe_orb() -> Dict[str, Any]:
-    try:
-        import orb_models
-        return {
-            "available": True,
-            "version": getattr(orb_models, "__version__", "unknown"),
-            "lammps_pair_style": None,
-            "pretrained": [
-                {
-                    "name": "orb-v3-conservative-inf-omat",
-                    "domain": "universal-inorganic",
-                    "description": "Orb v3 conservative model — fast universal MLIP.",
-                },
-            ],
-        }
-    except ImportError:
-        return {"available": False, "version": None, "pretrained": []}
-
-
-_BACKEND_PROBES: Dict[str, Any] = {
-    "mace":    _probe_mace,
-    "nequip":  _probe_nequip,
-    "deepmd":  _probe_deepmd,
-    "chgnet":  _probe_chgnet,
-    "uma":     _probe_uma,
-    "orb":     _probe_orb,
-}
+    Returns ``[]`` when every element is covered, and None when the
+    model declares no coverage (unknown).
+    """
+    covered = model_elements(backend, model, task_name)
+    if covered is None:
+        return None
+    return sorted(set(elements) - covered)
 
 
 def check_backends(
     backends: Optional[List[str]] = None,
+    available_software: Any = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """Check which MLIP backends are installed.
+    """Which MLIP backends are installed, and which models each offers.
+
+    Installation comes from each skill's ``detect:`` block, probed live for
+    just the requested backends (``_probe_from_frontmatter``, the probe
+    ``AvailableSoftware`` uses for every engine), plus any ``user_confirmed``
+    override in the available-software YAML. The cached probe results in
+    that YAML are not used: it lives in the home directory and is shared by
+    every Python environment. The model list is
+    each skill's ``pretrained:`` entries (minus ``offer: false``). A
+    backend with no ``DEPLOY`` recipe offers no models, since deploy()
+    could not load them.
 
     Args:
-        backends: Names of backends to probe. When ``None`` (default) all
-            known backends are probed. Pass a single-element list, e.g.
-            ``["mace"]``, to probe only that backend and avoid importing
-            unrelated packages.
+        backends: Backend names to report. Default: every MLIP skill.
+        available_software: Optional object with
+            ``get(domain, engine) -> {"available": bool}`` to use instead
+            of probing (tests, benchmarks).
 
     Returns:
-        Dict keyed by backend name:
-        ``{ "mace": {"available": bool, "version": str, "pretrained": [...]}, ... }``
+        ``{backend: {"available": bool, "pretrained": [
+            {"name", "domain", "description"}, ...]}}``
     """
-    targets = backends if backends is not None else list(_BACKEND_PROBES)
-    return {name: _BACKEND_PROBES[name]() for name in targets if name in _BACKEND_PROBES}
+    out: Dict[str, Dict[str, Any]] = {}
+    for name in (backends if backends is not None else _backend_names()):
+        try:
+            meta = _skill_meta(name)
+        except FileNotFoundError:
+            continue
+        info = (available_software.get(_MLIP_DOMAIN, name)
+                if available_software is not None else _probe_installed(name))
+        offered = []
+        if deploy_spec(name):
+            for entry in meta.get("pretrained") or []:
+                if entry.get("offer", True):
+                    offered.append({k: entry[k] for k in
+                                    ("name", "domain", "description")
+                                    if k in entry})
+        out[name] = {"available": bool(info.get("available")),
+                     "pretrained": offered}
+    return out
+
+
+def _probe_installed(backend: str) -> Dict[str, Any]:
+    """Live ``detect:`` probe for one backend, or a user_confirmed override."""
+    from ...utils.available_software import (
+        AvailableSoftware, _probe_from_frontmatter, _yaml_path)
+    live = _probe_from_frontmatter(_MLIP_DOMAIN, backend)
+    if live.get("available"):
+        return live
+    try:
+        if _yaml_path().is_file():
+            cached = AvailableSoftware.load().get(_MLIP_DOMAIN, backend)
+            if cached.get("user_confirmed"):
+                return {**cached, "available": True}
+    except Exception as e:
+        logger.debug(f"Could not read available-software YAML: {e}")
+    return live
+
+
+def model_file_strategy(backend: str, model: str) -> Optional[str]:
+    """The ``model_file`` strategy of a pretrained model (None if unknown)."""
+    entry = find_pretrained(backend, model)
+    if entry is None:
+        return None
+    return entry.get("model_file",
+                     (deploy_spec(backend) or {}).get("model_file", "none"))
+
+
+def fallback_rank(backend: str, model: str) -> Tuple[int, int, int]:
+    """Sort key for falling back without an LLM pick: lower is tried first.
+
+    Backends by their recipe's ``fallback_rank`` (a design choice in each
+    ``<backend>_deploy.py``), then the backend's ``default_model``, then the
+    skill's listed order. Never by directory name.
+    """
+    spec = deploy_spec(backend) or {}
+    entry = find_pretrained(backend, model)
+    names = [e.get("name") for e in (_skill_meta(backend).get("pretrained") or [])]
+    is_default = entry is not None and entry.get("name") == (
+        find_pretrained(backend, spec.get("default_model", "")) or {}).get("name")
+    return (int(spec.get("fallback_rank", 100)), 0 if is_default else 1,
+            names.index(model) if model in names else len(names))
+
+
+def can_run_in(backend: str, model: str, runner: Optional[str]) -> bool:
+    """Whether a pretrained model can run in ``runner`` ("ase", "lammps", ...).
+
+    ASE runs every backend. Another engine needs the backend in its tools
+    module's ``supported_mlip_backends()`` and an on-disk model file.
+    """
+    if runner in (None, "", "ase"):
+        return True
+    # A trained model is already a file; a pretrained one needs a strategy
+    # that writes one.
+    if not (model and os.path.isfile(model)) and \
+            model_file_strategy(backend, model) in (None, "none"):
+        return False
+    from ...agents.sim_agents.md_simulation_agent import MDSimulationAgent
+    engine = MDSimulationAgent.TOOL_REGISTRY.get(runner)
+    supported = getattr(engine, "supported_mlip_backends", None)
+    return bool(supported and backend in supported())
 
 
 # ═══════════════════════════════════════════════════════════════════
 #  MODEL DEPLOYMENT  (the default path)
 # ═══════════════════════════════════════════════════════════════════
+
+def _model_file_none(calc: Any, name: str, working_dir: str) -> str:
+    return ""
+
+
+def _model_file_torch_save(calc: Any, name: str, working_dir: str) -> str:
+    """Find, or write, an on-disk copy of the loaded torch model.
+
+    Engines such as LAMMPS load the model from a file. Uses the
+    calculator's own path attribute when it has one, else saves
+    ``calc.models[0]`` into ``working_dir``. Returns "" on failure.
+    """
+    for attr in ("model_path", "model_paths"):
+        val = getattr(calc, attr, None)
+        if val:
+            path = str(val[0]) if isinstance(val, list) else str(val)
+            if os.path.exists(path):
+                return path
+    path = os.path.join(working_dir, f"{name}.model")
+    try:
+        import torch
+        torch.save(calc.models[0], path)
+        return path
+    except Exception as e:
+        logger.warning(f"Could not save model file for {name}: {e}")
+        return ""
+
+
+# Named strategies a skill's ``model_file:`` field can choose.
+_MODEL_FILE_STRATEGIES = {
+    "none":       _model_file_none,
+    "torch_save": _model_file_torch_save,
+}
+
+
+def _resolve_device(device: str, devices: Optional[List[str]]) -> str:
+    """``device`` if the backend supports its kind, else "cpu".
+
+    Matches on the part before any index, so "cuda:1" counts as "cuda".
+    """
+    if not devices or (device or "").split(":")[0] in devices:
+        return device
+    return "cpu"
+
+
+def _build_calculator(import_line: str, construct_expr: str, device: str):
+    """Construct the calculator once, exactly as the run script will.
+
+    Validates the install and triggers any weight download. The templates
+    come from a built-in ``<backend>_deploy.py`` (package code), and the same
+    expression goes into the generated run script.
+    """
+    ns: Dict[str, Any] = {"DEVICE": device}
+    exec(import_line, ns)
+    return eval(construct_expr, ns)
+
 
 def deploy(
     backend: str,
@@ -213,24 +357,27 @@ def deploy(
     """
     Deploy an MLIP model as an engine-neutral DeployedPotential.
 
-    ``model`` is a model *identifier* — each backend's deploy function
-    decides whether it's a foundation-model keyword (``"mace-mp-0"``,
-    ``"chgnet"``, ``"uma-s-1p2"``) or an on-disk path to a
-    trained/fine-tuned model (the output of ``train()`` /
-    ``fine_tune()``). This single entry point covers both cases so
-    adding a backend touches exactly one deploy function — no separate
-    pretrained/trained code paths.
+    ``model`` is a pretrained model name or alias from the backend
+    skill's ``pretrained:`` list (``"mace-mp-0"``, ``"chgnet"``,
+    ``"uma"``), or an on-disk path to a trained/fine-tuned model (the
+    output of ``train()`` / ``fine_tune()``). Everything backend-specific
+    comes from the bundle's ``DEPLOY`` recipe and ``pretrained:`` list, so a
+    new backend needs no code here.
+
+    A pretrained model is refused if the system has an element the model
+    was not trained on. Several backends (Orb, UMA, DeePMD) would
+    otherwise run such a system silently with meaningless forces.
 
     Args:
-        backend:     "mace" | "chgnet" | "uma" | "nequip" | "deepmd"
-        model:       Foundation-model keyword or path to a trained model
-        elements:    Chemical elements in the system
+        backend:     Name of an MLIP skill bundle ("mace", "chgnet", ...)
+        model:       Pretrained model name/alias, or path to a trained model
+        elements:    Chemical elements in the system ([] skips the check)
         working_dir: Output directory
-        device:      "cpu" or "cuda"
-        task_name:   Prediction-head selector for multi-task foundation
-                     models (UMA: "omat", "omol", "oc20", ...). Ignored
-                     by single-task backends. Defaults per backend when
-                     None.
+        device:      "cpu", "cuda", ...; falls back to "cpu" if the
+                     backend does not list it
+        task_name:   Prediction head for multi-task models (UMA: "omat",
+                     "omol", ...). Defaults to the recipe's
+                     ``default_task``.
 
     Returns:
         A DeployedPotential descriptor — the engine-neutral contract
@@ -239,274 +386,98 @@ def deploy(
     """
     os.makedirs(working_dir, exist_ok=True)
 
-    if backend == "mace":
-        return _mace_deploy(model, elements, working_dir, device)
-    elif backend == "chgnet":
-        return _chgnet_deploy(model, elements, working_dir, device)
-    elif backend == "uma":
-        return _uma_deploy(model, elements, working_dir, device, task_name)
-    elif backend in ("nequip", "deepmd"):
-        # These have no foundation models. A trained model file is the
-        # only way to deploy them — but the deploy function (with its
-        # ASECalculatorSpec) isn't written yet.
-        if os.path.exists(model):
-            raise NotImplementedError(
-                f"_{backend}_deploy not yet implemented — add it here "
-                f"with an ASECalculatorSpec, mirroring _mace_deploy."
-            )
+    try:
+        meta = _skill_meta(backend)
+    except FileNotFoundError:
+        raise ValueError(f"Unknown backend: {backend} "
+                         f"(known: {', '.join(_backend_names())})")
+    spec = deploy_spec(backend)
+    if not spec:
         raise NotImplementedError(
-            f"{backend} has no foundation models; pass a trained model "
-            f"file. Use backend='mace' for pretrained deployment."
+            f"SciLink has no deploy recipe for {backend} yet: add a DEPLOY "
+            f"dict in skills/{_MLIP_DOMAIN}/{backend}/{backend}_deploy.py."
         )
+
+    use_device = _resolve_device(device, spec.get("devices"))
+    task = task_name or spec.get("default_task")
+
+    # isfile, not exists: a folder named like an alias ("mace", "orb") in
+    # the working directory must not be taken for a model file.
+    if model and os.path.isfile(model):
+        trained = spec.get("trained_file")
+        if not trained:
+            raise NotImplementedError(
+                f"The {backend} deploy recipe has no `trained_file` entry, so "
+                f"trained {backend} model files cannot be loaded yet."
+            )
+        name = os.path.basename(model)
+        ctx = {**(spec.get("defaults") or {}),
+               "name": name, "task": task, "model_file": model}
+        import_line = trained.get("import_line", spec["import_line"]).format(**ctx)
+        construct_expr = trained["construct_expr"].format(**ctx)
+        notes = trained.get("notes", "").format(**ctx)
+        calc = _build_calculator(import_line, construct_expr, use_device)
+        model_file = model
     else:
-        raise ValueError(f"Unknown backend: {backend}")
+        wanted = model or spec.get("default_model")
+        entry = find_pretrained(backend, wanted)
+        if entry is None:
+            known = [e.get("name") for e in meta.get("pretrained") or []]
+            raise ValueError(
+                f"Unknown {backend} model {wanted!r}. Known: {known}"
+            )
+        name = entry["name"]
+        if elements:
+            missing = uncovered_elements(backend, name, elements, task)
+            if missing:
+                raise ValueError(
+                    f"{name} was not trained on {missing} (system elements: "
+                    f"{sorted(set(elements))}). Choose a model that covers "
+                    f"every element."
+                )
+            if missing is None:
+                # Same policy as the picker: coverage that cannot be checked
+                # is refused, since several backends run uncovered elements
+                # silently.
+                raise ValueError(
+                    f"{name} declares no element coverage"
+                    f"{f' for task {task!r}' if task else ''}, so "
+                    f"{sorted(set(elements))} cannot be checked. Use a task "
+                    f"whose coverage the {backend} skill declares, or add it "
+                    f"to the skill's pretrained: list."
+                )
+        ctx = {**(spec.get("defaults") or {}), **(entry.get("params") or {}),
+               "name": name, "domain": entry.get("domain", ""), "task": task}
+        import_line = spec["import_line"].format(**ctx)
+        construct_expr = spec["construct_expr"].format(**ctx)
+        # A model may override the backend's notes (e.g. an ASE-only model
+        # of a LAMMPS-capable backend).
+        notes = entry.get("notes", spec.get("notes", "")).format(**ctx)
+        # Validate metadata before loading anything: building the
+        # calculator imports the backend and may download weights.
+        strategy = entry.get("model_file", spec.get("model_file", "none"))
+        if strategy not in _MODEL_FILE_STRATEGIES:
+            raise ValueError(f"Unknown model_file strategy {strategy!r} "
+                             f"for {name}; use one of "
+                             f"{sorted(_MODEL_FILE_STRATEGIES)}")
+        calc = _build_calculator(import_line, construct_expr, use_device)
+        model_file = _MODEL_FILE_STRATEGIES[strategy](calc, name, working_dir)
 
-
-def _chgnet_deploy(
-    model: str,
-    elements: List[str],
-    working_dir: str,
-    device: str,
-) -> DeployedPotential:
-    """Deploy a CHGNet model — bundled universal model or a trained file.
-
-    CHGNet ships a single universal model with the package; the common
-    case (``model`` is the ``"chgnet"`` keyword) deploys that with no
-    file on disk (``model_file=""``). If ``model`` is a path to a
-    trained CHGNet checkpoint, that file is loaded instead. Either way
-    the calculator is constructed once here to validate the install,
-    then discarded — the run script reconstructs it from the
-    ASECalculatorSpec.
-    """
-    from chgnet.model.dynamics import CHGNetCalculator
-
-    use_device = device if device in ("cuda", "cpu", "mps") else "cpu"
-    is_file = bool(model) and os.path.exists(model)
-
-    if is_file:
-        from chgnet.model import CHGNet
-        CHGNetCalculator(model=CHGNet.from_file(model), use_device=use_device)
-        construct_expr = (
-            f"CHGNetCalculator(model=__import__('chgnet.model', "
-            f"fromlist=['CHGNet']).CHGNet.from_file({model!r}), "
-            f"use_device=DEVICE)"
-        )
-        model_file, model_name = model, os.path.basename(model)
-        notes = f"Trained CHGNet model ({model_name}). ASE-only — no LAMMPS pair_style."
-    else:
-        # Construct-and-discard: validates chgnet is importable and the
-        # bundled weights load. The generated script rebuilds it.
-        CHGNetCalculator(use_device=use_device)
-        construct_expr = "CHGNetCalculator(use_device=DEVICE)"
-        model_file, model_name = "", model or "chgnet"
-        notes = (
-            "CHGNet universal MPtrj-pretrained model. ASE-only — no "
-            "LAMMPS pair_style; the MD agent must use the ASE runner."
-        )
-
-    logger.info(f"Deployed CHGNet {model_name} (ASE-only, device={use_device})")
+    logger.info(f"Deployed {backend} {name} (device={use_device})")
     return DeployedPotential(
         kind="mlip",
-        backend="chgnet",
-        model_name=model_name,
+        backend=backend,
+        model_name=name,
         model_file=model_file,
         elements=list(elements),
         ase_calculator=ASECalculatorSpec(
-            import_line="from chgnet.model.dynamics import CHGNetCalculator",
+            import_line=import_line,
             construct_expr=construct_expr,
-            device_env_var="CHGNET_DEVICE",
+            device_env_var=spec["device_env_var"],
         ),
         notes=notes,
     )
 
-
-# UMA foundation-model keywords. All UMA checkpoints load through the same
-# fairchem `pretrained_mlip.get_predict_unit` path; the keyword IS the
-# checkpoint name passed straight through. Bare "uma" resolves to the small
-# model — the fastest, the sensible default when a caller forces
-# backend="uma" without naming a size.
-_UMA_DEFAULT_MODEL = "uma-s-1p2"
-
-# Default prediction head when the caller doesn't specify one. UMA is a
-# multi-task model; "omat" (inorganic materials) is the right default for
-# the crystal/MD workflows this orchestrator drives. A molecular workflow
-# should pass task_name="omol".
-_UMA_DEFAULT_TASK = "omat"
-
-
-def _uma_deploy(
-    model: str,
-    elements: List[str],
-    working_dir: str,
-    device: str,
-    task_name: Optional[str] = None,
-) -> DeployedPotential:
-    """Deploy a UMA (fairchem) foundation model as a DeployedPotential.
-
-    UMA ships only foundation checkpoints (no trained-file path): ``model``
-    is a registry keyword such as ``"uma-s-1p2"`` / ``"uma-m-1p1"``, or the
-    bare ``"uma"`` which resolves to the small model. The calculator is
-    built from fairchem's two-step API — a predict unit from the pretrained
-    registry, then a ``FAIRChemCalculator`` wrapping it with a task head —
-    and constructed once here to validate the install and trigger the
-    weight download. ASE-only: fairchem has no LAMMPS pair_style in the base
-    package.
-    """
-    from fairchem.core import FAIRChemCalculator, pretrained_mlip
-
-    checkpoint = _UMA_DEFAULT_MODEL if (not model or model == "uma") else model
-    task = task_name or _UMA_DEFAULT_TASK
-    use_device = "cuda" if device == "cuda" else "cpu"
-
-    # Construct-and-discard: validates fairchem is importable, the checkpoint
-    # name is valid, and the weights download. The generated script rebuilds
-    # it from the ASECalculatorSpec below.
-    predictor = pretrained_mlip.get_predict_unit(checkpoint, device=use_device)
-    FAIRChemCalculator(predictor, task_name=task)
-
-    construct_expr = (
-        f"FAIRChemCalculator(__import__('fairchem.core', "
-        f"fromlist=['pretrained_mlip']).pretrained_mlip.get_predict_unit("
-        f"{checkpoint!r}, device=('cuda' if DEVICE == 'cuda' else 'cpu')), "
-        f"task_name={task!r})"
-    )
-
-    logger.info(
-        f"Deployed UMA {checkpoint} (task={task}, ASE-only, device={use_device})"
-    )
-    return DeployedPotential(
-        kind="mlip",
-        backend="uma",
-        model_name=checkpoint,
-        model_file="",  # fairchem manages its own weight cache
-        elements=list(elements),
-        ase_calculator=ASECalculatorSpec(
-            import_line="from fairchem.core import FAIRChemCalculator",
-            construct_expr=construct_expr,
-            device_env_var="UMA_DEVICE",
-        ),
-        notes=(
-            f"UMA {checkpoint} (task head '{task}'). ASE-only — no LAMMPS "
-            f"pair_style in the base fairchem package; the MD agent must use "
-            f"the ASE runner. Pass task_name='omol' for molecular systems."
-        ),
-    )
-
-
-# MACE foundation-model keywords -> (loader, API size keyword, domain).
-_MACE_FOUNDATION_MODELS = {
-    # Bare backend name -> the default MACE foundation model. Lets
-    # deploy("mace", model="mace", ...) work, symmetric with CHGNet
-    # (whose only model is also named after the backend) — this is the
-    # path taken when a caller forces backend="mace" without naming a
-    # specific model.
-    "mace":             ("mace_mp", "medium", "inorganic"),
-    "mace-mp-0":        ("mace_mp", "medium", "inorganic"),
-    "mace-mp-0b":       ("mace_mp", "small",  "inorganic"),
-    "mace-mp-0-large":  ("mace_mp", "large",  "inorganic"),
-    "small":            ("mace_mp", "small",  "inorganic"),
-    "medium":           ("mace_mp", "medium", "inorganic"),
-    "large":            ("mace_mp", "large",  "inorganic"),
-    "mace-off23":       ("mace_off", "medium", "organic"),
-    "mace-off23-small": ("mace_off", "small",  "organic"),
-    "mace-off23-large": ("mace_off", "large",  "organic"),
-}
-
-
-def _mace_deploy(
-    model: str,
-    elements: List[str],
-    working_dir: str,
-    device: str,
-) -> DeployedPotential:
-    """Deploy a MACE model — foundation keyword or trained file.
-
-    If ``model`` is a path to a trained/fine-tuned model on disk it is
-    loaded via ``MACECalculator(model_paths=...)``. Otherwise it's
-    treated as a foundation-model keyword resolved through the
-    ``mace_mp`` / ``mace_off`` loaders. In both cases the calculator is
-    constructed once to validate the install and locate the on-disk
-    model file (needed for the LAMMPS pair_coeff), and a
-    DeployedPotential is returned whose ASECalculatorSpec lets the run
-    script reconstruct the same calculator.
-    """
-    if model and os.path.exists(model):
-        # Trained / fine-tuned model file.
-        from mace.calculators import MACECalculator
-        MACECalculator(model_paths=[model], device=device,
-                       default_dtype="float64")
-        logger.info(f"Deployed trained MACE model → {model}")
-        return DeployedPotential(
-            kind="mlip",
-            backend="mace",
-            model_name=os.path.basename(model),
-            model_file=model,
-            elements=list(elements),
-            ase_calculator=ASECalculatorSpec(
-                import_line="from mace.calculators import MACECalculator",
-                construct_expr=(
-                    f"MACECalculator(model_paths=[{model!r}], "
-                    f"device=DEVICE, default_dtype='float64')"
-                ),
-                device_env_var="MACE_DEVICE",
-            ),
-            notes=(
-                f"Trained MACE model ({os.path.basename(model)}). "
-                f"LAMMPS-capable via pair_style mliap unified."
-            ),
-        )
-
-    # Foundation-model keyword.
-    from mace.calculators import mace_mp, mace_off
-
-    loader, mace_size, domain = _MACE_FOUNDATION_MODELS.get(
-        model, ("mace_off" if "off" in model.lower() else "mace_mp", model,
-                "organic" if "off" in model.lower() else "inorganic")
-    )
-    loaders = {"mace_mp": mace_mp, "mace_off": mace_off}
-    calc = loaders[loader](model=mace_size, device=device,
-                           default_dtype="float64")
-
-    # Locate the cached model file (needed for the LAMMPS pair_coeff).
-    model_file = None
-    for attr in ("model_path", "model_paths"):
-        val = getattr(calc, attr, None)
-        if val:
-            model_file = str(val) if not isinstance(val, list) else str(val[0])
-            break
-
-    if model_file is None or not os.path.exists(model_file):
-        model_file = os.path.join(working_dir, f"{model}.model")
-        try:
-            import torch
-            torch.save(calc.models[0], model_file)
-        except Exception as e:
-            logger.warning(f"Could not save model file: {e}")
-            model_file = model
-
-    logger.info(
-        f"Deployed pretrained {model} → {mace_size} ({domain}) → {model_file}"
-    )
-
-    return DeployedPotential(
-        kind="mlip",
-        backend="mace",
-        model_name=model,
-        model_file=model_file,
-        elements=list(elements),
-        ase_calculator=ASECalculatorSpec(
-            import_line=f"from mace.calculators import {loader}",
-            construct_expr=(
-                f"{loader}(model={mace_size!r}, device=DEVICE, "
-                f"default_dtype='float64')"
-            ),
-            device_env_var="MACE_DEVICE",
-        ),
-        notes=(
-            f"MACE {model} ({mace_size}, {domain}). LAMMPS-capable "
-            f"via pair_style mliap unified."
-        ),
-    )
 
 # ═══════════════════════════════════════════════════════════════════
 #  UNCERTAINTY ESTIMATION

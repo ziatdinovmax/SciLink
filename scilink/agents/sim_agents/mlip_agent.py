@@ -48,7 +48,7 @@ from ...auth import (
 )
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
-from ...skills.loader import load_skill, list_skills
+from ...skills.loader import load_skill, list_skills, get_subsection
 from ._deprecation import normalize_params
 
 try:
@@ -207,12 +207,61 @@ class MLIPAgent:
                 self._backends = {}
         return self._backends
 
+    # Engine skills mark the elements their models cover with this
+    # ``###`` sub-heading under ``## planning``.
+    _COVERAGE_HEADING = "Element coverage"
+
+    def _element_coverage_notes(self, backends: List[str]) -> str:
+        """Collect the ``### Element coverage`` block from each backend's skill.
+
+        Engine skills are only loaded after a backend is chosen, so the
+        model picker would otherwise never see their coverage lists. Each
+        engine's own skill file stays the single source: a new backend
+        needs only a skill with this block, with no change here or in
+        ``general.md``. Backends without a skill or block are skipped.
+        """
+        notes = []
+        for backend in sorted(set(backends)):
+            try:
+                parsed = load_skill(
+                    f"machine_learning_potentials/{backend}",
+                    domain="machine_learning_potentials",
+                )
+            except (FileNotFoundError, ValueError):
+                self.logger.debug(f"No skill for backend '{backend}'")
+                continue
+            block = get_subsection(parsed.get("planning", ""),
+                                   self._COVERAGE_HEADING)
+            if block:
+                notes.append(f"[{backend}]\n{block}")
+            else:
+                self.logger.debug(
+                    f"Skill '{backend}' has no '### {self._COVERAGE_HEADING}' block"
+                )
+        if not notes:
+            return ""
+        return (
+            "ELEMENT COVERAGE (from each backend's skill file):\n\n"
+            + "\n\n".join(notes)
+        )
+
     def _select_pretrained_model(
         self, elements: List[str], research_goal: str,
+        task_name: Optional[str] = None,
+        runner: Optional[str] = None,
+        fallback_order: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Use LLM + skill knowledge to select the best pretrained model
         for the given system.
+
+        Only models trained on every element, and able to run in
+        ``runner`` (e.g. an on-disk model for LAMMPS), are offered. Returns
+        ``{"backend", "model_name", "justification", ...}``; any fallback
+        (one eligible model, failed call, off-list pick) says so in the
+        justification and the log. The fallback is the first eligible model
+        whose backend or name is in ``fallback_order``, else the one with the
+        lowest recipe ``fallback_rank``.
         """
         backends = self._get_backends()
         pretrained_options = []
@@ -231,30 +280,83 @@ class MLIPAgent:
                 "Install mace-torch: pip install mace-torch"
             )
 
-        # If only one option, skip the LLM call
-        if len(pretrained_options) == 1:
-            choice = pretrained_options[0]
-            self.logger.info(
-                f"Single pretrained option: {choice['name']} ({choice['backend']})"
+        # Only models trained on every element are eligible. A model with
+        # no declared coverage is left out too: several backends run
+        # uncovered elements silently, so unknown is not safe.
+        eligible, excluded = [], {}
+        reasons = set()
+        for m in pretrained_options:
+            missing = (mlip_tools.uncovered_elements(
+                m["backend"], m["name"], elements, task_name)
+                if elements else [])
+            if missing is None:
+                excluded[m["name"]] = (
+                    f"declares no element coverage for task {task_name!r}"
+                    if task_name else "declares no element coverage")
+                reasons.add("declares its element coverage")
+            elif missing:
+                excluded[m["name"]] = f"not trained on {missing}"
+                reasons.add("was trained on every element")
+            elif not mlip_tools.can_run_in(m["backend"], m["name"], runner):
+                excluded[m["name"]] = f"cannot run in {runner}"
+                reasons.add(f"can run in {runner}")
+            else:
+                eligible.append(m)
+        if not elements:
+            self.logger.warning(
+                "No system elements given: element coverage is not checked")
+        if excluded:
+            self.logger.info(f"Models not covering {elements}: {excluded}")
+        if not eligible:
+            raise RuntimeError(
+                f"No installed pretrained MLIP for {elements} "
+                f"{' and '.join(sorted(reasons)) or 'is available'}. "
+                f"Excluded: {excluded}"
             )
-            return choice
+
+        def _selection(m: Dict[str, Any], why: str) -> Dict[str, Any]:
+            return {"backend": m["backend"], "model_name": m["name"],
+                    "justification": why}
+
+        # If only one option, skip the LLM call
+        if len(eligible) == 1:
+            choice = eligible[0]
+            self.logger.info(
+                f"Single eligible pretrained option: {choice['name']} "
+                f"({choice['backend']})"
+            )
+            return _selection(choice, "only installed pretrained model "
+                                      "trained on every element")
 
         skill_context = self._get_skill_context("planning")
-        options_str = json.dumps(pretrained_options, indent=2)
+        options_str = json.dumps(eligible, indent=2)
+        coverage_notes = self._element_coverage_notes(
+            [m["backend"] for m in eligible]
+        )
+        excluded_str = (
+            f"\nNOT OFFERED (and why): {json.dumps(excluded)}\n"
+            if excluded else ""
+        )
+        runner_str = (f"RUNNER: {runner} (every model listed can run in it)\n"
+                      if runner else "")
 
         prompt = f"""
 Select the best pretrained ML potential for this system.
 
 ELEMENTS: {elements}
 RESEARCH GOAL: {research_goal}
-
-AVAILABLE PRETRAINED MODELS:
+{runner_str}
+AVAILABLE PRETRAINED MODELS (each is trained on every element above):
 {options_str}
+{excluded_str}
+{coverage_notes}
 
 {skill_context}
 
 Selection criteria:
-- Element coverage: does the model's training data include these elements?
+- Choose only from AVAILABLE PRETRAINED MODELS, by exact name.
+- Weigh the ELEMENT COVERAGE notes: an element can be in a model's
+  training set but sparse (e.g. noble gases, actinides).
 - Domain match: inorganic model for metals/oxides, organic for molecules
 - If elements include C, H, N, O and the system is molecular → prefer organic models
 - If elements include metals, oxides → prefer inorganic models
@@ -267,16 +369,61 @@ Return JSON:
     "cautions": "any limitations to be aware of"
 }}
 """
+        # Fallback by design (each recipe's fallback_rank, then the
+        # backend's default model), not by directory-name order.
+        fallback = min(eligible, key=lambda m: mlip_tools.fallback_rank(
+            m["backend"], m["name"]))
+        for want in fallback_order or []:
+            hit = next((m for m in eligible
+                        if want in (m["backend"], m["name"])
+                        or (mlip_tools.find_pretrained(m["backend"], want)
+                            or {}).get("name") == m["name"]), None)
+            if hit:
+                fallback = hit
+                break
         try:
             result = self._generate_json(prompt)
-            # Validate the selection
-            valid_names = {m["name"] for m in pretrained_options}
-            if result.get("model_name") not in valid_names:
-                result["model_name"] = pretrained_options[0]["name"]
-                result["backend"] = pretrained_options[0]["backend"]
-            return result
-        except Exception:
-            return pretrained_options[0]
+        except Exception as e:
+            self.logger.warning(
+                f"Model selection call failed ({e}); using {fallback['name']}"
+            )
+            return _selection(fallback, f"fallback: selection call failed ({e})")
+
+        if not isinstance(result, dict):
+            # A list or bare string is an observed malformed reply: fall back
+            # rather than abort the deploy.
+            self.logger.warning(
+                f"Model selection reply is not a JSON object ({result!r:.80}); "
+                f"using {fallback['name']}")
+            return _selection(fallback, "fallback: the selection reply was "
+                                        "not a JSON object")
+        by_name = {m["name"]: m for m in eligible}
+        picked = result.get("model_name")
+        if not isinstance(picked, str):
+            picked = None
+        # Accept an alias ("orb") or a case variant ("MACE-OMAT-0") of an
+        # eligible model rather than treating it as an off-list pick.
+        if picked not in by_name:
+            wanted = str(picked or "").strip().lower()
+            for m in eligible:
+                entry = mlip_tools.find_pretrained(m["backend"], wanted)
+                if wanted == m["name"].lower() or (
+                        entry is not None and entry["name"] == m["name"]):
+                    result["model_name"] = picked = m["name"]
+                    break
+        if picked not in by_name:
+            self.logger.warning(
+                f"Selected model {picked!r} is not an eligible option; "
+                f"using {fallback['name']}"
+            )
+            return _selection(
+                fallback,
+                f"fallback: the selected model {picked!r} is not installed or "
+                f"not trained on every element",
+            )
+        # The backend comes from the option list, not the LLM's reply.
+        result["backend"] = by_name[picked]["backend"]
+        return result
 
     # ================================================================
     # PUBLIC API — PRETRAINED DEPLOYMENT (the default path)
@@ -291,6 +438,11 @@ Return JSON:
         structure_file: Optional[str] = None,
         backend: Optional[str] = None,
         model_name: Optional[str] = None,
+        type_elements: Optional[Dict[Any, str]] = None,
+        atom_style: Optional[str] = None,
+        mass_tolerance: Optional[float] = None,
+        isotope_window: Optional[float] = None,
+        fallback_order: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Deploy a pretrained foundation model.  This is the primary entry
@@ -312,14 +464,30 @@ Return JSON:
                 fallback (works for every backend).
             structure_file: Path to a LAMMPS data file describing the
                 system. Required — the MD agent's run reads from it.
+            type_elements: For a LAMMPS data file, ``{type: element}`` for
+                atom types its masses cannot tell (a deuterated "HW", a
+                coarse-grained bead, a united-atom "CH2"). Applied on top of
+                the file's readings, checked against the file, and recorded
+                with its source in ``result["atom_types"]``.
+            atom_style: The data file's atom style when it has no
+                ``Atoms # <style>`` header and the columns are ambiguous
+                (charge vs molecular).
+            mass_tolerance: How close a mass must be to an element's to count
+                (default ``lammps_types.DEFAULT_MASS_TOLERANCE``, 0.5 amu).
+            isotope_window: How far an element-symbol label's mass may sit
+                from the element's (default 3.0 amu: D, T, repartitioned H).
+            fallback_order: Backends (or model names) to fall back to, in
+                order, when the selection call gives no usable pick. Default:
+                each recipe's ``fallback_rank`` (mace, uma, orb, chgnet).
 
         This method deploys the model, then delegates run generation to
         MDSimulationAgent. MLIPAgent's job ends at "here is a deployed
         potential"; the MD agent owns the actual run.
 
         Returns dict: backend, model_name, model_file, elements,
-        selection, plus the MD agent's run result (run_path, runner,
-        task, notes, ...).
+        selection, atom_types (LAMMPS data: each type's element, basis and
+        source), plus the MD agent's run result (run_path, runner, task,
+        notes, ...).
         """
         if not _MLIP_TOOLS_AVAILABLE:
             raise ImportError(
@@ -335,7 +503,50 @@ Return JSON:
         self.logger.info(f"DEPLOYING PRETRAINED MLIP (runner={runner})")
         self.logger.info("=" * 60)
 
+        from ...skills._shared.structure_io import (
+            inspect_lammps_data, is_lammps_data, read_structure_elements)
+        reading = {k: v for k, v in (("type_elements", type_elements),
+                                     ("atom_style", atom_style),
+                                     ("mass_tolerance", mass_tolerance),
+                                     ("isotope_window", isotope_window))
+                   if v is not None}
         elements = sorted(system_info.get("elements", {}).keys())
+        problem, atom_types = None, None
+        if is_lammps_data(structure_file) and os.path.isfile(structure_file):
+            # Read the types once, with the caller's overrides, and fail here
+            # (before any weights download) if an atom type's element cannot
+            # be told. Every declared type counts for coverage, also one with
+            # no atoms: pair_coeff names its element.
+            info = inspect_lammps_data(structure_file, **reading)
+            atom_types = info["readings"]
+            if info["type_elements"] is not None:
+                elements = sorted(set(elements) | set(info["type_elements"].values()))
+            elif not (info["n_types"] == 1 and len(elements) == 1):
+                raise ValueError(
+                    f"Cannot tell which element each atom type is "
+                    f"({info['problem']}).")
+            if info["atoms_error"] and runner == "ase":
+                # The ASE script would fail at run time; refuse before any
+                # weights download. (LAMMPS reads the file with its own style.)
+                raise ValueError(f"Cannot read the atoms ({info['problem']}).")
+        elif is_lammps_data(structure_file) and type_elements:
+            # Not readable here: the caller's map is all there is; its
+            # elements must be covered too.
+            from ...skills._shared.lammps_types import check_type_elements
+            elements = sorted(set(elements)
+                              | set(check_type_elements(type_elements).values()))
+        elif not elements:
+            elements, _, problem = read_structure_elements(structure_file)
+        if not elements:
+            # Without the elements no model choice or coverage check is
+            # possible, and a LAMMPS data file without masses would load as
+            # H, He, ... in the run script. Fail loudly instead.
+            raise ValueError(
+                f"Could not determine the system's elements: system_info has "
+                f"none, and {problem or f'{structure_file} gives none'}. "
+                f"Fix the structure file or pass system_info['elements']."
+            )
+        sim = simulation_params or {}
 
         # If the caller explicitly forces a backend, skip the LLM
         # selection step entirely — useful for benchmarks, regression
@@ -346,8 +557,20 @@ Return JSON:
                 "model_name":    model_name or backend,
                 "justification": f"caller-forced via backend={backend!r}",
             }
+            # The same runner check the picker applies, before deploy()
+            # loads anything. An unknown name is left to deploy()'s error.
+            forced = selection["model_name"]
+            known = (os.path.isfile(forced)
+                     or mlip_tools.find_pretrained(backend, forced) is not None)
+            if known and not mlip_tools.can_run_in(backend, forced, runner):
+                raise ValueError(
+                    f"{backend} {forced!r} cannot run in {runner}: it has no "
+                    f"on-disk model file or no {runner} integration. Use "
+                    f"runner='ase'.")
         else:
-            selection = self._select_pretrained_model(elements, research_goal)
+            selection = self._select_pretrained_model(
+                elements, research_goal, task_name=sim.get("task_name"),
+                runner=runner, fallback_order=fallback_order)
         backend = selection.get("backend", "mace")
         model_name = selection.get("model_name") or backend
 
@@ -356,8 +579,6 @@ Return JSON:
 
         # Load backend-specific skill
         self._load_backend_skill(backend)
-
-        sim = simulation_params or {}
 
         # Deploy -- constructs the calculator once (validates the
         # install, locates the model file), returns an engine-neutral
@@ -396,6 +617,7 @@ Return JSON:
             temperature=sim.get("temperature", 300.0),
             pressure=sim.get("pressure"),   # None -> NVT
             **run_params,
+            **reading,
         )
 
         result: Dict[str, Any] = {
@@ -404,6 +626,7 @@ Return JSON:
             "model_file": potential.model_file,
             "elements":   potential.elements,
             "selection":  selection,
+            "atom_types": atom_types,
             **run,        # run_path, runner, task, notes, ...
         }
 
@@ -1192,15 +1415,18 @@ Return JSON:
 
         # If only MACE is available, skip LLM call
         if list(available.keys()) == ["mace"]:
-            # Pick foundation model based on elements
-            organic_elements = {"C", "H", "N", "O", "S", "P", "F", "Cl", "Br", "I"}
-            if set(elements).issubset(organic_elements):
+            # Organic model only if it was trained on every element, which
+            # needs the elements: unknown ([]) must not select the
+            # organic-only model.
+            if elements and mlip_tools.uncovered_elements(
+                    "mace", "mace-off23", elements) == []:
                 model = "mace-off23"
             else:
                 model = "mace-mp-0"
             return {"backend": "mace", "foundation_model": model}
 
         skill_context = self._get_skill_context("planning")
+        coverage_notes = self._element_coverage_notes(list(available))
 
         prompt = f"""
 Select the best MLIP backend and foundation model for fine-tuning.
@@ -1211,9 +1437,12 @@ RESEARCH GOAL: {research_goal}
 
 AVAILABLE BACKENDS: {json.dumps({k: v.get('pretrained', []) for k, v in available.items()}, indent=2)}
 
+{coverage_notes}
+
 {skill_context}
 
-For fine-tuning, prefer backends with relevant foundation models.
+For fine-tuning, prefer backends with relevant foundation models, and only
+foundation models trained on every element in ELEMENTS.
 For training from scratch, any backend works.
 
 Return JSON:
@@ -1297,5 +1526,14 @@ Return JSON:
         except Exception as e:
             self.logger.debug(f"Could not resolve foundation model: {e}")
 
-        # Return the name as-is — the training backend may resolve it
+        # No file to hand over (unknown name, or an ASE-only model such as
+        # mace-mh-0): give the trainer a name it resolves itself.
+        # mace_run_train accepts every mace_mp keyword ("medium-omat-0",
+        # "mh-0", ...) and "<size>_off", so map SciLink's names to those.
+        entry = mlip_tools.find_pretrained("mace", foundation_model)
+        params = (entry or {}).get("params") or {}
+        if params.get("loader") == "mace_mp":
+            return params["size"]
+        if params.get("loader") == "mace_off":
+            return f"{params['size']}_off"
         return foundation_model

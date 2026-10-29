@@ -10,6 +10,11 @@ detect:
     Langevin / NPT / Verlet integrators with `chgnet.model.dynamics
     .CHGNetCalculator` attached as the ASE calculator. A successful
     `import chgnet` means the backend is usable.
+pretrained:
+  - name: chgnet
+    domain: universal-inorganic
+    description: 'MPtrj-pretrained (~1.5M DFT relaxations). Predicts energies, forces, stresses and per-atom magnetic moments (unique among universal MLIPs). Fast. ASE only: no LAMMPS pair_style. Not for phonons, NEB barriers or elastic constants.'
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
 ---
 # CHGNet (Crystal Hamiltonian Graph Neural Network)
 
@@ -27,7 +32,16 @@ throughput is required, prefer MACE via `pair_style mace`.
 
 ## planning
 
-When to pick CHGNet:
+### Element coverage
+
+Check this FIRST; a system with any element outside this list
+cannot be modelled:
+- `chgnet` (MPtrj): Z = 1–94 (H to Pu) except Po, At, Rn, Fr, Ra (89 elements).
+  Noble gases are in the training data but sparse (Ne 7, Ar 13, He 80 frames):
+  results for them are unreliable; cross-check or say so. Actinides Ac–Pu are sparse. Z > 94 is outside the embedding and errors.
+  (Source: chgnet `model/encoders.py` max_num_elements=94; MPtrj element counts.)
+
+### When to pick CHGNet
 
 - **System contains magnetic elements (Fe, Co, Ni, Mn, Cr, …).** CHGNet
   predicts per-atom magnetic moments alongside energies and forces, enabling

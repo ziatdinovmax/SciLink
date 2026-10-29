@@ -17,6 +17,117 @@ detect:
     `pip install git+https://github.com/WillBaldwin0/graph_electrostatics.git@v0.4.0`.
     A successful `from mace.calculators import mace_polar` plus `import
     graph_longrange` confirms the polar backend is usable.
+# Pretrained models SciLink can deploy (the recipe is in mace_deploy.py). `elements` is the set the model was
+# trained on (checked against calc.z_table, mace-torch 0.3.16): a list of
+# symbols, or {z: [lo, hi], exclude: [...]}; quote symbols YAML reads as
+# booleans ('No'). `offer: false` keeps a model loadable by name but out of
+# the automatic picker. Aliases include the mace_mp keyword where it differs.
+pretrained:
+  - name: mace-mp-0
+    aliases: [mace, medium]
+    domain: inorganic
+    description: Universal MPtrj potential (medium), DFT PBE+U. Metals, oxides, ceramics. LAMMPS-capable (single node).
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: medium}
+  - name: mace-mp-0b
+    aliases: [small-0b]
+    domain: inorganic
+    description: MACE-MP-0b (small). Faster inference; improved pair repulsion and corrected isolated atoms. LAMMPS-capable (single node).
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: small-0b}
+  - name: mace-mpa-0
+    aliases: [medium-mpa-0]
+    domain: inorganic
+    description: MPtrj + sAlex (medium). State of the art on Matbench; improved high-pressure stability. LAMMPS-capable (single node).
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: medium-mpa-0}
+  - name: mace-omat-0
+    aliases: [small-omat-0]
+    domain: inorganic
+    description: OMat24-trained (small), DFT PBE+U. Excellent phonons. Default for inorganic materials. LAMMPS-capable (single node).
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: small-omat-0}
+  - name: mace-mh-0
+    aliases: [mh-0]
+    domain: mixed
+    description: Multi-head cross-domain model (OMAT/OMOL/OC20/MATPES), deployed with the omat_pbe head. Surfaces, bulk, mixed inorganic/organic. ASE only.
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: mh-0, kwargs: {head: omat_pbe}}
+    model_file: none
+    notes: "MACE {name} ({size}, {domain}, omat_pbe head). ASE only: no on-disk model file for LAMMPS; the MD agent must use the ASE runner."
+  - name: mace-off23
+    domain: organic
+    description: SPICE-trained, wB97M-D3(BJ)/def2-TZVPP (medium). Organic molecules, peptides, drug-like compounds; H C N O F P S Cl Br I only. Neutral, non-radical, non-reactive systems only. LAMMPS-capable (single node).
+    elements: [H, C, N, O, F, P, S, Cl, Br, I]
+    params: {loader: mace_off, size: medium}
+  - name: mace-mp-0-small
+    aliases: [small]
+    offer: false
+    domain: inorganic
+    description: Universal MPtrj potential (small).
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: small}
+  - name: mace-mp-0-large
+    aliases: [large]
+    offer: false
+    domain: inorganic
+    description: Universal MPtrj potential (large).
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: large}
+  - name: mace-off23-small
+    offer: false
+    domain: organic
+    description: SPICE-trained organic model (small).
+    elements: [H, C, N, O, F, P, S, Cl, Br, I]
+    params: {loader: mace_off, size: small}
+  - name: mace-off23-large
+    offer: false
+    domain: organic
+    description: SPICE-trained organic model (large).
+    elements: [H, C, N, O, F, P, S, Cl, Br, I]
+    params: {loader: mace_off, size: large}
+  - name: mace-mp-0b2
+    aliases: [medium-0b2]
+    offer: false
+    domain: inorganic
+    description: MACE-MP-0b2 (medium). Improved stability at high pressure. LAMMPS-capable (single node).
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: medium-0b2}
+  - name: mace-mp-0b3
+    aliases: [medium-0b3]
+    offer: false
+    domain: inorganic
+    description: MACE-MP-0b3 (medium). Fixes some phonon issues of 0b2. LAMMPS-capable (single node).
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: medium-0b3}
+  - name: mace-omat-0-medium
+    aliases: [medium-omat-0]
+    offer: false
+    domain: inorganic
+    description: OMat24-trained (medium), DFT PBE+U. LAMMPS-capable (single node).
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: medium-omat-0}
+  - name: mace-matpes-pbe-0
+    offer: false
+    domain: inorganic
+    description: MATPES-PBE (medium), DFT PBE without +U. LAMMPS-capable (single node).
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: mace-matpes-pbe-0}
+  - name: mace-matpes-r2scan-0
+    offer: false
+    domain: inorganic
+    description: MATPES-r2SCAN (medium), DFT r2SCAN. LAMMPS-capable (single node).
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: mace-matpes-r2scan-0}
+  - name: mace-mh-1
+    aliases: [mh-1]
+    offer: false
+    domain: mixed
+    description: Multi-head cross-domain model, second release, deployed with the omat_pbe head. ASE only.
+    elements: {z: [1, 94], exclude: [Po, At, Rn, Fr, Ra]}
+    params: {loader: mace_mp, size: mh-1, kwargs: {head: omat_pbe}}
+    model_file: none
+    notes: "MACE {name} ({size}, {domain}, omat_pbe head). ASE only: no on-disk model file for LAMMPS; the MD agent must use the ASE runner."
 ---
 # MACE (Multi-ACE)
 
@@ -86,9 +197,28 @@ through the agent.
 
 ## planning
 
-Model selection:
+### Element coverage
+
+Check this FIRST: a model cannot run a system containing any
+element outside its list. It fails at the first force call, not with a warning.
+Lists are read from each model's own element table (`calc.z_table`, mace-torch 0.3.16).
+- `mace-off23` (small/medium/large): H C N O F P S Cl Br I only (10 elements).
+  NO Li, Na, K, Mg, Ca, B, Si, or any metal, so not usable for salts in organic
+  solvent (e.g. LiPF6 electrolytes) or organometallics.
+- `mace-mp-0` / `-0b` / `-0b2` / `-0b3`, `mace-mpa-0`, `mace-omat-0`,
+  `mace-matpes-pbe-0`, `mace-matpes-r2scan-0`, `mace-mh-0`, `mace-mh-1`:
+  Z = 1–94 (H to Pu) except Po, At, Rn, Fr, Ra (89 elements).
+  Noble gases are sparse in MPtrj (Ne 7, Ar 13 frames): results for them are
+  unreliable with the MPtrj-trained models; cross-check or say so. Actinides Ac–Pu are sparse.
+- `polar-1-s` / `-m` / `-l` (OMol25): Z = 1–83 (H to Bi), noble gases included;
+  no actinides (read from the released checkpoints).
+- `mace-mdp`: SPICE-trained like mace-off23 (not checked here); dipoles only, no forces.
+
+### Model selection
+
+Choose only among models that cover every element:
 - Elements are inorganic (metals, oxides, ceramics) → `mace-omat-0`
-- Elements are organic (C, H, N, O, S, P, halogens) and energy/forces are needed → `mace-off23`
+- Elements are ONLY from H C N O F P S Cl Br I and energy/forces are needed → `mace-off23`
 - Mixed inorganic/organic system → `mace-mh-0` (cross domain coverage)
 - Speed over accuracy is required → `mace-mp-0b`
 - System is charged/ionic, redox-active, in an applied electric field, or has

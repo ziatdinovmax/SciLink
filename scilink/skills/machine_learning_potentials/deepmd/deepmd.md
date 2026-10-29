@@ -34,7 +34,20 @@ Foundation models:
 
 ## planning
 
-When to choose DeePMD:
+### Element coverage
+
+Check this FIRST. DPA models ACCEPT all 118 element symbols
+(`type_map_all`), so coverage depends on the pretraining BRANCH used:
+- DPA-3.1-3M / DPA-2.4-7M, OMat24 or MPtrj branch: Z = 1–94 except Po, At, Rn,
+  Fr, Ra (the dataset's set; per-branch lists not verified here).
+- The "72/73 elements" figure for DPA-2 refers to the original paper's
+  pretraining mix and is not an explicit list.
+- Check that the chosen branch's dataset contains every element in the system.
+  (Sources: HF deepmodelingcommunity DPA-3.1-3M / DPA-2.4-7M model cards;
+  arXiv 2312.15492.)
+
+### When to choose DeePMD
+
 - LAMMPS-side production at scale (> 50k atoms, multi-node MPI + GPU)
 - Custom model training from DFT reference data on a specific chemistry
 - Active learning loop with Deep Ensemble uncertainty estimates
