@@ -13,13 +13,21 @@ import { demoteHeadings, MarkdownBody } from "./MarkdownBody";
 const IMAGE_EXTS = ["png", "jpg", "jpeg"];
 const ARRAY_EXTS = ["npy", "tif", "tiff"];
 const TABLE_EXTS = ["csv", "tsv", "xlsx"];
-const CODE_EXTS = ["py", "sh", "yaml", "yml", "toml", "log", "txt", "jsonl", "cif", "xyz", "in"];
+const CODE_EXTS = ["py", "sh", "yaml", "yml", "toml", "log", "txt", "jsonl", "in"];
+// Atomic structures, drawn by the server with ASE (previews.is_structure_file).
+const STRUCTURE_EXTS = ["xyz", "extxyz", "cif", "vasp"];
 const CMAPS = ["viridis", "gray", "magma", "plasma", "inferno"];
 
 function ext(path: string): string {
   const name = path.split("/").pop() ?? "";
   const i = name.lastIndexOf(".");
   return i > 0 ? name.slice(i + 1).toLowerCase() : "";
+}
+
+function isStructure(path: string, e: string): boolean {
+  // VASP's POSCAR / CONTCAR carry no extension.
+  const name = (path.split("/").pop() ?? "").toUpperCase();
+  return STRUCTURE_EXTS.includes(e) || (e === "" && /^(POSCAR|CONTCAR)/.test(name));
 }
 
 function fmtSize(n: number): string {
@@ -96,6 +104,7 @@ function PreviewBody({
   if (IMAGE_EXTS.includes(e)) return <ImagePreview url={url} />;
   if (ARRAY_EXTS.includes(e)) return <ArrayPreview sessionId={sessionId} path={path} />;
   if (TABLE_EXTS.includes(e)) return <TablePreview sessionId={sessionId} path={path} />;
+  if (isStructure(path, e)) return <StructurePreview sessionId={sessionId} path={path} url={url} />;
   if (e === "md") return <MdPreview sessionId={sessionId} path={path} />;
   if (e === "html" || e === "htm")
     return <iframe className="preview-frame" src={url} title={path} sandbox="allow-scripts" />;
@@ -289,6 +298,36 @@ function TablePreview({ sessionId, path }: { sessionId: string; path: string }) 
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+function StructurePreview({
+  sessionId,
+  path,
+  url,
+}: {
+  sessionId: string;
+  path: string;
+  url: string;
+}) {
+  const [mode, setMode] = useState<"rendered" | "source">("rendered");
+  return (
+    <div>
+      <div className="preview-toolbar">
+        <button className={mode === "rendered" ? "primary" : ""} onClick={() => setMode("rendered")}>
+          Rendered
+        </button>
+        <button className={mode === "source" ? "primary" : ""} onClick={() => setMode("source")}>
+          Source
+        </button>
+      </div>
+      {/* The server draws the structure; ArrayPreview shows its PNG or its error. */}
+      {mode === "rendered" ? (
+        <ArrayPreview sessionId={sessionId} path={path} />
+      ) : (
+        <TextPreview url={url} />
+      )}
     </div>
   );
 }
