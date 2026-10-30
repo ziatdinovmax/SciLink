@@ -929,7 +929,15 @@ def _run_workflow_once(
                                              active_skills=[software])
                 except Exception:
                     _get = None  # engine without a getter: no ladder floor
-                entry = gen_result.get("entry_file")
+                entry = gen_result.get("entry_file") or ""
+                if not entry and len(base_inputs) == 1:
+                    entry = next(iter(base_inputs))
+                if gen_result.get("phases") or (
+                        not entry and "{script}" in run_command):
+                    # Several decks and no single entry to sweep: skip
+                    # (reported below) rather than launch with no input file.
+                    raise ValueError("multi-deck run: no single entry deck "
+                                     "to sweep")
 
                 def _run_ladder(param, members, _entry=entry):
                     dirs: Dict[Any, str] = {}
@@ -945,9 +953,8 @@ def _run_workflow_once(
                         if os.path.isdir(rdir):
                             shutil.rmtree(rdir, ignore_errors=True)
                         os.makedirs(rdir, exist_ok=True)
-                        cmd = (run_command.format(script=_entry)
-                               if _entry and "{script}" in run_command
-                               else run_command)
+                        cmd = _fill_script(run_command, _entry,
+                                           "parameter convergence")
                         executor.run(member_inputs, cmd, rdir)
                         dirs[setting] = rdir
                     return dirs
@@ -1036,7 +1043,13 @@ def _run_workflow_once(
     from .refinement import RefinementContext, policy_for, run_campaign
     from .critics import RunCritic
 
-    stages = _collect_stages(gen_result, output_dir, run_command)
+    try:
+        stages = _collect_stages(gen_result, output_dir, run_command)
+    except ValueError as e:
+        logger.error("cannot build the run: %s", e)
+        result["refinement"] = {"status": "failed", "error": str(e)}
+        result["final_status"] = "refinement_failed"
+        return result
     ctx = RefinementContext(
         research_goal=user_request, scale=scale, engine=run_engine,
         skill=run_skill, domain=run_domain, autonomy=autonomy,
@@ -1172,6 +1185,21 @@ def _record_pseudopotential_provenance(result: Dict[str, Any],
     result["pseudopotentials"] = {**record, "used": used}
 
 
+def _fill_script(template: str, entry: str, phase_name: str) -> str:
+    """``template`` with ``{script}`` replaced by the phase's entry file.
+
+    Raises ValueError when the template needs a file name and the phase has
+    none: the engine would otherwise be launched with no input file.
+    """
+    if "{script}" not in template:
+        return template
+    if not entry:
+        raise ValueError(
+            f"phase {phase_name!r} has no entry file for the run command "
+            f"{template!r}; the input generation must say which file runs")
+    return template.format(script=entry)
+
+
 def _collect_phases(
     gen_result: Dict[str, Any], run_dir: str, run_command_template: str
 ) -> list:
@@ -1210,11 +1238,7 @@ def _collect_phases(
     phases = []
     for spec in phases_spec:
         entry = spec.get("entry_file") or ""
-        cmd = (
-            run_command_template.format(script=entry)
-            if "{script}" in run_command_template
-            else run_command_template
-        )
+        cmd = _fill_script(run_command_template, entry, spec.get("name", "run"))
         phases.append(Phase(
             name=spec.get("name", "run"),
             input_files=spec.get("input_files") or {},
@@ -1265,18 +1289,14 @@ def _collect_stages(
         phases = _collect_phases(gen_result, run_dir, run_command_template)
         return [Stage(name="run", phases=phases, parallel=False)]
 
-    def _command(entry: str, override) -> str:
-        template = override or run_command_template
-        if "{script}" in template:
-            return template.format(script=entry or "")
-        return template
-
     def _phase(spec: Dict[str, Any], rdir: str) -> "Phase":
         entry = spec.get("entry_file") or ""
+        name = spec.get("name", "run")
         return Phase(
-            name=spec.get("name", "run"),
+            name=name,
             input_files=spec.get("input_files") or {},
-            run_command=_command(entry, spec.get("run_command")),
+            run_command=_fill_script(
+                spec.get("run_command") or run_command_template, entry, name),
             run_dir=str(rdir),
             entry_file=entry or "",
         )

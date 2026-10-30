@@ -34,6 +34,57 @@ from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from ._deprecation import normalize_params
 
 
+def resolve_run_order(result: dict) -> Optional[str]:
+    """Record which input file(s) the engine runs, and in what order.
+
+    Reads the reply's ``run_order`` (or an explicit ``entry_file``; a single
+    input file needs neither). One deck sets ``entry_file``. Several decks
+    become ``phases``, one per deck in ``run_order``, each with its own deck
+    plus every file ``run_order`` does not list (shared support files), so
+    the refinement loop runs, checks and fixes each deck in turn.
+
+    Updates ``result`` in place. Returns None, or the reason the reply does
+    not say what to run (several files and no ``run_order``, or a
+    ``run_order`` naming a file that is not in ``input_files``): the caller
+    fails generation rather than launching the engine with no input file.
+    """
+    files = result["input_files"]
+    order = result.get("run_order")
+    if order is None and result.get("entry_file"):
+        order = [result["entry_file"]]
+    if order is None:
+        if len(files) != 1:
+            return (f"the reply has {len(files)} input files "
+                    f"({', '.join(sorted(files))}) but no run_order saying "
+                    f"which of them the engine runs, and in what order")
+        order = list(files)
+    if isinstance(order, str):
+        order = [order]
+    if (not isinstance(order, list) or not order
+            or not all(isinstance(n, str) and n for n in order)):
+        return f"run_order must be a non-empty list of file names, got {order!r}"
+    missing = [n for n in order if n not in files]
+    if missing:
+        return (f"run_order names {', '.join(missing)}, which "
+                f"{'is' if len(missing) == 1 else 'are'} not in input_files "
+                f"({', '.join(sorted(files))})")
+    if len(set(order)) != len(order):
+        return f"run_order lists a file more than once: {order}"
+
+    result["run_order"] = order
+    if len(order) == 1:
+        result["entry_file"] = order[0]
+        result.pop("phases", None)
+        return None
+    support = {n: c for n, c in files.items() if n not in order}
+    result.pop("entry_file", None)
+    result["phases"] = [
+        {"name": n, "entry_file": n, "input_files": {n: files[n], **support}}
+        for n in order
+    ]
+    return None
+
+
 class MolecularQCAgent:
     """Molecular (finite-system) quantum-chemistry agent.
 
@@ -194,12 +245,16 @@ class MolecularQCAgent:
             f'    "<filename>": "<full file content>"\n'
             f"    ...\n"
             f"  }},\n"
+            f'  "run_order": ["<filename>", ...],\n'
             f'  "notes": "<any caveats, assumptions, or recommendations>"\n'
             f"}}\n"
             f"```\n\n"
             f"Pick the canonical filenames the {software.upper()} engine "
-            f"expects (e.g. a single ``job.nw`` deck for NWChem, ``run.py`` "
-            f"for PySCF, ``orca.inp`` for ORCA). Filenames are case-sensitive."
+            f"expects (e.g. ``job.nw`` decks for NWChem, ``run.py`` "
+            f"for PySCF, ``orca.inp`` for ORCA). Filenames are case-sensitive.\n\n"
+            f"``run_order`` lists the deck(s) the engine runs, in order; each "
+            f"finishes in the same directory before the next starts, and "
+            f"unlisted files (e.g. a basis-set file) are written alongside."
         )
         if skill_parts:
             return "\n\n".join(skill_parts) + "\n\n---\n\n" + base
@@ -264,8 +319,10 @@ class MolecularQCAgent:
             status      : "success" or "error"
             software    : echo of the software argument
             input_files : {filename: content} for every input file
-            entry_file  : the deck/script the refinement loop runs (set
-                          when a single input file is produced)
+            entry_file  : the deck/script the refinement loop runs (one deck)
+            phases      : one {name, entry_file, input_files} per deck, in
+                          run order (several decks; see resolve_run_order)
+            run_order   : the deck filename(s), in the order they run
             notes       : optional caveats / recommendations from the LLM
             message     : present on error only
         """
@@ -309,6 +366,27 @@ class MolecularQCAgent:
                 "raw_result": result,
             }
 
+        # A reply that does not say which deck runs gets one chance to fix
+        # it, with the reason, before generation fails.
+        problem = resolve_run_order(dict(result))
+        if problem:
+            self.logger.warning("reply does not say what to run (%s); asking again",
+                                problem)
+            try:
+                response = self.model.generate_content(
+                    f"{prompt}\n\n---\n\nYour previous reply could not be "
+                    f"run: {problem}. Return the complete JSON object again, "
+                    f"with run_order.",
+                    generation_config=self.generation_config,
+                )
+                retry = self._parse_response(response.text)
+            except Exception as e:
+                retry = {}
+                self.logger.warning("repair request failed: %s", e)
+            if isinstance(retry, dict) and isinstance(retry.get("input_files"), dict) \
+                    and retry["input_files"] and not resolve_run_order(dict(retry)):
+                result = retry
+
         # ── pre-submit syntax pass (engine-neutral, advisory) ─────────
         # Ask the active engine's skill bundle for its syntax checker/fixer
         # via the registry. The agent never names an engine or imports a
@@ -343,11 +421,16 @@ class MolecularQCAgent:
         except Exception as exc:
             self.logger.warning("input syntax check failed: %s", exc)
 
-        # Record the entry deck/script so the refinement loop knows what to
-        # run. Single-file engines (NWChem deck, PySCF script) are the common
-        # case; multi-file callers can override downstream.
-        if "entry_file" not in result and len(result["input_files"]) == 1:
-            result["entry_file"] = next(iter(result["input_files"]))
+        # Record what the refinement loop runs: one entry deck, or ordered
+        # phases when the calculation is split into decks. Without this a
+        # multi-deck reply ran the engine with no input file at all.
+        problem = resolve_run_order(result)
+        if problem:
+            return {
+                "status": "error",
+                "message": problem,
+                "raw_result": result,
+            }
 
         # ── deterministic geometry-consistency check (fail loud) ──────
         # The deck's inline geometry is LLM-transcribed from the structure; a

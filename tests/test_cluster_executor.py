@@ -53,6 +53,9 @@ class FakeConn:
     def mkdir_p(self, path):
         self.mkdirs.append(path)
 
+    def remove(self, path):
+        self._remote.pop(path, None)
+
     def upload(self, local, remote):
         self.uploads.append((local, remote))
         self._remote[remote] = Path(local).read_text()
@@ -118,6 +121,24 @@ class FakeScheduler:
 
 
 # ── ClusterExecutor.run ───────────────────────────────────────
+
+class TestStaleRemoteOutput:
+    def test_a_job_that_writes_nothing_does_not_report_the_previous_rc(self, tmp_path):
+        # Sequential phases share a remote dir (named after the run dir).
+        conn = FakeConn()
+        run_dir = str(tmp_path / "run")
+        first = ClusterExecutor(conn, scheduler=FakeScheduler(conn),
+                                remote_root="/scratch", poll_interval=0, timeout=100)
+        assert first.run({"a.nw": "A"}, "nwchem a.nw", run_dir)["returncode"] == 0
+        # The second job never writes its output files (e.g. killed before
+        # the wrapper's redirect) and the scheduler reports no exit code.
+        silent = FakeScheduler(conn, rc_written=None, exit_code=None)
+        second = ClusterExecutor(conn, scheduler=silent, remote_root="/scratch",
+                                 poll_interval=0, timeout=100)
+        result = second.run({"b.nw": "B"}, "nwchem b.nw", run_dir)
+        assert result["returncode"] is None
+        assert not (Path(run_dir) / _STDOUT).exists()
+
 
 class TestClusterExecutorRun:
     def test_full_flow_uploads_submits_polls_downloads(self, tmp_path):
