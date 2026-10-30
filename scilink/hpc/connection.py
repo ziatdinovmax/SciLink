@@ -1,7 +1,6 @@
 """Thread-safe SSH connection manager for HPC resources."""
 from __future__ import annotations
 
-import errno
 import io
 import threading
 from dataclasses import dataclass
@@ -242,11 +241,8 @@ class HPCConnection:
         """Delete a remote file; a file that is not there is not an error."""
         try:
             self.sftp.remove(path)
-        except FileNotFoundError:
+        except FileNotFoundError:   # paramiko's missing-file error
             pass
-        except IOError as e:
-            if getattr(e, "errno", None) != errno.ENOENT:
-                raise
 
     def mkdir_p(self, path: str) -> None:
         """Remote equivalent of ``mkdir -p``."""

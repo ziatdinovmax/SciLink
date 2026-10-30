@@ -168,58 +168,78 @@ def _decks(d, names):
                   run_dir=d, entry_file=n) for n in names]
 
 
+def _kept(d):
+    return sorted(p.name for p in (Path(d) / "phase_logs").glob("*")) \
+        if (Path(d) / "phase_logs").is_dir() else []
+
+
 def test_each_phase_log_is_kept_in_run_order(tmp_path):
     names = ("hcn.nw", "hnc.nw", "ts.nw")
     out = run_campaign([Stage(name="run", phases=_decks(str(tmp_path), names))],
                        _LogWriter(), _Good(), AutonomousPolicy(), _ctx())
     assert out["status"] == "success"
-    kept = sorted(p.name for p in tmp_path.glob("[0-9][0-9]_*.run_stdout.log"))
+    kept = _kept(tmp_path)
     assert kept == ["01_hcn.nw.run_stdout.log", "02_hnc.nw.run_stdout.log",
                     "03_ts.nw.run_stdout.log"]
     for k, n in zip(kept, names):
-        assert (tmp_path / k).read_text() == f"ran nwchem {n}\n"
+        assert (tmp_path / "phase_logs" / k).read_text() == f"ran nwchem {n}\n"
     assert (tmp_path / "run_stdout.log").read_text() == "ran nwchem ts.nw\n"
 
 
-def test_single_phase_writes_no_extra_log(tmp_path):
+def test_staged_steps_sharing_a_directory_keep_their_logs_too(tmp_path):
+    # MD-style campaign: each step is its own one-phase stage, one directory.
+    d = str(tmp_path)
+    stages = [Stage(name=n, phases=_decks(d, [n])) for n in ("equil.in", "prod.in")]
+    run_campaign(stages, _LogWriter(), _Good(), AutonomousPolicy(), _ctx())
+    assert _kept(d) == ["01_equil.in.run_stdout.log", "02_prod.in.run_stdout.log"]
+
+
+def test_a_directory_used_once_gets_no_copy(tmp_path):
     run_campaign([Stage(name="run", phases=_decks(str(tmp_path), ["job.nw"]))],
                  _LogWriter(), _Good(), AutonomousPolicy(), _ctx())
     assert sorted(os.listdir(tmp_path)) == ["run_stdout.log"]
 
 
 class _NeverStarts(_LogWriter):
-    """The second deck never produces output (e.g. a cancelled job)."""
+    """The second deck produces nothing (e.g. a cluster job that never ran):
+    the executor clears the previous run's files and writes none."""
 
     def __init__(self):
         self.n = 0
 
     def run(self, input_files, run_command, run_dir):
         self.n += 1
+        for name in ("run_stdout.log", "run_stderr.log", "run_returncode.txt"):
+            (Path(run_dir) / name).unlink(missing_ok=True)
         if self.n == 1:
             return super().run(input_files, run_command, run_dir)
-        return {"status": "error", "output_dir": run_dir, "returncode": None,
-                "error": "never started"}
+        return {"status": "completed", "output_dir": run_dir, "returncode": None}
 
 
 def test_a_phase_with_no_output_gets_no_copy_of_the_previous_log(tmp_path):
-    # LocalExecutor clears run_stdout.log before each run; mimic that contract.
-    class _Clearing(_NeverStarts):
-        def run(self, input_files, run_command, run_dir):
-            (Path(run_dir) / LocalExecutor.STDOUT_FILE).unlink(missing_ok=True)
-            return super().run(input_files, run_command, run_dir)
-
     run_campaign([Stage(name="run", phases=_decks(str(tmp_path), ["a.nw", "b.nw"]))],
-                 _Clearing(), _Good(), AutonomousPolicy(), _ctx())
-    assert (tmp_path / "01_a.nw.run_stdout.log").is_file()
-    assert not list(tmp_path.glob("02_*"))
+                 _NeverStarts(), _Good(), AutonomousPolicy(), _ctx())
+    assert _kept(tmp_path) == ["01_a.nw.run_stdout.log"]
+
+
+def test_the_engine_reader_never_reads_a_kept_copy_as_the_current_run(tmp_path):
+    # Deck 2 produced nothing: the only log left is deck 1's kept copy, and
+    # NWChem's reader must not parse it as deck 2's output.
+    from scilink.skills.molecular_qc.nwchem.nwchem_output import snapshot_run
+    run_campaign([Stage(name="run", phases=_decks(str(tmp_path), ["a.nw", "b.nw"]))],
+                 _NeverStarts(), _Good(), AutonomousPolicy(), _ctx())
+    snap = snapshot_run(str(tmp_path))
+    assert not any("a.nw" in f for f in snap["files_found"])
+    assert "No NWChem output" in snap["headline"]
 
 
 def test_logs_left_by_an_earlier_attempt_are_cleared(tmp_path):
-    (tmp_path / "01_old.nw.run_stdout.log").write_text("stale\n")
-    (tmp_path / "02_old2.nw.run_stdout.log").write_text("stale\n")
+    old = tmp_path / "phase_logs"
+    old.mkdir()
+    (old / "01_old.nw.run_stdout.log").write_text("stale\n")
     run_campaign([Stage(name="run", phases=_decks(str(tmp_path), ["job.nw"]))],
                  _LogWriter(), _Good(), AutonomousPolicy(), _ctx())
-    assert not list(tmp_path.glob("[0-9][0-9]_*"))
+    assert not old.exists()
 
 
 def test_launch_failure_leaves_no_earlier_output(tmp_path, monkeypatch):
@@ -296,22 +316,34 @@ def test_agent_refuses_several_decks_without_run_order(tmp_path, monkeypatch):
 _TWO = {"gas.nw": _DECK.format(n="gas"), "solv.nw": _DECK.format(n="solv")}
 
 
-def test_agent_asks_once_more_and_uses_a_repaired_reply(tmp_path, monkeypatch):
+def test_agent_asks_only_for_the_order_and_keeps_the_decks(tmp_path, monkeypatch):
     prompts = []
     r = _agent_reply(tmp_path, monkeypatch,
                      {"input_files": _TWO},
-                     {"input_files": _TWO, "run_order": ["solv.nw", "gas.nw"]},
+                     {"run_order": ["solv.nw", "gas.nw"]},
                      prompts=prompts)
     assert r["status"] == "success", r.get("message")
     assert [p["entry_file"] for p in r["phases"]] == ["solv.nw", "gas.nw"]
-    assert len(prompts) == 2 and "no run_order" in prompts[1]
-
-
-def test_agent_gives_up_after_one_repair(tmp_path, monkeypatch):
-    prompts = []
-    r = _agent_reply(tmp_path, monkeypatch, {"input_files": _TWO}, prompts=prompts)
-    assert r["status"] == "error" and "run_order" in r["message"]
+    assert r["input_files"] == _TWO                      # decks kept as returned
     assert len(prompts) == 2
+    assert "### gas.nw" in prompts[1] and "start solv" in prompts[1]   # decks shown
+    assert "Do not change" in prompts[1]
+    assert r["run_order_repair"]["outcome"] == "fixed"
+
+
+def test_a_failed_repair_reports_its_own_reason(tmp_path, monkeypatch):
+    prompts = []
+    r = _agent_reply(tmp_path, monkeypatch, {"input_files": _TWO},
+                     {"run_order": ["gas.nw", "missing.nw"]}, prompts=prompts)
+    assert r["status"] == "error"
+    assert "no run_order" in r["message"] and "missing.nw" in r["message"]
+    assert r["run_order_repair"]["outcome"] == "failed"
+    assert len(prompts) == 2
+
+
+def test_a_repair_answer_without_run_order_is_reported(tmp_path, monkeypatch):
+    r = _agent_reply(tmp_path, monkeypatch, {"input_files": _TWO}, {"notes": "?"})
+    assert r["status"] == "error" and "the answer had no run_order" in r["message"]
 
 
 def test_a_usable_reply_costs_one_call(tmp_path, monkeypatch):
@@ -321,3 +353,75 @@ def test_a_usable_reply_costs_one_call(tmp_path, monkeypatch):
                      prompts=prompts)
     assert r["status"] == "success" and r["entry_file"] == "job.nw"
     assert len(prompts) == 1
+
+
+# ── caveats on the result, and one single-file rule ─────────────────────
+
+def test_unrun_files_are_reported():
+    r = {"input_files": {"a.nw": "1", "b.nw": "2"}, "run_order": ["a.nw"]}
+    assert resolve_run_order(r) is None
+    assert r["entry_file"] == "a.nw"
+    assert any("never run: b.nw" in w for w in r["warnings"])
+
+
+def test_an_overridden_entry_file_is_reported():
+    r = {"input_files": {"a.nw": "1", "b.nw": "2"}, "entry_file": "b.nw",
+         "run_order": ["a.nw", "b.nw"]}
+    assert resolve_run_order(r) is None
+    assert any("entry_file b.nw was replaced" in w for w in r["warnings"])
+
+
+def test_a_checking_copy_does_not_touch_the_replys_warnings():
+    r = {"input_files": {"a.nw": "1", "b.nw": "2"}, "run_order": ["a.nw"],
+         "warnings": ["from the model"]}
+    resolve_run_order(dict(r))
+    assert r["warnings"] == ["from the model"]
+
+
+def test_an_empty_entry_file_means_undeclared_everywhere():
+    from scilink.agents.sim_agents.refinement import single_entry
+    one = {"job.nw": "x"}
+    assert single_entry(one, "") == "job.nw"
+    r = {"input_files": dict(one), "entry_file": ""}
+    assert resolve_run_order(r) is None and r["entry_file"] == "job.nw"
+    phases = _collect_phases({"input_files": one, "entry_file": ""}, "/tmp/x",
+                             "nwchem {script}")
+    assert phases[0].run_command == "nwchem job.nw"
+
+
+def test_convergence_skip_is_recorded_as_skipped(tmp_path, monkeypatch):
+    from scilink.agents.sim_agents import critics, refinement, simulation_pipeline as sp
+    gen = {"status": "success", "input_files": {"a.nw": "1", "b.nw": "2"},
+           "run_order": ["a.nw", "b.nw"]}
+    resolve_run_order(gen)
+    monkeypatch.setattr(sp, "_generate_inputs", lambda **kw: gen)
+    monkeypatch.setattr(sp, "_convergence_specs", lambda *a, **k: [{"param": "x"}])
+    monkeypatch.setattr(critics, "RunCritic", lambda **kw: object())
+    monkeypatch.setattr(refinement, "run_campaign",
+                        lambda *a, **k: {"status": "success"})
+    (tmp_path / "mol.xyz").write_text("1\n\nH 0 0 0\n")
+    out = sp._run_workflow_once(
+        "water", scale="molecular_qc", software="nwchem",
+        structure_file=str(tmp_path / "mol.xyz"), output_dir=str(tmp_path),
+        validate=False, executor=_LogWriter(), run_command="nwchem {script}",
+        converge_parameters=True)
+    assert out["parameter_convergence"]["status"] == "skipped"
+    assert "several decks" in out["parameter_convergence"]["message"]
+    assert any("convergence was requested but skipped" in w for w in out["warnings"])
+
+
+def test_generation_caveats_reach_the_runs_warnings(tmp_path, monkeypatch):
+    gen = {"status": "success", "input_files": {"a.nw": "1", "b.nw": "2"},
+           "run_order": ["a.nw"],
+           "run_order_repair": {"outcome": "fixed", "run_order": ["a.nw"]}}
+    resolve_run_order(gen)
+    out, _ = _pipeline(tmp_path, monkeypatch, gen)
+    assert any("never run: b.nw" in w for w in out["warnings"])
+    assert any("one follow-up request" in w for w in out["warnings"])
+
+
+def test_a_staged_step_with_one_file_needs_no_entry_file():
+    stages = _collect_stages(
+        {"stages": [{"name": "s1", "input_files": {"in.x": "1"}}]},
+        "/tmp/x", "engine {script}")
+    assert stages[0].phases[0].run_command == "engine in.x"

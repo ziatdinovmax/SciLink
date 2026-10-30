@@ -217,6 +217,11 @@ class ClusterExecutor(Executor):
 
         run_path = Path(run_dir)
         run_path.mkdir(parents=True, exist_ok=True)
+        # Phases can share a run directory: clear the previous run's output
+        # files first, so a submit that fails at any later step, or a job that
+        # never starts, cannot report them as its own.
+        for name in (_STDOUT, _STDERR, _RC):
+            (run_path / name).unlink(missing_ok=True)
 
         # Materialize inputs locally too — gives the local snapshot the inputs
         # and serves as the upload source.
@@ -227,10 +232,7 @@ class ClusterExecutor(Executor):
         sched = self._resolve_scheduler()
         remote_dir = self._remote_dir_for(run_dir)
         self.conn.mkdir_p(remote_dir)
-        # Phases can share a remote directory: clear the previous run's output
-        # files so a job that never starts cannot report them as its own.
-        for name in (_STDOUT, _STDERR, _RC):
-            (run_path / name).unlink(missing_ok=True)
+        for name in (_STDOUT, _STDERR, _RC):   # and their remote copies
             try:
                 self.conn.remove(f"{remote_dir}/{name}")
             except Exception as exc:  # noqa: BLE001 — best-effort cleanup

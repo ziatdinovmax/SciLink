@@ -1142,39 +1142,51 @@ def _member_context(ctx: RefinementContext) -> RefinementContext:
     return replace(ctx, cycle=0, history=[])
 
 
-PHASE_LOG_GLOB = "[0-9][0-9]_*." + LocalExecutor.STDOUT_FILE
+def single_entry(input_files: Any, entry_file: Optional[str] = None) -> str:
+    """The file a run executes: the declared ``entry_file``, else the only
+    input file, else ``""`` (an empty ``entry_file`` counts as undeclared)."""
+    if entry_file:
+        return entry_file
+    if isinstance(input_files, dict) and len(input_files) == 1:
+        return next(iter(input_files))
+    return ""
 
 
-def _phase_log_name(index: int, phase: Phase) -> str:
-    """``01_hcn.nw.run_stdout.log``: run order first, so names sort in order."""
-    return f"{index:02d}_{Path(phase.name).name}.{LocalExecutor.STDOUT_FILE}"
+# Per-phase stdout copies live in a subfolder of the run directory, where the
+# engine readers (which list the run directory's own files) never see them.
+PHASE_LOG_DIR = "phase_logs"
 
 
-def _clear_phase_logs(stage: "Stage") -> None:
-    """Remove per-phase log copies an earlier campaign left in this stage's
-    run directories (a retried workflow reuses its output directory)."""
-    for rdir in {ph.run_dir for ph in stage.phases}:
-        for old in Path(rdir).glob(PHASE_LOG_GLOB):
-            try:
-                old.unlink()
-            except OSError as e:
-                logger.warning("could not remove stale log %s: %s", old, e)
+def _shared_run_dirs(stages: List["Stage"]) -> set:
+    """Run directories that more than one sequential phase of the campaign
+    uses: a legacy multi-phase stage, or staged steps that are each their own
+    one-phase stage in the same directory."""
+    counts: Dict[str, int] = {}
+    for stage in stages:
+        if stage.parallel or stage.kind == "combine":
+            continue
+        for ph in stage.phases:
+            counts[ph.run_dir] = counts.get(ph.run_dir, 0) + 1
+    return {d for d, n in counts.items() if n > 1}
 
 
 def _keep_phase_log(phase: Phase, index: int) -> None:
-    """Copy a phase's stdout log to ``<NN>_<phase name>.run_stdout.log``.
+    """Copy a phase's stdout log to ``phase_logs/<NN>_<phase>.run_stdout.log``.
 
-    Sequential phases share a run directory, and each run rewrites
-    ``run_stdout.log``, so without a copy only the last phase's output is
-    left (for an engine like NWChem, stdout is the whole output). The
-    executor clears ``run_stdout.log`` before each run, so a phase that never
-    produced output leaves nothing to copy.
+    Phases that share a run directory each rewrite ``run_stdout.log``, so
+    without a copy only the last phase's output is left (for an engine like
+    NWChem, stdout is the whole output). The executor clears
+    ``run_stdout.log`` before each run, so a phase that produced no output
+    leaves nothing to copy.
     """
     src = Path(phase.run_dir) / LocalExecutor.STDOUT_FILE
     if not src.is_file():
         return
+    dst = (Path(phase.run_dir) / PHASE_LOG_DIR
+           / f"{index:02d}_{Path(phase.name).name}.{LocalExecutor.STDOUT_FILE}")
     try:
-        shutil.copyfile(src, src.with_name(_phase_log_name(index, phase)))
+        dst.parent.mkdir(exist_ok=True)
+        shutil.copyfile(src, dst)
     except OSError as e:
         logger.warning("could not keep the log of phase %s: %s", phase.name, e)
 
@@ -1218,6 +1230,14 @@ def run_campaign(
         single-chain result), and the full ``history``.
     """
     runnable = [s for s in stages if s.phases]
+    # Phase logs from an earlier attempt in a reused directory are not this
+    # campaign's.
+    for stage in runnable:
+        if not stage.parallel and stage.kind != "combine":
+            for rdir in {ph.run_dir for ph in stage.phases}:
+                shutil.rmtree(Path(rdir) / PHASE_LOG_DIR, ignore_errors=True)
+    shared_dirs = _shared_run_dirs(runnable)
+    log_index: Dict[str, int] = {}
     if not runnable:
         return {"status": "failed", "error": "no phases to run",
                 "stages": [], "phases": [], "history": ctx.history}
@@ -1253,11 +1273,11 @@ def run_campaign(
         elif not stage.parallel:
             members: List[Dict[str, Any]] = []
             status = "success"
-            _clear_phase_logs(stage)
-            for index, ph in enumerate(stage.phases, start=1):
+            for ph in stage.phases:
                 rec = _refine_phase(ph, executor, run_critic, policy, ctx)
-                if len(stage.phases) > 1:
-                    _keep_phase_log(ph, index)
+                if ph.run_dir in shared_dirs:
+                    log_index[ph.run_dir] = log_index.get(ph.run_dir, 0) + 1
+                    _keep_phase_log(ph, log_index[ph.run_dir])
                 flat.append(rec)
                 members.append(rec)
                 if rec["status"] != "success":

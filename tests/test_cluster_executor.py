@@ -139,6 +139,24 @@ class TestStaleRemoteOutput:
         assert result["returncode"] is None
         assert not (Path(run_dir) / _STDOUT).exists()
 
+    def test_a_submit_that_fails_early_leaves_no_previous_rc(self, tmp_path):
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        (run_dir / _RC).write_text("0")          # left by the previous phase
+        (run_dir / _STDOUT).write_text("previous phase\n")
+
+        class Down(FakeConn):
+            def connect(self, *a, **k):
+                raise ConnectionError("cluster unreachable")
+
+        conn = Down(connected=False)
+        ex = ClusterExecutor(conn, scheduler=FakeScheduler(conn),
+                             remote_root="/scratch", poll_interval=0, timeout=100)
+        with pytest.raises(ConnectionError):
+            ex.submit({"b.nw": "B"}, "nwchem b.nw", str(run_dir))
+        assert not (run_dir / _RC).exists()
+        assert not (run_dir / _STDOUT).exists()
+
 
 class TestClusterExecutorRun:
     def test_full_flow_uploads_submits_polls_downloads(self, tmp_path):

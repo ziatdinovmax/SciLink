@@ -831,6 +831,16 @@ def _run_workflow_once(
         result["input_generation"] = {"status": "error", "message": str(e)}
         return result
     result["input_generation"] = gen_result
+    # Caveats from generation (e.g. files left unrun) belong with the run's
+    # other warnings, where the user and the model see them.
+    gen_warnings = list(gen_result.get("warnings") or [])
+    repair = gen_result.get("run_order_repair") or {}
+    if repair.get("outcome") == "fixed":
+        gen_warnings.append("the first reply did not say which input file "
+                            "runs; the run order came from one follow-up "
+                            f"request ({', '.join(repair.get('run_order', []))})")
+    if gen_warnings:
+        result.setdefault("warnings", []).extend(gen_warnings)
     if gen_result.get("status") not in (None, "success"):
         result["final_status"] = "failed_input_generation"
         return result
@@ -918,6 +928,15 @@ def _run_workflow_once(
         base_inputs = _collect_input_files(gen_result)
         if specs and base_inputs:
             try:
+                from .refinement import single_entry
+                entry = single_entry(base_inputs, gen_result.get("entry_file"))
+                if gen_result.get("phases"):
+                    raise _ConvergenceSkipped(
+                        "the run has several decks (phases) and no single "
+                        "deck to sweep")
+                if not entry and "{script}" in run_command:
+                    raise _ConvergenceSkipped(
+                        "the input generation did not say which file runs")
                 from .convergence import converge_parameters as _run_convergence
                 from ...skills._shared._registry import get_tool_function
                 _set = get_tool_function("set_convergence_param",
@@ -929,15 +948,6 @@ def _run_workflow_once(
                                              active_skills=[software])
                 except Exception:
                     _get = None  # engine without a getter: no ladder floor
-                entry = gen_result.get("entry_file") or ""
-                if not entry and len(base_inputs) == 1:
-                    entry = next(iter(base_inputs))
-                if gen_result.get("phases") or (
-                        not entry and "{script}" in run_command):
-                    # Several decks and no single entry to sweep: skip
-                    # (reported below) rather than launch with no input file.
-                    raise ValueError("multi-deck run: no single entry deck "
-                                     "to sweep")
 
                 def _run_ladder(param, members, _entry=entry):
                     dirs: Dict[Any, str] = {}
@@ -1000,6 +1010,14 @@ def _run_workflow_once(
                     logger.info("Convergence ladders floored at base deck values: %s",
                                 pc.floors)
                 result["steps_completed"].append("parameter_convergence")
+            except _ConvergenceSkipped as e:
+                # Requested but not applicable: say so where the user and the
+                # model see it, not as an error.
+                logger.warning("Parameter convergence skipped: %s", e)
+                result["parameter_convergence"] = {
+                    "status": "skipped", "message": str(e)}
+                result.setdefault("warnings", []).append(
+                    f"Parameter convergence was requested but skipped: {e}.")
             except Exception as e:  # convergence is best-effort; never break the run
                 logger.warning("Parameter convergence skipped: %s", e)
                 result["parameter_convergence"] = {
@@ -1185,6 +1203,10 @@ def _record_pseudopotential_provenance(result: Dict[str, Any],
     result["pseudopotentials"] = {**record, "used": used}
 
 
+class _ConvergenceSkipped(Exception):
+    """Parameter convergence does not apply to this run (reason in the message)."""
+
+
 def _fill_script(template: str, entry: str, phase_name: str) -> str:
     """``template`` with ``{script}`` replaced by the phase's entry file.
 
@@ -1223,12 +1245,12 @@ def _collect_phases(
     """
     from .refinement import Phase
 
+    from .refinement import single_entry
+
     phases_spec = gen_result.get("phases")
     if not phases_spec:
-        entry = gen_result.get("entry_file")
         input_files = gen_result.get("input_files") or {}
-        if entry is None and len(input_files) == 1:
-            entry = next(iter(input_files))
+        entry = single_entry(input_files, gen_result.get("entry_file"))
         phases_spec = [{
             "name": "production",
             "input_files": input_files,
@@ -1289,8 +1311,10 @@ def _collect_stages(
         phases = _collect_phases(gen_result, run_dir, run_command_template)
         return [Stage(name="run", phases=phases, parallel=False)]
 
+    from .refinement import single_entry
+
     def _phase(spec: Dict[str, Any], rdir: str) -> "Phase":
-        entry = spec.get("entry_file") or ""
+        entry = single_entry(spec.get("input_files") or {}, spec.get("entry_file"))
         name = spec.get("name", "run")
         return Phase(
             name=name,
