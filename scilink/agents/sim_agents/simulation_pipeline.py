@@ -831,6 +831,16 @@ def _run_workflow_once(
         result["input_generation"] = {"status": "error", "message": str(e)}
         return result
     result["input_generation"] = gen_result
+    # Caveats from generation (e.g. files left unrun) belong with the run's
+    # other warnings, where the user and the model see them.
+    gen_warnings = list(gen_result.get("warnings") or [])
+    repair = gen_result.get("run_order_repair") or {}
+    if repair.get("outcome") == "fixed":
+        gen_warnings.append("the first reply did not say which input file "
+                            "runs; the run order came from one follow-up "
+                            f"request ({', '.join(repair.get('run_order', []))})")
+    if gen_warnings:
+        result.setdefault("warnings", []).extend(gen_warnings)
     if gen_result.get("status") not in (None, "success"):
         result["final_status"] = "failed_input_generation"
         return result
@@ -918,6 +928,15 @@ def _run_workflow_once(
         base_inputs = _collect_input_files(gen_result)
         if specs and base_inputs:
             try:
+                from .refinement import single_entry
+                entry = single_entry(base_inputs, gen_result.get("entry_file"))
+                if gen_result.get("phases"):
+                    raise _ConvergenceSkipped(
+                        "the run has several decks (phases) and no single "
+                        "deck to sweep")
+                if not entry and "{script}" in run_command:
+                    raise _ConvergenceSkipped(
+                        "the input generation did not say which file runs")
                 from .convergence import converge_parameters as _run_convergence
                 from ...skills._shared._registry import get_tool_function
                 _set = get_tool_function("set_convergence_param",
@@ -929,7 +948,6 @@ def _run_workflow_once(
                                              active_skills=[software])
                 except Exception:
                     _get = None  # engine without a getter: no ladder floor
-                entry = gen_result.get("entry_file")
 
                 def _run_ladder(param, members, _entry=entry):
                     dirs: Dict[Any, str] = {}
@@ -945,9 +963,8 @@ def _run_workflow_once(
                         if os.path.isdir(rdir):
                             shutil.rmtree(rdir, ignore_errors=True)
                         os.makedirs(rdir, exist_ok=True)
-                        cmd = (run_command.format(script=_entry)
-                               if _entry and "{script}" in run_command
-                               else run_command)
+                        cmd = _fill_script(run_command, _entry,
+                                           "parameter convergence")
                         executor.run(member_inputs, cmd, rdir)
                         dirs[setting] = rdir
                     return dirs
@@ -993,6 +1010,14 @@ def _run_workflow_once(
                     logger.info("Convergence ladders floored at base deck values: %s",
                                 pc.floors)
                 result["steps_completed"].append("parameter_convergence")
+            except _ConvergenceSkipped as e:
+                # Requested but not applicable: say so where the user and the
+                # model see it, not as an error.
+                logger.warning("Parameter convergence skipped: %s", e)
+                result["parameter_convergence"] = {
+                    "status": "skipped", "message": str(e)}
+                result.setdefault("warnings", []).append(
+                    f"Parameter convergence was requested but skipped: {e}.")
             except Exception as e:  # convergence is best-effort; never break the run
                 logger.warning("Parameter convergence skipped: %s", e)
                 result["parameter_convergence"] = {
@@ -1036,7 +1061,13 @@ def _run_workflow_once(
     from .refinement import RefinementContext, policy_for, run_campaign
     from .critics import RunCritic
 
-    stages = _collect_stages(gen_result, output_dir, run_command)
+    try:
+        stages = _collect_stages(gen_result, output_dir, run_command)
+    except ValueError as e:
+        logger.error("cannot build the run: %s", e)
+        result["refinement"] = {"status": "failed", "error": str(e)}
+        result["final_status"] = "refinement_failed"
+        return result
     ctx = RefinementContext(
         research_goal=user_request, scale=scale, engine=run_engine,
         skill=run_skill, domain=run_domain, autonomy=autonomy,
@@ -1172,6 +1203,25 @@ def _record_pseudopotential_provenance(result: Dict[str, Any],
     result["pseudopotentials"] = {**record, "used": used}
 
 
+class _ConvergenceSkipped(Exception):
+    """Parameter convergence does not apply to this run (reason in the message)."""
+
+
+def _fill_script(template: str, entry: str, phase_name: str) -> str:
+    """``template`` with ``{script}`` replaced by the phase's entry file.
+
+    Raises ValueError when the template needs a file name and the phase has
+    none: the engine would otherwise be launched with no input file.
+    """
+    if "{script}" not in template:
+        return template
+    if not entry:
+        raise ValueError(
+            f"phase {phase_name!r} has no entry file for the run command "
+            f"{template!r}; the input generation must say which file runs")
+    return template.format(script=entry)
+
+
 def _collect_phases(
     gen_result: Dict[str, Any], run_dir: str, run_command_template: str
 ) -> list:
@@ -1195,12 +1245,12 @@ def _collect_phases(
     """
     from .refinement import Phase
 
+    from .refinement import single_entry
+
     phases_spec = gen_result.get("phases")
     if not phases_spec:
-        entry = gen_result.get("entry_file")
         input_files = gen_result.get("input_files") or {}
-        if entry is None and len(input_files) == 1:
-            entry = next(iter(input_files))
+        entry = single_entry(input_files, gen_result.get("entry_file"))
         phases_spec = [{
             "name": "production",
             "input_files": input_files,
@@ -1210,11 +1260,7 @@ def _collect_phases(
     phases = []
     for spec in phases_spec:
         entry = spec.get("entry_file") or ""
-        cmd = (
-            run_command_template.format(script=entry)
-            if "{script}" in run_command_template
-            else run_command_template
-        )
+        cmd = _fill_script(run_command_template, entry, spec.get("name", "run"))
         phases.append(Phase(
             name=spec.get("name", "run"),
             input_files=spec.get("input_files") or {},
@@ -1265,18 +1311,16 @@ def _collect_stages(
         phases = _collect_phases(gen_result, run_dir, run_command_template)
         return [Stage(name="run", phases=phases, parallel=False)]
 
-    def _command(entry: str, override) -> str:
-        template = override or run_command_template
-        if "{script}" in template:
-            return template.format(script=entry or "")
-        return template
+    from .refinement import single_entry
 
     def _phase(spec: Dict[str, Any], rdir: str) -> "Phase":
-        entry = spec.get("entry_file") or ""
+        entry = single_entry(spec.get("input_files") or {}, spec.get("entry_file"))
+        name = spec.get("name", "run")
         return Phase(
-            name=spec.get("name", "run"),
+            name=name,
             input_files=spec.get("input_files") or {},
-            run_command=_command(entry, spec.get("run_command")),
+            run_command=_fill_script(
+                spec.get("run_command") or run_command_template, entry, name),
             run_dir=str(rdir),
             entry_file=entry or "",
         )

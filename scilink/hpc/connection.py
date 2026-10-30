@@ -237,6 +237,13 @@ class HPCConnection:
     def stat(self, path: str) -> paramiko.SFTPAttributes:
         return self.sftp.stat(path)
 
+    def remove(self, path: str) -> None:
+        """Delete a remote file; a file that is not there is not an error."""
+        try:
+            self.sftp.remove(path)
+        except FileNotFoundError:   # paramiko's missing-file error
+            pass
+
     def mkdir_p(self, path: str) -> None:
         """Remote equivalent of ``mkdir -p``."""
         self.run(f"mkdir -p {_q(path)}")
