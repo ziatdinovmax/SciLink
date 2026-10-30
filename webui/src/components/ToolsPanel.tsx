@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, type ToolInventory } from "../api";
+import { api, type ToolDetail, type ToolInventory } from "../api";
 
 /** MCP tab — connect MCP servers to the session's agent and disconnect
- * them; each server card lists the tools it registered. Nothing else: the
+ * them; each server card lists the tools it registered, and a tool's chip
+ * opens its description and parameters. Nothing else: the
  * agent's own built-in tools are not listed (in a meta session that would
  * be only the meta's routing tools, not what the specialists can do), and
  * there is deliberately no tool-file uploader — users hand code to the
@@ -27,6 +28,8 @@ export function ToolsPanel({
   const [name, setName] = useState("");
   const [addr, setAddr] = useState("");
   const [headers, setHeaders] = useState("");
+  // The open tool, keyed "<server>/<tool>"; one at a time.
+  const [openTool, setOpenTool] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     api.tools(sessionId).then(setInv).catch((e) => setError(String(e)));
@@ -191,12 +194,30 @@ export function ToolsPanel({
               </button>
             </div>
             <div className="tool-chips">
-              {s.tools.map((t) => (
-                <span key={t} className="file-chip" title={inv.external.find((e) => e.name === t)?.description}>
-                  {t}
-                </span>
-              ))}
+              {s.tools.map((t) => {
+                const key = `${s.name}/${t}`;
+                return (
+                  <button
+                    key={t}
+                    type="button"
+                    className={`file-chip tool-chip${openTool === key ? " open" : ""}`}
+                    aria-expanded={openTool === key}
+                    onClick={() => setOpenTool(openTool === key ? null : key)}
+                  >
+                    {t}
+                  </button>
+                );
+              })}
             </div>
+            {s.tools.map((t) =>
+              openTool === `${s.name}/${t}` ? (
+                <ToolDetailCard
+                  key={t}
+                  detail={s.tool_details?.find((d) => d.name === t)}
+                  fallback={inv.external.find((e) => e.name === t)?.description}
+                />
+              ) : null,
+            )}
           </div>
         ))}
       </section>
@@ -215,6 +236,40 @@ export function ToolsPanel({
         </section>
       )}
 
+    </div>
+  );
+}
+
+/** What an MCP tool says about itself: the server's description, line
+ * breaks kept, and the parameters from its input schema. `fallback` is the
+ * agent's registered (one-line) description, for a server that predates
+ * `tool_details`. */
+function ToolDetailCard({ detail, fallback }: { detail?: ToolDetail; fallback?: string }) {
+  const description = detail?.description || fallback || "";
+  const params = detail?.parameters ?? [];
+  return (
+    <div className="tool-detail">
+      {description ? (
+        <p className="tool-detail-desc">{description}</p>
+      ) : (
+        <p className="caption">The server gives no description for this tool.</p>
+      )}
+      {params.length > 0 && (
+        <table className="tool-params">
+          <tbody>
+            {params.map((p) => (
+              <tr key={p.name}>
+                <td>
+                  <code>{p.name}</code>
+                  {p.required && <span className="caption"> required</span>}
+                </td>
+                <td className="caption">{p.type}</td>
+                <td>{p.description}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }

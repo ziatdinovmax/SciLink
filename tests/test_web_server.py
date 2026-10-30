@@ -1202,7 +1202,11 @@ class _FakeMcpAgent:
         self.calls.append((name, command, url, transport, headers))
         if url == "http://bad":
             raise RuntimeError("connection refused")
-        schemas = [{"type": "function", "function": {"name": f"{name}_add", "description": "Add."}}]
+        schemas = [{"type": "function", "function": {
+            "name": f"{name}_add", "description": "Add.\n\nTwo numbers.",
+            "parameters": {"type": "object", "required": ["a"], "properties": {
+                "a": {"type": "number", "description": "First."},
+                "b": {"anyOf": [{"type": "number"}, {"type": "null"}]}}}}}]
         self._mcp_connections[name] = SimpleNamespace(
             tool_schemas=schemas, command=command, transport=transport or "sse")
         self._external_tools.append({"name": f"{name}_add", "description": "Add."})
@@ -1227,7 +1231,15 @@ def test_tools_inventory_and_mcp_lifecycle(client, tmp_path):
     assert r.status_code == 200 and r.json()["registered"] == 1
     assert session.agent.calls[-1][1] == ["python", "-m", "calc_server", "--x", "1"]
     inv = r.json()["inventory"]
-    assert inv["mcp_servers"] == [{"name": "calc", "transport": "stdio", "tools": ["calc_add"]}]
+    (server,) = inv["mcp_servers"]
+    assert {k: server[k] for k in ("name", "transport", "tools")} == {
+        "name": "calc", "transport": "stdio", "tools": ["calc_add"]}
+    # the server's own description (line breaks kept) and parameters, for the chip
+    assert server["tool_details"] == [{
+        "name": "calc_add", "description": "Add.\n\nTwo numbers.",
+        "parameters": [
+            {"name": "a", "type": "number", "required": True, "description": "First."},
+            {"name": "b", "type": "number | null", "required": False, "description": ""}]}]
     assert inv["external"] == [{"name": "calc_add", "description": "Add."}]
     # duplicate name → 409; http transport with headers; failure → 400
     assert client.post(f"{base}/mcp", json={"name": "calc", "transport": "stdio", "command": "x"}).status_code == 409
