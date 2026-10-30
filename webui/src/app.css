@@ -974,6 +974,12 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .mcp-server-head { display: flex; align-items: center; gap: 4px; }
 .mcp-server-head .icon-btn { margin-left: auto; }
 .tool-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.tool-chip { cursor: pointer; font: inherit; font-size: 12px; }
+.tool-chip:hover, .tool-chip.open { color: var(--accent); border-color: var(--accent); }
+.tool-detail { margin-top: 8px; padding: 8px 10px; border-left: 2px solid var(--accent); font-size: 13px; }
+.tool-detail-desc { margin: 0 0 6px; white-space: pre-wrap; }
+.tool-params { border-collapse: collapse; font-size: 12px; }
+.tool-params td { padding: 3px 12px 3px 0; vertical-align: top; }
 .tool-list { margin: 6px 0 0; padding-left: 18px; font-size: 13px; }
 .tool-list li { margin: 3px 0; }
 

@@ -16,11 +16,36 @@ import os
 from typing import Any, Dict, List, Optional
 
 _DESC_MAX = 600
+_DETAIL_MAX = 8000  # a tool's own description, shown when its chip is opened
 
 
 def _clip(text: Any) -> str:
     s = " ".join(str(text or "").split())
     return s if len(s) <= _DESC_MAX else s[:_DESC_MAX - 1] + "…"
+
+
+def _tool_detail(fn: Dict[str, Any]) -> Dict[str, Any]:
+    """A tool's description as its server wrote it (line breaks kept) and
+    its parameters read from the input schema."""
+    desc = str(fn.get("description") or "").strip()
+    if len(desc) > _DETAIL_MAX:
+        desc = desc[:_DETAIL_MAX - 1] + "…"
+    schema = fn.get("parameters") if isinstance(fn.get("parameters"), dict) else {}
+    props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    required = set(schema.get("required") or [])
+    params = []
+    for pname, spec in props.items():
+        spec = spec if isinstance(spec, dict) else {}
+        ptype = spec.get("type")
+        if isinstance(ptype, list):
+            ptype = " | ".join(str(t) for t in ptype)
+        elif not ptype and isinstance(spec.get("anyOf"), list):
+            ptype = " | ".join(str(o.get("type")) for o in spec["anyOf"]
+                               if isinstance(o, dict) and o.get("type"))
+        params.append({"name": str(pname), "type": str(ptype or ""),
+                       "required": pname in required,
+                       "description": _clip(spec.get("description"))})
+    return {"name": str(fn.get("name", "")), "description": desc, "parameters": params}
 
 
 def tool_inventory(agent: Any) -> Dict[str, Any]:
@@ -32,15 +57,16 @@ def tool_inventory(agent: Any) -> Dict[str, Any]:
     servers: List[Dict[str, Any]] = []
     for name, conn in (getattr(agent, "_mcp_connections", None) or {}).items():
         schemas = getattr(conn, "tool_schemas", None) or []
-        tool_names = []
+        tool_names, details = [], []
         for s in schemas:
             fn = s.get("function", {}) if isinstance(s, dict) else {}
             if fn.get("name"):
                 tool_names.append(fn["name"])
+                details.append(_tool_detail(fn))
         transport = ("stdio" if getattr(conn, "command", None)
                      else getattr(conn, "transport", None) or "sse")
         servers.append({"name": str(name), "transport": transport,
-                        "tools": tool_names})
+                        "tools": tool_names, "tool_details": details})
     return {
         "external": external,
         "mcp_servers": servers,
