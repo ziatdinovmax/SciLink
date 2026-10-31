@@ -134,6 +134,11 @@ def main(argv=None) -> int:
               "(--insecure-no-auth). Make sure a reverse proxy in front "
               "authenticates every request.", file=sys.stderr)
 
+    if auth is not None and auth.multi_user:
+        # One knowledge-base store per host: on a shared server the chat
+        # tools must not create or grow it (kb_store.store_writes_refused).
+        os.environ["SCILINK_SHARED_STORE"] = "1"
+
     from .app import NO_BUNDLE_MESSAGE, create_app
     # Pasted local folder paths only make sense when the browser and the
     # server share a machine.

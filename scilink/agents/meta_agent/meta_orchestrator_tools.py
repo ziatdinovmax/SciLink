@@ -1222,6 +1222,71 @@ class MetaOrchestratorTools:
             required=[],
         )
 
+        # -- create_knowledge_base -------------------------------------------
+        def create_knowledge_base(name: str, paths, description: str = "") -> str:
+            if isinstance(paths, str):
+                paths = [paths]
+            print(f"  📚 Tool: Creating knowledge base '{name}' from "
+                  f"{len(paths or [])} path(s)...")
+            try:
+                m = self.orch.create_kb_from_documents(
+                    name, list(paths or []), description=description)
+            except Exception as e:
+                return json.dumps({"status": "error", "message": str(e)})
+            out = {
+                "status": "success",
+                "knowledge_base": m.get("name"),
+                "embedding_model": m.get("embedding_model"),
+                "documents": len(m.get("sources") or []),
+                "chunks": m.get("n_chunks"),
+                "n_vectors": m.get("n_vectors") or 0,
+                "attached": False,
+            }
+            if not m.get("n_vectors"):
+                out["note"] = ("Keyword-only knowledge base (no embeddings): "
+                               "lookups use keyword (BM25) retrieval.")
+            return json.dumps(out)
+
+        self._register_tool(
+            func=create_knowledge_base,
+            name="create_knowledge_base",
+            description=(
+                "Create a NEW named knowledge base in the user's persistent "
+                "store from document files or folders (PDF, text/markdown, "
+                "Excel/CSV, images). The store is shared across sessions, so "
+                "call this ONLY when the user explicitly asks to create or "
+                "save a knowledge base (in any autonomy mode; never on your "
+                "own initiative). Embeds with this session's embedding model, "
+                "or builds a keyword-only knowledge base when the session has "
+                "none. An existing name is refused (replacing one is done in "
+                "the terminal). The new knowledge base is NOT attached: "
+                "attach it with attach_knowledge_base(path=<name>) when the "
+                "user wants this session grounded in it. For using a document "
+                "in just this session's planning, pass it in the delegation "
+                "task instead."
+            ),
+            parameters={
+                "name": {
+                    "type": "string",
+                    "description": ("1-64 letters, digits, dots, underscores "
+                                    "or dashes, starting with a letter or "
+                                    "digit."),
+                },
+                "paths": {
+                    "type": ["string", "array"],
+                    "items": {"type": "string"},
+                    "description": "Absolute path(s) of the document file(s) "
+                                   "or folder(s).",
+                },
+                "description": {
+                    "type": "string",
+                    "description": ("One line on what it holds — shown when "
+                                    "deciding whether to attach it."),
+                },
+            },
+            required=["name", "paths"],
+        )
+
         # -- add_to_knowledge_base -------------------------------------------
         def add_to_knowledge_base(paths, name: str = None) -> str:
             if isinstance(paths, str):

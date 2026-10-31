@@ -1046,6 +1046,39 @@ class MetaOrchestratorAgent:
         for name in list(self._mcp_connections):
             self.disconnect_mcp_server(name)
 
+    def create_kb_from_documents(self, name: str, paths: List[str],
+                                 description: str = "") -> Dict[str, Any]:
+        """Build a NEW named store KB from documents (chat-driven
+        counterpart of 'scilink kb create').
+
+        Embeds with this session's embedding model; with none, the KB is
+        keyword-only (BM25), like any KB built without one. An existing name
+        is refused — replacing a KB is the terminal's ``--overwrite``. The
+        new KB is not attached: it joins the detached list in the prompt,
+        and attaching it follows the ordinary attach rule.
+
+        Returns:
+            The written manifest.
+        """
+        from ...knowledge.kb_store import create_kb, store_writes_refused
+        refused = store_writes_refused("Creating a knowledge base")
+        if refused:
+            raise PermissionError(refused)
+        if not paths:
+            raise ValueError("Give the document file(s) or folder(s) to build it from.")
+        model = self.embedding_model or None
+        manifest = create_kb(
+            name, [str(Path(p).expanduser()) for p in paths],
+            embedding_model=model,
+            api_key=self.embedding_api_key if model else None,
+            base_url=(self.embedding_base_url or self.base_url) if model else None,
+            description=description or "",
+        )
+        # The detached-KB note lists every store KB: refresh it, or the model
+        # is offered a list without the one it just built.
+        self._refresh_system_prompt()
+        return manifest
+
     def add_documents_to_kb(self, paths: List[str],
                             name: Optional[str] = None) -> Dict[str, Any]:
         """Permanently add documents to a named store KB (chat-driven
@@ -1064,7 +1097,11 @@ class MetaOrchestratorAgent:
         """
         from ...knowledge.kb_store import (
             add_to_kb, kb_store_dir, list_kbs, read_manifest,
+            store_writes_refused,
         )
+        refused = store_writes_refused("Adding to a knowledge base")
+        if refused:
+            raise PermissionError(refused)
         if not name:
             attached_manifest = (read_manifest(self.knowledge_dir)
                                  if self.knowledge_dir else None)
