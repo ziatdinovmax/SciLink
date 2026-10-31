@@ -39,6 +39,10 @@ check("prose around display math keeps its tilde", dhtml.includes("~5%") && !dht
 check("escapeTildes leaves $$ blocks untouched", escapeTildes("a ~ b $$ x \\sim y ~ z $$ c ~ d") === "a \\~ b $$ x \\sim y ~ z $$ c \\~ d");
 check("escapeTildes treats single-dollar spans as prose", escapeTildes("~$1 and $2~") === "\\~$1 and $2\\~");
 check("demoteHeadings shifts by two, skips fences", demoteHeadings("# T\n```\n# code\n```\n##### f") === "### T\n```\n# code\n```\n###### f");
+const step = "Prepare the grid:\n\n| T (°C) | c (M) |\n|---|---|\n| 20 | ~0.1 |";
+const shtml = render(step);
+check("a step's grid renders as a table", shtml.includes("<table>") && shtml.includes("<th>T (°C)</th>"), shtml);
+check("the tilde escape leaves the table's cells alone", shtml.includes("~0.1") && !shtml.includes("<del>"), shtml);
 check("gfm strikethrough still works when written as ~~text~~ unescaped", render("~~gone~~", false).includes("<del>"));
 
 console.log(failures ? `\n${failures} check(s) FAILED` : "\nall markdown checks passed");

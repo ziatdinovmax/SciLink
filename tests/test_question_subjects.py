@@ -484,3 +484,26 @@ def test_numbered_steps_recognise_the_formats_plans_are_written_in():
                                          "with sigma=2.\n   3. detect_atoms_dcnn(n_cage=4) then refine.")
     assert base.steps_text("Threshold and label.") == "Threshold and label."
     assert base.steps_block("⚙️ Pipeline", one_line)["items"] == base.numbered_steps(one_line)
+
+
+def test_plan_steps_table_rows_become_one_markdown_table_under_their_step():
+    # The planner is asked to lay a grid out as a markdown table inside
+    # experimental_steps and writes each row as its own entry: the review
+    # gate numbered the header, the delimiter and every row as steps.
+    steps = ["1. Prepare the grid:", "| T (°C) | c (M) |", "|---|---|", "| 20 | 0.1 |",
+             "| 40 | 0.2 |", "2. Anneal 1 h"]
+    assert ui._program_items(steps, numbered=True) == [
+        "Prepare the grid:\n\n| T (°C) | c (M) |\n|---|---|\n| 20 | 0.1 |\n| 40 | 0.2 |",
+        "Anneal 1 h"]
+    # a delimiter row the author left out is supplied (the table would not render)
+    assert ui.merge_table_rows(["| a | b |", "| 1 | 2 |"]) == ["| a | b |\n|---|---|\n| 1 | 2 |"]
+    # after a banner, or first, the table stands alone; a lone pipe entry is a step
+    assert ui.merge_table_rows(["=== D ===", "| a | b |", "|-|-|", "Anneal", "x | y | z"]) == \
+        ["=== D ===", "| a | b |\n|-|-|", "Anneal", "x | y | z"]
+    # ideation keeps the table inside its bullet by indenting its rows
+    s = ui.plan_subject({"proposed_experiments": [{
+        "experiment_name": "P", "hypothesis": "h", "expected_outcome": "e", "justification": "j",
+        "experimental_steps": ["PS-1 grid:", "| a | b |", "|---|---|", "| 1 | 2 |"]}]},
+        ideation=True)
+    program = next(b for b in s["blocks"] if b.get("label") == "🧭 Proposed program")
+    assert program["markdown"] == "- PS-1 grid:\n  \n  | a | b |\n  |---|---|\n  | 1 | 2 |"

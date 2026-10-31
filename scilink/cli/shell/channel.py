@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional
 
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.padding import Padding
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
@@ -203,8 +204,15 @@ class Widgets:
             elif kind == "chips":
                 emit(label, Text(" · ".join(str(x) for x in b.get("items") or [])))
             elif kind == "steps":
-                emit(label, Group(*(Text(f"{n}. {step}")
-                                    for n, step in enumerate(b.get("items") or [], 1))))
+                # a step's first line is numbered; what follows it (a table
+                # the step carries) is markdown under it
+                parts: list = []
+                for n, step in enumerate(b.get("items") or [], 1):
+                    head, _, rest = str(step).partition("\n")
+                    parts.append(Text(f"{n}. {head}"))
+                    if rest.strip():
+                        parts.append(Padding(Markdown(rest.strip()), (0, 0, 0, 3)))
+                emit(label, Group(*parts))
             elif kind == "table":
                 table = Table(title=b.get("caption") or None, title_style="dim",
                               show_edge=False, pad_edge=False, box=None,

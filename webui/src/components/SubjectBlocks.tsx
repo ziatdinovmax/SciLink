@@ -119,8 +119,12 @@ function Block({
     case "steps":
       return (
         <ol className="qs-steps">
+          {/* a step is markdown: a grid the planner lays out as a table
+              under a step (merge_table_rows) renders as one */}
           {block.items.map((s, i) => (
-            <li key={i}>{s}</li>
+            <li key={i}>
+              <MarkdownBody text={s} escapeTilde onFileClick={onFileClick} />
+            </li>
           ))}
         </ol>
       );
