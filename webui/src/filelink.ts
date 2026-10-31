@@ -10,7 +10,7 @@ import { api, type TreeEntry } from "./api";
 const FILE_EXTS = new Set([
   "png", "jpg", "jpeg", "tif", "tiff", "npy", "csv", "tsv", "xlsx",
   "json", "jsonl", "md", "html", "htm", "pdf", "txt", "log", "py",
-  "yaml", "yml", "h5", "hdf5", "nxs", "cif", "xyz", "sh", "zip",
+  "yaml", "yml", "h5", "hdf5", "nxs", "cif", "xyz", "extxyz", "vasp", "sh", "zip",
 ]);
 
 /** Path-like: no newlines, reasonable length, ends in a known extension. */

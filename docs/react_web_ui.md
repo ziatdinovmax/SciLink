@@ -387,7 +387,12 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   - previews: images with zoom, NPY/TIFF heatmaps with a colormap selector
     (server-rendered), sortable/filterable CSV/TSV/XLSX tables, markdown
     with a Rendered|Source toggle, JSON pretty-print, sandboxed HTML,
-    browser-native PDF, code/VASP text;
+    browser-native PDF, code/VASP text, and atomic structures
+    (`.xyz`/`.extxyz`/`.cif`/`.vasp`, POSCAR/CONTCAR) drawn by the server
+    with ASE from the views the simulation agents render, farther atoms
+    paler so one hidden behind another shows through, with a
+    Rendered|Source toggle (a trajectory shows its last frame; needs
+    `scilink[sim]`);
   - chat ↔ explorer cross-links: artifact cards jump to the file in the
     explorer; any file's "Attach to chat" drops its path into the draft;
   - gallery view (thumbnail grid) and per-folder / whole-session zip
@@ -451,7 +456,7 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
 | POST | `/sessions/{id}/plan_dirs` | repoint the plan agent's knowledge/code/data dirs at stable folders |
 | GET | `/sessions/{id}/files?path=` | serve a session file (traversal-fenced) |
 | GET | `/sessions/{id}/tree` | recursive listing with sizes/mtimes and per-file "new" flags |
-| GET | `/sessions/{id}/thumb?path=&size=&cmap=` | PNG thumbnail; NPY/TIFF rendered as normalized heatmaps |
+| GET | `/sessions/{id}/thumb?path=&size=&cmap=` | PNG thumbnail; NPY/TIFF rendered as normalized heatmaps, structure files as atom views (`X-Preview-Kind: structure`) |
 | GET | `/sessions/{id}/table?path=&limit=` | CSV/TSV/XLSX head as JSON columns+rows |
 | GET | `/sessions/{id}/zip?path=` | zip a session subdirectory (or the whole session) |
 | GET | `/sessions/{id}/skills` | catalog: built-in bundles by domain with descriptions, the session's custom skills |

@@ -545,6 +545,34 @@ def test_thumb_array_kinds(client, tmp_path):
     assert "object" in r.json()["detail"]  # dtype named from the header
 
 
+def test_thumb_structure_files(client, tmp_path):
+    """Structure files are drawn with ASE; an unreadable one is explained."""
+    pytest.importorskip("ase")
+    from ase.build import bulk, molecule
+    from ase.io import write
+
+    from scilink.server import previews
+
+    _, sdir = _fake_session(client, tmp_path)
+    base = f"/api/v1/sessions/{sdir.name}/thumb"
+    write(sdir / "POSCAR", bulk("Si", cubic=True), format="vasp")
+    write(sdir / "traj.extxyz", [bulk("Cu", cubic=True)] * 3)
+    write(sdir / "water.xyz", molecule("H2O"), format="xyz")  # no cell
+    for name in ["POSCAR", "traj.extxyz", "water.xyz"]:
+        r = client.get(base, params={"path": name, "size": 512})
+        assert r.status_code == 200 and r.content[:4] == b"\x89PNG", name
+        assert r.headers["X-Preview-Kind"] == "structure"
+
+    (sdir / "broken.xyz").write_text("not a structure\n")
+    r = client.get(base, params={"path": "broken.xyz"})
+    assert r.status_code == 422 and "download to inspect" in r.json()["detail"]
+
+    assert previews._xyz_frame_count(sdir / "traj.extxyz") == 3
+    assert previews._xyz_frame_count(sdir / "broken.xyz") is None
+    assert previews.is_structure_file(sdir / "CONTCAR")
+    assert not previews.is_structure_file(sdir / "POSCAR_view_x.png")
+
+
 def test_zip_endpoint(client, tmp_path):
     import io
     import zipfile

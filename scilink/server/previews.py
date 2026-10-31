@@ -16,6 +16,10 @@ from typing import Any, Dict
 _RASTER_EXTS = {".png", ".jpg", ".jpeg"}
 _ARRAY_EXTS = {".npy", ".tif", ".tiff"}
 _TABLE_EXTS = {".csv", ".tsv", ".xlsx"}
+_STRUCTURE_EXTS = {".xyz", ".extxyz", ".cif", ".vasp"}
+_VASP_NAMES = ("POSCAR", "CONTCAR")  # VASP structure files carry no extension
+_MAX_DRAWN_ATOMS = 5000  # one matplotlib patch per atom per view
+_DEPTH_FADE = 0.6  # how far toward white the farthest atom is drawn
 
 _ALLOWED_CMAPS = ("gray", "viridis", "magma", "plasma", "inferno")
 
@@ -115,6 +119,110 @@ def _line_plot_png(arr, size: int) -> bytes:
     return buf.getvalue()
 
 
+def _is_vasp_file(path: Path) -> bool:
+    return path.suffix.lower() == ".vasp" or (
+        path.suffix == "" and path.name.upper().startswith(_VASP_NAMES))
+
+
+def is_structure_file(path: Path) -> bool:
+    """An atomic-structure file the preview draws with ASE."""
+    return path.suffix.lower() in _STRUCTURE_EXTS or _is_vasp_file(path)
+
+
+def _xyz_frame_count(path: Path):
+    """Frames in an (ext)xyz file, read from the atom-count lines alone;
+    None when the file does not follow that layout."""
+    frames = 0
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                for _ in range(int(line) + 1):  # comment line + atom lines
+                    next(f)
+                frames += 1
+    except (ValueError, StopIteration):
+        return None
+    return frames
+
+
+def _depth_colors(atoms, rotation: str, base):
+    """Element colors faded toward white with distance from the viewer.
+
+    Without a depth cue an atom hidden exactly behind another (a vacancy
+    in one sulfur layer of MoS2, seen from above) leaves no trace; faded,
+    the atom behind the gap shows through in a paler shade."""
+    import numpy as np
+    from ase.utils import rotate
+
+    z = (atoms.positions @ rotate(rotation))[:, 2]  # larger is nearer the viewer
+    span = float(np.ptp(z))
+    far = (z.max() - z) / span if span > 1e-6 else np.zeros_like(z)
+    fade = _DEPTH_FADE * far[:, None]
+    return base[atoms.numbers] * (1 - fade) + fade
+
+
+def _structure_png(path: Path, size: int) -> bytes:
+    """Side-by-side views of the structure (its last frame for a
+    trajectory), with the views the simulation agents render."""
+    try:
+        from ase.data import chemical_symbols
+        from ase.data.colors import jmol_colors
+        from ase.io import read
+        from ase.visualize.plot import plot_atoms
+    except ImportError:
+        raise ValueError("drawing a structure needs ASE — install scilink[sim]")
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+
+    from scilink.utils.structure_views import (
+        AXIS_VIEWS,
+        _center_structure_for_visualization,
+        _get_optimal_rotations,
+    )
+
+    try:
+        atoms = read(path, index=-1, format="vasp" if _is_vasp_file(path) else None)
+    except Exception as exc:
+        raise ValueError(f"not a structure ASE can read ({exc}) — download to inspect")
+    if len(atoms) == 0:
+        raise ValueError("the file holds no atoms")
+    if len(atoms) > _MAX_DRAWN_ATOMS:
+        raise ValueError(f"{len(atoms)} atoms are too many to draw — download to inspect")
+    if atoms.cell.rank == 3:
+        atoms = _center_structure_for_visualization(atoms)
+        views = _get_optimal_rotations(atoms)
+    else:
+        views = AXIS_VIEWS
+
+    title = f"{atoms.get_chemical_formula(mode='metal')} · {len(atoms)} atoms"
+    frames = _xyz_frame_count(path) if path.suffix.lower() in (".xyz", ".extxyz") else None
+    if frames and frames > 1:
+        title += f" · frame {frames} of {frames}"
+
+    n = len(views)
+    fig, axes = plt.subplots(1, n, figsize=(4 * n, 4.6), dpi=max(64, size) / (4 * n))
+    for ax, (label, rotation) in zip(axes, views.items()):
+        plot_atoms(atoms, ax, rotation=rotation, radii=0.5, show_unit_cell=2,
+                   colors=_depth_colors(atoms, rotation, jmol_colors))
+        ax.set_title(label.replace("_", " "), fontsize=10)
+        ax.set_axis_off()
+    numbers = sorted(set(atoms.numbers))
+    fig.legend(
+        handles=[Patch(facecolor=jmol_colors[z], edgecolor="black", linewidth=0.5,
+                       label=chemical_symbols[z]) for z in numbers],
+        loc="lower center", ncol=min(len(numbers), 10), frameon=False, fontsize=9)
+    fig.suptitle(title, fontsize=12)
+    fig.tight_layout(rect=(0, 0.06, 1, 1))
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    return buf.getvalue()
+
+
 def _is_xy_pairs(shape) -> bool:
     return (len(shape) == 2 and 2 in shape and max(shape) >= 8
             and min(shape) == 2)
@@ -125,8 +233,9 @@ def render_thumbnail(path: Path, size: int = 256,
     """(PNG bytes, kind) for an image/array file, longest side ≤ ``size``.
 
     ``kind`` is ``"image"`` (raster), ``"heatmap"`` (2D array, colormap
-    applies), or ``"line"`` (1D / x-y data plotted — colormap is
-    meaningless there). Unrenderable arrays raise ValueError carrying the
+    applies), ``"line"`` (1D / x-y data plotted — colormap is
+    meaningless there), or ``"structure"`` (atoms drawn from several
+    sides). Unrenderable arrays raise ValueError carrying the
     shape/dtype from the .npy header so the caller can explain instead of
     serving a broken image.
     """
@@ -138,6 +247,8 @@ def render_thumbnail(path: Path, size: int = 256,
     ext = path.suffix.lower()
     kind = "image"
 
+    if is_structure_file(path):
+        return _structure_png(path, size), "structure"
     if ext == ".npy":
         import numpy as np
 
