@@ -430,9 +430,15 @@ export interface SkillCatalog {
   skills_supported: boolean;
 }
 
+export interface ToolDetail {
+  name: string;
+  description: string;
+  parameters: { name: string; type: string; required: boolean; description: string }[];
+}
+
 export interface ToolInventory {
   external: { name: string; description: string }[];
-  mcp_servers: { name: string; transport: string; tools: string[] }[];
+  mcp_servers: { name: string; transport: string; tools: string[]; tool_details?: ToolDetail[] }[];
   mcp_supported: boolean;
 }
 
