@@ -230,7 +230,7 @@ def _print_program(steps: List[Any], numbered: bool) -> None:
         print("  (Nothing listed)")
         return
     n = 0
-    for step in steps:
+    for step in merge_table_rows(steps):
         raw = str(step).strip()
         if not raw:
             continue
@@ -244,8 +244,14 @@ def _print_program(steps: List[Any], numbered: bool) -> None:
         else:
             body = raw
             lead, cont = "  • ", "    "
-        print(textwrap.fill(body, width=78, initial_indent=lead,
+        # A table the step carries (merge_table_rows) is printed row by row:
+        # wrapped, its rows would run into one another.
+        head, _, table = body.partition("\n")
+        print(textwrap.fill(head, width=78, initial_indent=lead,
                             subsequent_indent=cont))
+        for row in table.splitlines():
+            if row.strip():
+                print(cont + row)
 
 
 def concept_title(c: Dict[str, Any], fallback_index: Any = "") -> str:
@@ -510,12 +516,64 @@ def display_plan_summary(result: Dict[str, Any],
     print("\n" + "="*80)
 
 
+_BANNER = re.compile(r"={3,}.*={3,}")
+_DELIMITER_ROW = re.compile(r"\|?[\s:|-]+\|?")
+
+
+def _is_table_row(line: str) -> bool:
+    return line.startswith("|") or line.count("|") >= 2
+
+
+def _table_markdown(rows: List[str]) -> str:
+    """Rows as one markdown table: a delimiter row is required for the table
+    to render at all, so one is supplied when the author left it out."""
+    if len(rows) >= 2 and not ("-" in rows[1] and _DELIMITER_ROW.fullmatch(rows[1])):
+        width = len(rows[0].strip("|").split("|"))
+        rows = [rows[0], "|" + "---|" * width, *rows[1:]]
+    return "\n".join(rows)
+
+
+def merge_table_rows(steps: List[Any]) -> List[str]:
+    """Consecutive entries that are rows of one markdown table become one
+    entry. The planner is asked to lay a grid out as a markdown table inside
+    ``experimental_steps`` and writes each row as its own entry, so a review
+    gate numbered the header, the delimiter and every row as separate steps.
+    The table is attached to the step before it (the step whose layout it
+    defines) under a blank line; after a banner or at the start it stands
+    alone. A lone pipe-bearing entry is a step, not a table."""
+    out: List[str] = []
+    rows: List[str] = []
+
+    def flush() -> None:
+        if len(rows) < 2:
+            out.extend(rows)
+        else:
+            table = _table_markdown(rows)
+            if out and out[-1] and not _BANNER.fullmatch(out[-1]):
+                out[-1] = f"{out[-1]}\n\n{table}"
+            else:
+                out.append(table)
+        rows.clear()
+
+    for step in steps or []:
+        raw = str(step).strip()
+        lines = [ln.strip() for ln in raw.splitlines()]
+        if raw and all(_is_table_row(ln) for ln in lines):
+            rows.extend(lines)
+            continue
+        flush()
+        out.append(raw)
+    flush()
+    return out
+
+
 def _program_items(steps: List[Any], numbered: bool) -> List[str]:
     """The program/steps list as items, by ``_print_program``'s rules: blank
-    entries are spacing, a banner entry is a section divider, and a numbered
-    protocol drops the author's own numbering (the renderer numbers)."""
+    entries are spacing, a banner entry is a section divider, a numbered
+    protocol drops the author's own numbering (the renderer numbers), and a
+    table's rows are one item (``merge_table_rows``), rendered as markdown."""
     items = []
-    for step in steps or []:
+    for step in merge_table_rows(steps):
         raw = str(step).strip()
         if not raw:
             continue
@@ -607,8 +665,9 @@ def plan_subject(result: Dict[str, Any], ideation: bool = False,
             if not items:
                 blocks.append(subject_block("text", label=label, markdown="Nothing listed."))
             elif ideation:
-                blocks.append(subject_block("text", label=label,
-                                            markdown="\n".join(f"- {it}" for it in items)))
+                # a table under an item stays in it when its rows are indented
+                blocks.append(subject_block("text", label=label, markdown="\n".join(
+                    "- " + it.replace("\n", "\n  ") for it in items)))
             else:
                 blocks.append(subject_block("steps", label=label, items=items))
         equipment = exp.get("required_equipment", [])
