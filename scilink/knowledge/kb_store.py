@@ -65,6 +65,16 @@ def kb_store_dir() -> Path:
     return scilink_home() / "knowledge_bases"
 
 
+def store_writes_refused(what: str) -> Optional[str]:
+    """The refusal for a chat-side change to the store on a shared server,
+    else ``None``. The store is one per host; on a multi-user server the
+    server CLI sets ``SCILINK_SHARED_STORE`` and changes are an operator's."""
+    if os.environ.get("SCILINK_SHARED_STORE", "").strip().lower() in ("", "0", "false", "no"):
+        return None
+    return (f"{what} is disabled on a shared server: the knowledge-base store is every "
+            "user's. An operator can do it with `scilink kb`.")
+
+
 def _validate_name(name: str) -> str:
     if not name or not _NAME_RE.match(name):
         raise ValueError(

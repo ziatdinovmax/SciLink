@@ -302,10 +302,15 @@ launch directory's `kb_storage`, plus every named KB with its description and
 source list — are offered **in chat**. In autopilot the meta asks before the
 first planning delegation; in autonomous mode it attaches the KB whose
 sources are clearly relevant to the task (and leaves all detached otherwise).
-Growing a KB works from chat too — *"add this datasheet to my produced-water
-knowledge base"* embeds just that document (with the KB's own embedding
-model) and the running session picks it up immediately; additions happen
-only on your explicit request, since a named KB is shared across sessions.
+Creating and growing a KB work from chat too — *"save the DOE report I
+uploaded as a knowledge base called produced-water"* builds it in the store
+(with the session's embedding model, or keyword-only without one) and offers
+it to later sessions like any named KB; *"add this datasheet to my
+produced-water knowledge base"* embeds just that document (with the KB's own
+embedding model) and the running session picks it up immediately. Both
+happen only on your explicit request, since a named KB is shared across
+sessions, and both are refused on a multi-user server, where the store
+belongs to every user (`scilink kb` is the operator's route there).
 Sessions otherwise treat named KBs as read-only: in-session document use
 stays session-local and never mutates the store.
 
