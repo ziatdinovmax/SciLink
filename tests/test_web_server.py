@@ -573,6 +573,58 @@ def test_thumb_structure_files(client, tmp_path):
     assert not previews.is_structure_file(sdir / "POSCAR_view_x.png")
 
 
+def test_structure_endpoint_for_the_3d_viewer(client, tmp_path):
+    """The 3D viewer's data: atoms, display positions and cell, ASE's
+    colours; a slab turned so its surface normal points up (+y), whichever
+    cell axis holds its vacuum; a file that is not a structure is refused."""
+    pytest.importorskip("ase")
+    import numpy as np
+    from ase.build import fcc111, molecule
+    from ase.io import write
+
+    _, sdir = _fake_session(client, tmp_path)
+    base = f"/api/v1/sessions/{sdir.name}/structure"
+
+    slab = fcc111("Cu", size=(3, 3, 3), vacuum=8.0)
+    slab.rotate(90, "x", rotate_cell=True)  # the vacuum vector c now points along -y
+    write(sdir / "POSCAR", slab, format="vasp")
+    d = client.get(base, params={"path": "POSCAR"}).json()
+    assert d["slab"] is True and d["title"].startswith("Cu27")
+    assert d["symbols"] == ["Cu"] * 27 and d["colors"]["Cu"].startswith("#")
+    extent = np.ptp(np.array(d["positions"]), axis=0)
+    assert extent[1] < extent[0] and extent[1] < extent[2]  # layers stacked along y
+    c = np.array(d["cell"])[2]
+    np.testing.assert_allclose(c / np.linalg.norm(c), [0, 1, 0], atol=1e-6)  # turned up
+
+    # The usual case, vacuum along +z, and an oblique cell whose vacuum
+    # vector leans: up is the surface normal, not the vacuum vector.
+    write(sdir / "slab_z.vasp", fcc111("Pt", size=(2, 2, 3), vacuum=8.0), format="vasp")
+    oblique = fcc111("Cu", size=(2, 2, 3), vacuum=8.0)
+    cell = oblique.get_cell().array.copy()
+    cell[2] += 0.5 * cell[0]  # shear c by half of a
+    oblique.set_cell(cell)
+    write(sdir / "oblique.vasp", oblique, format="vasp")
+    for name in ("slab_z.vasp", "oblique.vasp"):
+        d = client.get(base, params={"path": name}).json()
+        a_, b_, c_ = np.array(d["cell"])
+        normal = np.cross(a_, b_)
+        normal *= np.sign(np.dot(normal, c_))
+        np.testing.assert_allclose(normal / np.linalg.norm(normal), [0, 1, 0], atol=1e-6)
+
+    write(sdir / "water.xyz", molecule("H2O"), format="xyz")
+    d = client.get(base, params={"path": "water.xyz"}).json()
+    assert d["cell"] is None and d["slab"] is False and sorted(d["colors"]) == ["H", "O"]
+
+    assert client.get(base, params={"path": "../outside.xyz"}).status_code == 403
+    assert client.get(base, params={"path": "missing.xyz"}).status_code == 404
+
+    (sdir / "notes.txt").write_text("x")
+    assert client.get(base, params={"path": "notes.txt"}).status_code == 422
+    (sdir / "broken.xyz").write_text("not a structure\n")
+    r = client.get(base, params={"path": "broken.xyz"})
+    assert r.status_code == 422 and "download to inspect" in r.json()["detail"]
+
+
 def test_zip_endpoint(client, tmp_path):
     import io
     import zipfile
@@ -632,13 +684,13 @@ def test_scan_new_images(tmp_path):
     (cand / "visualization.png").write_bytes(b"x")
     (cand / "debug_masks.png").write_bytes(b"x")
     out = _scan_new_images(str(root), seen)
-    rels = {rel: label for rel, label, _branch, _v in out}
+    rels = {e["path"]: e["label"] for e in out}
     assert set(rels) == {"fit_overlay.png", "results/img/_candidates/cand_02/visualization.png"}
     assert rels["results/img/_candidates/cand_02/visualization.png"] == "candidate 2"
     assert rels["fit_overlay.png"] == "fit overlay"
-    out = [o for o in out if o[0] == "fit_overlay.png"]
+    out = [o for o in out if o["path"] == "fit_overlay.png"]
     # the version token is the file mtime (nanoseconds), carried to the client
-    assert out[0][3] == (root / "fit_overlay.png").stat().st_mtime_ns
+    assert out[0]["v"] == (root / "fit_overlay.png").stat().st_mtime_ns
     # already-seen files are not re-emitted
     assert _scan_new_images(str(root), seen) == []
 
@@ -650,8 +702,101 @@ def test_scan_new_images(tmp_path):
     os.utime(fit, ns=(st.st_atime_ns + 5_000_000_000,
                       st.st_mtime_ns + 5_000_000_000))
     rewritten = _scan_new_images(str(root), seen)
-    assert [rel for rel, _l, _b, _v in rewritten] == ["fit_overlay.png"]
-    assert rewritten[0][3] == fit.stat().st_mtime_ns
+    assert [e["path"] for e in rewritten] == ["fit_overlay.png"]
+    assert rewritten[0]["v"] == fit.stat().st_mtime_ns
+
+
+def test_scan_new_images_streams_one_structure_per_folder(tmp_path):
+    """A structure the agents write streams to the inset as a 3D entry, one
+    per structure folder (its POSCAR and .extxyz are one structure), named by
+    the folder; a later CONTCAR replaces it in the filmstrip."""
+    from scilink.server.runner import TurnState, _record_live_image, _scan_new_images
+
+    root = tmp_path / "s"
+    folder = root / "simulation" / "structures" / "MoS2_monolayer_001"
+    folder.mkdir(parents=True)
+    seen: dict = {}
+    _scan_new_images(str(root), seen)
+    (folder / "structure.extxyz").write_text("x")
+    (folder / "POSCAR").write_text("x")
+    (folder / "INCAR").write_text("x")                 # an input, not a structure
+    # The agent's own drawings of the structure: the 3D entry stands in for
+    # them in the inset. Another figure in the folder still streams, and so
+    # does a view drawing anywhere the inset draws no structure.
+    (folder / "structure_view_surface.png").write_bytes(b"x")
+    (folder / "POSCAR_view_z.png").write_bytes(b"x")
+    (folder / "band_gap.png").write_bytes(b"x")
+    (root / "analysis").mkdir()
+    (root / "analysis" / "fit_view_x.png").write_bytes(b"x")
+    out = _scan_new_images(str(root), seen)
+    structures = [e for e in out if e.get("kind") == "structure"]
+    assert len(structures) == 1
+    assert structures[0]["label"] == "MoS2 monolayer 001"
+    assert structures[0]["group"] == "simulation/structures/MoS2_monolayer_001"
+    assert {e["path"] for e in out if "kind" not in e} == {
+        "simulation/structures/MoS2_monolayer_001/band_gap.png", "analysis/fit_view_x.png"}
+
+    turn = TurnState()
+    for e in reversed(out):
+        _record_live_image(turn, e)
+    contcar = folder / "CONTCAR"
+    contcar.write_text("x")
+    # Within the folder's re-send interval only the turn's closing sweep sends it.
+    assert _scan_new_images(str(root), seen) == []
+    (later,) = _scan_new_images(str(root), seen, final=True)
+    assert later["path"].endswith("CONTCAR")
+    _record_live_image(turn, later)
+    assert [e["path"] for e in turn.live_images if e.get("kind") == "structure"] == [later["path"]]
+    assert turn.live_images[-1] is later
+
+
+def test_structures_never_take_a_figures_place(tmp_path, monkeypatch):
+    """Structures have their own per-tick slots; a folder rewritten
+    continually is re-sent at most every _STRUCTURE_RESEND_S, its newest
+    file kept for a later tick (and for the turn's closing sweep); what a
+    turn starts with is seeded, never streamed; a file too large to stream
+    is left to the Files tab."""
+    from scilink.server import runner
+
+    root = tmp_path / "s"
+    sim = root / "simulation"
+    (sim / "old").mkdir(parents=True)
+    (sim / "old" / "POSCAR").write_text("x")
+    seen: dict = {}
+    assert runner._scan_new_images(str(root), seen, seed=True) == []
+
+    for i in range(4):
+        (root / f"fig{i}.png").write_bytes(b"x")
+        (sim / f"run{i}").mkdir()
+        (sim / f"run{i}" / "POSCAR").write_text("x")
+    (sim / "big").mkdir()
+    (sim / "big" / "train.xyz").write_bytes(b"x" * (runner._STRUCTURE_MAX_BYTES + 1))
+    # Outside the simulation agents' folder a structure file is not streamed.
+    (root / "analysis").mkdir()
+    (root / "analysis" / "atoms.xyz").write_text("x")
+    out = runner._scan_new_images(str(root), seen)
+    figures = [e for e in out if "kind" not in e]
+    structures = [e for e in out if e.get("kind") == "structure"]
+    assert len(figures) == runner._IMAGE_EMIT_CAP == 4  # all four figures, none displaced
+    assert len(structures) == runner._STRUCTURE_EMIT_CAP
+    assert not any(e["path"].startswith(("simulation/old/", "simulation/big/", "analysis/"))
+                   for e in out)
+    rest = runner._scan_new_images(str(root), seen)  # the other two folders, next tick
+    assert {e["group"] for e in rest} | {e["group"] for e in structures} == {
+        f"simulation/run{i}" for i in range(4)}
+
+    # A folder rewritten moments after it was sent waits; the closing sweep does not.
+    contcar = sim / "run0" / "CONTCAR"
+    contcar.write_text("x")
+    assert runner._scan_new_images(str(root), seen) == []
+    clock = runner.time.time() + runner._STRUCTURE_RESEND_S + 1
+    monkeypatch.setattr(runner.time, "time", lambda: clock)
+    (later,) = runner._scan_new_images(str(root), seen)
+    assert later["path"] == "simulation/run0/CONTCAR"
+    monkeypatch.undo()
+    (sim / "run0" / "POSCAR").write_text("y")
+    (closing,) = runner._scan_new_images(str(root), seen, final=True)
+    assert closing["group"] == "simulation/run0"
 
 
 def test_feedback_flow_and_409(client, tmp_path):

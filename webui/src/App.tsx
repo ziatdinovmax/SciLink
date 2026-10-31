@@ -50,6 +50,8 @@ export interface LiveImage {
   label: string;
   branch: string | null;
   v?: number; // file mtime — cache-busting version so a rewrite re-fetches
+  kind?: "structure"; // an atomic structure, drawn in 3D rather than as an <img>
+  group?: string; // a structure's folder: one entry per structure, its newest file
 }
 
 const LIVE_IMAGE_CAP = 30; // keep a bounded filmstrip of recent figures
@@ -146,16 +148,19 @@ function reducer(state: SessionState, action: Action): SessionState {
           // updates the existing entry's version and moves it to the
           // "latest" slot; an identical replay (same path+version) is a
           // reconnect artifact and is dropped.
-          const existing = state.liveImages.findIndex(
-            (i) => i.path === ev.path,
-          );
-          if (existing >= 0 && state.liveImages[existing].v === ev.v)
+          // A structure is one entry per folder (its POSCAR, .extxyz and
+          // CONTCAR are one structure), keyed by `group`.
+          const key = (i: { path: string; group?: string }) => i.group ?? i.path;
+          const existing = state.liveImages.findIndex((i) => key(i) === key(ev));
+          if (existing >= 0 && state.liveImages[existing].path === ev.path
+              && state.liveImages[existing].v === ev.v)
             return state;
-          const entry = {
+          const entry: LiveImage = {
             path: ev.path,
             label: ev.label,
             branch: ev.branch,
             v: ev.v,
+            ...(ev.kind === "structure" ? { kind: "structure" as const, group: ev.group } : {}),
           };
           const next =
             existing >= 0

@@ -14,6 +14,7 @@
     "check:vocabulary": "node --experimental-strip-types scripts/vocabulary_check.ts"
   },
   "dependencies": {
+    "3dmol": "^2.5.5",
     "highlight.js": "^11.12.0",
     "katex": "^0.16.11",
     "react": "^18.3.1",

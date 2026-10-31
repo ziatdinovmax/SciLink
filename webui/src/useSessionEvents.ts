@@ -20,6 +20,8 @@ export type SessionEvent =
       label: string;
       branch: string | null;
       v?: number;
+      kind?: "structure";
+      group?: string;
     }
   | { type: "delegations"; view: DelegationView }
   | { type: "error"; message: string };
@@ -68,6 +70,7 @@ export function useSessionEvents(
         label: d.label ?? "",
         branch: d.branch ?? null,
         v: d.v,
+        ...(d.kind === "structure" ? { kind: "structure" as const, group: d.group } : {}),
       });
     });
     src.addEventListener("delegations", (e) =>

@@ -378,7 +378,11 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   as the agent writes them mid-turn, with a filmstrip to page back and a
   branch label during fan-outs. Driven by `analysis_image` SSE events from
   the same filesystem watcher as the explorer; intermediates (candidate
-  attempts, elbow plots, preview grids) are filtered server-side.
+  attempts, elbow plots, preview grids) are filtered server-side. A
+  structure the simulation agents write under `simulation/` (POSCAR,
+  `.extxyz`, a relaxed CONTCAR) shows as a small turning 3D view, one per
+  structure folder, named by the folder, a folder rewritten continually
+  re-sent at most every 10 s; a click opens it in Files.
 - **File Explorer** (Files tab) — beyond Streamlit parity:
   - live tree: no Refresh button — the server emits `files_changed` while a
     turn runs, so artifacts appear as the agent writes them;
@@ -392,7 +396,10 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
     with ASE from the views the simulation agents render, farther atoms
     paler so one hidden behind another shows through, with a
     Rendered|Source toggle (a trajectory shows its last frame; needs
-    `scilink[sim]`);
+    `scilink[sim]`). The simulation agents' structures (under the meta
+    session's `simulation/`) open instead in an interactive 3Dmol.js view
+    (rotate, zoom, hover an atom, ball-and-stick or space-filling, spin; a
+    slab opens surface-up), with 3D|Views|Source;
   - chat ↔ explorer cross-links: artifact cards jump to the file in the
     explorer; any file's "Attach to chat" drops its path into the draft;
   - gallery view (thumbnail grid) and per-folder / whole-session zip
@@ -448,7 +455,7 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
 | POST | `/sessions` | create, or resume with `resume_dir` |
 | GET/PATCH | `/sessions/{id}` | snapshot / rename |
 | POST | `/sessions/{id}/messages` | start a turn (409 while one runs) |
-| GET | `/sessions/{id}/events` | SSE: `log`, `status`, `question`, `question_cleared`, `assistant_message`, `session_named`, `files_changed`, `analysis_image`, `delegations`, `error` |
+| GET | `/sessions/{id}/events` | SSE: `log`, `status`, `question`, `question_cleared`, `assistant_message`, `session_named`, `files_changed`, `analysis_image` (a figure, or a simulation structure file with `kind: structure` and its folder as `group`, drawn in 3D by the inset), `delegations`, `error` |
 | POST | `/sessions/{id}/feedback` | answer the parked HITL question |
 | POST | `/sessions/{id}/stop` | stop the running turn |
 | POST | `/sessions/{id}/uploads` | multipart, `category` = data/metadata/knowledge/code/planning_data/meta/scripts; optional `paths` (JSON list of relative paths, one per file) makes it a layout-preserving folder upload |
@@ -457,6 +464,7 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
 | GET | `/sessions/{id}/files?path=` | serve a session file (traversal-fenced) |
 | GET | `/sessions/{id}/tree` | recursive listing with sizes/mtimes and per-file "new" flags |
 | GET | `/sessions/{id}/thumb?path=&size=&cmap=` | PNG thumbnail; NPY/TIFF rendered as normalized heatmaps, structure files as atom views (`X-Preview-Kind: structure`) |
+| GET | `/sessions/{id}/structure?path=` | a structure file as JSON for the 3D viewer: symbols, display positions and cell (a slab turned surface-up), ASE's colours |
 | GET | `/sessions/{id}/table?path=&limit=` | CSV/TSV/XLSX head as JSON columns+rows |
 | GET | `/sessions/{id}/zip?path=` | zip a session subdirectory (or the whole session) |
 | GET | `/sessions/{id}/skills` | catalog: built-in bundles by domain with descriptions, the session's custom skills |

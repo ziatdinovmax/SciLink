@@ -972,6 +972,23 @@ def create_app(session_root: Path, serve_frontend: bool = True,
                         headers={"Cache-Control": "no-cache",
                                  "X-Preview-Kind": kind})
 
+    @app.get("/api/v1/sessions/{session_id}/structure")
+    def get_structure(request: Request, session_id: str, path: str):
+        session = _session_or_404(request, session_id)
+        from . import previews
+        try:
+            target = files_mod.resolve_safe(session.session_dir, path)
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc))
+        if not target.is_file():
+            raise HTTPException(404, f"No such file: {path}")
+        if not previews.is_structure_file(target):
+            raise HTTPException(422, f"Not a structure file: {path}")
+        try:
+            return previews.structure_model(target)
+        except Exception as exc:
+            raise HTTPException(422, f"Could not read structure {path}: {exc}")
+
     @app.get("/api/v1/sessions/{session_id}/table")
     def get_table(request: Request, session_id: str, path: str, limit: int = 500):
         session = _session_or_404(request, session_id)

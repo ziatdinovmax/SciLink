@@ -58,6 +58,14 @@ def _get_optimal_rotations(atoms):
     else:
         return dict(AXIS_VIEWS)
 
+def _vacuum_gaps(cell, positions):
+    """Empty space along each cell vector: its length less the atoms'
+    extent along the same index. The one reading behind slab detection, the
+    drawn views' choice of axis and the 3D preview's "up"."""
+    cell = np.asarray(cell)
+    extents = positions.max(axis=0) - positions.min(axis=0)
+    return np.linalg.norm(cell, axis=1) - extents
+
 def _is_slab_structure(cell, positions):
     """Detect slab by checking for a >5 Å vacuum gap along any axis.
 
@@ -65,19 +73,31 @@ def _is_slab_structure(cell, positions):
     axis (not just z), so slabs with vacuum along a or b are detected
     correctly and anisotropic crystals without vacuum aren't false-
     positive."""
-    cell_lengths = np.linalg.norm(cell, axis=1)
-    extents = positions.max(axis=0) - positions.min(axis=0)
-    return any(length > extent + 5.0 for length, extent in zip(cell_lengths, extents))
+    return bool(np.any(_vacuum_gaps(cell, positions) > 5.0))
+
+def _slab_vacuum_axis(cell, positions):
+    """Index of the cell vector the vacuum runs along: the one with the most
+    empty space. Not the longest cell vector: a wide in-plane supercell
+    (6x6 MoS2, ~19 A) outgrows a ~18 A cell height."""
+    return int(np.argmax(_vacuum_gaps(cell, positions)))
+
+def _slab_surface_normal(cell, positions):
+    """Unit normal of a slab's surface, toward the vacuum side of its cell.
+
+    The cross product of the two in-plane cell vectors, not the vacuum
+    vector itself: in an oblique cell (c sheared off the normal) they
+    differ."""
+    cell = np.asarray(cell, dtype=float)
+    k = _slab_vacuum_axis(cell, positions)
+    normal = np.cross(cell[(k + 1) % 3], cell[(k + 2) % 3])
+    if np.dot(normal, cell[k]) < 0:
+        normal = -normal
+    return normal / np.linalg.norm(normal)
 
 def _get_slab_rotations(cell, positions):
     """Views optimized for slab structures"""
-    # The vacuum runs along the axis with the most empty space, the same
-    # comparison _is_slab_structure makes. Not the longest cell vector: a
-    # wide in-plane supercell (6x6 MoS2, ~19 A) outgrows a ~18 A cell height.
-    lengths = np.linalg.norm(cell, axis=1)
-    extents = positions.max(axis=0) - positions.min(axis=0)
-    vacuum_dir = np.argmax(lengths - extents)
-    
+    vacuum_dir = _slab_vacuum_axis(cell, positions)
+
     if vacuum_dir == 2:  # vacuum along z
         return {
             'surface': '0x,0y,0z',      # Top view of surface

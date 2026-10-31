@@ -9,6 +9,7 @@ import {
 } from "../api";
 import { useUIActions } from "../UIContext";
 import { demoteHeadings, MarkdownBody } from "./MarkdownBody";
+import { StructureViewer } from "./StructureViewer";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg"];
 const ARRAY_EXTS = ["npy", "tif", "tiff"];
@@ -16,6 +17,9 @@ const TABLE_EXTS = ["csv", "tsv", "xlsx"];
 const CODE_EXTS = ["py", "sh", "yaml", "yml", "toml", "log", "txt", "jsonl", "in"];
 // Atomic structures, drawn by the server with ASE (previews.is_structure_file).
 const STRUCTURE_EXTS = ["xyz", "extxyz", "cif", "vasp"];
+// Where the simulation agents write (the meta session's simulation child):
+// their structures get the interactive 3D view; see StructurePreview.
+const SIMULATION_DIR = "simulation";
 const CMAPS = ["viridis", "gray", "magma", "plasma", "inferno"];
 
 function ext(path: string): string {
@@ -311,19 +315,34 @@ function StructurePreview({
   path: string;
   url: string;
 }) {
-  const [mode, setMode] = useState<"rendered" | "source">("rendered");
+  // The interactive 3D view is for the simulation agents' structures (the
+  // meta session's simulation/ folder); any other structure file keeps the
+  // server-drawn views it always had.
+  const simulation = path.startsWith(`${SIMULATION_DIR}/`);
+  const [chosen, setMode] = useState<"3d" | "rendered" | "source">(simulation ? "3d" : "rendered");
+  // The mode is kept across files; one with no 3D view shows its drawn views.
+  const mode = chosen === "3d" && !simulation ? "rendered" : chosen;
   return (
     <div>
       <div className="preview-toolbar">
+        {simulation && (
+          <button className={mode === "3d" ? "primary" : ""} onClick={() => setMode("3d")}>
+            3D
+          </button>
+        )}
         <button className={mode === "rendered" ? "primary" : ""} onClick={() => setMode("rendered")}>
-          Rendered
+          {simulation ? "Views" : "Rendered"}
         </button>
         <button className={mode === "source" ? "primary" : ""} onClick={() => setMode("source")}>
           Source
         </button>
       </div>
-      {/* The server draws the structure; ArrayPreview shows its PNG or its error. */}
-      {mode === "rendered" ? (
+      {/* 3D: drawn in the browser from the server's reading of the file.
+          Rendered/Views: the server draws it from several sides;
+          ArrayPreview shows its PNG or its error. */}
+      {mode === "3d" ? (
+        <StructureViewer sessionId={sessionId} path={path} />
+      ) : mode === "rendered" ? (
         <ArrayPreview sessionId={sessionId} path={path} />
       ) : (
         <TextPreview url={url} />
