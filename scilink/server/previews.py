@@ -19,6 +19,10 @@ _TABLE_EXTS = {".csv", ".tsv", ".xlsx"}
 _STRUCTURE_EXTS = {".xyz", ".extxyz", ".cif", ".vasp"}
 _VASP_NAMES = ("POSCAR", "CONTCAR")  # VASP structure files carry no extension
 _MAX_DRAWN_ATOMS = 5000  # one matplotlib patch per atom per view
+# Read before the atom count is known: ASE parses a whole multi-frame file
+# to reach its last frame, so a training set or long trajectory is refused
+# by size first.
+_MAX_STRUCTURE_BYTES = 50 * 1024 * 1024
 _DEPTH_FADE = 0.6  # how far toward white the farthest atom is drawn
 
 _ALLOWED_CMAPS = ("gray", "viridis", "magma", "plasma", "inferno")
@@ -162,28 +166,19 @@ def _depth_colors(atoms, rotation: str, base):
     return base[atoms.numbers] * (1 - fade) + fade
 
 
-def _structure_png(path: Path, size: int) -> bytes:
-    """Side-by-side views of the structure (its last frame for a
-    trajectory), with the views the simulation agents render."""
+def _read_structure(path: Path):
+    """(atoms, frames) for a structure file: its last frame, centred in its
+    cell when it has one; ``frames`` is the trajectory length or None.
+    Raises ValueError with a reason a reader can act on."""
     try:
-        from ase.data import chemical_symbols
-        from ase.data.colors import jmol_colors
         from ase.io import read
-        from ase.visualize.plot import plot_atoms
     except ImportError:
         raise ValueError("drawing a structure needs ASE — install scilink[sim]")
-    import matplotlib
+    from scilink.utils.structure_views import _center_structure_for_visualization
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.patches import Patch
-
-    from scilink.utils.structure_views import (
-        AXIS_VIEWS,
-        _center_structure_for_visualization,
-        _get_optimal_rotations,
-    )
-
+    size = path.stat().st_size
+    if size > _MAX_STRUCTURE_BYTES:
+        raise ValueError(f"{size / 1024 / 1024:.0f} MB is too large to draw — download to inspect")
     try:
         atoms = read(path, index=-1, format="vasp" if _is_vasp_file(path) else None)
     except Exception as exc:
@@ -194,14 +189,87 @@ def _structure_png(path: Path, size: int) -> bytes:
         raise ValueError(f"{len(atoms)} atoms are too many to draw — download to inspect")
     if atoms.cell.rank == 3:
         atoms = _center_structure_for_visualization(atoms)
-        views = _get_optimal_rotations(atoms)
-    else:
-        views = AXIS_VIEWS
-
-    title = f"{atoms.get_chemical_formula(mode='metal')} · {len(atoms)} atoms"
     frames = _xyz_frame_count(path) if path.suffix.lower() in (".xyz", ".extxyz") else None
+    return atoms, frames
+
+
+def _structure_title(atoms, frames) -> str:
+    title = f"{atoms.get_chemical_formula(mode='metal')} · {len(atoms)} atoms"
     if frames and frames > 1:
         title += f" · frame {frames} of {frames}"
+    return title
+
+
+def _rotation_onto(v, target):
+    """The rotation matrix taking unit vector ``v`` onto unit vector ``target``."""
+    import numpy as np
+
+    v, target = np.asarray(v, float), np.asarray(target, float)
+    axis, c = np.cross(v, target), float(np.dot(v, target))
+    if np.linalg.norm(axis) < 1e-9:
+        if c > 0:
+            return np.eye(3)
+        # Opposite: half a turn about any axis perpendicular to v.
+        p = np.cross(v, [1.0, 0.0, 0.0] if abs(v[0]) < 0.9 else [0.0, 1.0, 0.0])
+        p /= np.linalg.norm(p)
+        return 2 * np.outer(p, p) - np.eye(3)
+    k = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+    return np.eye(3) + k + k @ k / (1 + c)
+
+
+def structure_model(path: Path) -> Dict[str, Any]:
+    """The structure as data for the browser's interactive 3D viewer.
+
+    Atoms, positions and the cell edges, with ASE's Jmol colours so the 3D
+    view and the drawn views agree. A slab is turned so its surface normal
+    points up (+y, screen up), toward its vacuum, the vacuum axis read as
+    the drawn views read it (structure_views): the viewer then opens on the
+    slab from the side, and a person tilts it to see the surface. The
+    coordinates are for display only — the file's own frame is in its
+    Source view.
+    """
+    import numpy as np
+    from ase.data.colors import jmol_colors
+
+    from scilink.utils.structure_views import _is_slab_structure, _slab_surface_normal
+
+    atoms, frames = _read_structure(path)
+    positions = atoms.get_positions()
+    cell = np.asarray(atoms.get_cell()) if atoms.cell.rank == 3 else None
+    slab = cell is not None and _is_slab_structure(cell, positions)
+    if slab:
+        rot = _rotation_onto(_slab_surface_normal(cell, positions), [0.0, 1.0, 0.0])
+        positions, cell = positions @ rot.T, cell @ rot.T
+    symbols = atoms.get_chemical_symbols()
+    colors = {s: "#" + "".join(f"{round(255 * c):02x}" for c in jmol_colors[z])
+              for s, z in zip(symbols, atoms.numbers)}
+    return {
+        "title": _structure_title(atoms, frames),
+        "symbols": symbols,
+        "positions": np.round(positions, 4).tolist(),
+        "cell": None if cell is None else np.round(cell, 4).tolist(),
+        "colors": colors,
+        "slab": bool(slab),
+    }
+
+
+def _structure_png(path: Path, size: int) -> bytes:
+    """Side-by-side views of the structure (its last frame for a
+    trajectory), with the views the simulation agents render."""
+    atoms, frames = _read_structure(path)
+    from ase.data import chemical_symbols
+    from ase.data.colors import jmol_colors
+    from ase.visualize.plot import plot_atoms
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+
+    from scilink.utils.structure_views import AXIS_VIEWS, _get_optimal_rotations
+
+    views = _get_optimal_rotations(atoms) if atoms.cell.rank == 3 else AXIS_VIEWS
+    title = _structure_title(atoms, frames)
 
     n = len(views)
     fig, axes = plt.subplots(1, n, figsize=(4 * n, 4.6), dpi=max(64, size) / (4 * n))

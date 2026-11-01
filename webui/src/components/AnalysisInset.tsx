@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { useUIActions } from "../UIContext";
 import type { LiveImage } from "../App";
+import { StructureViewer } from "./StructureViewer";
 
 export function AnalysisInset({
   sessionId,
@@ -107,11 +108,21 @@ export function AnalysisInset({
             onClick={() => openInFiles(img.path)}
             title="Open in Files"
           >
-            <img
-              key={`${img.path}:${img.v ?? ""}`}
-              src={api.fileUrl(sessionId, img.path, img.v)}
-              alt={img.label}
-            />
+            {img.kind === "structure" ? (
+              <StructureViewer
+                key={img.group ?? img.path}
+                sessionId={sessionId}
+                path={img.path}
+                version={img.v}
+                compact
+              />
+            ) : (
+              <img
+                key={`${img.path}:${img.v ?? ""}`}
+                src={api.fileUrl(sessionId, img.path, img.v)}
+                alt={img.label}
+              />
+            )}
           </div>
           <div className="inset-foot">
             <button

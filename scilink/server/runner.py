@@ -22,6 +22,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from scilink import hitl as _hitl
@@ -31,6 +32,7 @@ from scilink.ui.narration import current_activity
 from scilink.ui.output_capture import AgentStoppedError
 
 from .hitl_channel import HTTPChannel, PendingQuestion
+from .previews import is_structure_file
 from .stdout_router import RoutedCapture
 
 _LOG_POLL_S = 0.5
@@ -51,6 +53,31 @@ _IMAGE_SKIP = ("testloop", "elbow_plot", "summary_grid", "_candidates",
 _CANDIDATE_VIZ = re.compile(r"/_candidates/cand_(\d+)/visualization\.png$")
 _TS_SUFFIX = re.compile(r"_\d{8}_\d{6}$")
 _IMAGE_EMIT_CAP = 4          # newest N per fs tick — avoid a flood on a dir dump
+# A structure file the simulation agents write (a POSCAR, a generator's
+# .extxyz, a relaxed CONTCAR — under the meta session's simulation/ folder)
+# streams too, drawn in 3D by the inset; a structure file anywhere else is
+# not streamed, so other agents' insets are as they were. A structure folder
+# holds several copies of one structure, so the inset keeps one entry per
+# folder (the ``group`` key): the newest file in it. Structures have their
+# own per-tick cap, so they never take a figure's place; a folder rewritten
+# continually (an engine's CONTCAR at every ionic step) is re-sent at most
+# every _STRUCTURE_RESEND_S, its newest file picked up on a later tick; and
+# a file too large to stream (a training set, a long trajectory) is left to
+# the Files tab.
+_STRUCTURE_EMIT_CAP = 2
+_STRUCTURE_RESEND_S = 10.0
+_STRUCTURE_MAX_BYTES = 2 * 1024 * 1024
+_SIMULATION_DIR = "simulation"
+# The simulation agents' own drawings of a structure (view_structure:
+# ``<name>_view_<side>.png``, a side such as ``z``, ``edge1`` or ``in_plane``).
+# In a folder whose structure streams in 3D the inset shows the 3D view
+# instead, re-sent when only the drawings are new; they stay in the Files tab.
+_STRUCTURE_VIEW_PNG = re.compile(r"_view_[a-z0-9_]+\.png$", re.IGNORECASE)
+
+
+def _is_simulation_structure(rel: str) -> bool:
+    parts = rel.replace(os.sep, "/").split("/")
+    return len(parts) > 1 and parts[0] == _SIMULATION_DIR and is_structure_file(Path(rel))
 
 
 def _image_label(rel_path: str) -> str:
@@ -78,47 +105,139 @@ def _image_branch(rel_path: str) -> Optional[str]:
     return None
 
 
-def _scan_new_images(session_dir: str, seen: dict) -> list:
-    """Return [(rel_path, label, branch, mtime_ns)] for image artifacts new
-    (or freshly rewritten) since the last scan, newest first, capped. Updates
-    ``seen`` (abs path -> mtime_ns) in place. ``mtime_ns`` rides through to the
-    client as a URL version token, so a figure rewritten in place produces a
-    distinct <img> URL and re-fetches instead of showing cached stale bytes."""
-    found = []
+def _structure_label(rel_path: str) -> str:
+    """A structure is named by its folder (the agents' structure slug), not
+    by its file name: every one of them is a POSCAR."""
+    folder = os.path.basename(os.path.dirname(rel_path)) or os.path.basename(rel_path)
+    return folder.replace("_", " ").strip()[:60]
+
+
+def _live_entry(rel: str, v: int) -> dict:
+    """The inset's entry for a new figure or simulation structure file."""
+    if _is_simulation_structure(rel):
+        return {"path": rel, "label": _structure_label(rel), "branch": _image_branch(rel),
+                "v": v, "kind": "structure", "group": os.path.dirname(rel) or rel}
+    return {"path": rel, "label": _image_label(rel), "branch": _image_branch(rel), "v": v}
+
+
+def _scan_new_images(session_dir: str, seen: dict, seed: bool = False,
+                     final: bool = False) -> list:
+    """Return the inset entries (``_live_entry``) for figures and structure
+    files new (or freshly rewritten) since the last scan, newest first,
+    figures and structures each capped, one structure per folder. Updates
+    ``seen`` (abs path -> mtime_ns; a structure folder -> when it was last
+    sent, under ``("group", folder)``) in place. The entry's ``v`` (mtime_ns)
+    rides through to the client as a URL version token, so a figure
+    rewritten in place produces a distinct <img> URL and re-fetches instead
+    of showing cached stale bytes. ``seed`` records every file present as
+    seen and returns nothing: what a turn starts with is not news. ``final``
+    (the turn's closing sweep) holds nothing back, neither for a folder's
+    re-send interval nor for the per-tick cap: there is no later tick.
+
+    New drawings of a structure (``_STRUCTURE_VIEW_PNG``) in a folder whose
+    structure the inset can draw are not sent: the folder's structure is
+    sent instead, re-sent if it is unchanged, and the drawings count as seen
+    once it is on screen."""
+    found, structures = [], []
+    newest_structure: dict = {}  # folder -> (m, rel, ap) of its newest streamable structure
+    held_views: dict = {}        # folder -> [(m, rel, ap)] of its new drawings
+    now = time.time()
     skip_dirs = {"__pycache__", ".git", "node_modules"}
     for root, dirs, files in os.walk(session_dir):
         dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
         for f in files:
-            if os.path.splitext(f)[1].lower() not in _IMAGE_EXTS:
+            is_figure = os.path.splitext(f)[1].lower() in _IMAGE_EXTS
+            if not is_figure and not is_structure_file(Path(f)):
                 continue
             ap = os.path.join(root, f)
-            rel = os.path.relpath(ap, session_dir)
+            rel = os.path.relpath(ap, session_dir).replace(os.sep, "/")
+            if not is_figure and not _is_simulation_structure(rel):
+                continue
             # Match the skip list against the RELATIVE path (leading "/" so
             # "/previews/" hits a top-level previews/ too): a session root
             # whose absolute path contains a skip token must not silently
             # filter every figure.
-            low = "/" + rel.replace(os.sep, "/").lower()
+            low = "/" + rel.lower()
             if any(s in low for s in _IMAGE_SKIP) and not _CANDIDATE_VIZ.search(low):
                 continue
             try:
-                m = os.stat(ap).st_mtime_ns
+                st = os.stat(ap)
             except OSError:
                 continue
+            m = st.st_mtime_ns
+            folder = os.path.dirname(rel) or rel
+            if not is_figure and st.st_size <= _STRUCTURE_MAX_BYTES:
+                if m > newest_structure.get(folder, (-1,))[0]:
+                    newest_structure[folder] = (m, rel, ap)
             if ap in seen and m <= seen[ap]:
                 continue
-            seen[ap] = m
-            found.append((m, rel))
+            if seed:
+                seen[ap] = m
+                continue
+            if is_figure and _STRUCTURE_VIEW_PNG.search(f):
+                held_views.setdefault(folder, []).append((m, rel, ap))
+            elif is_figure:
+                seen[ap] = m
+                found.append((m, rel))
+            elif st.st_size <= _STRUCTURE_MAX_BYTES:
+                structures.append((m, rel, ap))
+            else:
+                seen[ap] = m  # too large to stream; never reconsidered unless rewritten
+
+    # Drawings in a folder with no structure to draw stream as figures; in
+    # one with a structure, that structure is a candidate even if unchanged.
+    candidates = {os.path.dirname(rel) or rel for _m, rel, _ap in structures}
+    for folder, views in held_views.items():
+        if folder not in newest_structure:
+            for m, rel, ap in views:
+                seen[ap] = m
+                found.append((m, rel))
+        elif folder not in candidates:
+            structures.append(newest_structure[folder])
+            candidates.add(folder)
+
     found.sort(reverse=True)  # newest first
-    return [(rel, _image_label(rel), _image_branch(rel), m)
-            for m, rel in found[:_IMAGE_EMIT_CAP]]
+    entries = [_live_entry(rel, m) for m, rel in found[:_IMAGE_EMIT_CAP]]
+
+    structures.sort(reverse=True)
+    folders: set = set()
+    for m, rel, ap in structures:
+        e = _live_entry(rel, m)
+        g = e["group"]
+        if g in folders:
+            seen[ap] = m  # an older copy of a structure already in this batch
+            continue
+        if not final and now - seen.get(("group", g), 0.0) < _STRUCTURE_RESEND_S:
+            continue  # sent moments ago: left unseen, so its newest file comes on a later tick
+        if not final and len(folders) >= _STRUCTURE_EMIT_CAP:
+            continue  # this tick's slots are taken: a later tick sends it
+        folders.add(g)
+        seen[ap] = m
+        seen[("group", g)] = now
+        entries.append(e)
+
+    # A folder's drawings are done with once its structure is on screen:
+    # sent now, or moments ago. Otherwise they wait, and bring it next tick.
+    for folder, views in held_views.items():
+        if folder in newest_structure and (
+                folder in folders or now - seen.get(("group", folder), 0.0) < _STRUCTURE_RESEND_S):
+            for m, _rel, ap in views:
+                seen[ap] = m
+    entries.sort(key=lambda e: e["v"], reverse=True)
+    return entries
+
+
+def _entry_key(img: dict) -> str:
+    return img.get("group") or img["path"]
 
 
 def _record_live_image(turn, img: dict) -> None:
-    """Snapshot filmstrip: one entry per figure path — a rewrite replaces the
-    entry and moves it to the latest slot (old bytes no longer exist, so
-    per-version entries would render identically)."""
+    """Snapshot filmstrip: one entry per figure path (per folder for a
+    structure) — a rewrite replaces the entry and moves it to the latest
+    slot (old bytes no longer exist, so per-version entries would render
+    identically)."""
     turn.live_images = [i for i in turn.live_images
-                        if i["path"] != img["path"]] + [img]
+                        if _entry_key(i) != _entry_key(img)] + [img]
 
 
 @dataclass
@@ -147,7 +266,7 @@ def start_turn(session, user_input: str) -> TurnState:
     """Create a TurnState and launch the agent thread (daemon, like Streamlit)."""
     turn = TurnState(is_running=True)
     try:
-        _scan_new_images(session.session_dir, turn.seen_images)
+        _scan_new_images(session.session_dir, turn.seen_images, seed=True)
     except Exception:
         pass
     session.turn = turn
@@ -266,10 +385,8 @@ def _watch_log(session, turn, cap) -> None:
                     session.events.emit("files_changed", {})
                     # Push newly-written figures to the live inset (oldest of
                     # this batch first, so the newest ends up "latest").
-                    for rel, label, branch, v in reversed(
+                    for img in reversed(
                             _scan_new_images(session.session_dir, seen_images)):
-                        img = {"path": rel, "label": label,
-                               "branch": branch, "v": v}
                         _record_live_image(turn, img)
                         session.events.emit("analysis_image", img)
                 last_sig = sig
@@ -289,9 +406,7 @@ def _watch_log(session, turn, cap) -> None:
     # (and the first-window case where nothing else changed the signature) —
     # otherwise the LAST figure of a turn is exactly the one the inset misses.
     try:
-        for rel, label, branch, v in reversed(
-                _scan_new_images(session.session_dir, seen_images)):
-            img = {"path": rel, "label": label, "branch": branch, "v": v}
+        for img in reversed(_scan_new_images(session.session_dir, seen_images, final=True)):
             _record_live_image(turn, img)
             session.events.emit("analysis_image", img)
     except Exception:

@@ -343,6 +343,8 @@ export interface SessionSnapshot {
     label: string;
     branch: string | null;
     v?: number;
+    kind?: "structure";
+    group?: string;
   }[];
   delegations: DelegationView | null; // meta sessions only
   event_cursor: number;
@@ -394,6 +396,17 @@ export interface TableData {
   rows: (string | number | null)[][];
   total_rows: number;
   truncated: boolean;
+}
+
+// An atomic structure for the 3D viewer (server previews.structure_model):
+// display coordinates, a slab turned surface-up; the file's own frame is its source.
+export interface StructureModel {
+  title: string;
+  symbols: string[];
+  positions: number[][];
+  cell: number[][] | null;
+  colors: Record<string, string>;
+  slab: boolean;
 }
 
 export interface UploadResult {
@@ -957,6 +970,9 @@ export const api = {
     req<TableData>(
       `/sessions/${id}/table?path=${encodeURIComponent(relPath)}&limit=${limit}`,
     ),
+
+  structure: (id: string, relPath: string) =>
+    req<StructureModel>(`/sessions/${id}/structure?path=${encodeURIComponent(relPath)}`),
 
   thumbUrl: (id: string, relPath: string, size = 256, cmap = "viridis") =>
     `${BASE}/sessions/${id}/thumb?path=${encodeURIComponent(relPath)}&size=${size}&cmap=${cmap}`,
