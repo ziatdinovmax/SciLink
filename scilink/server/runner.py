@@ -69,9 +69,10 @@ _STRUCTURE_RESEND_S = 10.0
 _STRUCTURE_MAX_BYTES = 2 * 1024 * 1024
 _SIMULATION_DIR = "simulation"
 # The simulation agents' own drawings of a structure (view_structure:
-# ``<name>_view_<side>.png``). In a folder whose structure streams in 3D the
-# inset shows the 3D view instead; they stay in the Files tab.
-_STRUCTURE_VIEW_PNG = re.compile(r"_view_[a-z0-9]+\.png$", re.IGNORECASE)
+# ``<name>_view_<side>.png``, a side such as ``z``, ``edge1`` or ``in_plane``).
+# In a folder whose structure streams in 3D the inset shows the 3D view
+# instead, re-sent when only the drawings are new; they stay in the Files tab.
+_STRUCTURE_VIEW_PNG = re.compile(r"_view_[a-z0-9_]+\.png$", re.IGNORECASE)
 
 
 def _is_simulation_structure(rel: str) -> bool:
@@ -111,21 +112,6 @@ def _structure_label(rel_path: str) -> str:
     return folder.replace("_", " ").strip()[:60]
 
 
-def _streams_a_structure(root: str, files: list, session_dir: str) -> bool:
-    """Whether the folder holds a simulation structure small enough for the
-    inset to stream (and so to draw in 3D)."""
-    for f in files:
-        rel = os.path.relpath(os.path.join(root, f), session_dir)
-        if not _is_simulation_structure(rel):
-            continue
-        try:
-            if os.path.getsize(os.path.join(root, f)) <= _STRUCTURE_MAX_BYTES:
-                return True
-        except OSError:
-            continue
-    return False
-
-
 def _live_entry(rel: str, v: int) -> dict:
     """The inset's entry for a new figure or simulation structure file."""
     if _is_simulation_structure(rel):
@@ -145,32 +131,33 @@ def _scan_new_images(session_dir: str, seen: dict, seed: bool = False,
     rewritten in place produces a distinct <img> URL and re-fetches instead
     of showing cached stale bytes. ``seed`` records every file present as
     seen and returns nothing: what a turn starts with is not news. ``final``
-    (the turn's closing sweep) does not hold a structure back for its
-    re-send interval: there is no later tick."""
+    (the turn's closing sweep) holds nothing back, neither for a folder's
+    re-send interval nor for the per-tick cap: there is no later tick.
+
+    New drawings of a structure (``_STRUCTURE_VIEW_PNG``) in a folder whose
+    structure the inset can draw are not sent: the folder's structure is
+    sent instead, re-sent if it is unchanged, and the drawings count as seen
+    once it is on screen."""
     found, structures = [], []
+    newest_structure: dict = {}  # folder -> (m, rel, ap) of its newest streamable structure
+    held_views: dict = {}        # folder -> [(m, rel, ap)] of its new drawings
     now = time.time()
     skip_dirs = {"__pycache__", ".git", "node_modules"}
     for root, dirs, files in os.walk(session_dir):
         dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
-        drawn_in_3d = None  # does this folder hold a structure the inset draws in 3D?
         for f in files:
             is_figure = os.path.splitext(f)[1].lower() in _IMAGE_EXTS
             if not is_figure and not is_structure_file(Path(f)):
                 continue
             ap = os.path.join(root, f)
-            rel = os.path.relpath(ap, session_dir)
+            rel = os.path.relpath(ap, session_dir).replace(os.sep, "/")
             if not is_figure and not _is_simulation_structure(rel):
                 continue
-            if is_figure and _STRUCTURE_VIEW_PNG.search(f):
-                if drawn_in_3d is None:
-                    drawn_in_3d = _streams_a_structure(root, files, session_dir)
-                if drawn_in_3d:
-                    continue
             # Match the skip list against the RELATIVE path (leading "/" so
             # "/previews/" hits a top-level previews/ too): a session root
             # whose absolute path contains a skip token must not silently
             # filter every figure.
-            low = "/" + rel.replace(os.sep, "/").lower()
+            low = "/" + rel.lower()
             if any(s in low for s in _IMAGE_SKIP) and not _CANDIDATE_VIZ.search(low):
                 continue
             try:
@@ -178,18 +165,37 @@ def _scan_new_images(session_dir: str, seen: dict, seed: bool = False,
             except OSError:
                 continue
             m = st.st_mtime_ns
+            folder = os.path.dirname(rel) or rel
+            if not is_figure and st.st_size <= _STRUCTURE_MAX_BYTES:
+                if m > newest_structure.get(folder, (-1,))[0]:
+                    newest_structure[folder] = (m, rel, ap)
             if ap in seen and m <= seen[ap]:
                 continue
             if seed:
                 seen[ap] = m
                 continue
-            if is_figure:
+            if is_figure and _STRUCTURE_VIEW_PNG.search(f):
+                held_views.setdefault(folder, []).append((m, rel, ap))
+            elif is_figure:
                 seen[ap] = m
                 found.append((m, rel))
             elif st.st_size <= _STRUCTURE_MAX_BYTES:
                 structures.append((m, rel, ap))
             else:
                 seen[ap] = m  # too large to stream; never reconsidered unless rewritten
+
+    # Drawings in a folder with no structure to draw stream as figures; in
+    # one with a structure, that structure is a candidate even if unchanged.
+    candidates = {os.path.dirname(rel) or rel for _m, rel, _ap in structures}
+    for folder, views in held_views.items():
+        if folder not in newest_structure:
+            for m, rel, ap in views:
+                seen[ap] = m
+                found.append((m, rel))
+        elif folder not in candidates:
+            structures.append(newest_structure[folder])
+            candidates.add(folder)
+
     found.sort(reverse=True)  # newest first
     entries = [_live_entry(rel, m) for m, rel in found[:_IMAGE_EMIT_CAP]]
 
@@ -203,12 +209,20 @@ def _scan_new_images(session_dir: str, seen: dict, seed: bool = False,
             continue
         if not final and now - seen.get(("group", g), 0.0) < _STRUCTURE_RESEND_S:
             continue  # sent moments ago: left unseen, so its newest file comes on a later tick
-        if len(folders) >= _STRUCTURE_EMIT_CAP:
+        if not final and len(folders) >= _STRUCTURE_EMIT_CAP:
             continue  # this tick's slots are taken: a later tick sends it
         folders.add(g)
         seen[ap] = m
         seen[("group", g)] = now
         entries.append(e)
+
+    # A folder's drawings are done with once its structure is on screen:
+    # sent now, or moments ago. Otherwise they wait, and bring it next tick.
+    for folder, views in held_views.items():
+        if folder in newest_structure and (
+                folder in folders or now - seen.get(("group", folder), 0.0) < _STRUCTURE_RESEND_S):
+            for m, _rel, ap in views:
+                seen[ap] = m
     entries.sort(key=lambda e: e["v"], reverse=True)
     return entries
 

@@ -110,7 +110,7 @@ export function AnalysisInset({
           >
             {img.kind === "structure" ? (
               <StructureViewer
-                key={img.path}
+                key={img.group ?? img.path}
                 sessionId={sessionId}
                 path={img.path}
                 version={img.v}

@@ -799,6 +799,65 @@ def test_structures_never_take_a_figures_place(tmp_path, monkeypatch):
     assert closing["group"] == "simulation/run0"
 
 
+def test_structure_drawings_give_way_to_the_3d_view(tmp_path, monkeypatch):
+    """The agent's drawings of a structure, whatever their side is called
+    (``in_plane``, ``along_short``), give way to the folder's 3D entry; on a
+    later turn that only redraws them, the unchanged structure is re-sent in
+    their place. Drawings of a structure too large to stream still stream."""
+    from scilink.server import runner
+
+    root = tmp_path / "s"
+    slab = root / "simulation" / "structures" / "slab"
+    slab.mkdir(parents=True)
+    (slab / "POSCAR").write_text("x")
+    big = root / "simulation" / "structures" / "big"
+    big.mkdir()
+    (big / "train.xyz").write_bytes(b"x" * (runner._STRUCTURE_MAX_BYTES + 1))
+    seen: dict = {}
+    assert runner._scan_new_images(str(root), seen, seed=True) == []
+
+    for side in ("z", "in_plane", "along_short"):
+        (slab / f"POSCAR_view_{side}.png").write_bytes(b"x")
+    (big / "train_view_z.png").write_bytes(b"x")
+    out = runner._scan_new_images(str(root), seen)
+    assert [(e.get("kind"), e["path"]) for e in sorted(out, key=lambda e: e["path"])] == [
+        (None, "simulation/structures/big/train_view_z.png"),
+        ("structure", "simulation/structures/slab/POSCAR"),
+    ]
+    assert runner._scan_new_images(str(root), seen) == []  # the drawings are done with
+
+    # A drawing held back while the tick's structure slots are full waits
+    # for its structure, and brings it on a later tick.
+    later = [root / "simulation" / f"run{i}" for i in range(runner._STRUCTURE_EMIT_CAP)]
+    for d in later:
+        d.mkdir()
+        (d / "POSCAR").write_text("x")
+    clock = runner.time.time() + runner._STRUCTURE_RESEND_S + 1
+    monkeypatch.setattr(runner.time, "time", lambda: clock)
+    os.utime(slab / "POSCAR", ns=(1, 1))  # the oldest structure: the run folders fill the tick
+    (slab / "POSCAR_view_z.png").write_bytes(b"y")
+    first = runner._scan_new_images(str(root), seen)
+    assert {e["group"] for e in first} == {f"simulation/run{i}" for i in range(len(later))}
+    (resent,) = runner._scan_new_images(str(root), seen)
+    assert resent["group"] == "simulation/structures/slab"
+
+
+def test_closing_sweep_sends_every_structure(tmp_path):
+    """The turn's closing sweep is not capped: a folder it left out would be
+    seeded as seen by the next turn and never stream."""
+    from scilink.server import runner
+
+    root = tmp_path / "s"
+    seen: dict = {}
+    runner._scan_new_images(str(root), seen, seed=True)
+    n = runner._STRUCTURE_EMIT_CAP + 1
+    for i in range(n):
+        (root / "simulation" / f"run{i}").mkdir(parents=True)
+        (root / "simulation" / f"run{i}" / "POSCAR").write_text("x")
+    out = runner._scan_new_images(str(root), seen, final=True)
+    assert {e["group"] for e in out} == {f"simulation/run{i}" for i in range(n)}
+
+
 def test_feedback_flow_and_409(client, tmp_path):
     """A fake blocking agent exercises the full turn/feedback/stop plumbing."""
     from scilink.server import runner as runner_mod

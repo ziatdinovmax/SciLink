@@ -45,13 +45,18 @@ function applyLook(viewer: any, m: StructureModel, look: Look) {
 
 // A 3Dmol viewer outlives clear(): its spin timer stops only once its
 // context is lost, and 3Dmol renders through one shared offscreen context
-// that never is, so a spinning viewer left alone renders forever; its window
-// listeners and observers keep it reachable. So it is stopped explicitly.
+// that never is, so a spinning viewer left alone renders forever. So it is
+// stopped explicitly, and its observers of the container disconnected. (Its
+// window resize and body mouseup listeners are bound in 3Dmol's constructor
+// and cannot be removed; the inset keeps one viewer per structure folder so
+// few are ever made.)
 // Where 3Dmol falls back to a WebGL context per canvas (no OffscreenCanvas),
 // that context is released too; in the shared mode the canvas holds only a
 // bitmap renderer and the release is a no-op.
 function disposeViewer(v: any) {
   v.spin(false);
+  v.divwatcher?.disconnect();
+  v.intwatcher?.disconnect();
   // clear() would render once more, into a canvas React has already
   // detached (a zero-size framebuffer); the removals alone do not render.
   v.removeAllSurfaces();
@@ -65,8 +70,12 @@ function disposeViewer(v: any) {
 
 // `compact`: the floating inset's form — no toolbar or legend, no mouse
 // (a click there opens the file in Files, where the full viewer is), turning
-// slowly so the shape reads. `version` re-reads a file rewritten in place;
-// the new structure replaces the old in the same viewer, view kept.
+// slowly so the shape reads. The inset keeps one viewer per structure folder,
+// so its `path` moves to the folder's newest file (a POSCAR, then its
+// CONTCAR): what is shown stays until the newer file is read. `version`
+// re-reads a file rewritten in place; the new structure replaces the old in
+// the same viewer, view kept. A read that fails (a file caught mid-write)
+// leaves a structure already shown in place.
 export function StructureViewer({
   sessionId,
   path,
@@ -87,21 +96,34 @@ export function StructureViewer({
   // The structure with the path it was read from: after a switch of file,
   // the previous file's structure must not open the new file's view.
   const [loaded, setLoaded] = useState<{ path: string; model: StructureModel } | null>(null);
-  const model = loaded?.path === path ? loaded.model : null;
-  const [error, setError] = useState<string | null>(null);
+  const loadedPath = useRef<string | null>(null);
+  const model = loaded && (loaded.path === path || compact) ? loaded.model : null;
+  // A failed read and a viewer that could not start are separate: a later
+  // read clears only its own.
+  const [readError, setReadError] = useState<string | null>(null);
+  const [startError, setStartError] = useState<string | null>(null);
+  const error = startError ?? readError;
   const [look, setLook] = useState<Look>("ball");
   const [spinning, setSpinning] = useState(false);
 
   useEffect(() => {
     let alive = true; // a slower, older read must not replace a newer one
-    setError(null);
     api.structure(sessionId, path)
-      .then((m) => alive && setLoaded({ path, model: m }))
-      .catch((e) => alive && setError(String(e?.message ?? e)));
+      .then((m) => {
+        if (!alive) return;
+        loadedPath.current = path;
+        setLoaded({ path, model: m });
+        setReadError(null);
+      })
+      .catch((e) => {
+        if (!alive) return;
+        if (loadedPath.current === path || (compact && loadedPath.current)) return;
+        setReadError(String(e?.message ?? e));
+      });
     return () => {
       alive = false;
     };
-  }, [sessionId, path, version]);
+  }, [sessionId, path, version, compact]);
 
   // One viewer per mounted component, in a mount of its own: a viewer
   // disposed later still observes its container, and must not find the
@@ -131,7 +153,7 @@ export function StructureViewer({
         themeWatch.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
         setReady(true);
       })
-      .catch((e) => setError(`Could not start the 3D viewer: ${e?.message ?? e}`));
+      .catch((e) => !cancelled && setStartError(`Could not start the 3D viewer: ${e?.message ?? e}`));
     return () => {
       cancelled = true;
       resize?.disconnect();
@@ -193,7 +215,7 @@ export function StructureViewer({
       v.rotate(y, "y");
       v.zoom(0.9);
       openingView.current = v.getView();
-      if (compact) v.spin("y", 0.5);
+      if (compact) v.spin("y", 0.5, true); // only while the inset is visible
     }
     v.render();
   }, [ready, model, path, compact]);

@@ -382,7 +382,9 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   structure the simulation agents write under `simulation/` (POSCAR,
   `.extxyz`, a relaxed CONTCAR) shows as a small turning 3D view, one per
   structure folder, named by the folder, a folder rewritten continually
-  re-sent at most every 10 s; a click opens it in Files.
+  re-sent at most every 10 s; a click opens it in Files. The agent's own
+  drawings of such a structure (`*_view_<side>.png`) give way to it: a
+  turn that only redraws them shows the folder's structure in 3D instead.
 - **File Explorer** (Files tab) — beyond Streamlit parity:
   - live tree: no Refresh button — the server emits `files_changed` while a
     turn runs, so artifacts appear as the agent writes them;
