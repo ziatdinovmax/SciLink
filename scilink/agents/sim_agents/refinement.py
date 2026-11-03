@@ -68,6 +68,28 @@ def _is_acceptable(verdict: Optional[Dict[str, Any]]) -> bool:
     return _verdict_rank(verdict) >= _VERDICT_RANK["warning"]
 
 
+def _engine_failure(result: Dict[str, Any]) -> Optional[str]:
+    """Why the engine run itself failed, from the executor's own facts: it
+    could not launch, timed out or was stopped, or exited non-zero. None for a
+    clean exit, or when the exit code is unknown (a scheduler that reports none)."""
+    if result.get("status") == "error":
+        return result.get("error") or "the run did not complete"
+    rc = result.get("returncode")
+    if isinstance(rc, int) and rc != 0:
+        return f"the engine exited with code {rc}"
+    return None
+
+
+def _hold_failed_run(verdict: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
+    """A run whose engine failed is not accepted on the critic's word: an
+    acceptable verdict is held at needs_fixes (its fixes kept), with the
+    reason, as a measured health violation is."""
+    failure = _engine_failure(result)
+    if failure and _is_acceptable(verdict):
+        return {**verdict, "verdict": "needs_fixes", "engine_failure": failure}
+    return verdict
+
+
 class CycleDecision(Enum):
     """Continuation decision after a finished run."""
 
@@ -609,6 +631,7 @@ def _refine_phase(
             if forced.get("failure_class") not in ("structure", "force_field"):
                 forced["failure_class"] = "health_gate"
             verdict = forced
+        verdict = _hold_failed_run(verdict, result)
         last_verdict = verdict
         ctx.record(phase, result, verdict)
 
@@ -640,6 +663,8 @@ def _refine_phase(
         "run_status": last_verdict.get("run_status"),
         "failure_class": last_verdict.get("failure_class"),
     }
+    if last_verdict.get("engine_failure"):
+        rec["engine_failure"] = last_verdict["engine_failure"]
     # A phase that ended unresolved on a measured non-physical value carries its
     # reasons; it is labelled health_gate unless the critic named a more specific
     # cause (structure / force_field) with its own campaign routing.
@@ -688,6 +713,7 @@ def _run_once_phase(
         domain=ctx.domain,
         input_files=phase.input_files,
     )
+    verdict = _hold_failed_run(verdict, result)
     ctx.record(phase, result, verdict)
     rec = {
         "phase": phase.name,
@@ -696,6 +722,8 @@ def _run_once_phase(
         "verdict": verdict.get("verdict"),
         "run_status": verdict.get("run_status"),
     }
+    if verdict.get("engine_failure"):
+        rec["engine_failure"] = verdict["engine_failure"]
     if checked is False:
         rec["health_checked"] = False
     return rec
@@ -1363,6 +1391,12 @@ def run_campaign(
     # (and the user) know the pass was unvouched — even when the run succeeded.
     if any(p.get("health_checked") is False for p in flat):
         result["health_checked"] = False
+    # A phase that ended with its engine failing (crash, timeout, launch error)
+    # names why, so a refinement failure is not left without a reason.
+    engine_failures = [f"{p['phase']}: {p['engine_failure']}"
+                       for p in flat if p.get("engine_failure")]
+    if engine_failures:
+        result["engine_failures"] = engine_failures
     if dry_run_record is not None:
         result["dry_run"] = dry_run_record
     return result
