@@ -80,14 +80,20 @@ def _engine_failure(result: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _hold_failed_run(verdict: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
-    """A run whose engine failed is not accepted on the critic's word: an
-    acceptable verdict is held at needs_fixes (its fixes kept), with the
-    reason, as a measured health violation is."""
+def _hold_failed_run(verdict: Dict[str, Any], result: Dict[str, Any],
+                     phase_name: str = "") -> Dict[str, Any]:
+    """A run whose engine failed carries the reason (``engine_failure``)
+    whatever the critic said, and is not accepted on the critic's word: an
+    acceptable verdict is held at needs_fixes (its fixes kept), as a measured
+    health violation is. A verdict already below acceptable stays the critic's."""
     failure = _engine_failure(result)
-    if failure and _is_acceptable(verdict):
+    if not failure:
+        return verdict
+    if _is_acceptable(verdict):
+        logger.warning("phase %s held: %s (the critic said %r)",
+                       phase_name, failure, verdict.get("verdict"))
         return {**verdict, "verdict": "needs_fixes", "engine_failure": failure}
-    return verdict
+    return {**verdict, "engine_failure": failure}
 
 
 class CycleDecision(Enum):
@@ -631,7 +637,7 @@ def _refine_phase(
             if forced.get("failure_class") not in ("structure", "force_field"):
                 forced["failure_class"] = "health_gate"
             verdict = forced
-        verdict = _hold_failed_run(verdict, result)
+        verdict = _hold_failed_run(verdict, result, phase.name)
         last_verdict = verdict
         ctx.record(phase, result, verdict)
 
@@ -713,7 +719,7 @@ def _run_once_phase(
         domain=ctx.domain,
         input_files=phase.input_files,
     )
-    verdict = _hold_failed_run(verdict, result)
+    verdict = _hold_failed_run(verdict, result, phase.name)
     ctx.record(phase, result, verdict)
     rec = {
         "phase": phase.name,

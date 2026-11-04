@@ -142,12 +142,65 @@ def test_a_signal_kill_is_a_failure(tmp_path):
     assert rec["engine_failure"] == "the engine exited with code -9"
 
 
-def test_a_poor_verdict_is_left_as_it_is(tmp_path):
+def test_a_poor_verdict_keeps_its_word_but_still_names_the_cause(tmp_path):
+    # Two identical crashes are reported with the same reason, whatever the
+    # critic called them; only an acceptable verdict is downgraded.
     poor = {"status": "success", "run_status": "failed", "verdict": "poor",
             "suggested_fixes": None}
     out, rec = _run(tmp_path, _Exec({"status": "completed", "returncode": 1}),
                     _Critic(poor))
-    assert rec["verdict"] == "poor" and "engine_failure" not in rec
+    assert rec["verdict"] == "poor"
+    assert rec["engine_failure"] == "the engine exited with code 1"
+    assert out["engine_failures"] == ["job.nw: the engine exited with code 1"]
+
+
+def test_a_held_run_is_logged(tmp_path, caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger="scilink.agents.sim_agents.refinement"):
+        _run(tmp_path, _Exec({"status": "completed", "returncode": 255}), _Critic(_warning()))
+    assert any("job.nw held: the engine exited with code 255" in r.getMessage()
+               and "'warning'" in r.getMessage() for r in caplog.records)
+
+
+def test_a_clean_run_is_not_logged_as_held(tmp_path, caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger="scilink.agents.sim_agents.refinement"):
+        _run(tmp_path, _Exec({"status": "completed", "returncode": 0}), _Critic(_good()))
+    assert not any("held" in r.getMessage() for r in caplog.records)
+
+
+# ── the reason reaches the model through the orchestrator's tools ────────
+
+_FAILED = {"final_status": "refinement_stopped", "structure_generation": {},
+           "refinement": {"status": "stopped"},
+           "warnings": ["The engine did not finish cleanly for: job.nw: the engine "
+                        "exited with code 255. Those runs were not accepted."]}
+
+
+def _sim_orch(tmp_path):
+    from scilink.agents.sim_agents import SimulationOrchestratorAgent, SimulationMode
+    return SimulationOrchestratorAgent(
+        base_dir=str(tmp_path / "sim"), api_key="dummy", model_name="claude-opus-4-6",
+        simulation_mode=SimulationMode.AUTONOMOUS)
+
+
+def test_run_simulation_passes_the_workflow_warnings_to_the_model(tmp_path, monkeypatch):
+    import json
+    import scilink.agents.sim_agents.simulation_pipeline as sp
+    monkeypatch.setattr(sp, "run_complete_workflow", lambda user_request, **kw: dict(_FAILED))
+    r = json.loads(_sim_orch(tmp_path).tools.execute_tool(
+        "run_simulation", description="benzene S1", scale="molecular_qc", software="nwchem"))
+    assert r["status"] == "refinement_stopped"
+    assert r["warnings"] == _FAILED["warnings"]
+
+
+def test_run_complete_dft_workflow_passes_the_workflow_warnings(tmp_path, monkeypatch):
+    import json
+    import scilink.agents.sim_agents.simulation_pipeline as sp
+    monkeypatch.setattr(sp, "run_complete_workflow", lambda user_request, **kw: dict(_FAILED))
+    r = json.loads(_sim_orch(tmp_path).tools.execute_tool(
+        "run_complete_dft_workflow", description="Si bulk"))
+    assert r["warnings"] == _FAILED["warnings"]
 
 
 def test_a_crashed_fanout_member_does_not_count_toward_the_quorum(tmp_path):
@@ -163,3 +216,26 @@ def test_a_crashed_fanout_member_does_not_count_toward_the_quorum(tmp_path):
     out = run_campaign([stage], _PerMember(), _Critic(_warning()), AutonomousPolicy(), _ctx())
     assert out["status"] != "success"
     assert [p["status"] for p in out["phases"]] == ["success", "stopped"]
+
+
+def test_a_crash_then_a_clean_rerun_leaves_no_cause_on_the_record(tmp_path):
+    ex = _Exec({"status": "completed", "returncode": 255},
+               {"status": "completed", "returncode": 0})
+    out, rec = _run(tmp_path, ex, _Critic(_warning({"job.nw": "fixed"}), _good()))
+    assert rec["status"] == "success" and "engine_failure" not in rec
+    assert "engine_failures" not in out
+
+
+def test_a_met_quorum_names_the_crashed_member_without_failing(tmp_path):
+    members = [Phase(name=f"m{i}", input_files={"in": "x"}, run_command="run",
+                     run_dir=str(tmp_path / f"m{i}"), entry_file="in") for i in range(3)]
+    stage = Stage(name="sweep", phases=members, parallel=True, min_success=2)
+
+    class _OneCrashes(Executor):
+        def run(self, input_files, run_command, run_dir):
+            rc = 255 if run_dir.endswith("m2") else 0
+            return {"status": "completed", "returncode": rc, "output_dir": run_dir}
+
+    out = run_campaign([stage], _OneCrashes(), _Critic(_good()), AutonomousPolicy(), _ctx())
+    assert out["status"] == "success"
+    assert out["engine_failures"] == ["m2: the engine exited with code 255"]

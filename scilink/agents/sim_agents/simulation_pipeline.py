@@ -1132,8 +1132,9 @@ def _run_workflow_once(
                        "without a physical-sanity check.")
     if refinement.get("engine_failures"):
         result.setdefault("warnings", []).append(
-            "The engine did not finish cleanly, so the run was not accepted: "
-            + "; ".join(refinement["engine_failures"]) + ".")
+            "The engine did not finish cleanly for: "
+            + "; ".join(refinement["engine_failures"])
+            + ". Those runs were not accepted.")
     result["final_status"] = (
         "success" if refinement.get("status") == "success"
         else f"refinement_{refinement.get('status', 'failed')}"
