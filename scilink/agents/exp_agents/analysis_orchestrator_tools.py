@@ -5607,6 +5607,8 @@ class AnalysisOrchestratorTools:
                 "structure_refinement_cycles": cycles_used,
                 "structure_outstanding_issues_count": len(outstanding_issues),
                 "structure_outstanding_issues": outstanding_issues[:10],
+                # the workflow's own caveats, so the model can act on the cause
+                "warnings": result.get("warnings") or [],
             })
 
         self._register_tool(

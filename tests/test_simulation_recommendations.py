@@ -182,6 +182,23 @@ def test_run_dft_workflow_passes_qc_and_unscored_scales(orch, tmp_path,
     assert len(calls) == 3
 
 
+def test_run_dft_workflow_passes_the_workflow_warnings(orch, tmp_path, monkeypatch):
+    import sys
+    stub = types.ModuleType("scilink.agents.sim_agents.simulation_pipeline")
+    warn = ["The engine did not finish cleanly for: run: the engine exited "
+            "with code 1. Those runs were not accepted."]
+    stub.run_complete_workflow = lambda description, **kw: {
+        "final_status": "refinement_stopped", "warnings": warn}
+    monkeypatch.setitem(sys.modules, "scilink.agents.sim_agents.simulation_pipeline", stub)
+    out_dir = tmp_path / "res4"
+    out_dir.mkdir()
+    orch.analysis_results.append({"analysis_id": "demo_004", "output_directory": str(out_dir),
+                                  "simulation_recommendations": [RECS[0]]})
+    res = json.loads(orch.tools.execute_tool(
+        "run_dft_workflow", analysis_id="demo_004", recommendation_index=0))
+    assert res["warnings"] == warn
+
+
 def test_system_prompt_mentions_new_tool(orch):
     sys_prompt = orch.messages[0]["content"]
     assert "recommend_simulations" in sys_prompt

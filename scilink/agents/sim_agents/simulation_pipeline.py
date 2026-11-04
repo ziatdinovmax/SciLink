@@ -1130,6 +1130,11 @@ def _run_workflow_once(
         )
         logger.warning("Health gate could not read its observable; a run passed "
                        "without a physical-sanity check.")
+    if refinement.get("engine_failures"):
+        result.setdefault("warnings", []).append(
+            "The engine did not finish cleanly for: "
+            + "; ".join(refinement["engine_failures"])
+            + ". Those runs were not accepted.")
     result["final_status"] = (
         "success" if refinement.get("status") == "success"
         else f"refinement_{refinement.get('status', 'failed')}"

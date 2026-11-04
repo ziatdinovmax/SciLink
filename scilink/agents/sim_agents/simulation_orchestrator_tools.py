@@ -1027,6 +1027,9 @@ class SimulationOrchestratorTools:
                 "structure_refinement_cycles": cycles_used,
                 "structure_outstanding_issues_count": len(outstanding_issues),
                 "structure_outstanding_issues": outstanding_issues[:10],
+                # the workflow's own caveats (an engine failure, a health-gate
+                # or force-field flag), so the model can act on the cause
+                "warnings": result.get("warnings") or [],
             })
 
         self._register_tool(
@@ -1268,6 +1271,9 @@ class SimulationOrchestratorTools:
                 "refinement_status": refinement.get("status"),
                 "output_directory": str(workdir),
                 "note": " ".join(notes) if notes else None,
+                # the workflow's own caveats (an engine failure, a health-gate
+                # or force-field flag), so the model can act on the cause
+                "warnings": result.get("warnings") or [],
             }
             if pseudo:
                 out["pseudopotentials"] = pseudo
