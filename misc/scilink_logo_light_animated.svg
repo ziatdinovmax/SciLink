@@ -70,7 +70,6 @@
   </defs>
   
   <!-- White background -->
-  <rect width="800" height="750" fill="#FFFFFF"/>
   
   <!-- Dashed triangular connector path -->
   <path d="M 400 180 

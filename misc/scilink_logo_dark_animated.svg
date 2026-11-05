@@ -93,8 +93,6 @@
   </defs>
   
   <!-- Background with subtle gradient -->
-  <rect width="800" height="750" fill="#252D38"/>
-  <rect width="800" height="750" fill="url(#bgGrad)" opacity="0.5"/>
   
   <!-- Dashed triangular connector path (all coords +100) -->
   <path d="M 400 180 
