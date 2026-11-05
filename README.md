@@ -1,713 +1,263 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="misc/scilink_logo_dark_animated.svg">
+    <img alt="SciLink" src="misc/scilink_logo_light_animated.svg" width="320">
+  </picture>
+</p>
+
 # SciLink
 
-**AI-Powered Scientific Research Automation Platform**
+**An agentic platform that runs your research cycle: plan, analyze, simulate.**
 
-![SciLink Logo](misc/scilink_logo_dark_animated.svg)
+SciLink is **mission control** for materials and chemistry research: an agent
+that takes a research task, splits it across specialist AI teams for
+experimental planning and multi-modal data analysis, and connects their
+results. Analysis findings feed the design of the next experiment, and that
+experiment's data comes back for analysis, so a cycle that usually spans
+separate tools, file formats and specialists runs as one continuous study.
+Simulation agents, which bring computational modeling into the same loop, are
+under active development.
 
-SciLink employs a system of intelligent agents to automate experimental design, data analysis, and iterative optimization workflows. Built around large language models with domain-specific tools, these agents act as AI research partners that can plan experiments, analyze results across multiple modalities, and suggest optimal next steps.
+You can work with SciLink in three ways. **Chat with it** in the browser or
+terminal and steer as it goes. **Give it a task** from the command line or
+Python and let it run to the end on its own. Or let **another AI agent**, such
+as Claude Code, call it as a scientific specialist over MCP.
 
----
-
-## Overview
-
-SciLink provides three complementary agent systems that cover the full scientific research cycle:
-
-| System | Purpose | Key Capabilities |
-|--------|---------|------------------|
-| **Planning Agents** | Experimental design & optimization | Hypothesis generation, Bayesian optimization, literature-aware planning |
-| **Analysis Agents** | Multi-modal data analysis | Image analysis, spectroscopy, hyperspectral datacubes, curve fitting |
-| **Simulation Agents** | Computational modeling | DFT calculations, classical MD (LAMMPS), structure recommendations |
-
----
-
-## Core Capabilities
-
-- **RAG over your knowledge base.** User-supplied papers, project notes,
-  instrument manuals, and prior results are indexed and retrieved to ground
-  hypothesis generation and experiment design.
-
-- **Agentic Knowledge Query.** Complements RAG for *structured* data —
-  tabular files and record databases. The agent generates and executes
-  query code dynamically, no upfront schema definition required. Two
-  depths share the same machinery: `query_knowledge_data` for ad-hoc
-  exploration (*"what fields exist?"*, *"value range of X?"*) and
-  `screen_database` for production filter-and-rank passes with a
-  structured top-K output.
-
-- **Tools + code.** Pre-built or user-provided tools (such as pre-trained
-  ML models) combine with on-the-fly code generation to produce runnable
-  analysis scripts, simulation input decks, or lab-automation protocols.
-  Executors run locally, on HPC, or on lab instruments.
-
-- **Pluggable skill bundles.** Domain experts extend the platform to new
-  instrument data types or simulation methods by contributing self-contained
-  markdown files (plus optional Python helpers). The platform discovers
-  and routes to them automatically — no core-agent changes required.
-
-- **Three autonomy levels.** **Co-Pilot** (human leads, reviews every step),
-  **Autopilot** (AI leads, human reviews major decisions), and **Autonomous**
-  (no human review). The mode selects who holds the acceptance gate on
-  agent commitments.
-
-- **Simulated-annealing agentic pipelines.** Hold domain priors strictly
-  at first, then progressively thaw the lock on the implementation plan
-  and domain-rule strictness only when iterative refinements fail to
-  converge — inspired by Metropolis–Hastings, with verifier-driven acceptance.
+<p align="center">
+  <img src="docs/figures/readme/architecture.jpg" alt="The user talks to a Mission Control agent, which dispatches planning, analysis and simulation agents. All three draw on RAG, skills and literature search" width="820">
+</p>
 
 ---
 
-## Installation
+## Quick start
 
 ```bash
-pip install scilink
-
-# With simulation dependencies (ASE, atomate2, etc.)
-pip install scilink[sim]
+pip install scilink           # core, including the web UI
+pip install "scilink[sim]"    # + simulation stack (ASE, atomate2, …)
 ```
 
-The web UI (`scilink ui`) is included in the default installation — it now
-launches the React web app by default (`scilink ui --streamlit` for the
-classic Streamlit interface).
+Set a model key (any one of these):
 
-The analysis agents work without additional dependencies, but installing Meta's [Segment Anything Model](https://github.com/facebookresearch/segment-anything) (SAM) enables more advanced particle and grain segmentation. SAM is not available on PyPI and must be installed from source:
+```bash
+export ANTHROPIC_API_KEY=...   # or OPENAI_API_KEY / GEMINI_API_KEY,
+                               # or SCILINK_API_KEY + --base-url for an
+                               # OpenAI-compatible proxy
+```
+
+Launch mission control:
+
+```bash
+scilink ui       # Mission Control in the browser
+scilink          # the same agent in your terminal
+```
+
+Give it a task:
+
+> *"Here are UV-Vis spectra across temperature and pH. Fit the product and byproduct bands, then suggest the next conditions to maximize selectivity."*
+>
+> *"Set up a DFT calculation for nitrate adsorbed on Cu(111) and prepare VASP inputs."*
+>
+> *"Propose a simple precipitation process to recover magnesium from this produced-water sample, and turn it into a protocol for our liquid-handling robot."*
+
+Mission control decides which specialists to involve, runs them at the autonomy
+level you chose, and reports back with files, figures and suggested next steps.
+Run it interactively and steer, hand it a brief with `--mode autonomous` and
+collect the results, or start `scilink serve` and let another agent send the
+tasks.
+
+<details>
+<summary>Optional: advanced segmentation with SAM</summary>
+
+The analysis agents work without additional dependencies, but installing Meta's
+[Segment Anything Model](https://github.com/facebookresearch/segment-anything)
+enables more advanced particle and grain segmentation. It is not on PyPI:
 
 ```bash
 pip install git+https://github.com/facebookresearch/segment-anything.git
 ```
+</details>
 
-### Environment Variables
+## See it in action
 
-Set API keys for your preferred LLM provider:
+From measurements to the next experiment: a UV-Vis series is fitted and the
+feature table goes straight into Bayesian optimization:
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/figures/readme/ui_analysis_fit.jpg" alt="Mission control chat with the verbose fitting log streaming per-spectrum results and a live window showing the latest fit"></td>
+    <td width="50%"><img src="docs/figures/readme/ui_bo_recommendation.jpg" alt="Mission control reports the analysis and the next temperature and pH recommended by Bayesian optimization"></td>
+  </tr>
+  <tr>
+    <td><sub><b>Analysis.</b> Every spectrum fitted with a verified, locked recipe. Results appear as they come in.</sub></td>
+    <td><sub><b>Planning.</b> The fitted features feed a Bayesian optimizer that recommends the next measurement.</sub></td>
+  </tr>
+</table>
+
+From a plain-language request to ready-to-run inputs and protocols:
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/figures/readme/ui_structure_3d.jpg" alt="An adsorbate on a copper slab shown in an interactive 3D viewer next to the generated VASP inputs"></td>
+    <td width="50%"><img src="docs/figures/readme/ui_plan_review.jpg" alt="A proposed experimental plan with hypothesis and steps, awaiting approval"></td>
+  </tr>
+  <tr>
+    <td><sub><b>Simulation.</b> The agent builds and checks the structure and writes DFT inputs ready for HPC.</sub></td>
+    <td><sub><b>Experiment design.</b> Plans stop at a review gate. Approve them or ask for changes.</sub></td>
+  </tr>
+</table>
+
+### Reports
+
+Every run leaves a self-contained HTML report next to its data, figures and
+scripts:
+
+<table>
+  <tr>
+    <td width="33%" valign="top"><img src="docs/figures/readme/report_series.jpg" alt="Spectral series analysis report"></td>
+    <td width="33%" valign="top"><img src="docs/figures/readme/report_image.jpg" alt="Image analysis report"></td>
+    <td width="33%" valign="top"><img src="docs/figures/readme/report_plan.jpg" alt="Experimental plan report"></td>
+  </tr>
+  <tr>
+    <td><sub><b>Spectral series.</b> Parameter trends across conditions, every individual fit, claims and caveats.</sub></td>
+    <td><sub><b>Image analysis.</b> Polarization mapping of a ferroelectric STEM image, with claims and limitations.</sub></td>
+    <td><sub><b>Experimental plan.</b> Hypothesis, justification, a step-by-step protocol with dose tables and plate layout.</sub></td>
+  </tr>
+</table>
+
+## What it does
+
+- **Analyze experimental data**: microscopy images, spectra (XPS, Raman, NMR,
+  EELS, …) and hyperspectral datacubes, via generate–execute–verify code
+  agents with domain skill bundles. A series is analysed once, then its
+  verified recipe is replayed across every dataset.
+- **Design and optimize campaigns**: hypothesis-driven experimental plans,
+  ideation portfolios, technical documents, techno-economic assessments and
+  Bayesian-optimization loops grounded in your literature and prior results.
+- **Build and run simulations**: structures, DFT and classical-MD inputs
+  (force field or machine-learned potential chosen automatically), engine
+  execution with a self-refining fix loop, and post-run property extraction.
+  *The simulation agents are under active development.*
+- **Connect to lab tools**: plug in instruments, databases and other tools
+  over MCP, so that, for example, an approved plan can be turned into a
+  protocol a liquid-handling robot can run.
+
+Prefer a specialist directly? Each mode is its own command:
 
 ```bash
-# Google Gemini (default)
-export GEMINI_API_KEY="your-key"
-
-# OpenAI
-export OPENAI_API_KEY="your-key"
-
-# Anthropic
-export ANTHROPIC_API_KEY="your-key"
-
-# OpenAI-compatible proxy (if applicable)
-export SCILINK_API_KEY="your-key"
+scilink plan          # experimental design & optimization
+scilink analyze       # data analysis
+scilink simulate      # structures, DFT, MD
 ```
 
-When using `SCILINK_API_KEY`, also provide a `--base-url` pointing to your OpenAI-compatible endpoint.
+## What makes SciLink different
 
-## Quick Start
+### Foundation agents
 
-SciLink can be used via the **CLI**, **web UI**, **MCP server**, or **Python API**.
-
-### CLI
+Instead of one agent per technique, SciLink ships a small set of **foundation
+agents**, one per broad modality (spectra, images, datacubes, simulation
+scales), specialized at runtime by pluggable **skill bundles**: a markdown file
+of domain guidance, optionally with vetted helper tools. Adding a new technique
+(a new spectroscopy, a new simulation engine) is a drop-in markdown bundle, not
+a new agent. Domain scientists can extend the platform without touching agent
+code, and the platform discovers and routes to new bundles automatically. See
+[docs/foundation_agents.md](docs/foundation_agents.md).
 
 ```bash
-# Planning session
-scilink plan
-scilink plan --autonomy autopilot --data-dir ./results --knowledge-dir ./papers
-
-# Analysis session
-scilink analyze
-scilink analyze --data ./sample.tif --metadata ./metadata.json
+scilink analyze --skills ./raman_skill.md     # your expertise, one file
 ```
 
-### Web UI
+### Simulated-annealing agent pipelines
+
+SciLink's analysis pipelines treat domain knowledge the way simulated annealing
+treats temperature: hold the domain priors and the implementation plan
+**locked** at first, and progressively thaw them only when verified refinement
+fails to converge, with verifier-driven acceptance at every step, so a
+relaxation never trades physics for fit quality silently. Inspired by
+Metropolis–Hastings. See
+[docs/constraint_annealing.md](docs/constraint_annealing.md).
+
+### Autonomy is a dial
+
+Every mode runs at one of three autonomy levels, which decide **who holds the
+acceptance gate** on agent commitments:
+
+| Level | Who leads | Human involvement |
+|---|---|---|
+| **Co-Pilot** | You | Review every step |
+| **Autopilot** | The agent | Approve major decisions (plans, outputs) |
+| **Autonomous** | The agent | None (headless / batch use) |
+
+The same session, tools and agents underneath. Only the gate moves.
+
+### Grounded in what you already know
+
+Papers, instrument manuals and prior results become **named knowledge bases**
+(`scilink kb`) that any session can attach. Tabular data and record databases
+are queried by generated code, with no schema to define first. Grounding is
+always an explicit choice, and retrieval degrades gracefully instead of
+failing. See [docs/knowledge_and_data.md](docs/knowledge_and_data.md).
+
+### Agents that keep what they learn
+
+During a session, the orchestrators record recurring failure modes, non-obvious
+parameter choices and domain rules. Observations worth keeping are
+**graduated** into markdown skills stored under `~/.scilink/`, outside the
+package, and auto-loaded on every future run. Your instance gets better at
+*your* problems. Opt in with `scilink memory enable` and manage the store
+with `scilink memory`.
+
+## Use SciLink from other agents (MCP)
+
+SciLink is both an MCP **server** (its tools driven by Claude Code, Deep
+Agents, VS Code or your own framework) and an MCP **client** (external tool
+servers such as instrument APIs, databases and lab robots, plugged into its
+orchestrators):
 
 ```bash
-scilink ui              # React web UI (default)
-scilink ui --streamlit  # classic Streamlit app
+scilink serve --print-mcp-json      # ready-to-paste client config, secret-free
+scilink analyze --mcp stdio:arxiv:python,-m,arxiv_mcp_server
 ```
 
-### MCP Server
+Tool narration streams to the client live, and sessions and background jobs survive
+server restarts. See [docs/connecting_agent_clients.md](docs/connecting_agent_clients.md)
+(all clients, all deployment layouts) and
+[docs/mcp_client_integration.md](docs/mcp_client_integration.md).
 
-```bash
-scilink serve --model claude-opus-4-6
-```
-
-See [MCP Integration](#mcp-integration) for details.
-
-### Python API
+## Python API
 
 ```python
-from scilink.agents.planning_agents import PlanningAgent
-from scilink.agents.exp_agents import AnalysisOrchestratorAgent, AnalysisMode
+from scilink.agents.exp_agents import AnalysisOrchestratorAgent
 
 if __name__ == "__main__":
-    # Generate an experimental plan
-    planner = PlanningAgent(model_name="claude-opus-4-6")
-    plan = planner.propose_experiments(
-        objective="Optimize lithium extraction yield",
-        knowledge_paths=["./literature/"],
-        primary_data_set={"file_path": "./composition_data.xlsx"}
+    result = AnalysisOrchestratorAgent().run_task(
+        "Analyze ./stem_image.tif, identify the defects and generate scientific claims"
     )
-
-    # Analyze image data
-    analyzer = AnalysisOrchestratorAgent(analysis_mode=AnalysisMode.AUTOPILOT)
-    result = analyzer.chat("Analyze ./stem_image.tif and generate scientific claims")
+    result["key_findings"]    # plus files_produced, summary, suggested_followups
 ```
 
-In a script, keep the code that runs SciLink under `if __name__ == "__main__":`. A process pool using the `spawn` start method (the default on macOS and Windows) re-imports your script in every worker. SciLink refuses to start inside such a worker, rather than run a second copy of your session there.
-
----
-
-![SciLink Reports](misc/report_snapshots.jpg)
-
----
-
-## MCP Integration
-
-SciLink supports the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) as both a **server** (exposing its tools/agents to external clients like Claude Code) and a **client** (connecting to external MCP servers for additional capabilities).
-
-### As an MCP Server
-
-Expose SciLink's analysis and planning tools to any MCP-compatible client:
-
-```bash
-# Default (stdio transport, autonomous mode)
-scilink serve --model claude-opus-4-6
-
-# Analysis only, with human approval for major actions
-scilink serve --mode analyze --autonomy co-pilot
-
-# HTTP transport (SSE)
-scilink serve --transport sse --host 127.0.0.1 --port 8000
-```
-
-The server exposes all orchestrator tools (prefixed `scilink_` for analysis, `scilink_plan_` for planning), plus job management tools for long-running operations. Autonomy modes control which tools require human approval before execution.
-
-Client setup is one command — `scilink serve --print-mcp-json` emits a ready-to-paste, secret-free config entry (zero-install `uvx` spec when available) — and credentials live in one place, `~/.scilink/credentials.env`, loaded by the server at startup. While tools run, their narration streams to the client as MCP log notifications; sessions and background jobs survive server restarts (a fixed `--session-dir` resumes the campaign). See [docs/connecting_agent_clients.md](docs/connecting_agent_clients.md) for the unified guide — every client (Claude Code/Desktop, Deep Agents, VS Code, your own framework), the three server placements, and the container layouts — and [docs/claude_code_integration.md](docs/claude_code_integration.md) for the Claude-specific walkthrough.
-
-### As an MCP Client
-
-Connect external MCP servers to extend SciLink with additional tools:
-
-```bash
-# Python MCP server (e.g., arXiv paper search)
-scilink analyze --mcp stdio:arxiv:python,-m,arxiv_mcp_server,--storage-path,/tmp/papers
-
-# Remote streamable-HTTP server (e.g., a hosted lab platform with token auth)
-scilink analyze --mcp mcp_config.json   # {"url": "...", "transport": "http", "headers": {...}}
-```
-
-Programmatically:
-
-```python
-orchestrator = AnalysisOrchestratorAgent()
-tool_count = orchestrator.connect_mcp_server(
-    server_name="arxiv",
-    command=["python", "-m", "arxiv_mcp_server", "--storage-path", "/tmp/papers"]
-)
-
-# or a remote server over streamable HTTP with bearer-token auth
-tool_count = orchestrator.connect_mcp_server(
-    server_name="lab-platform",
-    url="https://mcp.example.com/mcp",
-    transport="http",
-    headers={"Authorization": f"Bearer {os.environ['LAB_PLATFORM_API_KEY']}"},
-)
-```
-
-In the **web UI**, go to the **Tools** tab > **MCP Servers** section, select a transport (stdio/SSE/HTTP), enter the server name and command or URL (plus optional headers for authenticated servers), and click **Connect**.
-
-See [docs/mcp_client_integration.md](docs/mcp_client_integration.md) for the full MCP guide.
-
----
-
-## Extensibility
-
-SciLink supports custom tools, skills, and agents that can be added via CLI flags, the web UI, or programmatically.
-
-### Custom Tools
-
-Provide a Python file with `tool_schemas` (list of OpenAI-format tool dicts) and a `create_tool_functions(data)` factory:
-
-```bash
-scilink analyze --tools ./my_image_tools.py
-```
-
-See [docs/custom_tools_integration.md](docs/custom_tools_integration.md) for the full guide, including how custom tool outputs flow into built-in agents and how to feed a preprocessed file back into the analysis pipeline.
-
-### Custom Skills
-
-Add domain-specific analysis guidance via Markdown skill files:
-
-```bash
-scilink analyze --skills ./raman_skill.md ./ftir_skill.md
-```
-
-Built-in skills are available for image analysis (atomic-resolution STEM, etc.), curve fitting (XPS, Raman, etc.), and hyperspectral analysis (EELS, etc.).
-
-### Custom Agents
-
-Register additional `BaseAnalysisAgent` subclasses:
-
-```bash
-scilink analyze --agents ./my_xrd_agent.py
-```
-
-### Persistent Memory
-
-SciLink agents learn from hard problems and keep that knowledge across sessions.
-Graduated and auto-distilled skills are stored under **`~/.scilink/`** (override
-with `$SCILINK_HOME`) — outside the installed package, so they survive a `pip`
-upgrade and are auto-discovered on every future run. The store is **off by
-default**: run `scilink memory enable` (or use the Memory panel) before anything
-is banked, staged or loaded. Manage them with:
-
-```bash
-scilink memory list                 # graduated/auto-distilled skills
-scilink memory staged               # raw T=2 solutions awaiting distillation
-scilink memory upgrade <domain>/<id> --into <domain>/<name>   # enrich an existing skill
-scilink memory consolidate <domain>/<technique>              # distill N into a new skill
-scilink memory promote <domain>/<name>                       # make a provisional skill auto-routable
-```
-
-> **Docker:** the store lives in the container's home (`~/.scilink`), which is
-> **ephemeral** — learned skills are lost when the container exits unless you
-> mount a volume. The image declares it as a `VOLUME`; persist it with, e.g.:
->
-> ```bash
-> docker run -v ~/.scilink:/home/scilinkuser/.scilink scilink ...
-> # or: docker run -e SCILINK_HOME=/data -v scilink-mem:/data scilink ...
-> ```
->
-> Without a mount, SciLink logs a one-time warning that memory won't persist.
-
-### Named Knowledge Bases
-
-Knowledge bases — your papers, datasheets, and prior reports, embedded for
-retrieval-augmented planning — can be promoted to **named, reusable artifacts**
-stored under `~/.scilink/knowledge_bases/` (rides `$SCILINK_HOME`). Build one
-once (this embeds the documents, so it needs the embedding provider's API
-key); every later session reuses the persisted index from **any** directory:
-
-```bash
-scilink kb create produced-water --from ./papers ./composition_data \
-    --description "Produced-water composition and criticality references"
-scilink kb list                          # what exists, built with which embedding model
-scilink kb add produced-water --from ./new_paper.pdf   # embeds only the new documents
-scilink kb import legacy --from ./kb_storage --embedding-model gemini-embedding-001
-scilink kb rebuild produced-water --embedding-model text-embedding-3-small
-```
-
-Use a KB by name wherever a knowledge directory is accepted:
-
-```bash
-scilink plan --knowledge-dir produced-water
-scilink explore --knowledge-dir produced-water
-```
-
-In a meta (explore) session you don't need the flag: detached KBs — the
-launch directory's `kb_storage`, plus every named KB with its description and
-source list — are offered **in chat**. In autopilot the meta asks before the
-first planning delegation; in autonomous mode it attaches the KB whose
-sources are clearly relevant to the task (and leaves all detached otherwise).
-Creating and growing a KB work from chat too — *"save the DOE report I
-uploaded as a knowledge base called produced-water"* builds it in the store
-(with the session's embedding model, or keyword-only without one) and offers
-it to later sessions like any named KB; *"add this datasheet to my
-produced-water knowledge base"* embeds just that document (with the KB's own
-embedding model) and the running session picks it up immediately. Both
-happen only on your explicit request, since a named KB is shared across
-sessions, and both are refused on a multi-user server, where the store
-belongs to every user (`scilink kb` is the operator's route there).
-Sessions otherwise treat named KBs as read-only: in-session document use
-stays session-local and never mutates the store.
-
-Each KB's `manifest.json` records the embedding model that built it, so a
-provider mismatch (e.g. a Gemini-built KB in an OpenAI-embedding session)
-warns upfront with a rebuild hint instead of failing opaquely at query time.
-And a KB is never unusable: when its embedding provider is unavailable,
-retrieval falls back to model-free keyword (BM25) search over the stored
-chunks — lower recall than dense retrieval, but real grounding from any KB
-in any session, with zero embedding dependency.
-A KB created with `kb create` keeps copies of its source documents and can be
-re-embedded with `kb rebuild`; an imported one cannot (no sources), so prefer
-`create` when you have the original documents.
-
-**Behavior changes** (vs. releases before the KB store):
-
-- A meta/explore session **no longer silently inherits** whatever `kb_storage/`
-  sits in the launch directory. Grounding is always an explicit choice: the
-  `--knowledge-dir` flag, a chat-time confirmation, or the autonomous
-  relevance decision. Standalone `scilink plan` behavior is unchanged.
-- A planning-tool retrieval failure (e.g. missing embedding key) now
-  degrades through tiers instead of aborting plan generation: dense
-  retrieval → keyword (BM25) retrieval → no retrieved context, each step
-  logged.
-- `--knowledge-dir` accepts a store name as well as a path; an existing
-  directory always wins over a same-named KB.
-
----
-
-# Planning Agents
-
-<img src="misc/planning_screenshots.jpg" alt="SciLink Planning Agent" width="100%">
-
-The Planning Agents module automates experimental design and iterative optimization workflows.
-
-## Architecture
-
-| Agent | Purpose |
-|-------|---------|
-| **PlanningOrchestratorAgent** | Coordinates the full experimental workflow via natural language |
-| **PlanningAgent** | Generates experimental strategies using dual knowledge bases |
-| **ScalarizerAgent** | Converts raw data (CSV, Excel) into optimization-ready metrics |
-| **BOAgent** | Suggests optimal parameters via Bayesian Optimization |
-
-## CLI Usage
-
-```bash
-scilink plan
-scilink plan --autonomy autopilot --data-dir ./results --knowledge-dir ./papers
-scilink plan --model claude-opus-4-5
-```
-
-### Interactive Session Example
-
-```
-$ scilink plan
-Research objective (e.g. optimize reaction yield): Optimize lithium extraction from brine
-
-📋 SciLink Plan  claude-opus-4-6 (Anthropic) · planning_session_20260919_101500
-
-❯ Generate a plan using papers in ./literature/
-  🔧 Calling tool: generate_initial_plan
-  💭 Retrieving the eight most relevant chunks first
-  ⠋ Writing analysis code…  12s
-
-## Experiment 1: pH-controlled selective precipitation
-**Hypothesis:** adjusting pH to 10–11 selectively precipitates Mg(OH)₂ while retaining Li⁺
-· 4 LLM calls · 18,204/1,930 tokens · 41s
-
-❯ Analyze ./results/batch_001.csv and run optimization
-```
-
-Add `/objective` to the shared commands below to print the campaign objective.
-
-### CLI Commands
-
-The chat runs in SciLink's terminal shell, shared by every mode: line editing
-and history, Tab completion of slash commands and paths, a status row while
-the agent works (Ctrl+O shows the full narration), Ctrl+C to stop a running
-turn, typing mid-turn to queue the next message, and every question rendered
-with the same labels the web UI uses
-(`Enter = Approve plan`, and so on).
-
-| Command | Description |
-|---------|-------------|
-| `/help` | Commands and keys |
-| `/status` | Session state (`/state` still works) |
-| `/mode [level]` | Show or change the autonomy level (`/autonomy` still works) |
-| `/tools`, `/skills`, `/memory`, `/files` | What the agent can use and what it produced |
-| `/sessions`, `/resume [id]` | Past sessions in this folder; pick one up |
-| `/verbose`, `/cost` | Toggle narration; LLM calls and tokens this session |
-| `/checkpoint` | Save session state now (also saved after every turn and on exit) |
-| `/quit` | Exit |
-
-## Python API
-
-```python
-from scilink.agents.planning_agents.planning_orchestrator import (
-    PlanningOrchestratorAgent, AutonomyLevel
-)
-from scilink.agents.planning_agents import PlanningAgent, ScalarizerAgent, BOAgent
-
-# Using the orchestrator
-orchestrator = PlanningOrchestratorAgent(
-    objective="Optimize reaction yield",
-    autonomy_level=AutonomyLevel.AUTOPILOT,
-    data_dir="./experimental_results",
-    knowledge_dir="./papers"
-)
-response = orchestrator.chat("Generate initial plan and analyze batch_001.csv")
-
-# Direct agent usage
-agent = PlanningAgent(model_name="claude-opus-4-6")
-plan = agent.propose_experiments(
-    objective="Screen precipitation conditions",
-    knowledge_paths=["./literature/"],
-    primary_data_set={"file_path": "./composition_data.xlsx"}
-)
-
-# Bayesian optimization
-bo = BOAgent(model_name="claude-opus-4-6")
-result = bo.run_optimization_loop(
-    data_path="./optimization_data.csv",
-    objective_text="Maximize yield while minimizing cost",
-    input_cols=["Temperature", "pH", "Concentration"],
-    input_bounds=[[20, 80], [6, 10], [0.1, 2.0]],
-    target_cols=["Yield"],
-    batch_size=1
-)
-```
-
----
-
-# Experimental Analysis Agents
-
-<img src="misc/analysis_screenshots.jpg" alt="SciLink Analysis Agent" width="100%">
-
-The Analysis Agents module provides automated scientific data analysis across multiple modalities.
-
-## Architecture
-
-| ID | Agent | Use Case |
-|----|-------|----------|
-| 0 | **CurveFittingAgent** | 1D fitting — XRD, UV-Vis, PL, DSC, TGA, kinetics |
-| 1 | **ImageAnalysisAgent** | All image types — microscopy, SEM, TEM, AFM, optical. Handles atomic resolution, grains, particles, textures, defects, morphology |
-| 2 | **HyperspectralAnalysisAgent** | Spectroscopic datacubes — EELS-SI, EDS, Raman imaging |
-
-> **Beta:** ImageAnalysisAgent is under active development. Expect rough edges: verification scores and planner choices can vary across runs, and some domain-specific defaults are still being tuned. Feedback welcome.
-
-## CLI Usage
-
-```bash
-scilink analyze
-scilink analyze --data ./sample.tif --metadata ./metadata.json
-scilink analyze --mode autonomous --data ./spectrum.npy
-```
-
-### Interactive Session Example
-
-```
-$ scilink analyze --data ./stem_image.tif
-
-🔬 SciLink Analyze  claude-opus-4-6 (Anthropic) · analysis_session_20260919_101500
-
-❯ Examine the data at ./stem_image.tif
-  🔧 Calling tool: examine_data
-Microscopy image, 2048 × 2048. Suggested agent: ImageAnalysisAgent (1).
-· 2 LLM calls · 6,410/480 tokens · 9s
-
-❯ Run the analysis
-  🔧 Calling tool: run_analysis
-  ⠋ Verification 2/7…  1m 40s
-```
-
-Headless, for scripts and CI:
-
-```bash
-scilink analyze -p "Analyze ./stem_image.tif" --output-format json --yes
-```
-
-`/agents` (the analysis agents) and `/schema` (the metadata JSON schema)
-join the shared commands below.
-
-### CLI Commands
-
-The chat runs in SciLink's terminal shell, shared by every mode: line editing
-and history, Tab completion of slash commands and paths, a status row while
-the agent works (Ctrl+O shows the full narration), Ctrl+C to stop a running
-turn, typing mid-turn to queue the next message, and every question rendered
-with the same labels the web UI uses
-(`Enter = Approve plan`, and so on).
-
-| Command | Description |
-|---------|-------------|
-| `/help` | Commands and keys |
-| `/status` | Session state (`/state` still works) |
-| `/mode [level]` | Show or change the autonomy level (`/autonomy` still works) |
-| `/tools`, `/skills`, `/memory`, `/files` | What the agent can use and what it produced |
-| `/sessions`, `/resume [id]` | Past sessions in this folder; pick one up |
-| `/verbose`, `/cost` | Toggle narration; LLM calls and tokens this session |
-| `/checkpoint` | Save session state now (also saved after every turn and on exit) |
-| `/quit` | Exit |
-
-## Python API
-
-```python
-from scilink.agents.exp_agents import (
-    AnalysisOrchestratorAgent, AnalysisMode,
-    ImageAnalysisAgent, HyperspectralAnalysisAgent, CurveFittingAgent
-)
-
-# Using the orchestrator
-orchestrator = AnalysisOrchestratorAgent(
-    base_dir="./my_analysis",
-    analysis_mode=AnalysisMode.AUTOPILOT
-)
-response = orchestrator.chat("Examine ./data/sample.tif")
-
-# Direct image analysis with two-tier pipeline
-agent = ImageAnalysisAgent(analysis_depth="auto")
-result = agent.analyze(
-    "stem_image.tif",
-    system_info={"experiment": {"technique": "HAADF-STEM"}},
-    objective="Identify crystal phases and defects"
-)
-
-# Image series with outlier detection
-result = agent.analyze(
-    ["img_001.tif", "img_002.tif", "img_003.tif"],
-    series_metadata={"variable": "dose", "values": [1e14, 1e15, 1e16], "unit": "ions/cm²"}
-)
-
-# Curve fitting
-agent = CurveFittingAgent(output_dir="./curve_output", use_literature=True)
-result = agent.analyze(
-    ["pl_300K.csv", "pl_350K.csv", "pl_400K.csv"],
-    series_metadata={"variable": "temperature", "values": [300, 350, 400], "unit": "K"}
-)
-
-# Hyperspectral series: the first cube is analysed in full, its verified
-# analysis scripts are locked and replayed verbatim on the rest, then
-# failures are re-analysed, outliers flagged and trends synthesized
-agent = HyperspectralAnalysisAgent(output_dir="./eels_series")
-result = agent.analyze(
-    ["eels_300K.npy", "eels_350K.npy", "eels_400K.npy"],
-    system_info={"technique": "EELS", "energy_range": {"start": 450, "end": 570, "units": "eV"}},
-    series_metadata={"variable": "temperature", "values": [300, 350, 400], "unit": "K"},
-    max_series_refits=1,
-    series_workers=3,          # locked replays run concurrently
-)
-```
-
-### Metadata Conversion
-
-```python
-from scilink.agents.exp_agents import generate_metadata_json_from_text
-
-# "HAADF-STEM of MoS2 monolayer, 50nm FOV, 300kV"
-# → {"experiment_type": "Microscopy", "experiment": {"technique": "HAADF-STEM"}, ...}
-metadata = generate_metadata_json_from_text("./experiment_notes.txt")
-```
-
----
-
-## Novelty Assessment
-
-SciLink can automatically check experimental findings against the scientific literature to identify what's genuinely new. This is powered by integration with [FutureHouse](https://www.futurehouse.org/) AI agents.
-
-```
-👤 You: Assess novelty of these claims
-
-🤖 Agent: ⚡ Searching literature via FutureHouse...
-
-  📚 [Score 2/5] Mixed 2H/1T phase coexistence → Well-documented
-  🤔 [Score 3/5] Sulfur vacancy density of 3.2 × 10¹³ cm⁻² → Similar measurements exist
-  🌟 [Score 4/5] 1T phase localized within 5nm of grain boundaries → Limited prior reports
-
-  Summary: 1 HIGH-NOVELTY finding identified
-```
-
-The discovery loop: **Analysis** generates scientific claims → **Novelty Assessment** scores each against literature → **Recommendations** prioritize validation experiments for novel findings.
-
----
-
-## Output Structure
-
-### Planning Session
-
-```
-campaign_session/
-├── optimization_data.csv      # Accumulated experimental data
-├── plan.json                  # Current experimental plan
-├── plan.html                  # Rendered plan visualization
-├── checkpoint.json            # Session state for restoration
-└── output_scripts/            # Generated automation code
-```
-
-### Analysis Session
-
-```
-analysis_session/
-├── results/
-│   └── analysis_{dataset}_{agent}_{timestamp}/
-│       ├── metadata_used.json
-│       ├── analysis_results.json
-│       ├── visualizations/
-│       └── report.html
-├── chat_history.json
-└── checkpoint.json
-```
-
----
-
-# Simulation Agents
-
-Drive atomistic simulations from natural-language goals. The interactive chat surface
-is `scilink simulate`, backed by the engine-neutral `SimulationOrchestratorAgent`; the
-same pipeline is available programmatically as `run_complete_workflow` (one-shot:
-structure → inputs → optional validation → optional run). Every scale flows through one
-scale-agnostic path — the routing decision selects the *scale* (periodic DFT / molecular
-QC / classical MD / MLIP) and the engine is supplied by a markdown **skill bundle**, so
-no engine filenames are hardcoded in agent code.
-
-## Structure generation
-
-`StructurePipeline` runs the build → validate → refine loop for five structure classes
-(`crystal`, `molecular`, `condensed`, `biomolecular`, `aimsgb`), each driven by a
-markdown skill bundle that supplies the build guidance, the output format
-(POSCAR / xyz / pdb / extxyz), and the class-specific validation rubric. `StructurePlanner`
-maps a free-text request onto the right `structure_class` and downstream
-`simulation_scale`.
-
-## Periodic DFT
-
-`PeriodicDFTAgent` is engine-agnostic; the engine is selected by skill bundle. Two
-engines ship today — **VASP** and **Quantum ESPRESSO** — under
-`scilink/skills/periodic_dft/{vasp,qe}/`. Adding ABINIT or CP2K is a drop-in
-markdown bundle, no agent code changes.
-
-## Classical MD and MLIPs
-
-`MDSimulationAgent` generates classical-MD inputs (engine selected by skill bundle —
-LAMMPS ships today), with `ForceFieldAgent` assigning the potential and `StructurePipeline`
-packing the condensed-phase box. `MLIPAgent` deploys machine-learned potentials as an
-engine-neutral runner. Force-field vs MLIP is chosen downstream of routing once the
-structure exists — an MLIP is a potential source, not a separate scale.
-
-## Post-run analysis
-
-`SimulationAnalysisAgent` computes properties from a finished run's output via verified
-codegen (scalar values and non-scalar observables — curves, images, datacubes), engine-agnostic.
-
-## CLI
-
-```bash
-scilink simulate                                            # co-pilot chat
-scilink simulate --mode autopilot                           # AI proceeds with defaults
-scilink simulate --request "rutile TiO2 supercell with one O vacancy"
-```
-
-## Python API
-
-```python
-from scilink.agents.sim_agents import (
-    StructurePipeline, PeriodicDFTAgent, run_complete_workflow,
-)
-
-# Structure-only build (engine-agnostic, class-aware)
-sp = StructurePipeline(generator_model="claude-opus-4-6")
-res = sp.build_structure("a single water molecule", structure_class="molecular")
-# → res["final_structure_path"] points at structure.xyz
-
-# Full one-shot pipeline (structure + inputs together), any scale/engine
-run_complete_workflow(
-    "diamond Si, 2-atom primitive cell, ground-state SCF",
-    scale="periodic_dft", software="vasp",
-)
-
-# Quantum ESPRESSO inputs via the engine-agnostic agent
-PeriodicDFTAgent().generate_inputs(
-    structure_file="POSCAR",
-    request="vc-relax of Cu fcc",
-    software="qe",
-)
-```
-
-# Skill Graduation
-
-SciLink's chat orchestrators (plan, analyze, simulate) don't just consume skills — they **grow them**. During a
-session, the agent records observations into a session-scoped knowledge store. When an
-observation looks like a recurring pattern (a recurring failure mode, a non-obvious
-parameter choice, a domain rule), it can be **graduated** into a Markdown skill bundle
-that's stored on disk and auto-loaded into agent context on every subsequent run. No
-code changes, no manual skill authoring.
-
-The graduation tool is exposed in `analyze` and `plan` mode under the same name
-(`graduate_to_skill`); it writes only while persistent memory is switched on
-(`scilink memory enable`). In **autopilot** and **autonomous** modes the
-agent decides itself when an observation is worth graduating; in **co-pilot** it surfaces
-the candidate and asks first.
+Each mode orchestrator (plan / analyze / simulate) exposes this same
+`run_task(task, context)` contract (one programmatic call, no conversation),
+which is also how mission control itself delegates to them. The individual
+agents (`CurveFittingAgent`, `BOAgent`, `StructurePipeline`, …) are importable
+too. See [docs/python_api.md](docs/python_api.md).
+
+## Going deeper
+
+| Topic | Where |
+|---|---|
+| Foundation agents, skill authoring, custom tools & agents, memory | [docs/foundation_agents.md](docs/foundation_agents.md) |
+| Annealing / constraint relaxation | [docs/constraint_annealing.md](docs/constraint_annealing.md) |
+| Knowledge bases, RAG, data query, novelty assessment | [docs/knowledge_and_data.md](docs/knowledge_and_data.md) |
+| Python API and session layouts | [docs/python_api.md](docs/python_api.md) |
+| CLI reference and terminal shell | [docs/cli_reference.md](docs/cli_reference.md) |
+| Web UI | [docs/react_web_ui.md](docs/react_web_ui.md) |
+| Connecting agent clients (MCP server) | [docs/connecting_agent_clients.md](docs/connecting_agent_clients.md) |
+| Claude Code walkthrough | [docs/claude_code_integration.md](docs/claude_code_integration.md) |
+| MCP client integration | [docs/mcp_client_integration.md](docs/mcp_client_integration.md) |
+| Custom tools | [docs/custom_tools_integration.md](docs/custom_tools_integration.md) |
+
+## Disclaimer
+
+SciLink was developed at Pacific Northwest National Laboratory, operated by
+Battelle for the U.S. Department of Energy. See the full
+[disclaimer](docs/disclaimer.md).
