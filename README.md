@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="misc/scilink_logo_dark_animated.svg">
-    <img alt="SciLink" src="misc/scilink_logo_light_animated.svg" width="320">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/ziatdinovmax/SciLink/main/misc/scilink_logo_dark_animated.svg">
+    <img alt="SciLink" src="https://raw.githubusercontent.com/ziatdinovmax/SciLink/main/misc/scilink_logo_light_animated.svg" width="320">
   </picture>
 </p>
 
@@ -24,7 +24,7 @@ Python and let it run to the end on its own. Or let **another AI agent**, such
 as Claude Code, call it as a scientific specialist over MCP.
 
 <p align="center">
-  <img src="docs/figures/readme/architecture.jpg" alt="The user talks to a Mission Control agent, which dispatches planning, analysis and simulation agents. All three draw on RAG, skills and literature search" width="820">
+  <img src="https://raw.githubusercontent.com/ziatdinovmax/SciLink/main/docs/figures/readme/architecture.jpg" alt="The user talks to a Mission Control agent, which dispatches planning, analysis and simulation agents. All three draw on RAG, skills and literature search" width="820">
 </p>
 
 ---
@@ -84,8 +84,8 @@ feature table goes straight into Bayesian optimization:
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/figures/readme/ui_analysis_fit.jpg" alt="Mission control chat with the verbose fitting log streaming per-spectrum results and a live window showing the latest fit"></td>
-    <td width="50%"><img src="docs/figures/readme/ui_bo_recommendation.jpg" alt="Mission control reports the analysis and the next temperature and pH recommended by Bayesian optimization"></td>
+    <td width="50%"><img src="https://raw.githubusercontent.com/ziatdinovmax/SciLink/main/docs/figures/readme/ui_analysis_fit.jpg" alt="Mission control chat with the verbose fitting log streaming per-spectrum results and a live window showing the latest fit"></td>
+    <td width="50%"><img src="https://raw.githubusercontent.com/ziatdinovmax/SciLink/main/docs/figures/readme/ui_bo_recommendation.jpg" alt="Mission control reports the analysis and the next temperature and pH recommended by Bayesian optimization"></td>
   </tr>
   <tr>
     <td><sub><b>Analysis.</b> Every spectrum fitted with a verified, locked recipe. Results appear as they come in.</sub></td>
@@ -97,8 +97,8 @@ From a plain-language request to ready-to-run inputs and protocols:
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/figures/readme/ui_structure_3d.jpg" alt="An adsorbate on a copper slab shown in an interactive 3D viewer next to the generated VASP inputs"></td>
-    <td width="50%"><img src="docs/figures/readme/ui_plan_review.jpg" alt="A proposed experimental plan with hypothesis and steps, awaiting approval"></td>
+    <td width="50%"><img src="https://raw.githubusercontent.com/ziatdinovmax/SciLink/main/docs/figures/readme/ui_structure_3d.jpg" alt="An adsorbate on a copper slab shown in an interactive 3D viewer next to the generated VASP inputs"></td>
+    <td width="50%"><img src="https://raw.githubusercontent.com/ziatdinovmax/SciLink/main/docs/figures/readme/ui_plan_review.jpg" alt="A proposed experimental plan with hypothesis and steps, awaiting approval"></td>
   </tr>
   <tr>
     <td><sub><b>Simulation.</b> The agent builds and checks the structure and writes DFT inputs ready for HPC.</sub></td>
@@ -113,9 +113,9 @@ scripts:
 
 <table>
   <tr>
-    <td width="33%" valign="top"><img src="docs/figures/readme/report_series.jpg" alt="Spectral series analysis report"></td>
-    <td width="33%" valign="top"><img src="docs/figures/readme/report_image.jpg" alt="Image analysis report"></td>
-    <td width="33%" valign="top"><img src="docs/figures/readme/report_plan.jpg" alt="Experimental plan report"></td>
+    <td width="33%" valign="top"><img src="https://raw.githubusercontent.com/ziatdinovmax/SciLink/main/docs/figures/readme/report_series.jpg" alt="Spectral series analysis report"></td>
+    <td width="33%" valign="top"><img src="https://raw.githubusercontent.com/ziatdinovmax/SciLink/main/docs/figures/readme/report_image.jpg" alt="Image analysis report"></td>
+    <td width="33%" valign="top"><img src="https://raw.githubusercontent.com/ziatdinovmax/SciLink/main/docs/figures/readme/report_plan.jpg" alt="Experimental plan report"></td>
   </tr>
   <tr>
     <td><sub><b>Spectral series.</b> Parameter trends across conditions, every individual fit, claims and caveats.</sub></td>
@@ -160,7 +160,7 @@ of domain guidance, optionally with vetted helper tools. Adding a new technique
 (a new spectroscopy, a new simulation engine) is a drop-in markdown bundle, not
 a new agent. Domain scientists can extend the platform without touching agent
 code, and the platform discovers and routes to new bundles automatically. See
-[docs/foundation_agents.md](docs/foundation_agents.md).
+[docs/foundation_agents.md](https://github.com/ziatdinovmax/SciLink/blob/main/docs/foundation_agents.md).
 
 ```bash
 scilink analyze --skills ./raman_skill.md     # your expertise, one file
@@ -174,7 +174,7 @@ treats temperature: hold the domain priors and the implementation plan
 fails to converge, with verifier-driven acceptance at every step, so a
 relaxation never trades physics for fit quality silently. Inspired by
 Metropolis–Hastings. See
-[docs/constraint_annealing.md](docs/constraint_annealing.md).
+[docs/constraint_annealing.md](https://github.com/ziatdinovmax/SciLink/blob/main/docs/constraint_annealing.md).
 
 ### Autonomy is a dial
 
@@ -195,7 +195,7 @@ Papers, instrument manuals and prior results become **named knowledge bases**
 (`scilink kb`) that any session can attach. Tabular data and record databases
 are queried by generated code, with no schema to define first. Grounding is
 always an explicit choice, and retrieval degrades gracefully instead of
-failing. See [docs/knowledge_and_data.md](docs/knowledge_and_data.md).
+failing. See [docs/knowledge_and_data.md](https://github.com/ziatdinovmax/SciLink/blob/main/docs/knowledge_and_data.md).
 
 ### Agents that keep what they learn
 
@@ -219,9 +219,9 @@ scilink analyze --mcp stdio:arxiv:python,-m,arxiv_mcp_server
 ```
 
 Tool narration streams to the client live, and sessions and background jobs survive
-server restarts. See [docs/connecting_agent_clients.md](docs/connecting_agent_clients.md)
+server restarts. See [docs/connecting_agent_clients.md](https://github.com/ziatdinovmax/SciLink/blob/main/docs/connecting_agent_clients.md)
 (all clients, all deployment layouts) and
-[docs/mcp_client_integration.md](docs/mcp_client_integration.md).
+[docs/mcp_client_integration.md](https://github.com/ziatdinovmax/SciLink/blob/main/docs/mcp_client_integration.md).
 
 ## Python API
 
@@ -239,25 +239,25 @@ Each mode orchestrator (plan / analyze / simulate) exposes this same
 `run_task(task, context)` contract (one programmatic call, no conversation),
 which is also how mission control itself delegates to them. The individual
 agents (`CurveFittingAgent`, `BOAgent`, `StructurePipeline`, …) are importable
-too. See [docs/python_api.md](docs/python_api.md).
+too. See [docs/python_api.md](https://github.com/ziatdinovmax/SciLink/blob/main/docs/python_api.md).
 
 ## Going deeper
 
 | Topic | Where |
 |---|---|
-| Foundation agents, skill authoring, custom tools & agents, memory | [docs/foundation_agents.md](docs/foundation_agents.md) |
-| Annealing / constraint relaxation | [docs/constraint_annealing.md](docs/constraint_annealing.md) |
-| Knowledge bases, RAG, data query, novelty assessment | [docs/knowledge_and_data.md](docs/knowledge_and_data.md) |
-| Python API and session layouts | [docs/python_api.md](docs/python_api.md) |
-| CLI reference and terminal shell | [docs/cli_reference.md](docs/cli_reference.md) |
-| Web UI | [docs/react_web_ui.md](docs/react_web_ui.md) |
-| Connecting agent clients (MCP server) | [docs/connecting_agent_clients.md](docs/connecting_agent_clients.md) |
-| Claude Code walkthrough | [docs/claude_code_integration.md](docs/claude_code_integration.md) |
-| MCP client integration | [docs/mcp_client_integration.md](docs/mcp_client_integration.md) |
-| Custom tools | [docs/custom_tools_integration.md](docs/custom_tools_integration.md) |
+| Foundation agents, skill authoring, custom tools & agents, memory | [docs/foundation_agents.md](https://github.com/ziatdinovmax/SciLink/blob/main/docs/foundation_agents.md) |
+| Annealing / constraint relaxation | [docs/constraint_annealing.md](https://github.com/ziatdinovmax/SciLink/blob/main/docs/constraint_annealing.md) |
+| Knowledge bases, RAG, data query, novelty assessment | [docs/knowledge_and_data.md](https://github.com/ziatdinovmax/SciLink/blob/main/docs/knowledge_and_data.md) |
+| Python API and session layouts | [docs/python_api.md](https://github.com/ziatdinovmax/SciLink/blob/main/docs/python_api.md) |
+| CLI reference and terminal shell | [docs/cli_reference.md](https://github.com/ziatdinovmax/SciLink/blob/main/docs/cli_reference.md) |
+| Web UI | [docs/react_web_ui.md](https://github.com/ziatdinovmax/SciLink/blob/main/docs/react_web_ui.md) |
+| Connecting agent clients (MCP server) | [docs/connecting_agent_clients.md](https://github.com/ziatdinovmax/SciLink/blob/main/docs/connecting_agent_clients.md) |
+| Claude Code walkthrough | [docs/claude_code_integration.md](https://github.com/ziatdinovmax/SciLink/blob/main/docs/claude_code_integration.md) |
+| MCP client integration | [docs/mcp_client_integration.md](https://github.com/ziatdinovmax/SciLink/blob/main/docs/mcp_client_integration.md) |
+| Custom tools | [docs/custom_tools_integration.md](https://github.com/ziatdinovmax/SciLink/blob/main/docs/custom_tools_integration.md) |
 
 ## Disclaimer
 
 SciLink was developed at Pacific Northwest National Laboratory, operated by
 Battelle for the U.S. Department of Energy. See the full
-[disclaimer](docs/disclaimer.md).
+[disclaimer](https://github.com/ziatdinovmax/SciLink/blob/main/docs/disclaimer.md).
