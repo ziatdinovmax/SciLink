@@ -1224,3 +1224,59 @@ button.primary:disabled:hover { background: var(--border-strong); }
 .sb-draft { margin: 8px 0 12px; }
 .sb-draft .sb-section { margin: 6px 0; }
 .sb-draft-info { margin-top: 6px; }
+
+/* ── vibes: floating background emojis (cosmetic, per browser) ─────
+   z-index -1 paints it over the page background and under everything
+   else, so no layout box changes; it never takes pointer events. */
+.vibe-layer {
+  position: fixed; inset: 0;
+  pointer-events: none; z-index: -1; overflow: hidden;
+  animation: vibe-fade-in 2s ease-out forwards;
+}
+@keyframes vibe-fade-in { from { opacity: 0; } to { opacity: 1; } }
+.vibe-layer span {
+  position: absolute; display: block; line-height: 1;
+  font-size: var(--emoji-size, 28px); opacity: 0;
+  animation: vibe-float var(--duration, 18s) var(--delay, 0s) ease-in-out infinite;
+}
+.vibe-layer span.rocket {
+  animation: vibe-rocket var(--duration, 18s) var(--delay, 0s) linear infinite;
+}
+.vibe-layer span.ufo {
+  animation: vibe-ufo var(--duration, 40s) var(--delay, 20s) linear infinite;
+}
+.vibe-layer span.boom {
+  font-size: 48px; opacity: 1; position: fixed;
+  animation: vibe-boom 0.8s ease-out forwards;
+}
+@keyframes vibe-float {
+  0%   { opacity: 0; transform: translateY(100vh) rotate(0deg); }
+  3%   { opacity: var(--peak-opacity, 0.12); }
+  93%  { opacity: var(--peak-opacity, 0.12); }
+  100% { opacity: 0; transform: translateY(-10vh) rotate(var(--rotation, 360deg)); }
+}
+@keyframes vibe-rocket {
+  0%   { opacity: 0; transform: translateY(100vh) rotate(-45deg); }
+  3%   { opacity: var(--peak-opacity, 0.12); }
+  93%  { opacity: var(--peak-opacity, 0.12); }
+  100% { opacity: 0; transform: translateY(-10vh) rotate(-45deg); }
+}
+@keyframes vibe-ufo {
+  0%   { opacity: 0; transform: translateX(-10vw) translateY(0); }
+  2%   { opacity: var(--peak-opacity, 0.18); }
+  50%  { transform: translateX(50vw) translateY(-30px); }
+  98%  { opacity: var(--peak-opacity, 0.18); }
+  100% { opacity: 0; transform: translateX(110vw) translateY(0); }
+}
+@keyframes vibe-boom {
+  0%   { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(2.5); }
+}
+@media (prefers-reduced-motion: reduce) { .vibe-layer { display: none; } }
+
+.agent-spinner-dot.vibe-icon { font-size: 16px; }
+
+.vibe-slider { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-muted); }
+.vibe-slider input { flex: 1; accent-color: var(--accent); }
+.vibe-slider > span { min-width: 6.5em; }
+.vibe-slider output { min-width: 2ch; text-align: right; }
