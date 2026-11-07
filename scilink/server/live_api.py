@@ -455,7 +455,7 @@ class LiveRun:
 
     def _credentials(self) -> Dict[str, Any]:
         a = self._agent
-        return {"model_name": getattr(a, "model_name", None) or "claude-opus-4-6",
+        return {"model_name": getattr(a, "model_name", None) or "claude-opus-5-5",
                 "api_key": getattr(a, "api_key", None),
                 "base_url": getattr(a, "base_url", None)}
 

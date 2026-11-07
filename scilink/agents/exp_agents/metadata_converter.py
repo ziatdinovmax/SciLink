@@ -695,7 +695,7 @@ def normalize_metadata_dict_with_llm(
 def generate_metadata_json_from_text(
     input_text_filepath: str,           
     api_key: str | None = None,
-    model_name: str = "claude-opus-4-6",
+    model_name: str = "claude-opus-5-5",
     base_url: str | None = None,
     # Deprecated
     google_api_key: str | None = None,

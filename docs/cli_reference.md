@@ -88,7 +88,7 @@ embedder's vendor.
 ## MCP server — `scilink serve`
 
 ```bash
-scilink serve --model claude-opus-4-6                 # stdio, autonomous
+scilink serve --model claude-opus-5-5                 # stdio, autonomous
 scilink serve --mode analyze --autonomy co-pilot      # one mode, human-gated
 scilink serve --transport sse --host 127.0.0.1 --port 8000
 scilink serve --print-mcp-json                        # ready-to-paste client config

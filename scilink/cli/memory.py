@@ -78,7 +78,7 @@ def _make_llm_call(args):
     """
     from scilink.wrappers.litellm_wrapper import LiteLLMGenerativeModel
     model = LiteLLMGenerativeModel(
-        model=getattr(args, "model", None) or "claude-opus-4-6",
+        model=getattr(args, "model", None) or "claude-opus-5-5",
         api_key=getattr(args, "api_key", None),
         base_url=getattr(args, "base_url", None),
     )
@@ -91,8 +91,8 @@ def _make_llm_call(args):
 
 
 def _add_model_args(p):
-    p.add_argument("--model", default="claude-opus-4-6",
-                   help="Model for the distillation LLM (default: claude-opus-4-6)")
+    p.add_argument("--model", default="claude-opus-5-5",
+                   help="Model for the distillation LLM (default: claude-opus-5-5)")
     p.add_argument("--base-url", dest="base_url", default=None,
                    help="Custom API base URL (e.g. internal proxy)")
     p.add_argument("--api-key", dest="api_key", default=None,

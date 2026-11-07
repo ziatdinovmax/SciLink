@@ -46,14 +46,14 @@ orchestrator = PlanningOrchestratorAgent(
 response = orchestrator.chat("Generate initial plan and analyze batch_001.csv")
 
 # An agent directly
-plan = PlanningAgent(model_name="claude-opus-4-6").propose_experiments(
+plan = PlanningAgent(model_name="claude-opus-5-5").propose_experiments(
     objective="Screen precipitation conditions",
     knowledge_paths=["./literature/"],
     primary_data_set={"file_path": "./composition_data.xlsx"},
 )
 
 # Bayesian optimization
-result = BOAgent(model_name="claude-opus-4-6").run_optimization_loop(
+result = BOAgent(model_name="claude-opus-5-5").run_optimization_loop(
     data_path="./optimization_data.csv",
     objective_text="Maximize yield while minimizing cost",
     input_cols=["Temperature", "pH", "Concentration"],
@@ -116,7 +116,7 @@ from scilink.agents.sim_agents import (
 )
 
 # Structure only (engine-agnostic, class-aware)
-sp = StructurePipeline(generator_model="claude-opus-4-6")
+sp = StructurePipeline(generator_model="claude-opus-5-5")
 res = sp.build_structure("a single water molecule", structure_class="molecular")
 # res["final_structure_path"] points at structure.xyz
 

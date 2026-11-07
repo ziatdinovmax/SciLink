@@ -473,7 +473,7 @@ def _run_workflow_once(
     output_dir: str = "simulation_workflow_output",
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
-    model_name: str = "claude-opus-4-6",
+    model_name: str = "claude-opus-5-5",
     futurehouse_api_key: Optional[str] = None,
     mp_api_key: Optional[str] = None,
     max_refinement_cycles: int = 4,

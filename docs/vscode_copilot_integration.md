@@ -52,7 +52,7 @@ Add the following configuration (replace the `command` path with the output from
                 "serve",
                 "--mode", "both",
                 "--autonomy", "autonomous",
-                "--model", "claude-opus-4-6"
+                "--model", "claude-opus-5-5"
             ],
             "env": {
                 "ANTHROPIC_API_KEY": "${input:anthropic_api_key}"
@@ -158,11 +158,11 @@ The `--model` flag in the `args` array controls which LLM SciLink's internal age
 
 | Model | Notes |
 |---|---|
-| `claude-opus-4-6` | Most capable, best for complex scientific reasoning. |
+| `claude-opus-5-5` | Most capable, best for complex scientific reasoning. |
 | `claude-sonnet-4-6` | Faster and cheaper, good for routine analyses. |
 | `gemini-3.1-pro-preview` | Default if `--model` is omitted. Requires `GEMINI_API_KEY`. |
 
-The model name must match what your API key supports. If you set `--model claude-opus-4-6`, your `env` block must include `ANTHROPIC_API_KEY`. If you set a Gemini model, provide `GEMINI_API_KEY` instead.
+The model name must match what your API key supports. If you set `--model claude-opus-5-5`, your `env` block must include `ANTHROPIC_API_KEY`. If you set a Gemini model, provide `GEMINI_API_KEY` instead.
 
 To change the model, edit `mcp.json` via `MCP: Open User Configuration` and restart the server.
 
@@ -204,8 +204,8 @@ Also verify the server is actually running (`MCP: List Servers` → check status
 SciLink echoes which model each agent is using during server init (visible in the server's stderr output):
 
 ```
-🌐 Orchestrator using LiteLLM: claude-opus-4-6
-🌐 PlanningAgent using LiteLLM: claude-opus-4-6
+🌐 Orchestrator using LiteLLM: claude-opus-5-5
+🌐 PlanningAgent using LiteLLM: claude-opus-5-5
 ```
 
 Verify these match your intended model. If you suspect a mismatch, add `"LITELLM_LOG": "DEBUG"` to the `env` block temporarily — LiteLLM will log the exact model string on every API call. Remove it after verifying, as the output is verbose.

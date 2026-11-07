@@ -69,7 +69,7 @@ class _CriticBase:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model_name: str = "claude-opus-4-6",
+        model_name: str = "claude-opus-5-5",
         base_url: Optional[str] = None,
         futurehouse_api_key: Optional[str] = None,
         google_api_key: Optional[str] = None,
@@ -85,7 +85,7 @@ class _CriticBase:
                 vendor's conventional environment variable
                 (``ANTHROPIC_API_KEY`` etc.) when ``api_key`` is None.
             model_name: Model identifier, in the form expected by the
-                resolved provider (e.g. ``"claude-opus-4-6"``).
+                resolved provider (e.g. ``"claude-opus-5-5"``).
             base_url: Base URL for an OpenAI-compatible internal proxy.
                 When provided, requests are routed through the proxy
                 client; when ``None``, requests go through LiteLLM.

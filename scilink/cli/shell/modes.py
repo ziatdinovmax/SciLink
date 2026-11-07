@@ -90,8 +90,8 @@ class ModeAdapter:
 # ── shared flag groups ───────────────────────────────────────────
 
 def _model_flags(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--model", type=str, default="claude-opus-4-6",
-                   help="Model name (default: claude-opus-4-6)")
+    p.add_argument("--model", type=str, default="claude-opus-5-5",
+                   help="Model name (default: claude-opus-5-5)")
     p.add_argument("--base-url", type=str, dest="base_url",
                    help="Base URL for OpenAI-compatible endpoint")
     p.add_argument("--api-key", type=str, dest="api_key",

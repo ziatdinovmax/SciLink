@@ -74,7 +74,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     def __init__(
         self,
         api_key: str | None = None,
-        model_name: str = "claude-opus-4-6",
+        model_name: str = "claude-opus-5-5",
         base_url: str | None = None,
         output_dir: str = "hyperspectral_analysis_output",
         # Deprecated params

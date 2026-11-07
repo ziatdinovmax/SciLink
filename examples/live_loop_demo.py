@@ -52,7 +52,7 @@ same class also works in the web UI's Live tab as ``package.module:ClassName``.
 from scilink.live import MeasurementLoop, run_experiment
 from scilink.live.simulators import get_simulator
 
-MODEL = "claude-opus-4-6"           # or e.g. "bedrock/us.anthropic.claude-opus-4-8"
+MODEL = "claude-opus-5-5"           # or e.g. "bedrock/us.anthropic.claude-opus-5-5"
 
 
 def main():

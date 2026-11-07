@@ -14,7 +14,7 @@ in the UI:
 
     # Any other provider: pass the model and set its usual env var
     export ANTHROPIC_API_KEY=...
-    python examples/file_tools_demo.py --model claude-opus-4-6
+    python examples/file_tools_demo.py --model claude-opus-5-5
 
 Each turn prints the agent's answer; the script ends with an on-disk
 check of what the tools should have produced (backups, renamed file,
@@ -35,7 +35,7 @@ DEMO = REPO / "examples" / "eels_identification_demo"
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="bedrock/us.anthropic.claude-opus-4-8")
+    ap.add_argument("--model", default="bedrock/us.anthropic.claude-opus-5-5")
     ap.add_argument("--session-dir", default=None,
                     help="Where to put the session (default: ./file_tools_demo_session_<time>)")
     ap.add_argument("--skip-analysis", action="store_true")
