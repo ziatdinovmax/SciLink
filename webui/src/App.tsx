@@ -12,6 +12,8 @@ import {
 } from "./api";
 import { useSessionEvents, type SessionEvent } from "./useSessionEvents";
 import { UIContext } from "./UIContext";
+import { VibeContext, loadVibe, saveVibe, type VibeSettings } from "./vibe";
+import VibeLayer from "./components/VibeLayer";
 import { Sidebar, type SidebarConfig } from "./components/Sidebar";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { ChatPanel } from "./components/ChatPanel";
@@ -215,6 +217,11 @@ export default function App() {
     }
   });
   const [state, dispatch] = useReducer(reducer, emptyState);
+  const [vibe, setVibeState] = useState<VibeSettings>(loadVibe);
+  const setVibe = (v: VibeSettings) => {
+    setVibeState(v);
+    saveVibe(v);
+  };
 
   const toggleSidebar = (open: boolean) => {
     setSidebarOpen(open);
@@ -476,6 +483,8 @@ export default function App() {
   }
 
   return (
+    <VibeContext.Provider value={vibe.vibe}>
+    <VibeLayer settings={vibe} />
     <div className="layout">
       {!sidebarOpen && (
         <button
@@ -530,6 +539,8 @@ export default function App() {
         onLogout={auth.auth_required ? () => void logout() : undefined}
         theme={theme}
         onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
+        vibe={vibe}
+        onVibeChange={setVibe}
       />
       )}
       <div className="main">
@@ -696,5 +707,6 @@ export default function App() {
         )}
       </div>
     </div>
+    </VibeContext.Provider>
   );
 }

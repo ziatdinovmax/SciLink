@@ -13,6 +13,7 @@ import { FeedbackPanel } from "./FeedbackPanel";
 import { LogView } from "./LogView";
 import { currentActivity } from "../narration";
 import { VOCAB } from "../vocabulary";
+import { SPINNER_ICON, useVibe } from "../vibe";
 
 export function ChatPanel({
   session,
@@ -164,6 +165,9 @@ export function ChatPanel({
   };
 
   const running = status !== "idle";
+  const vibe = useVibe();
+  const spinIcon = SPINNER_ICON[vibe];
+  const spinCls = vibe === "Professional" ? "agent-spinner-dot" : "agent-spinner-dot vibe-icon";
   // Short "what is it doing" line for the spinner pill — between the bare
   // spinner and full verbose output. The server computes it from the
   // narration (the reader the terminal shell shares); the local scan
@@ -228,9 +232,9 @@ export function ChatPanel({
           <>
             <div className="live-row">
               <div className="agent-spinner-container">
-                <span className="agent-spinner-dot">•</span>
-                <span className="agent-spinner-dot">•</span>
-                <span className="agent-spinner-dot">•</span>
+                <span className={spinCls}>{spinIcon}</span>
+                <span className={spinCls}>{spinIcon}</span>
+                <span className={spinCls}>{spinIcon}</span>
                 <span
                   className="agent-spinner-label"
                   title={activity ?? undefined}

@@ -10,6 +10,7 @@ import {
   type DelegationView,
 } from "../api";
 import { DelegationTree } from "./DelegationTree";
+import { VIBES, type Vibe, type VibeSettings } from "../vibe";
 import logoDark from "../assets/scilink_logo_dark_animated.svg";
 import logoLight from "../assets/scilink_logo_light_animated.svg";
 
@@ -52,6 +53,8 @@ export function Sidebar({
   onToggleTheme,
   authUser = null,
   onLogout,
+  vibe,
+  onVibeChange,
 }: {
   config: AppConfig | null;
   mode: string;
@@ -76,6 +79,8 @@ export function Sidebar({
   onToggleTheme: () => void;
   authUser?: string | null; // set when the server requires sign-in
   onLogout?: () => void;
+  vibe: VibeSettings;
+  onVibeChange: (v: VibeSettings) => void;
 }) {
   // The config is frozen once a session exists AND while one is being
   // created: the Start button stayed clickable during "Initializing agent…"
@@ -645,6 +650,34 @@ export function Sidebar({
       <WorkspacePanel />
 
       <div className="sidebar-section" style={{ marginTop: "auto" }}>
+        <label className="field">
+          <span>Vibe</span>
+          <select
+            value={vibe.vibe}
+            onChange={(e) => onVibeChange({ ...vibe, vibe: e.target.value as Vibe })}
+          >
+            {VIBES.map((v) => (
+              <option key={v} value={v}>
+                {v}
+              </option>
+            ))}
+          </select>
+        </label>
+        {vibe.vibe === "Positivity boost" && (
+          <>
+            <VibeSlider label="💜 Hearts" max={50} value={vibe.hearts} onChange={(n) => onVibeChange({ ...vibe, hearts: n })} />
+            <VibeSlider label="➕ Pluses" max={50} value={vibe.pluses} onChange={(n) => onVibeChange({ ...vibe, pluses: n })} />
+          </>
+        )}
+        {vibe.vibe === "Space nerd" && (
+          <>
+            <VibeSlider label="🚀 Rockets" max={50} value={vibe.rockets} onChange={(n) => onVibeChange({ ...vibe, rockets: n })} />
+            <VibeSlider label="🛸 UFOs" max={10} value={vibe.ufos} onChange={(n) => onVibeChange({ ...vibe, ufos: n })} />
+          </>
+        )}
+      </div>
+
+      <div className="sidebar-section">
         <button
           className="danger-hover"
           style={{ width: "100%" }}
@@ -655,5 +688,31 @@ export function Sidebar({
         </button>
       </div>
     </div>
+  );
+}
+
+function VibeSlider({
+  label,
+  max,
+  value,
+  onChange,
+}: {
+  label: string;
+  max: number;
+  value: number;
+  onChange: (n: number) => void;
+}) {
+  return (
+    <label className="vibe-slider">
+      <span>{label}</span>
+      <input
+        type="range"
+        min={0}
+        max={max}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+      />
+      <output>{value}</output>
+    </label>
   );
 }
