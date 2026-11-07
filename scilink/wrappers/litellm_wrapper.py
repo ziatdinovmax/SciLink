@@ -572,6 +572,60 @@ def call_dropping_refused_sampling(call, kwargs: dict, retries: Optional[int],
         return result
 
 
+# OpenAI's GPT-6 family (Astra, 6.1 Sol/Terra) refuses function tools on
+# /v1/chat/completions; tool calling requires the Responses API. LiteLLM's
+# ``responses/`` route bridges ``completion()`` there for every call shape
+# SciLink sends (tools, images, text). Optional ``openai/`` prefix; any other
+# provider prefix (azure/, bedrock/, ...) never matches.
+_GPT_MAJOR_RE = re.compile(r'^(?:openai/)?gpt-(\d+)', re.IGNORECASE)
+
+
+def _responses_api_model(model, api_base=None):
+    """The model string to SEND for ``model``: GPT-6+ on OpenAI's own endpoint
+    is routed through LiteLLM's Responses bridge, everything else unchanged.
+
+    A request rewrite only: callers keep the name they were given, so limiter
+    keys, logs and the refused-sampling memory see one name per model. A custom
+    ``api_base`` (an OpenAI-compatible proxy) is left alone, since a proxy may
+    have no /responses route.
+    """
+    m = _GPT_MAJOR_RE.match(str(model or ""))
+    if api_base or not m or int(m.group(1)) < 6 or "responses/" in str(model):
+        return model
+    return "openai/responses/" + str(model).split("/", 1)[-1]
+
+
+def _merge_bridge_choices(response):
+    """Fold the Responses bridge's split choices back into ONE assistant message.
+
+    The bridge turns each Responses output item into its own choice, so a
+    reply that says one sentence and then calls a tool (GPT-6 does this
+    routinely) comes back as ``choices[0]`` = the sentence and ``choices[1]``
+    = the tool call. Every SciLink caller reads ``choices[0]`` and so lost the
+    call: the orchestrator announced a delegation and ended its turn. SciLink
+    never asks for n>1 alternatives, so several choices here are always parts
+    of one reply; they become one message (text + tool calls), as Chat
+    Completions would return it.
+    """
+    choices = getattr(response, "choices", None) or []
+    if len(choices) < 2 or not any(getattr(c.message, "tool_calls", None) for c in choices):
+        return response
+    texts = [c.message.content for c in choices
+             if c.message.content and not getattr(c.message, "tool_calls", None)]
+    tool_calls = [tc for c in choices for tc in (getattr(c.message, "tool_calls", None) or [])]
+    first = choices[0]
+    first.message.content = "\n".join(t.strip() for t in texts) or None
+    first.message.tool_calls = tool_calls
+    if getattr(first.message, "reasoning_content", None) is None:
+        first.message.reasoning_content = next(
+            (getattr(c.message, "reasoning_content", None) for c in choices
+             if getattr(c.message, "reasoning_content", None)), None)
+    first.finish_reason = "tool_calls"
+    first.index = 0
+    response.choices = [first]
+    return response
+
+
 def _completion_with_retries(retries: Optional[int], **kwargs):
     """``litellm.completion`` under :func:`call_with_retries`, with a refused
     sampling parameter dropped (:func:`call_dropping_refused_sampling`).
@@ -580,8 +634,14 @@ def _completion_with_retries(retries: Optional[int], **kwargs):
     caller's (no SciLink caller streams today).
     """
     kwargs["num_retries"] = 0
-    return call_dropping_refused_sampling(lambda kw: litellm.completion(**kw), kwargs,
-                                          retries, kwargs.get("model"))
+    name = kwargs.get("model")
+    if name is not None:
+        kwargs["model"] = _responses_api_model(name, kwargs.get("api_base"))
+    response = call_dropping_refused_sampling(lambda kw: litellm.completion(**kw), kwargs,
+                                              retries, name)
+    if "responses/" in str(kwargs.get("model") or "") and not kwargs.get("stream"):
+        response = _merge_bridge_choices(response)
+    return response
 
 
 def litellm_completion(*args, **kwargs):
