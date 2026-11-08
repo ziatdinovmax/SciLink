@@ -152,6 +152,13 @@ def consistency_subject(unit: str, idx, name: str, kind: str, consensus: str,
                         f"has a lower {metric}", [compare])
 
 
+def _required_outputs_text(target: dict) -> str:
+    req = target.get("required_outputs")
+    if isinstance(req, str):
+        return req.strip()
+    return ", ".join(str(k) for k in req) if isinstance(req, list) else ""
+
+
 def refinement_plan_subject(state: dict) -> dict:
     """What the hyperspectral targets gate shows, as subject blocks
     (scilink.hitl): the sections ``IterativeFeedbackController`` prints,
@@ -174,6 +181,10 @@ def refinement_plan_subject(state: dict) -> dict:
         f"{plan_label} = **{decision.get('refinement_needed', False)}**\n\n"
         f"Reasoning: {decision.get('reasoning') or 'N/A'}")))
     if targets:
+        # The maps a target must deliver are a promise the run is held to,
+        # so the person approving the plan sees them (a column only when
+        # some target names any).
+        required = [_required_outputs_text(t) for t in targets]
         rows = []
         for i, t in enumerate(targets, 1):
             # custom_code targets carry value=None by schema design — the
@@ -181,8 +192,13 @@ def refinement_plan_subject(state: dict) -> dict:
             value = t.get("value")
             rows.append([i, t.get("type", "N/A"), "" if value is None else str(value),
                          t.get("description", "No description provided.")])
+        columns = ["#", "Type", "Value", "Description"]
+        if any(required):
+            columns.append("Required outputs")
+            for row, req in zip(rows, required):
+                row.append(req)
         blocks.append(subject_block("table", label=f"🎯 Targeted actions ({len(targets)})",
-                                    columns=["#", "Type", "Value", "Description"], rows=rows))
+                                    columns=columns, rows=rows))
     else:
         blocks.append(subject_block("text", label="🎯 Targeted actions (0)",
                                     markdown="No specific targets were generated."))
@@ -522,6 +538,8 @@ class IterativeFeedbackController:
             print(f"\n{header}")
             for line in textwrap.wrap(t_desc, width=70):
                 print(f"      {line}")
+            if _required_outputs_text(t):
+                print(f"      Required outputs: {_required_outputs_text(t)}")
 
         print("-" * 80)
         
