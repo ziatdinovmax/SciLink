@@ -615,7 +615,7 @@ class MetaOrchestratorAgent:
         # Tools registry.
         self.tools = MetaOrchestratorTools(self)
 
-        system_prompt = get_system_prompt(self.meta_mode) + self._kb_note()
+        system_prompt = get_system_prompt(self.meta_mode) + self._kb_note() + self._hpc_note()
 
         # Initialize LLM (dual path, copied from AnalysisOrchestratorAgent).
         if base_url:
@@ -669,10 +669,30 @@ class MetaOrchestratorAgent:
         self._refresh_system_prompt()
         logging.info(f"🔄 Meta mode changed: {old_mode.value} → {mode.value}")
 
+    def _hpc_note(self) -> str:
+        """System-prompt note on an attached HPC connection. Without it the
+        meta's model was never told a cluster was connected, and answered a
+        "check my jobs" from general knowledge instead of delegating."""
+        conn = getattr(self, "hpc_connection", None)
+        if conn is None:
+            return ""
+        prof = getattr(conn, "profile", None)
+        who = (f"{getattr(prof, 'username', '?')}@{getattr(prof, 'hostname', '?')}"
+               if prof is not None else "a cluster")
+        sched = getattr(getattr(self, "hpc_scheduler", None), "name", None) or "unknown scheduler"
+        return (
+            "\n\n## HPC CLUSTER (connected)\n"
+            f"- {who} ({sched}). The simulation specialist can list the user's "
+            "jobs in its queue (list_cluster_jobs), submit jobs, check those it "
+            "submitted and download their results, so cluster work goes to "
+            "`delegate_to_simulation`."
+        )
+
     def _refresh_system_prompt(self) -> None:
         """Rebuild the system prompt (the mode's prompt plus the knowledge
-        base note) and put it in the message history."""
-        self._system_prompt = get_system_prompt(self.meta_mode) + self._kb_note()
+        base and HPC notes) and put it in the message history."""
+        self._system_prompt = (get_system_prompt(self.meta_mode) + self._kb_note()
+                               + self._hpc_note())
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = self._system_prompt
 
@@ -913,6 +933,8 @@ class MetaOrchestratorAgent:
         if child is not None:
             child.hpc_connection = self.hpc_connection
             child.hpc_scheduler = self.hpc_scheduler
+        if getattr(self, "messages", None):      # tell the meta's model, too
+            self._refresh_system_prompt()
 
     # =========================================================================
     # Shared extensions: skills, custom tools, MCP servers

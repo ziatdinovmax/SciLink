@@ -2711,6 +2711,55 @@ class SimulationOrchestratorTools:
         )
 
         # =====================================================================
+        # 13b. LIST CLUSTER JOBS (the user's queue, any origin)
+        # =====================================================================
+        def list_cluster_jobs(user: str = None) -> str:
+            conn = self.orch.hpc_connection
+            sched = self.orch.hpc_scheduler
+            if conn is None or sched is None:
+                return json.dumps({"status": "error", "message": "No HPC connection active."})
+            if not conn.is_connected:
+                return json.dumps({"status": "error",
+                                   "message": "HPC connection is not active. Reconnect and retry."})
+            who = (user or "").strip() or getattr(getattr(conn, "profile", None), "username", None)
+            try:
+                jobs = sched.queue(who)
+            except Exception as e:
+                return json.dumps({"status": "error", "message": str(e)})
+            return json.dumps({
+                "status": "success",
+                "user": who,
+                "scheduler": getattr(sched, "name", None),
+                "n_jobs": len(jobs),
+                "jobs": [{
+                    "job_id": j.job_id, "name": j.name, "job_status": j.status.value,
+                    "raw_status": j.raw_status, "partition": j.partition,
+                    "nodes": j.nodes, "time_used": j.time_used,
+                    "time_limit": j.time_limit, "work_dir": j.work_dir,
+                } for j in jobs],
+                "note": ("All of the user's jobs in the scheduler's queue, whether or not "
+                         "SciLink submitted them; finished jobs leave the queue."),
+            })
+
+        self._register_tool(
+            func=list_cluster_jobs,
+            name="list_cluster_jobs",
+            description=(
+                "List the jobs in the connected cluster's queue for a user (default: the "
+                "connected user), whatever submitted them: job id, name, state, partition, "
+                "nodes, time used. Read-only. For one job SciLink submitted, "
+                "get_job_status gives more detail."
+            ),
+            parameters={
+                "user": {
+                    "type": "string",
+                    "description": "Cluster username to list (default: the connected user).",
+                },
+            },
+            required=[],
+        )
+
+        # =====================================================================
         # 14. DOWNLOAD VASP RESULTS
         # =====================================================================
         def download_job_results(job_id: str, local_dir: str = "") -> str:

@@ -257,3 +257,49 @@ def test_a_stopped_turn_counts_until_its_thread_ends(tmp_path):
     assert c.post(f"{base}/disconnect").status_code == 409
     done.set(); t.join()
     assert c.post(f"{base}/disconnect").status_code == 200
+
+
+# ── the meta's model is told; the specialist can list the user's queue ──
+
+def test_the_meta_prompt_says_a_cluster_is_connected():
+    from scilink.agents.meta_agent.meta_orchestrator import MetaOrchestratorAgent, MetaMode
+    meta = MetaOrchestratorAgent.__new__(MetaOrchestratorAgent)
+    meta._children = {}
+    meta.meta_mode = MetaMode.AUTOPILOT
+    meta._kb_note = lambda: ""
+    meta.messages = [{"role": "system", "content": "base"}]
+    conn = SimpleNamespace(profile=SimpleNamespace(username="alle927", hostname="deception.pnl.gov"))
+    meta.set_hpc_connection(conn, SimpleNamespace(name="SLURM"))
+    prompt = meta.messages[0]["content"]
+    assert "HPC CLUSTER (connected)" in prompt and "alle927@deception.pnl.gov (SLURM)" in prompt
+    assert "list_cluster_jobs" in prompt and "delegate_to_simulation" in prompt
+    meta.set_hpc_connection(None)
+    assert "HPC CLUSTER" not in meta.messages[0]["content"]
+
+
+def test_the_specialist_lists_the_users_queue(tmp_path):
+    pytest.importorskip("ase")
+    import json
+    from scilink.agents.sim_agents import SimulationOrchestratorAgent, SimulationMode
+    from scilink.hpc.scheduler import HPCJob, JobStatus
+    asked = []
+
+    class Sched:
+        name = "SLURM"
+
+        def queue(self, user=None):
+            asked.append(user)
+            return [HPCJob(job_id="1477923", name="smoke_cr", status=JobStatus.PENDING,
+                           raw_status="PD", partition="slurm")]
+
+    orch = SimulationOrchestratorAgent(base_dir=str(tmp_path / "sim"), api_key="dummy",
+                                       model_name="claude-opus-4-6",
+                                       simulation_mode=SimulationMode.AUTONOMOUS)
+    r = json.loads(orch.tools.execute_tool("list_cluster_jobs"))
+    assert r["status"] == "error"                           # not connected yet
+    orch.hpc_connection = SimpleNamespace(is_connected=True,
+                                          profile=SimpleNamespace(username="alle927"))
+    orch.hpc_scheduler = Sched()
+    r = json.loads(orch.tools.execute_tool("list_cluster_jobs"))
+    assert r["status"] == "success" and r["user"] == "alle927" and asked == ["alle927"]
+    assert r["jobs"][0]["job_id"] == "1477923" and r["jobs"][0]["job_status"] == "Pending"

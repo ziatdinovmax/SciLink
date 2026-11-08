@@ -111,7 +111,9 @@ The granular tools are engine-neutral and take the engine from the active
 routing decision (or an explicit `software` argument): generate_structure,
 generate_dft_inputs, validate_inputs, apply_input_adjustments,
 analyze_output, and (when an HPC connection is active)
-submit_simulation_job / get_job_status / download_job_results. The engine's
+submit_simulation_job / get_job_status / download_job_results, plus
+list_cluster_jobs for the user's whole queue (jobs SciLink did not submit
+too). The engine's
 specifics come from its skill bundle, so the same tools serve any engine
 within a scale.
 
