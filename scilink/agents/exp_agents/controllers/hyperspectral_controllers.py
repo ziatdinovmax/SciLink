@@ -536,6 +536,30 @@ def _render_data_facts(data, axis, axis_units: str, max_peaks: int = 4) -> str:
     return _data_facts(data, axis, axis_units, max_peaks).get("text", "")
 
 
+def _as_float_maps(maps):
+    """The script's maps as float arrays, so every downstream check and plot
+    sees one dtype. A boolean or integer map (a detection mask, a count) is a
+    legitimate output; left as is, one such map crashed the dashboard's
+    percentile scaling and failed the whole attempt with every other map in
+    it (#809). Float arrays are returned as the same objects, untouched; a
+    list becomes an array; a value that is not numeric stays as returned, for
+    the existing checks to judge."""
+    if not isinstance(maps, dict):
+        return maps
+    out = {}
+    for name, arr in maps.items():
+        a = arr if isinstance(arr, np.ndarray) else np.asarray(arr)
+        if a.dtype.kind in "biu":
+            a = a.astype(float)
+        elif a.dtype.kind == "O":
+            try:
+                a = a.astype(float)
+            except (TypeError, ValueError):
+                a = arr
+        out[name] = a
+    return out
+
+
 def _declares_unmeasured(result_dict: dict, required_outputs) -> bool:
     """A ``not_measurable`` declaration stands when every REQUIRED output is
     absent or entirely NaN — diagnostic maps beside it (a mask, an SNR map)
@@ -2565,11 +2589,74 @@ Overlays showing where components are concentrated on the structural image.
         return state
 
 
+_REQUIRED_OUTPUTS_RULES_START = "**Required outputs (objective-aware QC enforcement):**"
+_REQUIRED_OUTPUTS_RULES_END = "**Example 1"
+_OUTPUT_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+
+
+def _required_outputs_rules() -> str:
+    """The planner's own required-outputs rules, quoted from the refinement
+    instructions so the declaration step and the planner cannot drift."""
+    text = SPECTROSCOPY_REFINEMENT_INSTRUCTIONS
+    start = text.find(_REQUIRED_OUTPUTS_RULES_START)
+    end = text.find(_REQUIRED_OUTPUTS_RULES_END, start + 1) if start >= 0 else -1
+    return text[start:end].strip() if start >= 0 and end > start else ""
+
+
+def _required_outputs_prompt(objective: str, target: dict) -> str:
+    return (
+        "A plan's measurement target names no `required_outputs`. The pipeline "
+        "guarantees only the outputs listed there: with none, an attempt that "
+        "returns just diagnostic maps (a mask, a validity or noise map) is "
+        "accepted as the task's result.\n\n"
+        f"Analysis objective: {objective}\n\n"
+        f"Target description: {target.get('description') or ''}\n\n"
+        f"{_required_outputs_rules()}\n\n"
+        "Declare the target's required outputs under these rules: the exact "
+        "map keys of the quantities this target exists to deliver for the "
+        "objective. Return an empty list only when the objective is "
+        "exploratory and names no quantity.\n"
+        'Output a JSON object: {"required_outputs": [...], "reason": "..."}'
+    )
+
+
 class SelectRefinementTargetController:
     """
     [🧠 LLM Step]
     Asks the LLM if a refinement (zoom-in) is needed and where.
     """
+
+    def _declare_required_outputs(self, target: dict, state: dict) -> None:
+        """A measurement target with no required outputs leaves the gate
+        nothing to hold an attempt to (#810). When the run has an objective,
+        ask once for the declaration the planner skipped; the answer may be
+        an empty list (exploratory). Fails open: any problem keeps the plan
+        as it was."""
+        objective = state.get("analysis_objective")
+        if target.get("required_outputs") or not objective:
+            return
+        try:
+            response = self.model.generate_content(
+                contents=[_required_outputs_prompt(objective, target)],
+                generation_config=None,
+                safety_settings=self.safety_settings,
+            )
+            result_json, error_dict = self._parse_llm_response(response)
+            if error_dict or not isinstance(result_json, dict):
+                raise ValueError(error_dict or "no JSON object")
+            keys = result_json.get("required_outputs")
+            if not isinstance(keys, list):
+                raise ValueError("required_outputs is not a list")
+            keys = [k.strip() for k in keys if isinstance(k, str)]
+            keys = list(dict.fromkeys(k for k in keys if _OUTPUT_KEY_RE.match(k)))
+        except Exception as e:  # noqa: BLE001 - the declaration is an addition, never a blocker
+            self.logger.warning(f"Required-outputs declaration skipped: {e}")
+            return
+        target["required_outputs"] = keys
+        self.logger.info(
+            f"🎯 Required outputs declared for the target: {keys or '[] (exploratory)'}"
+            f" — {str(result_json.get('reason') or '').strip()[:200]}")
+
     def __init__(self, model, logger, generation_config, safety_settings, parse_fn: Callable):
         self.model = model
         self.logger = logger
@@ -2786,6 +2873,7 @@ refinement targets are meaningful here — do not request `spatial` or
                 # Winner-Takes-All: If code is needed, focus ONLY on that.
                 # We pick the first custom target and ignore standard zooms for this turn.
                 top_target = custom_code_targets[0]
+                self._declare_required_outputs(top_target, state)
                 label = "Analysis Plan" if skip_mode else "Priority Target Selected"
                 self.logger.info(f"🎯 {label} (Custom Code): {top_target.get('description')}")
                 final_targets = [top_target]
@@ -4327,6 +4415,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     ctx.timeout_used_s = _timeout_used
                     if not isinstance(result_dict, dict):
                         raise ValueError("Function return must be a dict.")
+                    if "maps" in result_dict:
+                        result_dict["maps"] = _as_float_maps(result_dict["maps"])
                     # A not_measurable declaration that CONTRADICTS the
                     # deterministic data facts (a >= 5-sigma feature in the
                     # field mean) is a wrong gate, not a finding: repaired in
@@ -4495,10 +4585,22 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 # axis_spec so non-spatial leading axes get axis-
                 # name-driven labels ("Voltage-Time Map" / "Sample
                 # Count") instead of "Spatial Map" / "Pixel Count".
-                dashboard_bytes = tools.create_feature_dashboard(
-                    result_map, feature_name, current_unit,
-                    axis_spec=resolve_axis_spec(state.get("system_info")),
-                )
+                # A map whose figure cannot be drawn fails ITS review, not the
+                # attempt: the other maps keep their reviews (#809).
+                try:
+                    dashboard_bytes = tools.create_feature_dashboard(
+                        result_map, feature_name, current_unit,
+                        axis_spec=resolve_axis_spec(state.get("system_info")),
+                    )
+                except Exception as _dash_exc:  # noqa: BLE001
+                    self.logger.warning(
+                        f"    Skipping {feature_name}: its figure could not be drawn "
+                        f"({type(_dash_exc).__name__}: {_dash_exc}).")
+                    qc_failures.append(
+                        f"{feature_name}: the map could not be plotted for review "
+                        f"({type(_dash_exc).__name__}: {_dash_exc}); return it as a "
+                        f"numeric (H, W) array.")
+                    continue
 
                 if dashboard_bytes:
                     _prev_passed = ctx.passed_reviews.get(feature_name)
