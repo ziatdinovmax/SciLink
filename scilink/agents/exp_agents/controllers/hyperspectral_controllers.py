@@ -531,6 +531,89 @@ def _render_band_flux_table(data, axis, axis_units: str, aux: dict | None = None
         return ""
 
 
+_FIELD_OVERVIEW_CAPTION = (
+    "FIELD OVERVIEW (made from the data, no model): the total signal over the axis, then "
+    "each main feature of the field-mean spectrum (a peak as its integrated signal, a dip "
+    "as its depth below a local baseline). Brightness is signal strength, not what a "
+    "region is.")
+
+
+def _field_overview(state: dict, max_features: int = 4) -> dict:
+    """What the field looks like, for a planner that saw no decomposition.
+
+    With decomposition skipped, the planner chose regions and windows with no
+    picture of the field, and named regions from an assumed contrast. This is
+    the picture a scientist looks at first, made from the data with no model:
+    the total signal over the axis, and the signal integrated over each of the
+    field mean's main features (the DATA FACTS the code writer gets), one
+    panel each. Returns ``{"image": jpeg bytes, "text": facts}``, or ``{}``
+    when it cannot be made; advisory, never raises.
+    """
+    try:
+        import io
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        data = np.asarray(state["hspy_data"], dtype=float)
+        if data.ndim != 3 or min(data.shape) < 2:
+            return {}
+        e = data.shape[2]
+        axis_2 = resolve_axis_spec(state.get("system_info") or {})["axis_2"]
+        units = axis_2.get("units", "")
+        axis = signal_axis_values(axis_2, e)
+        if axis is None:
+            axis = (np.linspace(axis_2["start"], axis_2["end"], e)
+                    if "start" in axis_2 and "end" in axis_2 else np.arange(e, dtype=float))
+            if "start" not in axis_2:
+                units = "channels"
+        axis = np.asarray(axis, dtype=float)
+        facts = _data_facts(data, axis, units)
+        feats = list(facts.get("features") or [])[:max_features]
+        panels = [(np.nansum(data, axis=2), f"total signal, {axis[0]:.4g}–{axis[-1]:.4g} {units}")]
+        step = abs(float(axis[1] - axis[0])) if e > 1 else 1.0
+        for f in feats:
+            half = max(float(f.get("width") or 0.0) / 2.0, 1.5 * step)
+            sel = (axis >= f["position"] - half) & (axis <= f["position"] + half)
+            if sel.sum() < 1:
+                continue
+            where = f"{f.get('kind', 'feature')} at {f['position']:.4g} {units} (±{half:.3g})"
+            if f.get("kind") == "dip":
+                # Depth below a straight baseline between the window's edges,
+                # pixel by pixel, so a stronger band is brighter, as for peaks.
+                idx = np.flatnonzero(sel)
+                i0, i1 = int(idx[0]), int(idx[-1])
+                left = np.nanmean(data[:, :, max(i0 - 3, 0):max(i0, 1)], axis=2)
+                right = np.nanmean(data[:, :, min(i1 + 1, e - 1):min(i1 + 4, e)], axis=2)
+                t = (axis[idx] - axis[idx[0]]) / max(float(axis[idx[-1]] - axis[idx[0]]), 1e-12)
+                base = left[:, :, None] + (right - left)[:, :, None] * t[None, None, :]
+                panels.append((np.nansum(base - data[:, :, idx], axis=2),
+                               f"{where}: depth below baseline"))
+            else:
+                panels.append((np.nansum(data[:, :, sel], axis=2), f"{where}: integrated signal"))
+        n = len(panels)
+        cols = min(n, 3)
+        rows = -(-n // cols)
+        fig, axes = plt.subplots(rows, cols, figsize=(4.2 * cols, 3.8 * rows), squeeze=False)
+        for ax, (img, title) in zip(axes.ravel(), panels):
+            finite = img[np.isfinite(img)]
+            lo, hi = (np.percentile(finite, [1, 99]) if finite.size else (0, 1))
+            im = ax.imshow(img, cmap="viridis", vmin=lo, vmax=hi if hi > lo else lo + 1)
+            ax.set_title(title, fontsize=9)
+            ax.set_xticks([]); ax.set_yticks([])
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        for ax in axes.ravel()[n:]:
+            ax.axis("off")
+        fig.suptitle("Field overview from the data (no model): brighter = more signal", fontsize=10)
+        fig.tight_layout()
+        buf = io.BytesIO()
+        fig.savefig(buf, format="jpeg", dpi=90)
+        plt.close(fig)
+        return {"image": buf.getvalue(), "text": facts.get("facts_text", ""),
+                "caption": _FIELD_OVERVIEW_CAPTION}
+    except Exception:  # noqa: BLE001 - advisory, never break planning
+        return {}
+
+
 def _render_data_facts(data, axis, axis_units: str, max_peaks: int = 4) -> str:
     """Text of :func:`_data_facts` (empty when the facts cannot be computed)."""
     return _data_facts(data, axis, axis_units, max_peaks).get("text", "")
@@ -753,6 +836,9 @@ def _data_facts(data, axis, axis_units: str, max_peaks: int = 4) -> dict:
             "window holds a LISTED feature is rejected.")
         strongest = feats[0]["sigma"] if feats else 0.0
         return {"text": "\n".join(lines),
+                # the facts alone, without the closing paragraph addressed to
+                # the code writer (windows, seeds, not_measurable): for a planner
+                "facts_text": "\n".join(lines[:-1]),
                 "measurable": strongest >= 5.0,
                 "strongest_sigma": strongest,
                 "sigma_mean": sigma_mean,
@@ -2830,7 +2916,18 @@ refinement targets are meaningful here — do not request `spatial` or
                 self.logger.info("Skip-decomposition mode — no decomposition images to review (expected).")
             else:
                 self.logger.warning("No analysis images found for refinement selection.")
-            prompt_parts.append("(No visual results available)")
+            overview = _field_overview(state) if skip_mode else {}
+            if overview.get("image"):
+                # No decomposition, so no maps: show the field itself, and the
+                # field mean's features. Kept on state so a replan after the
+                # person's feedback sees the same evidence.
+                state["field_overview"] = overview
+                prompt_parts.append("\n" + overview["caption"])
+                prompt_parts.append({"mime_type": "image/jpeg", "data": overview["image"]})
+                if overview.get("text"):
+                    prompt_parts.append("\n" + overview["text"])
+            else:
+                prompt_parts.append("(No visual results available)")
 
         for img in analysis_images:
             image_bytes = img.get('data') or img.get('bytes')
@@ -3667,6 +3764,10 @@ class RunDynamicAnalysisController:
                 # measured inputs only (#754), up front of the code-gen prompt
                 from .._input_integrity import CODEGEN_PRINCIPLE, with_principle
                 base_prompt = with_principle(base_prompt, CODEGEN_PRINCIPLE)
+                # regions named by evidence, not contrast; every retry is
+                # rebuilt from this base prompt
+                from .._region_names import REGION_NAMES_PRINCIPLE
+                base_prompt = with_principle(base_prompt, REGION_NAMES_PRINCIPLE)
                 if state.get("joint_manifest"):
                     # a joint analysis's inputs (#754)
                     from .._joint import joint_units_block
