@@ -931,8 +931,11 @@ class MetaOrchestratorAgent:
         self.hpc_scheduler = scheduler if connection is not None else None
         child = self._children.get("simulation")
         if child is not None:
-            child.hpc_connection = self.hpc_connection
-            child.hpc_scheduler = self.hpc_scheduler
+            if hasattr(child, "set_hpc_connection"):    # also tells its model
+                child.set_hpc_connection(self.hpc_connection, self.hpc_scheduler)
+            else:
+                child.hpc_connection = self.hpc_connection
+                child.hpc_scheduler = self.hpc_scheduler
         if getattr(self, "messages", None):      # tell the meta's model, too
             self._refresh_system_prompt()
 

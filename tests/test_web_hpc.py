@@ -302,4 +302,45 @@ def test_the_specialist_lists_the_users_queue(tmp_path):
     orch.hpc_scheduler = Sched()
     r = json.loads(orch.tools.execute_tool("list_cluster_jobs"))
     assert r["status"] == "success" and r["user"] == "alle927" and asked == ["alle927"]
+    assert "cluster" in r
     assert r["jobs"][0]["job_id"] == "1477923" and r["jobs"][0]["job_status"] == "Pending"
+
+
+
+def test_the_specialist_is_told_when_the_cluster_changes(tmp_path):
+    # Live: after switching Deception -> Perlmutter the specialist answered
+    # "you are connected to deception" from its own earlier messages.
+    pytest.importorskip("ase")
+    import json
+    from scilink.agents.sim_agents import SimulationOrchestratorAgent, SimulationMode
+    orch = SimulationOrchestratorAgent(base_dir=str(tmp_path / "sim"), api_key="dummy",
+                                       model_name="claude-opus-4-6",
+                                       simulation_mode=SimulationMode.AUTONOMOUS)
+    dec = SimpleNamespace(is_connected=True,
+                          profile=SimpleNamespace(username="alle927", hostname="deception.pnl.gov"))
+    nersc = SimpleNamespace(is_connected=True,
+                            profile=SimpleNamespace(username="sallec", hostname="perlmutter.nersc.gov"))
+    slurm = SimpleNamespace(name="SLURM", queue=lambda user=None: [])
+    orch.set_hpc_connection(dec, slurm)
+    assert "alle927@deception.pnl.gov (SLURM)" in orch.messages[0]["content"]
+    orch.set_hpc_connection(nersc, slurm)
+    prompt = orch.messages[0]["content"]
+    assert "sallec@perlmutter.nersc.gov" in prompt and "deception" not in prompt
+    assert "connection has changed" in prompt
+    r = json.loads(orch.tools.execute_tool("list_cluster_jobs"))
+    assert r["cluster"] == "perlmutter.nersc.gov" and r["user"] == "sallec"
+    orch.set_hpc_connection(None)
+    assert "No cluster is connected now" in orch.messages[0]["content"]
+    orch.set_simulation_mode(SimulationMode.CO_PILOT)       # survives a prompt rebuild
+    assert "No cluster is connected now" in orch.messages[0]["content"]
+
+
+def test_the_meta_tells_its_specialist_through_its_hook():
+    from scilink.agents.meta_agent.meta_orchestrator import MetaOrchestratorAgent
+    meta = MetaOrchestratorAgent.__new__(MetaOrchestratorAgent)
+    seen = []
+    child = SimpleNamespace(set_hpc_connection=lambda c, s=None: seen.append((c, s)))
+    meta._children = {"simulation": child}
+    conn, sched = object(), SimpleNamespace(name="SLURM")
+    meta.set_hpc_connection(conn, sched)
+    assert seen == [(conn, sched)]

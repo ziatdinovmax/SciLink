@@ -2666,6 +2666,7 @@ class SimulationOrchestratorTools:
 
             return json.dumps({
                 "status": "success",
+                "cluster": getattr(getattr(conn, "profile", None), "hostname", None),
                 "job_id": job.job_id,
                 "job_status": job.status.value,
                 "is_terminal": job.status.is_terminal,
@@ -2728,6 +2729,7 @@ class SimulationOrchestratorTools:
                 return json.dumps({"status": "error", "message": str(e)})
             return json.dumps({
                 "status": "success",
+                "cluster": getattr(getattr(conn, "profile", None), "hostname", None),
                 "user": who,
                 "scheduler": getattr(sched, "name", None),
                 "n_jobs": len(jobs),
