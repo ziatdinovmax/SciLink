@@ -296,7 +296,7 @@ class TestClusterExecutorRun:
             def __init__(self, profile):
                 captured["profile"] = profile
 
-            def connect(self, password="", key_passphrase=""):
+            def connect(self, password="", key_passphrase="", otp=""):
                 captured["password"] = password
                 captured["passphrase"] = key_passphrase
 
@@ -323,13 +323,29 @@ class TestClusterExecutorRun:
             def __init__(self, profile):
                 captured["profile"] = profile
 
-            def connect(self, password="", key_passphrase=""):
+            def connect(self, password="", key_passphrase="", otp=""):
                 pass
 
         monkeypatch.setattr(conn_mod, "HPCConnection", FakeHPCConn)
         ClusterExecutor.connect(hostname="h", username="u", key_path="/k")
         assert captured["profile"].auth_method == "key"
         assert captured["profile"].key_path == "/k"
+
+    def test_connect_factory_passes_a_one_time_code(self, monkeypatch):
+        import scilink.hpc.connection as conn_mod
+        captured = {}
+
+        class FakeHPCConn:
+            def __init__(self, profile):
+                pass
+
+            def connect(self, password="", key_passphrase="", otp=""):
+                captured.update(password=password, otp=otp)
+
+        monkeypatch.setattr(conn_mod, "HPCConnection", FakeHPCConn)
+        ClusterExecutor.connect(hostname="perlmutter.nersc.gov", username="u",
+                                password="pw", otp="123456")
+        assert captured == {"password": "pw", "otp": "123456"}
 
     def test_uploaded_script_has_directives_and_wrapper(self, tmp_path):
         conn = FakeConn()

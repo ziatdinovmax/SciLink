@@ -188,8 +188,49 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
 
 ## What's included (first cut)
 
-- **Modes**: meta (mission control), analyze, plan. Simulate/HPC is not in
-  the web UI yet.
+- **Modes**: meta (mission control), analyze, plan. There is no separate
+  simulate mode: Mission Control delegates simulation to its specialist.
+- **HPC cluster panel** (Mission Control sidebar): connects the session's
+  simulation specialist to a cluster over SSH, so it can submit, track and
+  download jobs (`submit_simulation_job`, `get_job_status`,
+  `download_job_results`). Fields: host, user, port, login method, password
+  or key, an optional **one-time code** for multi-factor sites, and an
+  optional jump host.
+  - **MFA:** the code answers the server's keyboard-interactive prompts: a
+    combined "Password + OTP" prompt (NERSC) gets both joined; a separate
+    code prompt, after a password or after a key, gets the code. Codes are
+    single-use, so a dropped connection needs a fresh one; the panel says
+    when the link has dropped. NERSC's `sshproxy` (a 24-hour SSH key) also
+    works, as a key login with no code.
+  - **Secrets:** password, key passphrase and code go to the server for one
+    login and are never stored, logged or returned; the form clears them
+    once a login was tried, and keeps them when the server stopped first
+    (e.g. 409 while a turn finishes), so a fresh code is not lost.
+    "Remember this profile" keeps only host, user, port, method, key path
+    and jump host, in the browser.
+  - **Key login and jump hosts** use the SSH keys and agent of the account
+    running SciLink, so they are offered only on a local server **without
+    sign-in**. A server behind sign-in (tokens, `--users`, an auth proxy) is
+    shared even on a loopback bind: there they answer 403 and password (+ code)
+    is the way in. A jump host must be `[user@]host[:port]`; one that itself
+    asks for a code cannot be answered from the browser.
+  - **Missing secrets are caught before answering:** if the server asks for a
+    code (or password) that was not entered, the login stops without sending
+    an answer (no known-wrong attempt is sent; a site's PAM may still log the
+    abandoned login). A refused login, or one that fails after a password or
+    code was sent, is never retried on the host's other addresses (a code is
+    single-use); a drop before anything was sent still tries the next one.
+  - **Host keys** are accepted on first use and not checked against
+    `~/.ssh/known_hosts` (as in the Streamlit app); verifying them is a
+    follow-up.
+  - The connection can't be changed while a turn is running (409): finish or
+    stop the turn first, so no job is left half-submitted.
+  - **Jobs belong to their cluster:** a submitted job records the cluster
+    (`user@host:port`). After switching clusters, `get_job_status` and
+    `download_job_results` refuse that job and name the cluster to
+    reconnect to (job ids repeat across clusters).
+  - Needs paramiko >= 3.2 (a base dependency); an older one is reported
+    before any login (501).
 - **Sidebar**: model + provider fields (e.g. Bedrock region), API key /
   base URL (with "✓ available from ENV" captions — the server reports
   credential *availability*, never values), FutureHouse / Materials Project
@@ -463,6 +504,9 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
 | POST | `/sessions/{id}/uploads` | multipart, `category` = data/metadata/knowledge/code/planning_data/meta/scripts; optional `paths` (JSON list of relative paths, one per file) makes it a layout-preserving folder upload |
 | POST | `/sessions/{id}/folders` | validate pasted local folder paths + enumerate tabular contents and immediate subfolders |
 | POST | `/sessions/{id}/plan_dirs` | repoint the plan agent's knowledge/code/data dirs at stable folders |
+| GET | `/sessions/{id}/hpc` | the session's cluster connection (host, user, scheduler, `mfa`, `dropped`); never secrets |
+| POST | `/sessions/{id}/hpc/connect` | open an SSH connection for the simulation specialist (password / key, optional one-time code, jump host); key login and jump hosts only on a local server without sign-in; 409 during a turn |
+| POST | `/sessions/{id}/hpc/disconnect` | close it and detach it from the specialist |
 | GET | `/sessions/{id}/files?path=` | serve a session file (traversal-fenced) |
 | GET | `/sessions/{id}/tree` | recursive listing with sizes/mtimes and per-file "new" flags |
 | GET | `/sessions/{id}/thumb?path=&size=&cmap=` | PNG thumbnail; NPY/TIFF rendered as normalized heatmaps, structure files as atom views (`X-Preview-Kind: structure`) |

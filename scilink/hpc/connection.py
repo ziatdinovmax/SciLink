@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import re
 import threading
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -10,6 +11,54 @@ import paramiko
 import logging
 import socket
 
+
+def _login_strategy():
+    """The MFA login classes, imported on first use: they need paramiko >= 3.2
+    (``auth_strategy``), and an older paramiko should fail here with a message
+    naming the version rather than when the package is imported."""
+    try:
+        from .auth import LoginRefused, MFAAuth
+    except ImportError as exc:
+        raise ImportError(
+            f"SciLink's HPC login needs paramiko >= 3.2 (found "
+            f"{getattr(paramiko, '__version__', 'unknown')}): "
+            "pip install -U 'paramiko>=3.2'") from exc
+    return LoginRefused, MFAAuth
+
+
+# Host names and jump hosts reach a local `ssh` command (the jump-host path):
+# nothing that ssh could read as an option or a second argument.
+_HOST = r"[A-Za-z0-9_](?:[A-Za-z0-9_.-]*[A-Za-z0-9_])?"
+_HOSTNAME = re.compile(rf"^{_HOST}$")
+_PROXY_JUMP = re.compile(rf"^(?:([A-Za-z0-9_][A-Za-z0-9._+-]*)@)?({_HOST})(?::(\d{{1,5}}))?$")
+
+
+def validate_hostname(value: str) -> str:
+    """The host name, stripped, or ValueError when it isn't a plain name/address."""
+    v = (value or "").strip()
+    if not _HOSTNAME.match(v):
+        raise ValueError(f"not a valid host name: {value!r}")
+    return v
+
+
+def validate_proxy_jump(value: str) -> str:
+    """The jump host, stripped, or ValueError when it is not ``[user@]host[:port]``
+    (anything else, e.g. a leading ``-``, would reach ssh as an option)."""
+    v = (value or "").strip()
+    if v and not _PROXY_JUMP.match(v):
+        raise ValueError(f"jump host must look like user@host or user@host:port, got {value!r}")
+    return v
+
+
+def _jump_command(jump: str, hostname: str, port: int) -> str:
+    """``ssh -W host:port [-p P] -- [user@]jump``: ssh reads ``host:port`` after
+    ``--`` as a host name, so a jump-host port goes in ``-p``."""
+    m = _PROXY_JUMP.match(jump)
+    user, host, jport = m.group(1), m.group(2), m.group(3)
+    target = f"{user}@{host}" if user else host
+    port_opt = f"-p {int(jport)} " if jport else ""
+    return f"ssh -W {hostname}:{int(port)} {port_opt}-- {target}"
+
 @dataclass
 class HPCProfile:
     """Storable connection profile (no secrets)."""
@@ -17,7 +66,7 @@ class HPCProfile:
     hostname: str
     username: str
     port: int = 22
-    auth_method: str = "key"        # "key" | "password"
+    auth_method: str = "key"        # "key" | "password" (either may add a one-time code)
     key_path: str = ""
     proxy_jump: str = ""            # e.g. "user@bastion.example.edu"
 
@@ -41,11 +90,21 @@ class HPCConnection:
         self,
         password: str = "",
         key_passphrase: str = "",
+        otp: str = "",
     ) -> None:
-        """Open an SSH connection, trying all resolved IPs."""
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    
+        """Open an SSH connection, trying all resolved IPs.
+
+        ``otp`` is a one-time code for sites with multi-factor login (e.g.
+        NERSC's "Password + OTP" prompt, or a key followed by a code). It is
+        used for this login only; a dropped connection needs a fresh code.
+        """
+        def _new_client() -> paramiko.SSHClient:
+            c = paramiko.SSHClient()
+            c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            return c
+
+        client = _new_client()
+
         kw: dict = dict(
             hostname=self.profile.hostname,
             port=self.profile.port,
@@ -54,24 +113,34 @@ class HPCConnection:
             banner_timeout=30,
             auth_timeout=30,
         )
-    
-        if self.profile.auth_method == "key":
-            if self.profile.key_path:
-                kw["key_filename"] = self.profile.key_path
-            if key_passphrase:
-                kw["passphrase"] = key_passphrase
-            kw["look_for_keys"] = True
-            kw["allow_agent"] = True
-        else:
-            kw["password"] = password
-            kw["look_for_keys"] = False
-            kw["allow_agent"] = False
-    
-        if self.profile.proxy_jump:
-            kw["sock"] = paramiko.ProxyCommand(
-                f"ssh -W %h:%p {self.profile.proxy_jump}"
+
+        # One login chain for every route: key and/or password, answering
+        # keyboard-interactive prompts (paramiko's own fallback reads a
+        # second factor from the terminal, which hangs a server).
+        LoginRefused, MFAAuth = _login_strategy()
+
+        def _auth():
+            return MFAAuth(
+                self.profile.username,
+                password=password,
+                otp=otp,
+                use_keys=self.profile.auth_method == "key",
+                key_path=self.profile.key_path,
+                key_passphrase=key_passphrase,
             )
-            client.connect(**kw)
+        kw["auth_strategy"] = _auth()
+
+        if self.profile.proxy_jump:
+            jump = validate_proxy_jump(self.profile.proxy_jump)
+            host = validate_hostname(self.profile.hostname)
+            # paramiko's ProxyCommand does not expand %h/%p: fill them in.
+            kw["sock"] = paramiko.ProxyCommand(
+                _jump_command(jump, host, self.profile.port))
+            try:
+                client.connect(**kw)
+            except Exception:
+                client.close()
+                raise
             self._client = client
             self._enable_keepalive()
             return
@@ -105,22 +174,34 @@ class HPCConnection:
                 sock.settimeout(per_ip_timeout)
                 sock.connect((ip, self.profile.port))
     
-                # Socket connected — hand to Paramiko
+                # Socket connected — hand to Paramiko (a fresh login chain:
+                # a failed attempt must not carry its prompt state over)
                 kw["sock"] = sock
                 kw["timeout"] = 30
+                kw["auth_strategy"] = _auth()
                 client.connect(**kw)
                 self._client = client
                 self._enable_keepalive()
                 return
             except Exception as exc:
-                last_err = exc
+                client.close()
                 try:
                     sock.close()
                 except Exception:
                     pass
-                # Reset client for next attempt
-                client = paramiko.SSHClient()
-                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                # The host answered and refused the login, or a password or
+                # code already went out before the link failed: another
+                # address of the same host would refuse it too, and would
+                # spend a single-use code again. Report this failure as is.
+                if isinstance(exc, LoginRefused):
+                    raise
+                if kw["auth_strategy"].secret_sent:
+                    raise ConnectionError(
+                        f"The connection to {self.profile.hostname} dropped after the "
+                        f"password/one-time code was sent ({exc}). A code is single-use: "
+                        "connect again with a fresh one.") from exc
+                last_err = exc
+                client = _new_client()
                 continue
     
         raise ConnectionError(

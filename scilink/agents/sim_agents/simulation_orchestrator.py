@@ -111,7 +111,9 @@ The granular tools are engine-neutral and take the engine from the active
 routing decision (or an explicit `software` argument): generate_structure,
 generate_dft_inputs, validate_inputs, apply_input_adjustments,
 analyze_output, and (when an HPC connection is active)
-submit_simulation_job / get_job_status / download_job_results. The engine's
+submit_simulation_job / get_job_status / download_job_results, plus
+list_cluster_jobs for the user's whole queue (jobs SciLink did not submit
+too). The engine's
 specifics come from its skill bundle, so the same tools serve any engine
 within a scale.
 
@@ -364,6 +366,7 @@ class SimulationOrchestratorAgent:
         # HPC backend — optional; tools degrade gracefully when None
         self.hpc_connection = hpc_connection
         self.hpc_scheduler = hpc_scheduler
+        self._hpc_was_connected = hpc_connection is not None
 
         # Routing decision from route_simulation tool. Populated once
         # per session by the first route_simulation call; subsequent
@@ -422,11 +425,7 @@ class SimulationOrchestratorAgent:
         self.tools = SimulationOrchestratorTools(self)
 
         # System prompt
-        system_prompt = get_system_prompt(
-            self.simulation_mode,
-            external_tools=self._external_tools or None,
-            custom_skills=self._custom_skills or None,
-        )
+        system_prompt = self._compose_system_prompt()
 
         # Initialize LLM
         if base_url:
@@ -705,11 +704,7 @@ class SimulationOrchestratorAgent:
         old_mode = self.simulation_mode
         self.simulation_mode = mode
         self._enable_human_feedback = self._should_enable_human_feedback()
-        new_system_prompt = get_system_prompt(
-            mode,
-            external_tools=self._external_tools or None,
-            custom_skills=self._custom_skills or None,
-        )
+        new_system_prompt = self._compose_system_prompt()
         self._system_prompt = new_system_prompt
         if self.messages and self.messages[0].get("role") == "system":
             self.messages[0]["content"] = new_system_prompt
@@ -787,14 +782,48 @@ class SimulationOrchestratorAgent:
     def _should_enable_human_feedback(self) -> bool:
         return self.simulation_mode != SimulationMode.AUTONOMOUS
 
-    def _refresh_system_prompt(self) -> None:
-        """Rebuild the system prompt after registering tools/skills so the
-        model sees the updated list."""
-        new_prompt = get_system_prompt(
+    def _compose_system_prompt(self) -> str:
+        """The mode's prompt (with registered tools and skills) plus the HPC note."""
+        return get_system_prompt(
             self.simulation_mode,
             external_tools=self._external_tools or None,
             custom_skills=self._custom_skills or None,
-        )
+        ) + self._hpc_note()
+
+    def _hpc_note(self) -> str:
+        """Which cluster is connected now. The conversation can predate a
+        reconnect: live, after switching from one cluster to another, the
+        specialist answered "you are connected to <the old one>" from its own
+        earlier messages without calling a tool."""
+        conn = getattr(self, "hpc_connection", None)
+        if conn is None:
+            if not getattr(self, "_hpc_was_connected", False):
+                return ""
+            return ("\n\n## HPC CLUSTER\n- No cluster is connected now. Earlier "
+                    "messages may mention one; that connection was closed.")
+        prof = getattr(conn, "profile", None)
+        who = (f"{getattr(prof, 'username', '?')}@{getattr(prof, 'hostname', '?')}"
+               if prof is not None else "a cluster")
+        sched = getattr(getattr(self, "hpc_scheduler", None), "name", None) or "unknown scheduler"
+        return ("\n\n## HPC CLUSTER (connected)\n"
+                f"- {who} ({sched}). This is the live connection; if earlier "
+                "messages name a different cluster, the connection has changed "
+                "since. Answer questions about the cluster from the job tools "
+                "(list_cluster_jobs, get_job_status), not from earlier messages.")
+
+    def set_hpc_connection(self, connection, scheduler=None) -> None:
+        """Attach (or detach, with ``None``) an HPC connection and tell the model."""
+        self.hpc_connection = connection
+        self.hpc_scheduler = scheduler if connection is not None else None
+        if connection is not None:
+            self._hpc_was_connected = True
+        if getattr(self, "messages", None):
+            self._refresh_system_prompt()
+
+    def _refresh_system_prompt(self) -> None:
+        """Rebuild the system prompt after registering tools/skills so the
+        model sees the updated list."""
+        new_prompt = self._compose_system_prompt()
         self._system_prompt = new_prompt
         if self.messages and self.messages[0].get("role") == "system":
             self.messages[0]["content"] = new_prompt

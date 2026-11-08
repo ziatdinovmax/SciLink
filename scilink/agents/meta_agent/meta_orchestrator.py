@@ -563,6 +563,11 @@ class MetaOrchestratorAgent:
 
         # Session state — kept shallow; children own their deep state.
         self._children: Dict[str, Any] = {}          # "analysis"/"planning" -> agent
+        # An HPC connection the host attached (the web UI's HPC panel); handed
+        # to the simulation specialist and its workers. Not checkpointed: an
+        # SSH session cannot outlive the process.
+        self.hpc_connection = None
+        self.hpc_scheduler = None
         self._delegation_ledger: List[Dict[str, Any]] = []
         # Complementarity verdicts cached by frozenset of dataset paths, so the
         # standalone assess_complementarity tool and the internal gate in
@@ -610,7 +615,7 @@ class MetaOrchestratorAgent:
         # Tools registry.
         self.tools = MetaOrchestratorTools(self)
 
-        system_prompt = get_system_prompt(self.meta_mode) + self._kb_note()
+        system_prompt = get_system_prompt(self.meta_mode) + self._kb_note() + self._hpc_note()
 
         # Initialize LLM (dual path, copied from AnalysisOrchestratorAgent).
         if base_url:
@@ -664,10 +669,30 @@ class MetaOrchestratorAgent:
         self._refresh_system_prompt()
         logging.info(f"🔄 Meta mode changed: {old_mode.value} → {mode.value}")
 
+    def _hpc_note(self) -> str:
+        """System-prompt note on an attached HPC connection. Without it the
+        meta's model was never told a cluster was connected, and answered a
+        "check my jobs" from general knowledge instead of delegating."""
+        conn = getattr(self, "hpc_connection", None)
+        if conn is None:
+            return ""
+        prof = getattr(conn, "profile", None)
+        who = (f"{getattr(prof, 'username', '?')}@{getattr(prof, 'hostname', '?')}"
+               if prof is not None else "a cluster")
+        sched = getattr(getattr(self, "hpc_scheduler", None), "name", None) or "unknown scheduler"
+        return (
+            "\n\n## HPC CLUSTER (connected)\n"
+            f"- {who} ({sched}). The simulation specialist can list the user's "
+            "jobs in its queue (list_cluster_jobs), submit jobs, check those it "
+            "submitted and download their results, so cluster work goes to "
+            "`delegate_to_simulation`."
+        )
+
     def _refresh_system_prompt(self) -> None:
         """Rebuild the system prompt (the mode's prompt plus the knowledge
-        base note) and put it in the message history."""
-        self._system_prompt = get_system_prompt(self.meta_mode) + self._kb_note()
+        base and HPC notes) and put it in the message history."""
+        self._system_prompt = (get_system_prompt(self.meta_mode) + self._kb_note()
+                               + self._hpc_note())
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = self._system_prompt
 
@@ -893,6 +918,26 @@ class MetaOrchestratorAgent:
             self._children["simulation"] = build_child(
                 self, "simulation", self.simulation_dir, restore=restore, persistent=True)
         return self._children["simulation"]
+
+    def set_hpc_connection(self, connection, scheduler=None) -> None:
+        """Attach (or, with ``None``, detach) an HPC connection.
+
+        The simulation specialist's job tools read the connection when they
+        run, so an existing specialist picks it up at once; one built later
+        gets it from ``build_child``. The web server changes it only between
+        turns, so a job is never submitted over a connection being closed.
+        """
+        self.hpc_connection = connection
+        self.hpc_scheduler = scheduler if connection is not None else None
+        child = self._children.get("simulation")
+        if child is not None:
+            if hasattr(child, "set_hpc_connection"):    # also tells its model
+                child.set_hpc_connection(self.hpc_connection, self.hpc_scheduler)
+            else:
+                child.hpc_connection = self.hpc_connection
+                child.hpc_scheduler = self.hpc_scheduler
+        if getattr(self, "messages", None):      # tell the meta's model, too
+            self._refresh_system_prompt()
 
     # =========================================================================
     # Shared extensions: skills, custom tools, MCP servers

@@ -69,6 +69,9 @@ dependencies = [
     # streamlit, but imported directly, so pinned directly).
     "prompt_toolkit>=3.0.43",
     "rich>=13.7",
+    # SSH to HPC clusters: the web UI's HPC panel (default install) and the
+    # simulation agents. 3.2 is the floor for auth_strategy (MFA login).
+    "paramiko>=3.2.0",
 ]
 
 [project.optional-dependencies]
@@ -77,7 +80,6 @@ sim = [
     "aimsgb>=1.1.1",
     "atomate2>=0.0.21",
     "mdanalysis>=2.9.0",
-    "paramiko>=3.0.0",
 ]
 # The web UI ships with the default install now (streamlit is a core
 # dependency). The empty extra is kept so existing `pip install scilink[ui]`

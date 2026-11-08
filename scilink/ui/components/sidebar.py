@@ -197,6 +197,15 @@ def _render_hpc_connection() -> None:
             key="sidebar_hpc_proxy",
         )
 
+        otp = st.text_input(
+            "One-time code (MFA, optional)",
+            type="password",
+            placeholder="e.g. NERSC: the 6-digit code",
+            help="For sites with multi-factor login. Used for this login only; "
+                 "a dropped connection needs a fresh code.",
+            key="sidebar_hpc_otp",
+        )
+
         save_chk = st.checkbox("Remember profile", key="sidebar_hpc_save")
 
         if st.button(
@@ -216,7 +225,7 @@ def _render_hpc_connection() -> None:
             )
             try:
                 c = HPCConnection(profile)
-                c.connect(password=password, key_passphrase=key_pass)
+                c.connect(password=password, key_passphrase=key_pass, otp=otp)
                 sched = detect_scheduler(c)
                 home = c.home_dir()
 
