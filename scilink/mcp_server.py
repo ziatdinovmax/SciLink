@@ -3,7 +3,7 @@
 Allows any MCP client (Claude Desktop, Cursor, etc.) to use SciLink as a
 tool provider.  Start with::
 
-    scilink serve --model gemini-3.1-pro-preview
+    scilink serve --model claude-opus-5-5
 
 Supports three autonomy modes:
 - **autonomous** (default) — tools execute without human approval.
@@ -634,7 +634,7 @@ async def _to_thread_streaming(fn, *args, label: str = None) -> str:
 def create_server(
     *,
     api_key: str = None,
-    model_name: str = "gemini-3.1-pro-preview",
+    model_name: str = "claude-opus-5-5",
     base_url: str = None,
     mode: str = "both",
     session_dir: str = None,

@@ -394,7 +394,7 @@ class MeasurementLoop:
     """
 
     def __init__(self, output_dir: str, *,
-                 model_name: str = "claude-opus-4-6",
+                 model_name: str = "claude-opus-5-5",
                  api_key: Optional[str] = None, base_url: Optional[str] = None,
                  system_info: Any = None,
                  targets: Optional[List[str]] = None,

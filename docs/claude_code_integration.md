@@ -16,7 +16,7 @@ pip install -e ".[all]"          # everything (UI + simulation)
 
 ```bash
 claude mcp add scilink -s user \
-  -e GEMINI_API_KEY=your-gemini-key \
+  -e ANTHROPIC_API_KEY=your-anthropic-key \
   -e UNSAFE_EXECUTION_OK=true \
   -e "PATH=$(dirname $(which python)):$PATH" \
   -- $(which scilink) serve --mode analyze
@@ -24,7 +24,7 @@ claude mcp add scilink -s user \
 
 **Flags explained:**
 - `-s user` — available from any directory (use `-s project` to limit to one repo)
-- `-e GEMINI_API_KEY=...` — API key for the LLM backend (also supports `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`)
+- `-e ANTHROPIC_API_KEY=...` — API key for the LLM backend (also supports `GEMINI_API_KEY`, `OPENAI_API_KEY`)
 - `-e UNSAFE_EXECUTION_OK=true` — allows code execution without a sandbox prompt (required since there's no terminal to approve interactively)
 - `-e PATH=...` — ensures the `python` command is found during code execution
 - `--mode analyze` — expose analysis tools (use `plan` for planning tools, or `both` for all)
@@ -196,7 +196,7 @@ scilink serve --help
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--model` | `gemini-3.1-pro-preview` | LLM model for analysis agents |
+| `--model` | `claude-opus-5-5` | LLM model for analysis agents |
 | `--mode` | `both` | `analyze`, `plan`, or `both` |
 | `--autonomy` | `autonomous` | `autonomous`, `autopilot`, or `co-pilot` |
 | `--transport` | `stdio` | `stdio` or `sse` |

@@ -7,15 +7,15 @@ from .. import auth
 from .vocabulary import MODES as _MODES
 
 MODEL_OPTIONS = [
-    "claude-opus-4-6",
-    "gemini-3.8-flash",
-    "gpt-5.6-sol",
-    # Amazon Bedrock (Claude Opus 4.8) via the US geo cross-region inference
-    # profile (exact ID from the AWS model card; Opus 4.8 has no date stamp and
-    # no version suffix). Invoke-able only through an inference profile, hence
-    # the ``us.`` prefix. For EU/JP/AU keys swap the prefix:
-    # ``eu.``/``jp.``/``au.``. (Base model ID: anthropic.claude-opus-4-8.)
-    "bedrock/us.anthropic.claude-opus-4-8",
+    "claude-opus-5-5",
+    "gemini-4-argon",
+    "gpt-6-astra",
+    # Amazon Bedrock (Claude Opus 5.5) via the US geo cross-region inference
+    # profile (no date stamp and no version suffix). Invoke-able only through
+    # an inference profile, hence the ``us.`` prefix. For EU/JP/AU keys swap
+    # the prefix: ``eu.``/``jp.``/``au.``. (Base model ID:
+    # anthropic.claude-opus-5-5.)
+    "bedrock/us.anthropic.claude-opus-5-5",
 ]
 
 EMBEDDING_MODEL_OPTIONS = [

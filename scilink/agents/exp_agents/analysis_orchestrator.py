@@ -597,7 +597,7 @@ class AnalysisOrchestratorAgent:
         self,
         base_dir: str = "./analysis_session",
         api_key: Optional[str] = None,
-        model_name: str = "claude-opus-4-6",
+        model_name: str = "claude-opus-5-5",
         base_url: Optional[str] = None,
         embedding_model: str = "gemini-embedding-001",
         embedding_api_key: Optional[str] = None,

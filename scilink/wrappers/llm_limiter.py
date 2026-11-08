@@ -53,8 +53,8 @@ _tripped_until: Dict[str, float] = {}
 
 def _key(model: Optional[str]) -> str:
     """The breaker's key for a model: the wrapper's PREFIXED name, so the
-    name an admission asks with (the meta's ``claude-opus-4-6``) and the
-    name the retry policy records under (``anthropic/claude-opus-4-6``) are
+    name an admission asks with (the meta's ``claude-opus-5-5``) and the
+    name the retry policy records under (``anthropic/claude-opus-5-5``) are
     one key."""
     if not model:
         return _UNKNOWN

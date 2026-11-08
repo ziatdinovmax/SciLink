@@ -45,7 +45,7 @@ Escape any special characters properly for JSON (newlines as \\n, quotes as \\",
 
 class StructureGenerator:
     def __init__(self, api_key: str = None, 
-                 model_name: str = "gemini-3.1-pro-preview",
+                 model_name: str = "claude-opus-5-5",
                  base_url: Optional[str] = None,
                  executor_timeout: int = DEFAULT_TIMEOUT,
                  generated_script_dir: str = "generated_scripts",

@@ -135,7 +135,7 @@ class StructurePlanner:
 
     Construction (standalone)::
 
-        planner = StructurePlanner(model_name="claude-opus-4-6")
+        planner = StructurePlanner(model_name="claude-opus-5-5")
         spec = planner.plan("a solvated lysozyme system for MD")
         spec.structure_class  # -> "biomolecular"
 
@@ -146,7 +146,7 @@ class StructurePlanner:
 
     def __init__(self,
                  model: Any = None,
-                 model_name: str = "claude-opus-4-6",
+                 model_name: str = "claude-opus-5-5",
                  api_key: Optional[str] = None,
                  base_url: Optional[str] = None,
                  available_software: Any = None,

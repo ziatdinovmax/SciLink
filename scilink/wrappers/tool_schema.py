@@ -25,6 +25,8 @@ run over every registered tool so a non-portable schema fails in CI.
 from __future__ import annotations
 
 import copy
+import logging
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -218,6 +220,31 @@ def openai_tools_need_no_reasoning(model: str) -> bool:
     return name.startswith("gpt-5")
 
 
+_gpt6_tool_hint_given: set = set()
+_gpt6_tool_hint_lock = threading.Lock()
+
+
+def _explain_gpt6_tool_failure(model) -> None:
+    """Once per model: why a GPT-6 tool call through an OpenAI-compatible
+    endpoint failed. GPT-6 takes function tools only on the Responses API;
+    this client speaks Chat Completions, and no request flag changes that
+    (``reasoning_effort="none"``, the gpt-5 escape, is refused too)."""
+    from .litellm_wrapper import _is_gpt6_or_later
+    if not _is_gpt6_or_later(model):
+        return
+    with _gpt6_tool_hint_lock:
+        if model in _gpt6_tool_hint_given:
+            return
+        _gpt6_tool_hint_given.add(model)
+    logging.getLogger(__name__).warning(
+        f"{model}: a tool call through the OpenAI-compatible endpoint (base_url) "
+        "failed. OpenAI's GPT-6 models accept function tools only on the "
+        "Responses API, which SciLink uses when it calls OpenAI directly; "
+        "through a base_url it sends Chat Completions. Use the model without "
+        "a base_url (with OPENAI_API_KEY), or a proxy that serves GPT-6 tool "
+        "calls on Chat Completions.")
+
+
 class _PortableCompletions:
     def __init__(self, raw_completions, default_model):
         self._raw = raw_completions
@@ -236,8 +263,13 @@ class _PortableCompletions:
         # sampling parameter the model refuses is dropped as on the LiteLLM path.
         from .litellm_wrapper import call_dropping_refused_sampling
         model = kwargs.get("model") or self._default_model
-        response = call_dropping_refused_sampling(lambda kw: self._raw.create(*args, **kw),
-                                                  kwargs, None, model)
+        try:
+            response = call_dropping_refused_sampling(lambda kw: self._raw.create(*args, **kw),
+                                                      kwargs, None, model)
+        except Exception:
+            if tools:
+                _explain_gpt6_tool_failure(model)
+            raise
         # The proxy path's chat loops call this shim directly: count the
         # call (and trace it when tracing is on) like the wrapper classes.
         try:

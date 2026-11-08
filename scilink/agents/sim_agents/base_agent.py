@@ -54,7 +54,7 @@ class SimulationAgent(ABC):
         self,
         working_dir: str,
         api_key: Optional[str] = None,
-        model_name: str = "gemini-3-pro-preview",
+        model_name: str = "claude-opus-5-5",
         base_url: Optional[str] = None,
         skill: Optional[str] = None,
         local_model: Optional[str] = None,

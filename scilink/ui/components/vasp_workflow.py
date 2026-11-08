@@ -459,7 +459,7 @@ def _get_or_create_agent():
     agent = SimulationOrchestratorAgent(
         base_dir=st.session_state.get("session_dir", "./simulate_session"),
         api_key=api_key,
-        model_name=cfg.get("model") or "claude-opus-4-6",
+        model_name=cfg.get("model") or "claude-opus-5-5",
         base_url=base_url,
         simulation_mode=SimulationMode.CO_PILOT,
         futurehouse_api_key=st.session_state.get("vasp_fh_key") or None,

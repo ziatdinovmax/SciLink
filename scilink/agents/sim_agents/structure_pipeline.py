@@ -38,8 +38,8 @@ class StructurePipeline:
                  api_key: str = None,
                  base_url: Optional[str] = None,
                  mp_api_key: str = None,
-                 generator_model: str = "gemini-3-pro-preview",
-                 validator_model: str = "gemini-3-pro-preview",
+                 generator_model: str = "claude-opus-5-5",
+                 validator_model: str = "claude-opus-5-5",
                  output_dir: str = "structure_output",
                  max_refinement_cycles: int = 4,
                  script_timeout: int = 300):

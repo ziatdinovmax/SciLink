@@ -284,7 +284,7 @@ class SimulationOrchestratorAgent:
     Args:
         base_dir: Base directory for session outputs.
         api_key: API key for the LLM provider.
-        model_name: Model name (default: claude-opus-4-6).
+        model_name: Model name (default: claude-opus-5-5).
         base_url: Base URL for OpenAI-compatible internal proxy endpoint.
         restore_checkpoint: Whether to restore from previous checkpoint.
         simulation_mode: Level of autonomy.
@@ -311,7 +311,7 @@ class SimulationOrchestratorAgent:
         self,
         base_dir: str = "./simulate_session",
         api_key: Optional[str] = None,
-        model_name: str = "claude-opus-4-6",
+        model_name: str = "claude-opus-5-5",
         base_url: Optional[str] = None,
         restore_checkpoint: bool = False,
         simulation_mode: SimulationMode = SimulationMode.CO_PILOT,

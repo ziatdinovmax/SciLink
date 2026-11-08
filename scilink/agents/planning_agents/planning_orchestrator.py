@@ -629,7 +629,7 @@ class PlanningOrchestratorAgent:
         objective: str = "Undefined Research Goal",
         base_dir: str = "./campaign_outputs",
         api_key: Optional[str] = None,
-        model_name: str = "claude-opus-4-6",
+        model_name: str = "claude-opus-5-5",
         base_url: Optional[str] = None,
         embedding_model: Optional[str] = None,
         embedding_api_key: Optional[str] = None,
