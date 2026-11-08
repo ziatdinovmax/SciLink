@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from ._layout import canonicalize, uniform_or_values
-from ._model import Axis, Dataset, UnsupportedContent
+from ._model import Axis, Dataset, UnsupportedContent, load, stand_in
 
 _PIXEL_MARK = 65535
 
@@ -65,7 +65,7 @@ def _berkeley_groups(h5) -> list:
     return found
 
 
-def _read_berkeley(h5, path: str) -> List[Dataset]:
+def _read_berkeley(h5, path: str, header_only: bool = False) -> List[Dataset]:
     out: List[Dataset] = []
     root_md: Dict[str, Any] = {}
     mic = h5.get("microscope")
@@ -81,7 +81,7 @@ def _read_berkeley(h5, path: str) -> List[Dataset]:
                 pass
     for gname in _berkeley_groups(h5):
         g = h5[gname]
-        data = np.asarray(g["data"][()])
+        data = load(g["data"], header_only)
         axes: List[Axis] = []
         for i in range(data.ndim):
             d = g.get(f"dim{i + 1}")
@@ -209,10 +209,12 @@ def _decode_stream(dset, npix: int, nch: int, out: Optional[np.ndarray] = None) 
     An event belongs to the pixel numbered by the marks before it (a mark
     closes a pixel). The scan covers ``ceil(marks / npix)`` frames; events
     after the mark that closes the last of them belong to no pixel and are
-    dropped. The stream is read and counted a chunk at a time (its bins
-    sorted, which is cheap: the stream runs pixel by pixel, and counted as
-    runs), so the working memory beside the counts is a few chunk-sized
-    arrays, never copies of the whole stream.
+    dropped. One pass over the stream, a chunk at a time: each chunk is
+    counted up to its last mark (its bins sorted, which is cheap: the stream
+    runs pixel by pixel, and counted as runs), and the events after that
+    mark wait for the next chunk; only the events after the stream's final
+    mark are decided at the end. Working memory beside the counts is a few
+    chunk-sized arrays.
     """
     if out is not None and out.size != npix * nch:
         raise ValueError(f"detector streams disagree on the raster: {out.size} "
@@ -220,32 +222,47 @@ def _decode_stream(dset, npix: int, nch: int, out: Optional[np.ndarray] = None) 
     if getattr(dset, "ndim", 1) == 0:
         dset = np.asarray(dset).reshape(-1)
     entries = int(np.prod(dset.shape))
-    marks = sum(int(np.count_nonzero(c == _PIXEL_MARK)) for c in _chunks(dset))
-    last = max(1, -(-marks // npix)) * npix            # pixels numbered 0 .. last-1
     if out is None:
         # No bin can hold more counts than the stream has entries.
         out = np.zeros(npix * nch, dtype=np.uint32 if entries < 2**32 else np.uint64)
     elif out.dtype == np.uint32 and int(out.max(initial=0)) + entries >= 2**32:
         out = out.astype(np.uint64)
-    seen = 0                                            # marks before this chunk
-    for s in _chunks(dset):
-        mark = s == _PIXEL_MARK
-        pix = (np.cumsum(mark, dtype=np.int64) + seen)[~mark]
-        seen += int(np.count_nonzero(mark))
-        ch = s[~mark].astype(np.int64)
-        keep = (ch < nch) & (pix < last)
+
+    def add(pix, ch):
+        keep = ch < nch
         if not keep.any():
-            continue
+            return
         idx = np.sort((pix[keep] % npix) * nch + ch[keep], kind="stable")
         new = np.empty(idx.size, dtype=bool)
         new[0] = True
         np.not_equal(idx[1:], idx[:-1], out=new[1:])
         starts = np.flatnonzero(new)
         out[idx[starts]] += np.diff(np.append(starts, idx.size)).astype(out.dtype)
+
+    seen = 0                                     # marks so far
+    carry = None                                 # events after the last mark seen
+    for s in _chunks(dset):
+        if carry is not None and carry.size:
+            s = np.concatenate([carry, s])
+        mark = s == _PIXEL_MARK
+        if not mark.any():
+            carry = s                            # one pixel still open
+            continue
+        end = int(np.flatnonzero(mark)[-1]) + 1
+        body, carry, mark = s[:end], s[end:], mark[:end]
+        pix = (np.cumsum(mark, dtype=np.int64) + seen)[~mark]
+        seen += int(np.count_nonzero(mark))
+        add(pix, body[~mark].astype(np.int64))
+    # Events after the final mark open pixel `seen`: kept only if that pixel
+    # lies inside the last frame the marks begin.
+    if carry is not None and carry.size:
+        last = max(1, -(-seen // npix)) * npix
+        if seen < last:
+            add(np.full(carry.size, seen, dtype=np.int64), carry.astype(np.int64))
     return out
 
 
-def _read_velox(h5, path: str, decode_streams: bool = True) -> List[Dataset]:
+def _read_velox(h5, path: str, header_only: bool = False) -> List[Dataset]:
     data_root = h5.get("Data")
     if data_root is None:
         raise UnsupportedContent(f"no Data group in Velox file {path}")
@@ -253,7 +270,7 @@ def _read_velox(h5, path: str, decode_streams: bool = True) -> List[Dataset]:
     image_shapes: List[tuple] = []
 
     for gid, g in (data_root.get("Image") or {}).items():
-        arr = np.asarray(g["Data"][()])          # (y, x, frames)
+        arr = load(g["Data"], header_only)       # (y, x, frames)
         md = _velox_meta(g)
         ny, nx = arr.shape[:2]
         image_shapes.append((ny, nx))
@@ -318,19 +335,17 @@ def _read_velox(h5, path: str, decode_streams: bool = True) -> List[Dataset]:
                 ny, nx = raster
             else:
                 ny, nx = image_shapes[0]
-            if decode_streams:
+            if not header_only:
                 cube = _decode_stream(g["Data"], ny * nx, nch, out=cube)
             elif cube is None:
                 # Shape only, for a probe or a metadata read: a zero-memory
                 # stand-in, so the event stream is never decoded for them.
-                cube = np.broadcast_to(np.zeros((), np.uint32), (ny * nx * nch,))
+                cube = stand_in((ny * nx * nch,), np.uint32)
             md0 = md0 or md
         if cube is not None:
             meta = _velox_common(md0)
             meta["signal_type"] = "EDS"
             meta["summed_over"] = "frames and detectors"
-            if not decode_streams:
-                meta["not_decoded"] = True
             nch = cube.size // (ny * nx)
             sp = _spatial_axes(md0, ny, nx)
             axes = sp + [_energy_axis(md0, nch)]
@@ -346,7 +361,7 @@ def _read_velox(h5, path: str, decode_streams: bool = True) -> List[Dataset]:
         si = data_root.get("SpectrumImage") or {}
         md_si = _velox_meta(si[list(si)[0]]) if si else {}
         for gid, g in eels.items():
-            arr = np.asarray(g["Data"][()])
+            arr = load(g["Data"], header_only)
             if arr.ndim != 3:
                 continue
             cube = np.transpose(arr, (2, 0, 1))  # stored (x, energy, y)
@@ -383,17 +398,17 @@ def _read_velox(h5, path: str, decode_streams: bool = True) -> List[Dataset]:
     return out
 
 
-def read_open(h5, path: str, decode_streams: bool = True) -> List[Dataset]:
+def read_open(h5, path: str, header_only: bool = False) -> List[Dataset]:
     if is_velox(h5):
-        return _read_velox(h5, path, decode_streams=decode_streams)
-    out = _read_berkeley(h5, path)
+        return _read_velox(h5, path, header_only=header_only)
+    out = _read_berkeley(h5, path, header_only=header_only)
     if not out:
         raise UnsupportedContent(f"no EMD signal group (emd_group_type=1) in {path}")
     return out
 
 
-def read(path: str, decode_streams: bool = True) -> List[Dataset]:
+def read(path: str, header_only: bool = False) -> List[Dataset]:
     import h5py
 
     with h5py.File(path, "r") as h5:
-        return read_open(h5, path, decode_streams=decode_streams)
+        return read_open(h5, path, header_only=header_only)

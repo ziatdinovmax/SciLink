@@ -98,5 +98,16 @@ class Dataset:
         }
 
 
+def stand_in(shape, dtype) -> np.ndarray:
+    """A zero-memory array of ``shape`` and ``dtype``, for a header-only read:
+    it answers every question about the dataset but its values."""
+    return np.broadcast_to(np.zeros((), dtype=dtype), tuple(int(n) for n in shape))
+
+
+def load(dset, header_only: bool) -> np.ndarray:
+    """An HDF5 dataset's array, or its stand-in when only the header is wanted."""
+    return stand_in(dset.shape, dset.dtype) if header_only else np.asarray(dset[()])
+
+
 class UnsupportedContent(ValueError):
     """The file is in a known format but holds something no reader handles yet."""

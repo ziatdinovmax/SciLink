@@ -611,7 +611,10 @@ def create_validated_component_pair_reconstruction(
         # =================================================================
         # STEP 1: COMPUTE FULL NMF RECONSTRUCTION
         # =================================================================
-        nmf_reconstruction = np.zeros_like(hspy_data)
+        # A float array: raw counts may be integers (an EDS cube), and the
+        # reconstruction is not. Float data keeps its own dtype.
+        nmf_reconstruction = np.zeros(hspy_data.shape,
+                                      dtype=np.result_type(hspy_data.dtype, np.float32))
         for i in range(n_components):
             nmf_reconstruction += abundance_maps[..., i, np.newaxis] * components[i]
         

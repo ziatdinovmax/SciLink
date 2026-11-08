@@ -1305,11 +1305,11 @@ class AnalysisOrchestratorTools:
         """SciLink metadata recorded in a DM / HyperSpy / EMD / Velox file, else None.
 
         ``prefer`` picks the dataset the analysing agent will load. The array
-        itself is not needed, so an event stream is not decoded for this.
+        itself is not needed, so only the file's header is read.
         """
         try:
             from ...utils.readers import calibrated_dataset, file_metadata
-            ds = calibrated_dataset(str(path), prefer=prefer, decode_streams=False)
+            ds = calibrated_dataset(str(path), prefer=prefer, header_only=True)
             return file_metadata(ds) if ds is not None else None
         except Exception as e:  # noqa: BLE001 - a file we cannot read adds nothing
             self.logger.warning(f"Could not read metadata from {path.name}: {e}")
@@ -1319,7 +1319,7 @@ class AnalysisOrchestratorTools:
         """Examine a DM / HyperSpy / EMD file through ``scilink.utils.readers``."""
         from ...utils.readers import file_metadata, read_datasets
         try:
-            found = read_datasets(str(path), decode_streams=False)
+            found = read_datasets(str(path), header_only=True)
         except Exception as e:  # noqa: BLE001
             result["data_type"] = "unknown"
             result["suggested_agents"] = []
@@ -1745,7 +1745,7 @@ class AnalysisOrchestratorTools:
                     # array's shape (a 3-D image stack is not a datacube).
                     try:
                         from ...utils.readers import calibrated_dataset, file_metadata
-                        _ds = calibrated_dataset(str(path), decode_streams=False)
+                        _ds = calibrated_dataset(str(path), header_only=True)
                         if _ds is not None:
                             result["calibration"] = _ds.describe()["axes"]
                             result["file_metadata"] = file_metadata(_ds)
@@ -3335,8 +3335,10 @@ class AnalysisOrchestratorTools:
                     from ...utils.readers import records_calibration
                     if records_calibration(actual_data_input):
                         from ...utils.readers import PREFER_IMAGE, read_dataset
-                        _ds = read_dataset(actual_data_input, prefer=PREFER_IMAGE)
+                        _ds = read_dataset(actual_data_input, prefer=PREFER_IMAGE,
+                                           header_only=True)
                         if _ds.kind == "image_stack":
+                            _ds = read_dataset(actual_data_input, prefer=PREFER_IMAGE)
                             print(f"    Frame stack {tuple(_ds.data.shape)} from "
                                   f"{Path(actual_data_input).name}: passed as an "
                                   "image series")

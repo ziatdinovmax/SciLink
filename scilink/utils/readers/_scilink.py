@@ -88,17 +88,17 @@ def records_calibration(path) -> bool:
 
 
 def calibrated_dataset(path, prefer: Sequence[str] = (),
-                       decode_streams: bool = True) -> Optional[Dataset]:
+                       header_only: bool = False) -> Optional[Dataset]:
     """The dataset when the file carries its own calibration, else None.
 
     True for the native formats and for an HDF5 file that is HyperSpy, EMD or
     Velox inside; a plain array (``.npy``, generic HDF5, an image) is None.
-    ``decode_streams=False`` when only the metadata is wanted (see
+    ``header_only=True`` when only the metadata is wanted (see
     :func:`read_datasets`).
     """
     from . import read_dataset
     if records_calibration(path):
-        return read_dataset(path, prefer=prefer, decode_streams=decode_streams)
+        return read_dataset(path, prefer=prefer, header_only=header_only)
     return None
 
 

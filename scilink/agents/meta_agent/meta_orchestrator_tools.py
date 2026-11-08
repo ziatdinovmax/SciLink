@@ -173,8 +173,8 @@ def _native_summary(path: Path) -> Dict[str, Any]:
     if path.stat().st_size > _NATIVE_PROBE_MAX_BYTES:
         # Routing does not need the array; the specialist reads it once.
         return {"read_natively": True, "note": note}
-    # Kinds, shapes and axes only: an event stream is not decoded here.
-    found = read_datasets(str(path), decode_streams=False)
+    # Kinds, shapes and axes only: no array is read here.
+    found = read_datasets(str(path), header_only=True)
     primary = max(found, key=lambda d: d.data.size)
     sig = primary.signal_axis
     out: Dict[str, Any] = {

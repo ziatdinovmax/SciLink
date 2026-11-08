@@ -607,3 +607,100 @@ def test_hyperspy_unset_values_are_not_values(tmp_path):
     md = file_metadata(read_dataset(tmp_path / "n.hspy"))
     assert "_None_" not in json.dumps(md) and "<undefined>" not in json.dumps(md)
     assert "instrument" not in md["experiment"] and "beam_energy_kV" not in md.get("acquisition", {})
+
+
+def _reference_decode(stream, npix, nch):
+    """The original whole-stream decode, kept here as the reference."""
+    s = np.asarray(stream).ravel().astype(np.int64)
+    mark = s == 65535
+    pix = np.cumsum(mark)[~mark]
+    ch = s[~mark]
+    frames = max(1, -(-int(mark.sum()) // npix))
+    keep = (ch < nch) & (pix < frames * npix)
+    return np.bincount((pix[keep] % npix) * nch + ch[keep], minlength=npix * nch)
+
+
+@pytest.mark.parametrize("ending", ["after_full_frame", "inside_a_frame", "no_marks", "mark_last"])
+def test_single_pass_decode_matches_the_reference_on_every_ending(monkeypatch, ending):
+    """Events after the final mark are dropped only when that mark closes a
+    frame; a chunk with no mark carries its events on; at every chunk size."""
+    from scilink.utils.readers import emd
+    rng = np.random.default_rng(7)
+    npix, nch = 6, 9
+    marks = {"after_full_frame": 2 * npix, "inside_a_frame": 2 * npix + 3,
+             "no_marks": 0, "mark_last": npix + 2}[ending]
+    stream = []
+    for _ in range(marks):
+        stream += list(rng.integers(0, nch + 2, rng.integers(0, 12)))    # some channels >= nch
+        stream.append(65535)
+    if ending != "mark_last":
+        stream += list(rng.integers(0, nch, 5))                          # trailing events
+    stream = np.asarray(stream, np.uint16)[:, None]
+    want = _reference_decode(stream, npix, nch)
+    for chunk in (1, 2, 5, 17, 1 << 22):
+        monkeypatch.setattr(emd, "_STREAM_CHUNK", chunk)
+        np.testing.assert_array_equal(emd._decode_stream(stream, npix, nch).astype(np.int64), want)
+
+
+def _sig(d):
+    return (d.kind, d.data.shape, str(d.data.dtype), [a.as_dict() for a in d.axes], d.title,
+            json.dumps(d.metadata, default=str, sort_keys=True),
+            json.dumps(file_metadata(d), default=str, sort_keys=True))
+
+
+def test_a_header_only_read_answers_like_a_full_read(dm_files, tmp_path):
+    """Kind, shape, dtype, axes, title, metadata and SciLink metadata, for
+    every format, with no array read."""
+    d, v, *_ = dm_files
+    big = (np.random.default_rng(1).random((256, 256)) * 1000).astype(np.float32)   # stored on disk, not inline
+    _write_dm(tmp_path / f"big.dm{v}", [_dm_image(big, [(0, 0.02, "nm"), (0, 0.02, "nm")], dtype_code=2)], v)
+    _hspy(tmp_path / "s.hspy", np.zeros((3, 4, 20), np.float32),
+          [("y", "nm", 0, 1, True), ("x", "nm", 0, 1, True), ("Energy", "eV", 100, 1, False)])
+    _velox_stream_file(tmp_path / "v.emd")
+    files = [d / f"si.dm{v}", d / f"img.dm{v}", d / f"spec.dm{v}", tmp_path / f"big.dm{v}",
+             tmp_path / "s.hspy", tmp_path / "v.emd"]
+    for f in files:
+        full = [_sig(x) for x in read_datasets(f)]
+        head = read_datasets(f, header_only=True)
+        assert [_sig(x) for x in head] == full, f.name
+    big_head = read_dataset(tmp_path / f"big.dm{v}", header_only=True)
+    assert big_head.data.strides == (0, 0)                     # a stand-in: nothing was read
+
+
+def test_the_orchestrator_reads_no_array_of_a_native_image(dm_files, tmp_path, monkeypatch):
+    """examine_data, the run's metadata and the frame-stack check read only
+    the header; the image agent's own load is the one full read."""
+    from scilink.utils.readers import dm
+    from scilink.skills._shared.image_analysis_tools import load_image_data
+    from scilink.agents.exp_agents.analysis_orchestrator_tools import AnalysisOrchestratorTools
+    d, v, *_ = dm_files
+    big = (np.random.default_rng(1).random((256, 256)) * 1000).astype(np.float32)
+    _write_dm(tmp_path / f"big.dm{v}", [_dm_image(big, [(0, 0.02, "nm"), (0, 0.02, "nm")], dtype_code=2)], v)
+    reads = []
+    real = dm._Located.read
+    monkeypatch.setattr(dm._Located, "read", lambda self, fh: reads.append(self.count) or real(self, fh))
+    orch = types.SimpleNamespace(base_dir=str(tmp_path), _agent_registry={}, current_metadata=None)
+    r = json.loads(AnalysisOrchestratorTools(orch).functions_map["examine_data"](str(tmp_path / f"big.dm{v}")))
+    assert r["data_type"] == "image" and reads == []
+    out, seen = _run_analysis_with(tmp_path, tmp_path / f"big.dm{v}", 1)
+    assert out.get("status") == "success" and seen[-1]["data"] == str(tmp_path / f"big.dm{v}")
+    assert reads == []                                        # metadata and stack check: header only
+    np.testing.assert_array_equal(load_image_data(str(tmp_path / f"big.dm{v}")), big)
+    assert len(reads) == 1
+
+
+@pytest.mark.parametrize("dtype", [np.uint32, np.int16, np.float32, np.float64])
+def test_decomposition_check_plots_take_integer_counts(dtype):
+    """An EDS cube read from its file holds integer counts; the decomposition
+    check plot rebuilt it in the data's own dtype and failed on integers.
+    Float cubes keep their dtype, so their plots and metrics are unchanged."""
+    import logging
+    from scilink.skills.hyperspectral.eels.eels import create_validated_component_pair_reconstruction
+    rng = np.random.default_rng(0)
+    comps = rng.random((2, 40))
+    abund = rng.random((6, 7, 2))
+    cube = (abund @ comps * 100).astype(dtype)
+    out = create_validated_component_pair_reconstruction(
+        cube, comps, abund, 0, {"energy_range": {"start": 0, "end": 4, "units": "keV"}},
+        logging.getLogger("t"))
+    assert out is not None and isinstance(out[0], bytes)

@@ -14,7 +14,7 @@ from typing import Any, Dict, List
 import numpy as np
 
 from ._layout import canonicalize, uniform_or_values
-from ._model import Axis, Dataset, UnsupportedContent
+from ._model import Axis, Dataset, UnsupportedContent, load
 
 
 # How HyperSpy writes a value that is not set: ``None`` is stored as the
@@ -98,7 +98,7 @@ def _axis(g) -> Axis:
     return ax
 
 
-def read_open(h5, path: str) -> List[Dataset]:
+def read_open(h5, path: str, header_only: bool = False) -> List[Dataset]:
     exps = h5.get("Experiments")
     if exps is None:
         raise UnsupportedContent(f"no Experiments group in HyperSpy file {path}")
@@ -107,7 +107,7 @@ def read_open(h5, path: str) -> List[Dataset]:
         g = exps[name]
         if "data" not in g:
             continue
-        data = np.asarray(g["data"][()])
+        data = load(g["data"], header_only)
         axes = []
         for i in range(data.ndim):
             key = f"axis-{i}"
@@ -122,8 +122,8 @@ def read_open(h5, path: str) -> List[Dataset]:
     return out
 
 
-def read(path: str) -> List[Dataset]:
+def read(path: str, header_only: bool = False) -> List[Dataset]:
     import h5py
 
     with h5py.File(path, "r") as h5:
-        return read_open(h5, path)
+        return read_open(h5, path, header_only=header_only)

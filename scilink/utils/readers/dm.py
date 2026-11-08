@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from ._layout import canonicalize
-from ._model import Axis, Dataset, UnsupportedContent
+from ._model import Axis, Dataset, UnsupportedContent, stand_in
 
 # Tag value type codes.
 _SIMPLE = {
@@ -199,7 +199,8 @@ def _metadata(tags: Dict[str, Any]) -> Dict[str, Any]:
     return md
 
 
-def _image(fh, entry: Dict[str, Any], source: str, bo: str) -> Optional[Dataset]:
+def _image(fh, entry: Dict[str, Any], source: str, bo: str,
+           header_only: bool = False) -> Optional[Dataset]:
     idata = entry.get("ImageData") if isinstance(entry, dict) else None
     if not isinstance(idata, dict) or "Data" not in idata:
         return None
@@ -209,12 +210,30 @@ def _image(fh, entry: Dict[str, Any], source: str, bo: str) -> Optional[Dataset]
     dims = [int(d) for d in dims]
     code = int(idata.get("DataType", 0))
     raw = idata["Data"]
-    raw = raw.read(fh) if isinstance(raw, _Located) else np.asarray(raw)
-    buf = raw.tobytes()
     if code in _PACKED_COMPLEX:
         raise UnsupportedContent(
             "DM packed-complex FFT image; export the FFT as complex or the "
             "real-space image instead")
+    if header_only and isinstance(raw, _Located):
+        # Shape and type from the tags; the array stays on disk.
+        nbytes = raw.count * raw.dtype.itemsize
+        if code in _RGB_TYPES:
+            data = stand_in(tuple(reversed(dims)) + (3,), np.uint8)
+            rgb = True
+        elif code in _IMAGE_DTYPE:
+            dt = np.dtype(bool) if code == 14 else _IMAGE_DTYPE[code].newbyteorder("=")
+            n = int(np.prod(dims)) if dims else nbytes // _IMAGE_DTYPE[code].itemsize
+            if nbytes // _IMAGE_DTYPE[code].itemsize != n:
+                raise UnsupportedContent(
+                    f"DM image data has {nbytes // _IMAGE_DTYPE[code].itemsize} values "
+                    f"for dimensions {dims}")
+            data = stand_in(tuple(reversed(dims)) if dims else (n,), dt)
+            rgb = False
+        else:
+            raise UnsupportedContent(f"DM image data type {code}")
+        return _finish_image(entry, idata, dims, data, rgb, source)
+    raw = raw.read(fh) if isinstance(raw, _Located) else np.asarray(raw)
+    buf = raw.tobytes()
     if code in _RGB_TYPES:
         px = np.frombuffer(buf, dtype=np.uint8).reshape(-1, 4)[:, [2, 1, 0]]
         data = px.reshape(tuple(reversed(dims)) + (3,))
@@ -232,7 +251,11 @@ def _image(fh, entry: Dict[str, Any], source: str, bo: str) -> Optional[Dataset]
         rgb = False
     else:
         raise UnsupportedContent(f"DM image data type {code}")
+    return _finish_image(entry, idata, dims, data, rgb, source)
 
+
+def _finish_image(entry, idata, dims, data, rgb, source) -> Dataset:
+    """Axes, metadata and canonical order for an image's array (or stand-in)."""
     cal = _get(idata, "Calibrations", "Dimension") or []
     if isinstance(cal, dict):
         cal = list(cal.values())
@@ -286,7 +309,7 @@ def _name_axes(axes: List[Axis], md: Dict[str, Any]) -> None:
             a.name = "Signal"
 
 
-def read(path: str) -> List[Dataset]:
+def read(path: str, header_only: bool = False) -> List[Dataset]:
     with open(path, "rb") as fh:
         reader = _TagReader(fh)
         root = reader.read_root()
@@ -295,7 +318,7 @@ def read(path: str) -> List[Dataset]:
             images = list(images.values())
         out: List[Dataset] = []
         for entry in images or []:
-            ds = _image(fh, entry, path, reader.bo)
+            ds = _image(fh, entry, path, reader.bo, header_only)
             if ds is not None:
                 out.append(ds)
     if not out:

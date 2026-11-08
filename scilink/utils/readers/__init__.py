@@ -57,42 +57,43 @@ def can_read(path) -> bool:
     return Path(str(path)).suffix.lower() in READABLE_SUFFIXES
 
 
-def _read_hdf5_family(path: str, suffix: str, decode_streams: bool = True) -> List[Dataset]:
+def _read_hdf5_family(path: str, suffix: str, header_only: bool = False) -> List[Dataset]:
     import h5py
 
     from . import emd, hspy, nexus
 
     with h5py.File(path, "r") as h5:
         if hspy.is_hyperspy(h5):
-            return hspy.read_open(h5, path)
+            return hspy.read_open(h5, path, header_only=header_only)
         if emd.is_velox(h5) or emd._berkeley_groups(h5):
-            return emd.read_open(h5, path, decode_streams=decode_streams)
+            return emd.read_open(h5, path, header_only=header_only)
     if suffix == ".emd":
         raise UnsupportedContent(f"{path} is HDF5 but not a recognised EMD layout")
     return nexus.read(path)
 
 
-def read_datasets(path, decode_streams: bool = True) -> List[Dataset]:
+def read_datasets(path, header_only: bool = False) -> List[Dataset]:
     """Every dataset the file holds, primary first where the format says which.
 
-    ``decode_streams=False`` is for a caller that needs only kinds, shapes,
-    axes and metadata (a probe, a metadata read): an EDS event stream is then
-    not decoded, and its dataset's ``data`` is a zero-memory stand-in of the
-    right shape, marked ``metadata["not_decoded"]``.
+    ``header_only=True`` is for a caller that needs only kinds, shapes,
+    dtypes, axes and metadata (a probe, examine_data, a metadata read, a
+    routing check): no array is read and no event stream decoded, and each
+    dataset's ``data`` is a zero-memory stand-in of the right shape and
+    dtype. Plain HDF5 (NeXus / largest dataset) is still read in full.
     """
     path = str(path)
     suffix = Path(path).suffix.lower()
     if suffix in (".dm3", ".dm4"):
         from . import dm
-        return dm.read(path)
+        return dm.read(path, header_only=header_only)
     if suffix == ".hspy":
         from . import hspy
-        return hspy.read(path)
+        return hspy.read(path, header_only=header_only)
     if suffix == ".emd" or suffix in _HDF5_SUFFIXES:
-        return _read_hdf5_family(path, suffix, decode_streams)
+        return _read_hdf5_family(path, suffix, header_only)
     if suffix == ".npy":
         from ._layout import canonicalize
-        data = np.load(path)
+        data = np.load(path, mmap_mode="r" if header_only else None)
         axes = [Axis(size=n) for n in data.shape]
         data, axes, kind = canonicalize(data, axes)
         return [Dataset(data=data, axes=axes, kind=kind, format="npy", source=path)]
@@ -109,7 +110,7 @@ def pick(found: Sequence[Dataset], prefer: Optional[Sequence[str]] = None) -> Da
 
 
 def read_dataset(path, prefer: Optional[Sequence[str]] = None,
-                 decode_streams: bool = True) -> Dataset:
+                 header_only: bool = False) -> Dataset:
     """The file's primary dataset.
 
     ``prefer`` lists kinds in order of preference (e.g. ``("spectrum_image",)``
@@ -117,7 +118,7 @@ def read_dataset(path, prefer: Optional[Sequence[str]] = None,
     wins. Otherwise the largest dataset wins, so a survey image or a
     thumbnail stored beside a spectrum image never replaces it.
     """
-    return pick(read_datasets(path, decode_streams=decode_streams), prefer)
+    return pick(read_datasets(path, header_only=header_only), prefer)
 
 
 from ._scilink import (calibrated_dataset, file_metadata,  # noqa: E402
