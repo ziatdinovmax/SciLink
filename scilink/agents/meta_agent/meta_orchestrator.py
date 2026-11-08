@@ -563,6 +563,11 @@ class MetaOrchestratorAgent:
 
         # Session state — kept shallow; children own their deep state.
         self._children: Dict[str, Any] = {}          # "analysis"/"planning" -> agent
+        # An HPC connection the host attached (the web UI's HPC panel); handed
+        # to the simulation specialist and its workers. Not checkpointed: an
+        # SSH session cannot outlive the process.
+        self.hpc_connection = None
+        self.hpc_scheduler = None
         self._delegation_ledger: List[Dict[str, Any]] = []
         # Complementarity verdicts cached by frozenset of dataset paths, so the
         # standalone assess_complementarity tool and the internal gate in
@@ -893,6 +898,21 @@ class MetaOrchestratorAgent:
             self._children["simulation"] = build_child(
                 self, "simulation", self.simulation_dir, restore=restore, persistent=True)
         return self._children["simulation"]
+
+    def set_hpc_connection(self, connection, scheduler=None) -> None:
+        """Attach (or, with ``None``, detach) an HPC connection.
+
+        The simulation specialist's job tools read the connection when they
+        run, so an existing specialist picks it up at once; one built later
+        gets it from ``build_child``. The web server changes it only between
+        turns, so a job is never submitted over a connection being closed.
+        """
+        self.hpc_connection = connection
+        self.hpc_scheduler = scheduler if connection is not None else None
+        child = self._children.get("simulation")
+        if child is not None:
+            child.hpc_connection = self.hpc_connection
+            child.hpc_scheduler = self.hpc_scheduler
 
     # =========================================================================
     # Shared extensions: skills, custom tools, MCP servers

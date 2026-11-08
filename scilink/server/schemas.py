@@ -48,6 +48,24 @@ class FolderCheckRequest(BaseModel):
     paths: list[str]
 
 
+class HPCConnectRequest(BaseModel):
+    """Open an SSH connection to a cluster for the session's simulation work.
+
+    ``password``, ``key_passphrase`` and ``otp`` (a one-time code for
+    multi-factor sites such as NERSC) are used for this one login and are
+    never stored, logged or returned."""
+
+    hostname: str
+    username: str
+    port: int = 22
+    auth_method: str = "password"   # "password" | "key"
+    password: str = ""
+    key_path: str = ""
+    key_passphrase: str = ""
+    otp: str = ""
+    proxy_jump: str = ""
+
+
 class PlanDirsRequest(BaseModel):
     """Point the planning agent's resource dirs at existing local folders
     (KB indexes key on source paths, so stable folders are reused across

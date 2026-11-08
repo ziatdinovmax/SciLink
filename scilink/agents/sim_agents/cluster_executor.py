@@ -108,6 +108,7 @@ class ClusterExecutor(Executor):
         auth_method: Optional[str] = None,
         proxy_jump: str = "",
         port: int = 22,
+        otp: str = "",
         **executor_kwargs: Any,
     ) -> "ClusterExecutor":
         """Open an HPC connection and return a ready ``ClusterExecutor``.
@@ -129,6 +130,8 @@ class ClusterExecutor(Executor):
             auth_method: ``"password"`` or ``"key"``; inferred when omitted.
             proxy_jump: Optional ``user@bastion`` jump host.
             port: SSH port.
+            otp: One-time code for a multi-factor login (e.g. NERSC); used
+                for this login only.
 
         Returns:
             A connected ``ClusterExecutor``.
@@ -140,7 +143,10 @@ class ClusterExecutor(Executor):
             auth_method=method, key_path=key_path, proxy_jump=proxy_jump,
         )
         conn = HPCConnection(profile)
-        conn.connect(password=password, key_passphrase=key_passphrase)
+        # otp only when given: connection classes written before it existed
+        # (and test stand-ins) keep their two-argument connect().
+        conn.connect(password=password, key_passphrase=key_passphrase,
+                     **({"otp": otp} if otp else {}))
         return cls(conn, **executor_kwargs)
 
     # ── internals ─────────────────────────────────────────────
@@ -149,14 +155,16 @@ class ClusterExecutor(Executor):
         if self.conn.is_connected:
             return
         # A key/agent session can re-establish from an arg-less connect(); a
-        # password session cannot (the password is intentionally not stored).
+        # password or one-time-code (MFA) session cannot: neither secret is
+        # stored, and a code is single-use.
         # Surface that as a clear error rather than a bare paramiko auth failure.
         try:
             self.conn.connect()
         except Exception as exc:  # noqa: BLE001 — re-raise with guidance
             raise ConnectionError(
                 "HPC connection is down and could not be re-established "
-                "non-interactively (password sessions cannot self-recover). "
+                "non-interactively (password and one-time-code sessions cannot "
+                "self-recover; reconnect with a fresh code). "
                 "Pass an already-connected HPCConnection, e.g. via "
                 "ClusterExecutor.connect(...)."
             ) from exc

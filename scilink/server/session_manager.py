@@ -55,6 +55,13 @@ class WebSession:
     # after this get the explorer's "new" badge.
     turn_started_at: Optional[float] = None
     lock: threading.Lock = field(default_factory=threading.Lock)
+    # The cluster connection opened from the HPC panel (in memory only), and
+    # what the panel shows about it (no secrets).
+    hpc_connection: Any = None
+    hpc_info: Dict[str, Any] = field(default_factory=dict)
+    # serialises connect / disconnect, so the agent and the panel never
+    # disagree about which connection is live
+    hpc_lock: threading.Lock = field(default_factory=threading.Lock)
 
     def __post_init__(self) -> None:
         if self.tracker is None:
@@ -291,6 +298,11 @@ class SessionManager:
         except Exception:
             pass
         session.events.close()
+        if session.hpc_connection is not None:
+            try:
+                session.hpc_connection.disconnect()
+            except Exception:
+                pass
         return True
 
     def list_live(self) -> List[Dict[str, Any]]:

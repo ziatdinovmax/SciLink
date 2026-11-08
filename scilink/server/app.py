@@ -12,6 +12,7 @@ from __future__ import annotations
 import hmac
 import mimetypes
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -50,6 +51,7 @@ from .schemas import (
     MemorySweepRequest,
     MemoryTechniqueRequest,
     MemoryUpgradeRequest,
+    HPCConnectRequest,
     PlanDirsRequest,
     RenameSessionRequest,
     SendMessageRequest,
@@ -402,6 +404,10 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         with session.lock:
             if session.turn is not None and session.turn.is_running:
                 raise HTTPException(409, "A turn is already running.")
+            if session.hpc_lock.locked():
+                # a connect/disconnect is swapping the agent's HPC connection
+                raise HTTPException(409, "An HPC connection is being opened or closed; "
+                                         "send the message once it finishes.")
             runner.start_turn(session, content)
         return {"status": "running"}
 
@@ -516,6 +522,130 @@ def create_app(session_root: Path, serve_frontend: bool = True,
             setattr(agent, attr, p)
             applied[attr] = str(p)
         return {"applied": applied}
+
+    # ── HPC connection (simulation jobs) ─────────────────────────
+
+    def _hpc_status(session) -> dict:
+        conn = session.hpc_connection
+        connected = bool(conn is not None and conn.is_connected)
+        info = dict(session.hpc_info) if session.hpc_connection is not None else {}
+        return {"connected": connected, **info,
+                **({"dropped": True} if info and not connected else {})}
+
+    @app.get("/api/v1/sessions/{session_id}/hpc")
+    def hpc_status(request: Request, session_id: str):
+        """The session's cluster connection, without secrets."""
+        return _hpc_status(_session_or_404(request, session_id))
+
+    # Key login and jump hosts act with the SSH keys and agent of the account
+    # running SciLink. Only a local server with no sign-in is that user's own:
+    # a server behind sign-in (tokens, --users, an auth proxy) is shared even
+    # when it binds loopback.
+    hpc_server_keys_ok = bool(local_files and auth is None)
+
+    def _hpc_change_allowed(session) -> None:
+        """409 unless no turn is running. Checked under ``session.lock`` (which
+        send_message holds while it starts a turn) with ``hpc_lock`` held (which
+        send_message refuses on), so a turn cannot start in between. A stopped
+        turn counts until its thread has ended."""
+        turn = session.turn
+        thread = getattr(turn, "thread", None) if turn is not None else None
+        with session.lock:
+            busy = session.status != "idle" or (thread is not None and thread.is_alive())
+        if busy:
+            raise HTTPException(
+                409, "A turn is running: wait for it to finish (or stop it) before "
+                     "changing the HPC connection, so no job is left half-submitted.")
+
+    @app.post("/api/v1/sessions/{session_id}/hpc/connect")
+    def hpc_connect(request: Request, session_id: str, body: HPCConnectRequest):
+        """Open an SSH connection for the session's simulation specialist.
+
+        Password and one-time code (MFA) logins work on any deployment. Key
+        login and a jump host use the server account's SSH keys and agent, so
+        they are allowed only on a local server without sign-in."""
+        session = _session_or_404(request, session_id)
+        agent = session.agent
+        if not hasattr(agent, "set_hpc_connection"):
+            raise HTTPException(
+                400, "HPC connections apply to Mission Control (meta) sessions, "
+                     "whose simulation specialist submits the jobs.")
+        method = (body.auth_method or "password").strip().lower()
+        if method not in ("password", "key"):
+            raise HTTPException(400, "auth_method must be 'password' or 'key'")
+        if not hpc_server_keys_ok and (method == "key" or body.proxy_jump.strip()):
+            raise HTTPException(
+                403, "Key login and jump hosts use the SSH keys of the account "
+                     "running SciLink, so they are only available when SciLink "
+                     "runs on your own computer without sign-in. Use a password "
+                     "(and one-time code) here.")
+        if not body.hostname.strip() or not body.username.strip():
+            raise HTTPException(400, "hostname and username are required")
+        from scilink.hpc import detect_scheduler
+        from scilink.hpc.connection import HPCConnection, HPCProfile, validate_proxy_jump
+        try:
+            jump = validate_proxy_jump(body.proxy_jump)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        profile = HPCProfile(
+            name=body.hostname.split(".")[0], hostname=body.hostname.strip(),
+            username=body.username.strip(), port=int(body.port),
+            auth_method=method, key_path=body.key_path.strip(), proxy_jump=jump)
+        with session.hpc_lock:
+            _hpc_change_allowed(session)
+            conn = HPCConnection(profile)
+            try:
+                conn.connect(password=body.password, key_passphrase=body.key_passphrase,
+                             otp=body.otp)
+            except Exception as exc:
+                # The message names what is missing (e.g. a one-time code); the
+                # login code never puts a secret in it. 422, not 401: the web
+                # client treats 401 as its own sign-in expiring.
+                raise HTTPException(422, f"Could not connect to {profile.hostname}: {exc}")
+            try:
+                sched = detect_scheduler(conn)
+                home = conn.home_dir()
+            except Exception as exc:
+                conn.disconnect()
+                raise HTTPException(502, f"Connected, but could not query the cluster: {exc}")
+            try:
+                _hpc_change_allowed(session)     # nothing started meanwhile
+            except HTTPException:
+                conn.disconnect()
+                raise
+            old = session.hpc_connection
+            session.hpc_connection = conn
+            session.hpc_info = {
+                "hostname": profile.hostname, "username": profile.username,
+                "port": profile.port, "auth_method": method,
+                "mfa": bool(body.otp.strip()),
+                "scheduler": getattr(sched, "name", None), "home": home,
+                "connected_at": time.time(),
+            }
+            agent.set_hpc_connection(conn, sched)
+            if old is not None and old is not conn:
+                try:
+                    old.disconnect()
+                except Exception:
+                    pass
+            return _hpc_status(session)
+
+    @app.post("/api/v1/sessions/{session_id}/hpc/disconnect")
+    def hpc_disconnect(request: Request, session_id: str):
+        session = _session_or_404(request, session_id)
+        with session.hpc_lock:
+            _hpc_change_allowed(session)
+            conn = session.hpc_connection
+            if hasattr(session.agent, "set_hpc_connection"):
+                session.agent.set_hpc_connection(None)
+            session.hpc_connection = None
+            session.hpc_info = {}
+            if conn is not None:
+                try:
+                    conn.disconnect()
+                except Exception:
+                    pass
+            return _hpc_status(session)
 
     # ── files ────────────────────────────────────────────────────
 

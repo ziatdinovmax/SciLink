@@ -725,6 +725,32 @@ export interface LiveConfig {
   targets?: string[];
 }
 
+/** The session's HPC connection as the server reports it (never secrets). */
+export interface HpcStatus {
+  connected: boolean;
+  dropped?: boolean;
+  hostname?: string;
+  username?: string;
+  port?: number;
+  auth_method?: "password" | "key";
+  mfa?: boolean;
+  scheduler?: string | null;
+  home?: string;
+  connected_at?: number;
+}
+
+export interface HpcConnectBody {
+  hostname: string;
+  username: string;
+  port: number;
+  auth_method: "password" | "key";
+  password?: string;
+  key_path?: string;
+  key_passphrase?: string;
+  otp?: string;
+  proxy_jump?: string;
+}
+
 /** Thrown on a 401 so the app can drop to the sign-in screen (a cookie
  * session ends when the server restarts). */
 export class UnauthorizedError extends Error {}
@@ -836,6 +862,11 @@ export const api = {
     req<{ entries: TreeEntry[]; truncated: boolean }>(`/sessions/${id}/tree`),
 
   delegations: (id: string) => req<DelegationView>(`/sessions/${id}/delegations`),
+  hpcStatus: (id: string) => req<HpcStatus>(`/sessions/${id}/hpc`),
+  hpcConnect: (id: string, body: HpcConnectBody) =>
+    req<HpcStatus>(`/sessions/${id}/hpc/connect`, json(body)),
+  hpcDisconnect: (id: string) =>
+    req<HpcStatus>(`/sessions/${id}/hpc/disconnect`, { method: "POST" }),
   telemetry: (id: string) => req<TelemetrySnapshot>(`/sessions/${id}/telemetry`),
 
   skills: (id: string) => req<SkillCatalog>(`/sessions/${id}/skills`),

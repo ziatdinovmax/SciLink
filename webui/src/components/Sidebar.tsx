@@ -10,6 +10,7 @@ import {
   type DelegationView,
 } from "../api";
 import { DelegationTree } from "./DelegationTree";
+import { HpcPanel } from "./HpcPanel";
 import logoDark from "../assets/scilink_logo_dark_animated.svg";
 import logoLight from "../assets/scilink_logo_light_animated.svg";
 
@@ -600,6 +601,8 @@ export function Sidebar({
           />
         </div>
       )}
+
+      {session && session.mode === "meta" && <HpcPanel sessionId={session.id} />}
 
       {session && liveSessions.some((s) => s.id !== session.id) && (
         <div className="sidebar-section">

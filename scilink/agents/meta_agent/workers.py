@@ -146,6 +146,9 @@ def build_child(orch: Any, mode: str, base_dir: Path, *, restore: bool = False,
             restore_checkpoint=restore,
             simulation_mode=SimulationMode.CO_PILOT if persistent else SimulationMode.AUTONOMOUS,
             file_roots=roots,
+            # the HPC connection the host attached to the meta, if any
+            hpc_connection=getattr(orch, "hpc_connection", None),
+            hpc_scheduler=getattr(orch, "hpc_scheduler", None),
             # mp_api_key not threaded from the meta (its constructor has
             # none); MPRester falls back to the MP_API_KEY env var when a
             # crystal-from-Materials-Project structure is requested.
