@@ -87,10 +87,10 @@ _BRANCH_PREP_FACTOR = 1.2        # raw stack (uncompressed) -> preparation peak
 _BRANCH_MAX_FILES = 5000          # walk at most this many data files
 #: What a branch's agents load: measurement files, not sidecars or reports.
 _DATA_SUFFIXES = frozenset({
-    ".npy", ".npz", ".h5", ".hdf5", ".nxs", ".emd", ".mat", ".mrc", ".dm3", ".dm4", ".ser", ".raw",
+    ".npy", ".npz", ".h5", ".hdf5", ".nxs", ".emd", ".hspy", ".mat", ".mrc", ".dm3", ".dm4", ".ser", ".raw",
     ".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp",
     ".csv", ".txt", ".tsv", ".dat", ".xy", ".xye", ".spc", ".spe", ".chi", ".xrdml"})
-_HDF5_SUFFIXES = frozenset({".h5", ".hdf5", ".nxs", ".emd"})
+_HDF5_SUFFIXES = frozenset({".h5", ".hdf5", ".nxs", ".emd", ".hspy"})
 
 
 def _in_memory_bytes(f: Path) -> float:

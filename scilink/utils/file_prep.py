@@ -633,6 +633,60 @@ def split_pickled_metadata_only(input_path, paths: dict, logger=None):
     }
 
 
+def split_with_reader(input_path: Path, paths: dict, logger=None):
+    """Split a file SciLink reads natively (DM, HyperSpy, EMD, Velox) without codegen.
+
+    The reader returns the array in canonical order and the metadata the file
+    records (axis calibration, acquisition values) in SciLink's schema; the
+    array is written as ``.npy`` and checked byte-for-byte against what was
+    read. Returns None for any other file (the codegen split handles it).
+    """
+    from .readers import file_metadata, pick, read_datasets, records_calibration
+    if not records_calibration(input_path):
+        return None
+    try:
+        found = read_datasets(str(input_path))      # read once, every dataset
+        ds = pick(found)
+    except Exception as e:  # noqa: BLE001 - unreadable → the codegen path decides
+        if logger:
+            logger.warning(f"📦 Reader could not open {input_path.name}: {e}")
+        return None
+    out_dir = Path(paths["out_dir"])
+    stem = re.sub(r"[^0-9A-Za-z_-]", "_", input_path.stem) or "input"
+    data_out = out_dir / f"{stem}_data.npy"
+    # A spectrum is written as (x, y) columns on its calibrated axis: that is
+    # what the curve agent reads from an array, and what its loader returns
+    # for the original file.
+    arr = (np.column_stack([ds.axes[0].coordinates(), ds.data])
+           if ds.kind == "spectrum" else ds.data)
+    np.save(data_out, arr)
+    if not np.array_equal(np.load(data_out), arr, equal_nan=arr.dtype.kind in "fc"):
+        return {"status": "error", "attempts": 0,
+                "message": f"Written array does not match what was read from {input_path.name}."}
+    meta = file_metadata(ds)
+    meta["source_file"] = input_path.name
+    others = [d for d in found if d is not ds]
+    if others:
+        meta["other_datasets_in_file"] = [
+            {"kind": d.kind, "shape": list(d.data.shape), "title": d.title} for d in others]
+    meta_out = Path(paths["metadata_out"])
+    meta_out.write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
+    json.loads(meta_out.read_text())
+    if logger:
+        logger.info(f"✅ Split by the {ds.format} reader (deterministic): {data_out.name}")
+    return {
+        "status": "success",
+        "data_path": str(data_out),
+        "metadata_path": str(meta_out),
+        "attempts": 0,
+        "deterministic": True,
+        "note": (f"Split by SciLink's {ds.format} reader, no generated code: the "
+                 f"{ds.kind} {tuple(arr.shape)}"
+                 + (" as (x, y) columns" if ds.kind == "spectrum" else "")
+                 + " with the calibration and acquisition values the file records."),
+    }
+
+
 # Extensions whose bytes are human-readable text worth showing the split LLM
 # verbatim. Binary containers (.npy/.npz/.h5/.mat/.tif) surface their metadata
 # structurally in the probe, so a "raw head" is meaningless for them.
@@ -768,20 +822,37 @@ def _prepare_one(input_path: Path, paths: dict, base_prompt: str, model, executo
     }, None
 
 
+def _codegen_declined(approve_codegen) -> bool:
+    """True when the caller's consent for running generated code is refused."""
+    return approve_codegen is not None and not approve_codegen()
+
+
+_DECLINED = {"status": "error", "attempts": 0,
+             "message": "Code execution declined: SciLink's reader could not split "
+                        "this file and the fallback runs generated code."}
+
+
 def prepare_inputs(input_path, model, executor, output_dir, probe=None,
-                   logger=None, max_retries: int = 1) -> dict:
+                   logger=None, max_retries: int = 1, approve_codegen=None) -> dict:
     """Split ONE combined data+metadata file into data + metadata files (codegen).
 
     Returns ``{status:"success", data_path, metadata_path, attempts}`` or
     ``{status:"error", message, attempts}``. The reconstruction used for the
     round-trip check is deleted once verified. The caller decides how to handle an
     error — the meta surfaces it to the user rather than delegating an unsplit file.
+    ``approve_codegen`` (a callable) is asked before any generated code runs, for a
+    caller that skipped consent because it expected a deterministic split.
     """
     input_path = Path(input_path)
     paths = _file_paths(input_path, Path(output_dir))
     det = split_pickled_metadata_only(input_path, paths, logger)
     if det is not None:
         return det
+    det = split_with_reader(input_path, paths, logger)
+    if det is not None:
+        return det
+    if _codegen_declined(approve_codegen):
+        return dict(_DECLINED)
     base_prompt = _build_prompt(probe, input_path)
     result, _ = _prepare_one(input_path, paths, base_prompt, model, executor,
                              logger, max_retries)
@@ -816,7 +887,7 @@ def _signature(probe):
 
 
 def prepare_inputs_batch(input_paths, model, executor, output_dir, probes=None,
-                         logger=None, max_retries: int = 1) -> dict:
+                         logger=None, max_retries: int = 1, approve_codegen=None) -> dict:
     """Split MANY combined files, reusing one verified split per structural cluster.
 
     Files are clustered by :func:`_signature`; the cluster's first file drives a
@@ -841,6 +912,8 @@ def prepare_inputs_batch(input_paths, model, executor, output_dir, probes=None,
     # no clustering); everything else proceeds through the codegen machinery.
     for i, p in enumerate(input_paths):
         det = split_pickled_metadata_only(p, _file_paths(p, output_dir), logger)
+        if det is None:
+            det = split_with_reader(Path(p), _file_paths(Path(p), output_dir), logger)
         if det is not None:
             results[i] = {"file": str(p), "reused": False, **det}
 
@@ -852,6 +925,12 @@ def prepare_inputs_batch(input_paths, model, executor, output_dir, probes=None,
         if sig is None:                       # no structural confidence → solo
             sig = ("__solo__", i)
         clusters.setdefault(sig, []).append(i)
+
+    if clusters and _codegen_declined(approve_codegen):
+        for idxs in clusters.values():
+            for i in idxs:
+                results[i] = {"file": str(input_paths[i]), "reused": False, **_DECLINED}
+        clusters = {}
 
     for idxs in clusters.values():
         first = idxs[0]

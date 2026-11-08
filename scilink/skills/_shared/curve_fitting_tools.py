@@ -568,7 +568,8 @@ def load_curve_data(data_path: str, auto_orient: bool = True,
                     system_info: dict = None, column_names: list = None) -> np.ndarray:
     """
     Robustly loads curve data (X, Y) from various file formats.
-    Handles .npy, .h5/.hdf5/.nxs (NeXus), CSV, TSV, and whitespace separation
+    Handles .npy, .h5/.hdf5/.nxs (NeXus), .dm3/.dm4/.hspy/.emd (via
+    ``scilink.utils.readers``), CSV, TSV, and whitespace separation
     automatically.
 
     When ``auto_orient`` is True (default), the result is normalized to a
@@ -590,6 +591,20 @@ def load_curve_data(data_path: str, auto_orient: bool = True,
     # Native numpy format
     if data_path.endswith('.npy'):
         return _finish(np.load(data_path))
+
+    # DM / HyperSpy / EMD / Velox (also inside .h5/.hdf5): a spectrum comes
+    # back as (x, y) on its calibrated axis.
+    from scilink.utils.readers import records_calibration
+    if records_calibration(data_path):
+        from scilink.utils.readers import PREFER_CURVE, UnsupportedContent, read_dataset
+        ds = read_dataset(data_path, prefer=PREFER_CURVE)
+        if ds.kind == "spectrum":
+            return np.column_stack([ds.axes[0].coordinates(), ds.data])
+        if ds.kind not in PREFER_CURVE:
+            raise UnsupportedContent(
+                f"{os.path.basename(data_path)} holds no spectrum (its data is "
+                f"{ds.kind} {tuple(ds.data.shape)}); the curve loader takes spectra")
+        return _finish(ds.data)
 
     # NeXus / HDF5 — pull the signal and (when present) its axis so we
     # can return (X, Y) pairs for callers that expect a 2D layout.

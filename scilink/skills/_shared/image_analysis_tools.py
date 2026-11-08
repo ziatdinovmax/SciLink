@@ -28,6 +28,13 @@ def load_image_data(image_path: str) -> np.ndarray:
     if ext == ".npy":
         return np.load(image_path)
 
+    # DM / HyperSpy / EMD / Velox, also inside .h5/.hdf5 (a plain HDF5 file
+    # is not one of these and keeps the path below).
+    from scilink.utils.readers import records_calibration
+    if records_calibration(image_path):
+        from scilink.utils.readers import PREFER_IMAGE, native_array
+        return native_array(image_path, prefer=PREFER_IMAGE, accept=PREFER_IMAGE)
+
     # Standard image formats
     import cv2
 

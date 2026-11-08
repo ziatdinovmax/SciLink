@@ -44,7 +44,8 @@ def _normalize_to_uint8(img_array, p_low=0.5, p_high=99.5):
 
 
 def load_image(image_path, raw: bool = False):
-    """Load an image from file (PNG, JPG, TIF, .npy, or .h5/.hdf5/.nxs).
+    """Load an image from file (PNG, JPG, TIF, .npy, .h5/.hdf5/.nxs, or
+    .dm3/.dm4/.hspy/.emd through ``scilink.utils.readers``).
 
     ``raw=False`` (default) returns a display-ready uint8 rendering
     (percentile-normalized). ``raw=True`` returns the file's native values
@@ -57,6 +58,13 @@ def load_image(image_path, raw: bool = False):
         _, ext = os.path.splitext(image_path)
         ext = ext.lower()
 
+        from scilink.utils.readers import records_calibration
+        if records_calibration(image_path):
+            from scilink.utils.readers import PREFER_IMAGE, native_array
+            # A general loader (previews, auxiliary operands): the preferred
+            # kind when the file holds one, else its largest dataset.
+            img_array = native_array(image_path, prefer=PREFER_IMAGE)
+            return img_array if raw else _normalize_to_uint8(img_array)
         if ext == '.npy' or ext in ('.h5', '.hdf5', '.nxs'):
             if ext == '.npy':
                 img_array = np.load(image_path)

@@ -165,6 +165,12 @@ rather than fabricate a result).
   modalities. Only if the user explicitly wants the raw container inside the
   fan-out, pass allow_raw_branches=true (that branch gets a scaled budget) or an
   explicit branch_time_budget_s.
+- A file SciLink reads natively (Gatan .dm3/.dm4, HyperSpy .hspy, EMD/Velox
+  .emd, or an HDF5 that `inspect_uploads` marks `read_natively`) carries its own
+  calibration: delegate ONE such file as-is, with no `prepare_inputs` and no
+  metadata file. SEVERAL that form a series: pass them as a LIST to
+  `prepare_inputs` (split by SciLink's readers, no code is generated) and
+  delegate the staged directory it returns as the one series.
 - When an uploaded file holds BOTH the data and its metadata mixed together
   (an HDF5/NeXus with attributes, a `.npz`/`.mat` with data+meta keys, a
   CSV/text with a header/comment metadata block, a TIFF with tags/
