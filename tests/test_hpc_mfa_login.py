@@ -365,3 +365,80 @@ def test_a_jump_host_must_look_like_one():
     for bad in ("-oProxyCommand=touch /tmp/x x", "a b", "alice@host;rm -rf /", "alice@-oFoo"):
         with pytest.raises(ValueError):
             validate_proxy_jump(bad)
+
+
+# ── review #811: the password step keeps the chain in MFAAuth's hands ────
+
+class _PwThenKbdServer(_Server):
+    """Lists password at first, then (after a password try) only
+    keyboard-interactive: the client sees BadAuthenticationType."""
+
+    def get_allowed_auths(self, username):
+        if self.style == "pw-then-nersc" and not self.state.get("password_tried"):
+            return "password,keyboard-interactive"
+        if self.style == "pw-then-drop" and not self.state.get("password_tried"):
+            return "password,keyboard-interactive"
+        return "keyboard-interactive"
+
+    def check_auth_password(self, username, password):
+        self.state["password_tried"] = True
+        return paramiko.AUTH_FAILED
+
+    def check_auth_interactive(self, username, submethods):
+        if self.style == "pw-then-drop":          # the link dies before any prompt
+            self.state["transport"].sock.close()
+            return paramiko.AUTH_FAILED
+        q = paramiko.InteractiveQuery("", "")
+        q.add_prompt("Password + OTP: ", False)
+        return q
+
+    def check_auth_interactive_response(self, responses):
+        self.state.setdefault("responses", []).append(list(responses))
+        return (paramiko.AUTH_SUCCESSFUL if list(responses) == [PASSWORD + CODE]
+                else paramiko.AUTH_FAILED)
+
+
+@pytest.fixture
+def pw_then_kbd_server(monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "_Server", _PwThenKbdServer)
+
+
+def _auth_only(port, **kw):
+    """Run MFAAuth against the server directly (password before codes)."""
+    sock = socket.create_connection(("127.0.0.1", port))
+    t = paramiko.Transport(sock)
+    t.start_client(timeout=10)
+    a = MFAAuth(USER, **kw)
+    try:
+        a.authenticate(t)
+    finally:
+        t.close()
+    return a
+
+
+def test_paramiko_never_answers_the_code_prompt_with_the_bare_password(
+        pw_then_kbd_server, server):
+    # paramiko's fallback=True would answer "Password + OTP:" with the
+    # password alone: a failed login on record (sites lock accounts on those).
+    port, style = server
+    style("pw-then-nersc")
+    with pytest.raises(paramiko.AuthenticationException, match="one-time code"):
+        _auth_only(port, password=PASSWORD)              # no code given
+    assert "responses" not in LAST_SERVER_STATE          # no prompt was answered
+
+
+def test_password_not_allowed_does_not_count_as_a_secret_sent(
+        pw_then_kbd_server, server):
+    # The server answers the password step with "not allowed here"
+    # (BadAuthenticationType), then drops: secret_sent stays False, so the
+    # connection is not reported as having spent a code.
+    port, style = server
+    style("pw-then-drop")
+    sock = socket.create_connection(("127.0.0.1", port))
+    t = paramiko.Transport(sock)
+    t.start_client(timeout=10)
+    a = MFAAuth(USER, password=PASSWORD)     # password first (with a code, kbd goes first)
+    with pytest.raises(Exception):
+        a.authenticate(t)
+    t.close()
+    assert LAST_SERVER_STATE.get("password_tried") and a.secret_sent is False

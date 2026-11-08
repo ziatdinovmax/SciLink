@@ -2558,10 +2558,14 @@ class SimulationOrchestratorTools:
             record["hpc_job_id"] = job_id
             record["hpc_remote_dir"] = remote_dir
             record["hpc_results_dir"] = None
+            # Job ids are per cluster (small integers, reused): status and
+            # download check this before using the id or the remote path.
+            record["hpc_cluster"] = self._cluster_key(conn)
 
             return json.dumps({
                 "status": "success",
                 "job_id": job_id,
+                "cluster": record["hpc_cluster"],
                 "scheduler": sched.name,
                 "remote_dir": remote_dir,
                 "next_steps": (
@@ -2659,6 +2663,10 @@ class SimulationOrchestratorTools:
                     "status": "error",
                     "message": "HPC connection is not active. Reconnect and retry.",
                 })
+            record = self._find_structure_by_job_id(job_id, self._cluster_key(conn))
+            wrong = self._wrong_cluster(record, conn, job_id)
+            if wrong:
+                return wrong
             try:
                 job = sched.status(job_id)
             except Exception as e:
@@ -2777,7 +2785,10 @@ class SimulationOrchestratorTools:
                     "message": "HPC connection is not active. Reconnect and retry.",
                 })
 
-            record = self._find_structure_by_job_id(job_id)
+            record = self._find_structure_by_job_id(job_id, self._cluster_key(conn))
+            wrong = self._wrong_cluster(record, conn, job_id)
+            if wrong:
+                return wrong
             if record is None:
                 return json.dumps({
                     "status": "error",
@@ -2943,6 +2954,7 @@ class SimulationOrchestratorTools:
                     "\n## HPC Job",
                     f"- **Scheduler:** {sched_name}",
                     f"- **Job ID:** {record['hpc_job_id']}",
+                    f"- **Cluster:** {record.get('hpc_cluster') or 'N/A'}",
                     f"- **Remote dir:** `{record.get('hpc_remote_dir', 'N/A')}`",
                     f"- **Local results:** `{record.get('hpc_results_dir', 'N/A')}`",
                 ]
@@ -3427,12 +3439,52 @@ class SimulationOrchestratorTools:
                 continue
         return None
 
-    def _find_structure_by_job_id(self, job_id: str) -> Optional[Dict[str, Any]]:
-        """Find the session record that was submitted as the given HPC job."""
-        for record in self.orch.generated_structures or []:
-            if record.get("hpc_job_id") == job_id:
-                return record
-        return None
+    def _find_structure_by_job_id(self, job_id: str,
+                                  cluster: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Find the session record that was submitted as the given HPC job.
+
+        Job ids repeat across clusters, so a record submitted to ``cluster``
+        wins, then one from before clusters were recorded; otherwise any
+        record with that id is returned, for :meth:`_wrong_cluster` to report."""
+        matches = [r for r in (self.orch.generated_structures or [])
+                   if r.get("hpc_job_id") is not None
+                   and str(r.get("hpc_job_id")) == str(job_id)]
+        if cluster is not None:
+            for wanted in (cluster, None):
+                for record in matches:
+                    if record.get("hpc_cluster") == wanted:
+                        return record
+        return matches[0] if matches else None
+
+    @staticmethod
+    def _cluster_key(conn) -> Optional[str]:
+        """``user@host:port`` of a connection: the cluster a job id belongs to."""
+        profile = getattr(conn, "profile", None)
+        host = getattr(profile, "hostname", None)
+        if not host:
+            return None
+        return (f"{getattr(profile, 'username', '')}@{str(host).lower()}"
+                f":{getattr(profile, 'port', 22)}")
+
+    def _wrong_cluster(self, record, conn, job_id: str) -> Optional[str]:
+        """An error (JSON) when ``record`` was submitted to another cluster than
+        the live connection, else None. Jobs SciLink did not submit (no record)
+        and records from before clusters were recorded pass."""
+        submitted_to = (record or {}).get("hpc_cluster")
+        live = self._cluster_key(conn)
+        if not submitted_to or submitted_to == live:
+            return None
+        return json.dumps({
+            "status": "error",
+            "job_id": job_id,
+            "submitted_to": submitted_to,
+            "connected_to": live,
+            "message": (
+                f"Job {job_id} was submitted to {submitted_to}, but the live "
+                f"connection is {live}. Job ids are per cluster, so this job "
+                f"cannot be checked or downloaded here: reconnect to "
+                f"{submitted_to} first."),
+        })
 
     @staticmethod
     def _generate_job_script(

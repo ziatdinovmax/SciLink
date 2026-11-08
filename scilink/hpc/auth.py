@@ -226,11 +226,23 @@ class MFAAuth(AuthStrategy):
                 break
             try:
                 if method == "password":
-                    self.secret_sent = True
-                    rest = transport.auth_password(self.username, self._password)
+                    # fallback=False: on "password not allowed" paramiko would
+                    # otherwise answer the keyboard-interactive prompt itself
+                    # with the bare password (a failed login where the prompt
+                    # is "Password + OTP:"). The loop picks the next method.
+                    # Counted as sent once it goes out (a drop mid-call may
+                    # still have delivered it); undone below only when the
+                    # server answers that password logins are not allowed.
+                    sent_before, self.secret_sent = self.secret_sent, True
+                    rest = transport.auth_password(self.username, self._password,
+                                                   fallback=False)
                 else:
                     rest = transport.auth_interactive(self.username, self._handler)
             except BadAuthenticationType as e:
+                # The method is not allowed here: no login of that kind
+                # happened, so a failure later may still try another address.
+                if method == "password":
+                    self.secret_sent = sent_before
                 allowed = list(e.allowed_types)
                 continue
             except AuthenticationException:

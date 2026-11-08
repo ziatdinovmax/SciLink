@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { api, type HpcConnectBody, type HpcStatus } from "../api";
+import { useEffect, useState, type SyntheticEvent } from "react";
+import { api, HttpError, type HpcConnectBody, type HpcStatus } from "../api";
 
 /** Connect the session's simulation specialist to an HPC cluster.
  *
@@ -20,6 +20,11 @@ interface Profile {
 }
 
 const PROFILES_KEY = "scilink.hpcProfiles";
+
+/** Answers where the server stopped before any login was tried (bad request,
+ * not allowed here, unknown session, a turn still running, no paramiko): the
+ * typed password and code are kept, since a code was not spent. */
+const NOT_ATTEMPTED = new Set([400, 403, 404, 409, 501]);
 
 function loadProfiles(): Profile[] {
   try {
@@ -54,6 +59,7 @@ export function HpcPanel({ sessionId }: { sessionId: string }) {
   const [remember, setRemember] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
 
   useEffect(() => {
     // The server's own keys are offered only on a local server without
@@ -75,6 +81,12 @@ export function HpcPanel({ sessionId }: { sessionId: string }) {
       window.clearInterval(t);
     };
   }, [sessionId]);
+
+  // Unfold on a new connection and on a dropped one, so the status or the
+  // dropped-link warning is where the user is looking.
+  useEffect(() => {
+    if (status.connected || status.dropped) setOpen(true);
+  }, [status.connected, status.dropped]);
 
   const usePassword = method === "password" || !localFiles;
 
@@ -103,6 +115,7 @@ export function HpcPanel({ sessionId }: { sessionId: string }) {
       otp: otp.trim(),
       proxy_jump: localFiles ? proxy.trim() : "",
     };
+    let attempted = true;
     try {
       setStatus(await api.hpcConnect(sessionId, body));
       if (remember) {
@@ -120,12 +133,17 @@ export function HpcPanel({ sessionId }: { sessionId: string }) {
         saveProfiles(next);
       }
     } catch (e) {
+      attempted = !(e instanceof HttpError && NOT_ATTEMPTED.has(e.status));
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      // Secrets are single-use here: never kept in the form after an attempt.
-      setPassword("");
-      setKeyPass("");
-      setOtp("");
+      // Secrets are single-use here: cleared once a login was tried. Kept when
+      // the server stopped first (e.g. a turn was finishing), so a fresh code
+      // is not lost to a retry.
+      if (attempted) {
+        setPassword("");
+        setKeyPass("");
+        setOtp("");
+      }
       setBusy(false);
     }
   }
@@ -141,30 +159,39 @@ export function HpcPanel({ sessionId }: { sessionId: string }) {
     }
   }
 
+  const summary = (
+    <summary>
+      <h3 style={{ display: "inline" }}>HPC cluster</h3>
+      {status.connected && <span className="caption"> · ● {status.hostname}</span>}
+    </summary>
+  );
+  const toggle = (e: SyntheticEvent<HTMLDetailsElement>) =>
+    setOpen(e.currentTarget.open);
+
   if (status.connected) {
     return (
       <div className="sidebar-section">
-        <h3>HPC cluster</h3>
-        <p className="caption">
-          ● Connected to <b>{status.hostname}</b> as {status.username}
-          {status.scheduler ? ` · ${status.scheduler}` : " · no scheduler detected"}
-          {status.mfa ? " · MFA" : ""}
-        </p>
-        <p className="caption">The simulation specialist can now submit and track jobs here.</p>
-        <button style={{ width: "100%" }} disabled={busy} onClick={() => void disconnect()}>
-          Disconnect
-        </button>
-        {error && <p className="caption warn">{error}</p>}
+        <details open={open} onToggle={toggle}>
+          {summary}
+          <p className="caption">
+            ● Connected to <b>{status.hostname}</b> as {status.username}
+            {status.scheduler ? ` · ${status.scheduler}` : " · no scheduler detected"}
+            {status.mfa ? " · MFA" : ""}
+          </p>
+          <p className="caption">The simulation specialist can now submit and track jobs here.</p>
+          <button style={{ width: "100%" }} disabled={busy} onClick={() => void disconnect()}>
+            Disconnect
+          </button>
+          {error && <p className="caption warn">{error}</p>}
+        </details>
       </div>
     );
   }
 
   return (
     <div className="sidebar-section">
-      <details>
-        <summary>
-          <h3 style={{ display: "inline" }}>HPC cluster</h3>
-        </summary>
+      <details open={open} onToggle={toggle}>
+        {summary}
         {status.dropped && (
           <p className="caption warn">
             The connection to {status.hostname} dropped. Reconnect below (a site with a

@@ -566,7 +566,10 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         they are allowed only on a local server without sign-in."""
         session = _session_or_404(request, session_id)
         agent = session.agent
-        if not hasattr(agent, "set_hpc_connection"):
+        # One rule, stated the same way here and in the sidebar (which shows
+        # the panel only for meta sessions): Mission Control only. The web UI
+        # has no simulate sessions; analyze and plan agents submit no jobs.
+        if session.mode != "meta" or not hasattr(agent, "set_hpc_connection"):
             raise HTTPException(
                 400, "HPC connections apply to Mission Control (meta) sessions, "
                      "whose simulation specialist submits the jobs.")
@@ -581,8 +584,15 @@ def create_app(session_root: Path, serve_frontend: bool = True,
                      "(and one-time code) here.")
         if not body.hostname.strip() or not body.username.strip():
             raise HTTPException(400, "hostname and username are required")
-        from scilink.hpc import detect_scheduler
-        from scilink.hpc.connection import HPCConnection, HPCProfile, validate_proxy_jump
+        try:
+            from scilink.hpc import detect_scheduler
+            from scilink.hpc.connection import (
+                HPCConnection, HPCProfile, _login_strategy, validate_proxy_jump)
+            _login_strategy()      # paramiko >= 3.2 (the login is imported lazily)
+        except ImportError as exc:
+            raise HTTPException(
+                501, f"HPC connections need paramiko >= 3.2 on the SciLink server "
+                     f"(pip install -U 'paramiko>=3.2'): {exc}")
         try:
             jump = validate_proxy_jump(body.proxy_jump)
         except ValueError as exc:

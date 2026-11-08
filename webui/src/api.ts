@@ -755,6 +755,15 @@ export interface HpcConnectBody {
  * session ends when the server restarts). */
 export class UnauthorizedError extends Error {}
 
+/** Any other non-2xx answer, with its HTTP status (e.g. 409 = busy, try later). */
+export class HttpError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(`${BASE}${path}`, init);
   if (!r.ok) {
@@ -765,7 +774,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
       /* not json */
     }
     if (r.status === 401) throw new UnauthorizedError(detail);
-    throw new Error(detail);
+    throw new HttpError(detail, r.status);
   }
   return r.json() as Promise<T>;
 }

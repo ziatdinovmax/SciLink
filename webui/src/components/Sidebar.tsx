@@ -607,7 +607,7 @@ export function Sidebar({
         </div>
       )}
 
-      {session && session.mode === "meta" && <HpcPanel sessionId={session.id} />}
+      {session && session.mode === "meta" && <HpcPanel key={session.id} sessionId={session.id} />}
 
       {session && liveSessions.some((s) => s.id !== session.id) && (
         <div className="sidebar-section">

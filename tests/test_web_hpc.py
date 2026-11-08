@@ -155,7 +155,7 @@ def test_the_connection_does_not_change_during_a_turn(tmp_path):
 def test_a_local_server_allows_key_login(tmp_path):
     c = _client(tmp_path)
     _, base = _session(c, tmp_path)
-    key = {"hostname": "deception", "username": "alice", "auth_method": "key",
+    key = {"hostname": "cluster-a", "username": "alice", "auth_method": "key",
            "key_path": "~/.ssh/id_ed25519"}
     assert c.post(f"{base}/connect", json=key).status_code == 200
     assert FakeConn.instances[-1].profile.auth_method == "key"
@@ -268,10 +268,10 @@ def test_the_meta_prompt_says_a_cluster_is_connected():
     meta.meta_mode = MetaMode.AUTOPILOT
     meta._kb_note = lambda: ""
     meta.messages = [{"role": "system", "content": "base"}]
-    conn = SimpleNamespace(profile=SimpleNamespace(username="alle927", hostname="deception.pnl.gov"))
+    conn = SimpleNamespace(profile=SimpleNamespace(username="bob", hostname="cluster-a.example.org"))
     meta.set_hpc_connection(conn, SimpleNamespace(name="SLURM"))
     prompt = meta.messages[0]["content"]
-    assert "HPC CLUSTER (connected)" in prompt and "alle927@deception.pnl.gov (SLURM)" in prompt
+    assert "HPC CLUSTER (connected)" in prompt and "bob@cluster-a.example.org (SLURM)" in prompt
     assert "list_cluster_jobs" in prompt and "delegate_to_simulation" in prompt
     meta.set_hpc_connection(None)
     assert "HPC CLUSTER" not in meta.messages[0]["content"]
@@ -298,18 +298,18 @@ def test_the_specialist_lists_the_users_queue(tmp_path):
     r = json.loads(orch.tools.execute_tool("list_cluster_jobs"))
     assert r["status"] == "error"                           # not connected yet
     orch.hpc_connection = SimpleNamespace(is_connected=True,
-                                          profile=SimpleNamespace(username="alle927"))
+                                          profile=SimpleNamespace(username="bob"))
     orch.hpc_scheduler = Sched()
     r = json.loads(orch.tools.execute_tool("list_cluster_jobs"))
-    assert r["status"] == "success" and r["user"] == "alle927" and asked == ["alle927"]
+    assert r["status"] == "success" and r["user"] == "bob" and asked == ["bob"]
     assert "cluster" in r
     assert r["jobs"][0]["job_id"] == "1477923" and r["jobs"][0]["job_status"] == "Pending"
 
 
 
 def test_the_specialist_is_told_when_the_cluster_changes(tmp_path):
-    # Live: after switching Deception -> Perlmutter the specialist answered
-    # "you are connected to deception" from its own earlier messages.
+    # Live: after switching cluster A -> Perlmutter the specialist answered
+    # "you are connected to cluster-a" from its own earlier messages.
     pytest.importorskip("ase")
     import json
     from scilink.agents.sim_agents import SimulationOrchestratorAgent, SimulationMode
@@ -317,18 +317,18 @@ def test_the_specialist_is_told_when_the_cluster_changes(tmp_path):
                                        model_name="claude-opus-4-6",
                                        simulation_mode=SimulationMode.AUTONOMOUS)
     dec = SimpleNamespace(is_connected=True,
-                          profile=SimpleNamespace(username="alle927", hostname="deception.pnl.gov"))
+                          profile=SimpleNamespace(username="bob", hostname="cluster-a.example.org"))
     nersc = SimpleNamespace(is_connected=True,
-                            profile=SimpleNamespace(username="sallec", hostname="perlmutter.nersc.gov"))
+                            profile=SimpleNamespace(username="carol", hostname="perlmutter.nersc.gov"))
     slurm = SimpleNamespace(name="SLURM", queue=lambda user=None: [])
     orch.set_hpc_connection(dec, slurm)
-    assert "alle927@deception.pnl.gov (SLURM)" in orch.messages[0]["content"]
+    assert "bob@cluster-a.example.org (SLURM)" in orch.messages[0]["content"]
     orch.set_hpc_connection(nersc, slurm)
     prompt = orch.messages[0]["content"]
-    assert "sallec@perlmutter.nersc.gov" in prompt and "deception" not in prompt
+    assert "carol@perlmutter.nersc.gov" in prompt and "cluster-a" not in prompt
     assert "connection has changed" in prompt
     r = json.loads(orch.tools.execute_tool("list_cluster_jobs"))
-    assert r["cluster"] == "perlmutter.nersc.gov" and r["user"] == "sallec"
+    assert r["cluster"] == "perlmutter.nersc.gov" and r["user"] == "carol"
     orch.set_hpc_connection(None)
     assert "No cluster is connected now" in orch.messages[0]["content"]
     orch.set_simulation_mode(SimulationMode.CO_PILOT)       # survives a prompt rebuild
@@ -344,3 +344,172 @@ def test_the_meta_tells_its_specialist_through_its_hook():
     conn, sched = object(), SimpleNamespace(name="SLURM")
     meta.set_hpc_connection(conn, sched)
     assert seen == [(conn, sched)]
+
+
+def test_the_gate_is_the_panels_rule_mission_control_only(tmp_path):
+    # Review #811: the endpoint and the sidebar should state the same rule.
+    # An agent with the hook in a non-meta session is still refused.
+    c = _client(tmp_path)
+    _, base = _session(c, tmp_path, mode="plan", agent=MetaLike())
+    r = c.post(f"{base}/connect", json=_NERSC)
+    assert r.status_code == 400 and "Mission Control" in r.json()["detail"]
+
+
+def test_an_old_paramiko_is_named_at_connect_not_at_import(monkeypatch):
+    # Review #811: paramiko < 3.2 has no auth_strategy. The hpc package must
+    # still import, and connect() must say which version is needed.
+    import builtins
+    from scilink.hpc import connection as conn_mod
+    real_import = builtins.__import__
+
+    def no_auth(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "auth" and level == 1 or name == "scilink.hpc.auth":
+            raise ImportError("No module named 'paramiko.auth_strategy'")
+        return real_import(name, globals, locals, fromlist, level)
+    monkeypatch.setattr(builtins, "__import__", no_auth)
+    with pytest.raises(ImportError, match=r"paramiko >= 3\.2"):
+        conn_mod._login_strategy()
+
+
+# ── a job belongs to the cluster it was submitted to (review #811) ───────
+
+def _orch(tmp_path):
+    pytest.importorskip("ase")
+    from scilink.agents.sim_agents import SimulationOrchestratorAgent, SimulationMode
+    return SimulationOrchestratorAgent(base_dir=str(tmp_path / "sim"), api_key="dummy",
+                                       model_name="claude-opus-4-6",
+                                       simulation_mode=SimulationMode.AUTONOMOUS)
+
+
+class _JobConn:
+    def __init__(self, user, host):
+        self.is_connected = True
+        self.profile = SimpleNamespace(username=user, hostname=host, port=22)
+        self.uploaded, self.downloaded = [], []
+
+    def mkdir_p(self, path):
+        pass
+
+    def upload(self, local, remote):
+        self.uploaded.append(remote)
+
+    def download(self, remote, local):
+        self.downloaded.append(remote)
+        Path(local).write_text("x")
+
+
+class _JobSched:
+    name = "SLURM"
+
+    def __init__(self):
+        self.asked = []
+
+    def submit(self, script, work_dir=None):
+        return "4242"
+
+    def status(self, job_id):
+        from scilink.hpc.scheduler import HPCJob, JobStatus
+        self.asked.append(job_id)
+        return HPCJob(job_id=job_id, name="sim", status=JobStatus.COMPLETED,
+                      raw_status="CD", partition="slurm")
+
+
+def _record(tmp_path, slug, **extra):
+    d = tmp_path / slug
+    d.mkdir()
+    (d / "POSCAR").write_text("Si\n")
+    (d / "INCAR").write_text("ENCUT = 300\n")
+    return {"slug": slug, "structure_dir": str(d), "structure_path": str(d / "POSCAR"),
+            "input_files": {"INCAR": str(d / "INCAR")}, **extra}
+
+
+CLA = ("bob", "cluster-a.example.org")
+NERSC = ("carol", "perlmutter.nersc.gov")
+
+
+def test_a_submitted_job_records_its_cluster(tmp_path):
+    import json
+    orch = _orch(tmp_path)
+    rec = _record(tmp_path, "si")
+    orch.generated_structures = [rec]
+    orch.set_hpc_connection(_JobConn(*CLA), _JobSched())
+    r = json.loads(orch.tools.execute_tool(
+        "submit_simulation_job", structure_slug="si", remote_dir="/scratch/x/si",
+        run_command="mpirun vasp_std"))
+    assert r["status"] == "success", r
+    assert rec["hpc_cluster"] == r["cluster"] == "bob@cluster-a.example.org:22"
+
+
+def test_status_and_download_refuse_a_job_from_another_cluster(tmp_path):
+    import json
+    orch = _orch(tmp_path)
+    orch.generated_structures = [_record(
+        tmp_path, "si", hpc_job_id="4242", hpc_remote_dir="/scratch/x/si",
+        hpc_cluster="bob@cluster-a.example.org:22")]
+    nersc, sched = _JobConn(*NERSC), _JobSched()
+    orch.set_hpc_connection(nersc, sched)
+    for tool in ("get_job_status", "download_job_results"):
+        r = json.loads(orch.tools.execute_tool(tool, job_id="4242"))
+        assert r["status"] == "error", (tool, r)
+        assert r["submitted_to"] == "bob@cluster-a.example.org:22"
+        assert "reconnect to bob@cluster-a.example.org:22" in r["message"]
+    assert sched.asked == [] and nersc.downloaded == []    # nothing ran on NERSC
+    # back on cluster A, both work
+    cla = _JobConn(*CLA)
+    orch.set_hpc_connection(cla, sched)
+    assert json.loads(orch.tools.execute_tool("get_job_status", job_id="4242"))["status"] == "success"
+    r = json.loads(orch.tools.execute_tool("download_job_results", job_id="4242"))
+    assert r["status"] == "success" and cla.downloaded[0].startswith("/scratch/x/si/")
+
+
+def test_the_same_job_id_on_two_clusters_picks_the_live_ones_record(tmp_path):
+    import json
+    orch = _orch(tmp_path)
+    orch.generated_structures = [
+        _record(tmp_path, "si", hpc_job_id="4242", hpc_remote_dir="/scratch/si",
+                hpc_cluster="bob@cluster-a.example.org:22"),
+        _record(tmp_path, "cu", hpc_job_id="4242", hpc_remote_dir="/pscratch/cu",
+                hpc_cluster="carol@perlmutter.nersc.gov:22"),
+    ]
+    nersc = _JobConn(*NERSC)
+    orch.set_hpc_connection(nersc, _JobSched())
+    r = json.loads(orch.tools.execute_tool("download_job_results", job_id="4242"))
+    assert r["status"] == "success" and nersc.downloaded[0].startswith("/pscratch/cu/")
+
+
+def test_a_job_scilink_did_not_submit_is_still_checked(tmp_path):
+    # e.g. an id from list_cluster_jobs: no record, so no cluster to compare
+    import json
+    orch = _orch(tmp_path)
+    sched = _JobSched()
+    orch.set_hpc_connection(_JobConn(*NERSC), sched)
+    r = json.loads(orch.tools.execute_tool("get_job_status", job_id="999"))
+    assert r["status"] == "success" and sched.asked == ["999"]
+
+
+def test_an_old_paramiko_is_a_501_before_any_login(tmp_path, monkeypatch):
+    # 501 is in the panel's "no login was tried" set, so the code is kept.
+    import scilink.hpc.connection as conn_mod
+
+    def old():
+        raise ImportError("SciLink's HPC login needs paramiko >= 3.2 (found 3.1.0)")
+    monkeypatch.setattr(conn_mod, "_login_strategy", old)
+    c = _client(tmp_path)
+    _, base = _session(c, tmp_path)
+    r = c.post(f"{base}/connect", json=_NERSC)
+    assert r.status_code == 501 and "paramiko >= 3.2" in r.json()["detail"]
+    assert FakeConn.instances == []                      # no login attempted
+
+
+def test_the_live_clusters_record_beats_one_from_before_clusters_were_recorded(tmp_path):
+    import json
+    orch = _orch(tmp_path)
+    orch.generated_structures = [
+        _record(tmp_path, "old", hpc_job_id="4242", hpc_remote_dir="/scratch/old"),
+        _record(tmp_path, "new", hpc_job_id="4242", hpc_remote_dir="/pscratch/new",
+                hpc_cluster="carol@perlmutter.nersc.gov:22"),
+    ]
+    nersc = _JobConn(*NERSC)
+    orch.set_hpc_connection(nersc, _JobSched())
+    r = json.loads(orch.tools.execute_tool("download_job_results", job_id="4242"))
+    assert r["status"] == "success" and nersc.downloaded[0].startswith("/pscratch/new/")

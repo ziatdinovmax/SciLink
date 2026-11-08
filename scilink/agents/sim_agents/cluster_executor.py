@@ -143,10 +143,7 @@ class ClusterExecutor(Executor):
             auth_method=method, key_path=key_path, proxy_jump=proxy_jump,
         )
         conn = HPCConnection(profile)
-        # otp only when given: connection classes written before it existed
-        # (and test stand-ins) keep their two-argument connect().
-        conn.connect(password=password, key_passphrase=key_passphrase,
-                     **({"otp": otp} if otp else {}))
+        conn.connect(password=password, key_passphrase=key_passphrase, otp=otp)
         return cls(conn, **executor_kwargs)
 
     # ── internals ─────────────────────────────────────────────

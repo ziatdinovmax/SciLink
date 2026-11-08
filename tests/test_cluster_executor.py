@@ -296,7 +296,7 @@ class TestClusterExecutorRun:
             def __init__(self, profile):
                 captured["profile"] = profile
 
-            def connect(self, password="", key_passphrase=""):
+            def connect(self, password="", key_passphrase="", otp=""):
                 captured["password"] = password
                 captured["passphrase"] = key_passphrase
 
@@ -323,7 +323,7 @@ class TestClusterExecutorRun:
             def __init__(self, profile):
                 captured["profile"] = profile
 
-            def connect(self, password="", key_passphrase=""):
+            def connect(self, password="", key_passphrase="", otp=""):
                 pass
 
         monkeypatch.setattr(conn_mod, "HPCConnection", FakeHPCConn)

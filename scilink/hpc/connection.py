@@ -11,7 +11,20 @@ import paramiko
 import logging
 import socket
 
-from .auth import LoginRefused, MFAAuth
+
+def _login_strategy():
+    """The MFA login classes, imported on first use: they need paramiko >= 3.2
+    (``auth_strategy``), and an older paramiko should fail here with a message
+    naming the version rather than when the package is imported."""
+    try:
+        from .auth import LoginRefused, MFAAuth
+    except ImportError as exc:
+        raise ImportError(
+            f"SciLink's HPC login needs paramiko >= 3.2 (found "
+            f"{getattr(paramiko, '__version__', 'unknown')}): "
+            "pip install -U 'paramiko>=3.2'") from exc
+    return LoginRefused, MFAAuth
+
 
 # Host names and jump hosts reach a local `ssh` command (the jump-host path):
 # nothing that ssh could read as an option or a second argument.
@@ -104,7 +117,9 @@ class HPCConnection:
         # One login chain for every route: key and/or password, answering
         # keyboard-interactive prompts (paramiko's own fallback reads a
         # second factor from the terminal, which hangs a server).
-        def _auth() -> MFAAuth:
+        LoginRefused, MFAAuth = _login_strategy()
+
+        def _auth():
             return MFAAuth(
                 self.profile.username,
                 password=password,
