@@ -158,9 +158,9 @@ The `--model` flag in the `args` array controls which LLM SciLink's internal age
 
 | Model | Notes |
 |---|---|
-| `claude-opus-5-5` | Most capable, best for complex scientific reasoning. |
+| `claude-opus-5-5` | Default if `--model` is omitted. Most capable, best for complex scientific reasoning. Requires `ANTHROPIC_API_KEY`. |
 | `claude-sonnet-4-6` | Faster and cheaper, good for routine analyses. |
-| `gemini-3.1-pro-preview` | Default if `--model` is omitted. Requires `GEMINI_API_KEY`. |
+| `gemini-4-argon` | Requires `GEMINI_API_KEY`. |
 
 The model name must match what your API key supports. If you set `--model claude-opus-5-5`, your `env` block must include `ANTHROPIC_API_KEY`. If you set a Gemini model, provide `GEMINI_API_KEY` instead.
 

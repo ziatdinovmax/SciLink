@@ -59,7 +59,7 @@ class PeriodicDFTAgent:
         return list_skills(domain=cls.SKILL_DOMAIN)
 
     def __init__(self, api_key: str = None,
-                 model_name: str = "gemini-3.1-pro-preview",
+                 model_name: str = "claude-opus-5-5",
                  base_url: Optional[str] = None,
                  # Legacy params
                  local_model: str = None,

@@ -9,9 +9,9 @@ import openai
 from ..utils.child_process import refuse_in_spawn_bootstrap
 
 
-# OpenAI reasoning-class models (gpt-5*, o1*, o3*, o4*) only accept the default
+# OpenAI reasoning-class models (gpt-5 and later, o1*, o3*, o4*) only accept the default
 # temperature/top_p. Sending custom values raises "Unsupported value" errors.
-_REASONING_MODEL_RE = re.compile(r'^(gpt-5|o[134])(?!\d)', re.IGNORECASE)
+_REASONING_MODEL_RE = re.compile(r'^(gpt-(?:[5-9]|\d{2,})|o[134])(?!\d)', re.IGNORECASE)
 
 
 def _is_openai_reasoning_model(model: str) -> bool:

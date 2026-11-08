@@ -21,7 +21,7 @@ def synthesize_knowledge(
     focus: str,
     *,
     model: Any = None,
-    model_name: str = "gemini-3.1-pro-preview",
+    model_name: str = "claude-opus-5-5",
     api_key: Optional[str] = None,
     knowledge_id: Optional[str] = None,
     synthesis_type: str = "reference",

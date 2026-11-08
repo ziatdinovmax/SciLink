@@ -39,9 +39,9 @@ from typing import Any, Dict, List, Optional, Union
 from ..utils.child_process import refuse_in_spawn_bootstrap
 
 
-# OpenAI reasoning-class models (gpt-5*, o1*, o3*, o4*) only accept the default
+# OpenAI reasoning-class models (gpt-5 and later, o1*, o3*, o4*) only accept the default
 # temperature/top_p. Sending custom values raises "Unsupported value" errors.
-_REASONING_MODEL_RE = re.compile(r'^(gpt-5|o[134])(?!\d)', re.IGNORECASE)
+_REASONING_MODEL_RE = re.compile(r'^(gpt-(?:[5-9]|\d{2,})|o[134])(?!\d)', re.IGNORECASE)
 
 
 def _is_openai_reasoning_model(model: str) -> bool:
@@ -580,17 +580,40 @@ def call_dropping_refused_sampling(call, kwargs: dict, retries: Optional[int],
 _GPT_MAJOR_RE = re.compile(r'^(?:openai/)?gpt-(\d+)', re.IGNORECASE)
 
 
+def _is_gpt6_or_later(model) -> bool:
+    m = _GPT_MAJOR_RE.match(str(model or ""))
+    return bool(m) and int(m.group(1)) >= 6
+
+
+# Where LiteLLM sends an ``openai/`` request when no ``api_base`` is passed.
+_OPENAI_BASE_ENV = ("OPENAI_BASE_URL", "OPENAI_API_BASE")
+
+
+def _custom_openai_base(api_base=None):
+    """The OpenAI-compatible endpoint a request goes to when it is not
+    OpenAI's own: the ``api_base`` argument, else what LiteLLM itself reads
+    for the openai provider (``litellm.api_base``, then the environment).
+    OpenAI's own URL counts as none."""
+    candidates = [api_base, getattr(litellm, "api_base", None)]
+    candidates += [os.environ.get(v) for v in _OPENAI_BASE_ENV]
+    for base in candidates:
+        if base:
+            return None if "api.openai.com" in str(base) else base
+    return None
+
+
 def _responses_api_model(model, api_base=None):
     """The model string to SEND for ``model``: GPT-6+ on OpenAI's own endpoint
     is routed through LiteLLM's Responses bridge, everything else unchanged.
 
     A request rewrite only: callers keep the name they were given, so limiter
-    keys, logs and the refused-sampling memory see one name per model. A custom
-    ``api_base`` (an OpenAI-compatible proxy) is left alone, since a proxy may
-    have no /responses route.
+    keys, logs and the refused-sampling memory see one name per model. An
+    OpenAI-compatible proxy, set by argument or the way LiteLLM finds one, is
+    left alone, since a proxy may have no /responses route.
     """
-    m = _GPT_MAJOR_RE.match(str(model or ""))
-    if api_base or not m or int(m.group(1)) < 6 or "responses/" in str(model):
+    if not _is_gpt6_or_later(model) or "responses/" in str(model):
+        return model
+    if _custom_openai_base(api_base):
         return model
     return "openai/responses/" + str(model).split("/", 1)[-1]
 
@@ -601,26 +624,27 @@ def _merge_bridge_choices(response):
     The bridge turns each Responses output item into its own choice, so a
     reply that says one sentence and then calls a tool (GPT-6 does this
     routinely) comes back as ``choices[0]`` = the sentence and ``choices[1]``
-    = the tool call. Every SciLink caller reads ``choices[0]`` and so lost the
-    call: the orchestrator announced a delegation and ended its turn. SciLink
-    never asks for n>1 alternatives, so several choices here are always parts
-    of one reply; they become one message (text + tool calls), as Chat
-    Completions would return it.
+    = the tool call; a reply in two message items comes back as two text
+    choices. Every SciLink caller reads ``choices[0]`` and so lost the rest:
+    the orchestrator announced a delegation and ended its turn. SciLink never
+    asks for n>1 alternatives, so several choices here are always parts of
+    one reply; they become one message (all the text, then every tool call),
+    as Chat Completions would return it.
     """
     choices = getattr(response, "choices", None) or []
-    if len(choices) < 2 or not any(getattr(c.message, "tool_calls", None) for c in choices):
+    if len(choices) < 2:
         return response
-    texts = [c.message.content for c in choices
-             if c.message.content and not getattr(c.message, "tool_calls", None)]
+    texts = [c.message.content.strip() for c in choices
+             if isinstance(c.message.content, str) and c.message.content.strip()]
     tool_calls = [tc for c in choices for tc in (getattr(c.message, "tool_calls", None) or [])]
     first = choices[0]
-    first.message.content = "\n".join(t.strip() for t in texts) or None
-    first.message.tool_calls = tool_calls
+    first.message.content = "\n".join(texts) or None
+    first.message.tool_calls = tool_calls or None
     if getattr(first.message, "reasoning_content", None) is None:
         first.message.reasoning_content = next(
             (getattr(c.message, "reasoning_content", None) for c in choices
              if getattr(c.message, "reasoning_content", None)), None)
-    first.finish_reason = "tool_calls"
+    first.finish_reason = "tool_calls" if tool_calls else choices[-1].finish_reason
     first.index = 0
     response.choices = [first]
     return response

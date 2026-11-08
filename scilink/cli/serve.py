@@ -3,7 +3,7 @@
 Usage::
 
     scilink serve                                      # defaults
-    scilink serve --model gemini-3.1-pro-preview       # specific model
+    scilink serve --model claude-opus-5-5       # specific model
     scilink serve --mode analyze                       # analysis tools only
     scilink serve --autonomy co-pilot                  # require approval
     scilink serve --transport sse --port 8000           # SSE transport
@@ -75,8 +75,8 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        default=os.environ.get("SCILINK_MODEL", "gemini-3.1-pro-preview"),
-        help="LLM model name (default: gemini-3.1-pro-preview)",
+        default=os.environ.get("SCILINK_MODEL", "claude-opus-5-5"),
+        help="LLM model name (default: claude-opus-5-5)",
     )
     parser.add_argument(
         "--api-key",

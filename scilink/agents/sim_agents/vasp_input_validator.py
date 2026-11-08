@@ -82,7 +82,7 @@ class IncarValidatorAgent:
     """
 
     def __init__(self, api_key: str = None,
-                 model_name: str = "gemini-3.1-pro-preview",
+                 model_name: str = "claude-opus-5-5",
                  base_url: Optional[str] = None,
                  futurehouse_api_key: str = None,
                  max_wait_time: int = 500,

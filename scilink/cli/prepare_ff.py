@@ -185,8 +185,8 @@ Environment Variables:
     api_group.add_argument(
         "--model",
         type=str,
-        default="gemini-3-pro-preview",
-        help="LLM model name (default: gemini-3-pro-preview)",
+        default="claude-opus-5-5",
+        help="LLM model name (default: claude-opus-5-5)",
     )
     api_group.add_argument(
         "--base-url",
