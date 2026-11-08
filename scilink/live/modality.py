@@ -519,13 +519,16 @@ class HyperspectralModality(CurveModality):
 def load_cube(data_path: Any) -> np.ndarray:
     """A datacube as (H, W, channels). ``.npy`` or HDF5, like the agent's loader."""
     path = Path(str(data_path))
+    from ..utils.readers import native_array, records_calibration
     if path.suffix.lower() == ".npy":
         cube = np.load(path)
+    elif records_calibration(path):
+        cube = native_array(path, prefer=("spectrum_image",))
     elif path.suffix.lower() in (".h5", ".hdf5", ".nxs"):
         from ..utils.hdf5_utils import load_hdf5_signal
         cube = np.asarray(load_hdf5_signal(str(path)))
     else:
-        raise ValueError(f"{path.name}: a datacube is a .npy or HDF5 file")
+        raise ValueError(f"{path.name}: a datacube is a .npy, HDF5, DM, .hspy or .emd file")
     cube = np.asarray(cube, dtype=float)
     if cube.ndim == 2:
         cube = cube[None, ...]
@@ -759,10 +762,13 @@ IMAGE_SUFFIXES = (".npy", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
 
 
 def load_image(data_path: Any) -> np.ndarray:
-    """A 2D greyscale image as floats (``.npy`` or a common image file)."""
+    """A 2D greyscale image as floats (``.npy``, a common image file, DM or EMD)."""
+    from ..utils.readers import native_array, records_calibration
     path = Path(str(data_path))
     if path.suffix.lower() == ".npy":
         a = np.load(path)
+    elif records_calibration(path):
+        a = native_array(path, prefer=("image",))
     else:
         from ..skills._shared.image_analysis_tools import load_image_data
         a = np.asarray(load_image_data(str(path)))

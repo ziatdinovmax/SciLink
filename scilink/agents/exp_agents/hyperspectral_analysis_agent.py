@@ -2374,17 +2374,22 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.logger.info("✅ Refined HTML report generated.")
 
     def _load_hyperspectral_data(self, data_path: str) -> np.ndarray:
-        """Load hyperspectral data from .npy or .h5/.hdf5/.nxs (NeXus)."""
+        """Load hyperspectral data: .npy, .h5/.hdf5/.nxs (NeXus), or a file the
+        readers open (.dm3/.dm4/.hspy/.emd) as a (y, x, channels) cube."""
         try:
+            from ...utils.readers import native_array, records_calibration
             lower = data_path.lower()
             if lower.endswith('.npy'):
                 data = np.load(data_path)
+            elif records_calibration(data_path):
+                data = native_array(data_path, prefer=("spectrum_image",))
             elif lower.endswith(('.h5', '.hdf5', '.nxs')):
                 from ...utils.hdf5_utils import load_hdf5_signal
                 data = load_hdf5_signal(data_path)
             else:
                 raise ValueError(
-                    f"Expected .npy or .h5/.hdf5/.nxs file, got: {data_path}"
+                    f"Expected .npy, .h5/.hdf5/.nxs, .dm3/.dm4, .hspy or .emd "
+                    f"file, got: {data_path}"
                 )
             self.logger.info(f"Loaded hyperspectral data: shape {data.shape}")
             

@@ -161,6 +161,38 @@ def _walk_files(directory: Path, max_depth: int) -> Dict[str, Any]:
             "depth_truncated": depth_truncated}
 
 
+_NATIVE_PROBE_MAX_BYTES = 512 * 1024 * 1024
+
+
+def _native_summary(path: Path) -> Dict[str, Any]:
+    """What SciLink's readers see in a DM / HyperSpy / EMD / Velox file."""
+    from ...utils.readers import read_datasets
+    note = ("SciLink reads this file directly with its calibration and "
+            "acquisition metadata: delegate it as-is, no prepare_inputs "
+            "and no separate metadata needed.")
+    if path.stat().st_size > _NATIVE_PROBE_MAX_BYTES:
+        # Routing does not need the array; the specialist reads it once.
+        return {"read_natively": True, "note": note}
+    found = read_datasets(str(path))
+    primary = max(found, key=lambda d: d.data.size)
+    sig = primary.signal_axis
+    out: Dict[str, Any] = {
+        "read_natively": True,
+        "data_kind": primary.kind,
+        "shape": list(primary.data.shape),
+        "signal_type": primary.metadata.get("signal_type", ""),
+        "note": note,
+    }
+    if sig is not None:
+        c = sig.coordinates()
+        out["signal_axis"] = {"name": sig.name, "units": sig.units,
+                              "start": float(c[0]), "end": float(c[-1])}
+    if len(found) > 1:
+        out["datasets_in_file"] = [{"kind": d.kind, "shape": list(d.data.shape),
+                                    "title": d.title} for d in found]
+    return out
+
+
 def _probe_file(path: Path) -> Dict[str, Any]:
     """Content-probe a single file for routing. Never raises — any failure
     is reported in the returned dict's ``note`` field."""
@@ -206,6 +238,12 @@ def _probe_file(path: Path) -> Dict[str, Any]:
                 root_attrs = sorted(f.attrs.keys())
             info.update(kind="hdf5", datasets=sorted(names)[:80],
                         root_attrs=root_attrs[:40])
+            from ...utils.readers import records_calibration
+            if records_calibration(path):
+                info.update(_native_summary(path))
+        elif ext in (".dm3", ".dm4", ".hspy", ".emd"):
+            info.update(kind="native")
+            info.update(_native_summary(path))
         elif ext == ".mat":
             # whosmat reads the directory without loading arrays (cheap); v7.3
             # .mat are HDF5 and raise NotImplementedError → probe via h5py.
@@ -1735,7 +1773,11 @@ class MetaOrchestratorTools:
             if missing:
                 return json.dumps({"status": "error",
                                    "message": "File(s) not found: " + ", ".join(missing)})
-            if not require_sandbox_approval(
+            # Files SciLink reads natively are split by its readers with no
+            # generated code, so they need no sandbox approval.
+            from ...utils.readers import records_calibration as _records_cal
+            _all_native = all(_records_cal(p) for p in pths)
+            if not _all_native and not require_sandbox_approval(
                 context="Meta agent file preparation (lossless data/metadata split)"
             ):
                 return json.dumps({

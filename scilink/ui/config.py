@@ -39,13 +39,15 @@ SESSION_DIR_PREFIXES = {k: m["session_prefix"] for k, m in _MODES.items()}
 SUPPORTED_DATA_EXTENSIONS = (
     ".tif", ".tiff", ".png", ".jpg", ".npy", ".csv", ".txt", ".tsv", ".xlsx",
     ".h5", ".hdf5", ".nxs",
+    # Read with their calibration by scilink.utils.readers.
+    ".dm3", ".dm4", ".hspy", ".emd",
 )
 
 # Vendor formats that SciLink itself cannot read; surfaced in the upload
 # whitelist only when an MCP server exposing a compatible reader is
 # connected (see ``extra_data_extensions_for``).
 VENDOR_DATA_EXTENSIONS = (
-    ".dm3", ".dm4", ".emd", ".ndata", ".ndata1", ".ndata2",
+    ".ndata", ".ndata1", ".ndata2",
     ".ibw", ".ardf",
     ".gwy", ".gsf",
     ".spe", ".spc", ".spx",

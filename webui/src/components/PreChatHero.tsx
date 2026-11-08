@@ -8,7 +8,7 @@ import { describeFolder, folderPromptLines } from "../folderfiles";
  * Design: plain centered headline (dashed borders belong to drop targets
  * only), minimal copy. */
 
-const DATA_ACCEPT = ".tif,.tiff,.png,.jpg,.npy,.csv,.txt,.tsv,.xlsx,.h5,.hdf5,.nxs";
+const DATA_ACCEPT = ".tif,.tiff,.png,.jpg,.npy,.csv,.txt,.tsv,.xlsx,.h5,.hdf5,.nxs,.dm3,.dm4,.hspy,.emd";
 const METADATA_ACCEPT = ".json,.txt";
 const KNOWLEDGE_ACCEPT =
   ".pdf,.txt,.md,.docx,.png,.jpg,.jpeg,.tif,.tiff,.csv,.xlsx,.tsv,.json";

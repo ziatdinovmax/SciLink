@@ -28,6 +28,11 @@ def load_image_data(image_path: str) -> np.ndarray:
     if ext == ".npy":
         return np.load(image_path)
 
+    from scilink.utils.readers import CALIBRATED_SUFFIXES
+    if ext in CALIBRATED_SUFFIXES:
+        from scilink.utils.readers import native_array
+        return native_array(image_path, prefer=("image",))
+
     # Standard image formats
     import cv2
 
