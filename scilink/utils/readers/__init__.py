@@ -35,21 +35,29 @@ import numpy as np
 from ._model import Axis, Dataset, UnsupportedContent
 
 __all__ = ["Axis", "Dataset", "UnsupportedContent", "CALIBRATED_SUFFIXES",
-           "READABLE_SUFFIXES", "can_read", "read_dataset", "read_datasets",
+           "READABLE_SUFFIXES", "can_read", "pick", "read_dataset", "read_datasets",
            "is_native", "native_array", "calibrated_dataset", "file_metadata",
-           "merge_file_metadata", "records_calibration"]
+           "merge_file_metadata", "records_calibration", "PREFER_CURVE",
+           "PREFER_IMAGE", "PREFER_CUBE"]
 
 # Formats SciLink could not open before these readers.
 CALIBRATED_SUFFIXES = frozenset({".dm3", ".dm4", ".hspy", ".emd"})
 _HDF5_SUFFIXES = frozenset({".h5", ".hdf5", ".nxs"})
 READABLE_SUFFIXES = CALIBRATED_SUFFIXES | _HDF5_SUFFIXES | {".npy"}
 
+# Which dataset of a file each kind of analysis takes, in order of
+# preference; a loader and the metadata read for its run use the same one,
+# so the calibration describes the array that is analysed.
+PREFER_CURVE = ("spectrum", "spectrum_series")
+PREFER_IMAGE = ("image", "image_stack")
+PREFER_CUBE = ("spectrum_image",)
+
 
 def can_read(path) -> bool:
     return Path(str(path)).suffix.lower() in READABLE_SUFFIXES
 
 
-def _read_hdf5_family(path: str, suffix: str) -> List[Dataset]:
+def _read_hdf5_family(path: str, suffix: str, decode_streams: bool = True) -> List[Dataset]:
     import h5py
 
     from . import emd, hspy, nexus
@@ -58,14 +66,20 @@ def _read_hdf5_family(path: str, suffix: str) -> List[Dataset]:
         if hspy.is_hyperspy(h5):
             return hspy.read_open(h5, path)
         if emd.is_velox(h5) or emd._berkeley_groups(h5):
-            return emd.read_open(h5, path)
+            return emd.read_open(h5, path, decode_streams=decode_streams)
     if suffix == ".emd":
         raise UnsupportedContent(f"{path} is HDF5 but not a recognised EMD layout")
     return nexus.read(path)
 
 
-def read_datasets(path) -> List[Dataset]:
-    """Every dataset the file holds, primary first where the format says which."""
+def read_datasets(path, decode_streams: bool = True) -> List[Dataset]:
+    """Every dataset the file holds, primary first where the format says which.
+
+    ``decode_streams=False`` is for a caller that needs only kinds, shapes,
+    axes and metadata (a probe, a metadata read): an EDS event stream is then
+    not decoded, and its dataset's ``data`` is a zero-memory stand-in of the
+    right shape, marked ``metadata["not_decoded"]``.
+    """
     path = str(path)
     suffix = Path(path).suffix.lower()
     if suffix in (".dm3", ".dm4"):
@@ -75,7 +89,7 @@ def read_datasets(path) -> List[Dataset]:
         from . import hspy
         return hspy.read(path)
     if suffix == ".emd" or suffix in _HDF5_SUFFIXES:
-        return _read_hdf5_family(path, suffix)
+        return _read_hdf5_family(path, suffix, decode_streams)
     if suffix == ".npy":
         from ._layout import canonicalize
         data = np.load(path)
@@ -85,7 +99,17 @@ def read_datasets(path) -> List[Dataset]:
     raise UnsupportedContent(f"no reader for '{suffix}' files")
 
 
-def read_dataset(path, prefer: Optional[Sequence[str]] = None) -> Dataset:
+def pick(found: Sequence[Dataset], prefer: Optional[Sequence[str]] = None) -> Dataset:
+    """The first dataset of the first preferred kind, else the largest."""
+    for kind in prefer or ():
+        for ds in found:
+            if ds.kind == kind:
+                return ds
+    return max(found, key=lambda d: d.data.size)
+
+
+def read_dataset(path, prefer: Optional[Sequence[str]] = None,
+                 decode_streams: bool = True) -> Dataset:
     """The file's primary dataset.
 
     ``prefer`` lists kinds in order of preference (e.g. ``("spectrum_image",)``
@@ -93,12 +117,7 @@ def read_dataset(path, prefer: Optional[Sequence[str]] = None) -> Dataset:
     wins. Otherwise the largest dataset wins, so a survey image or a
     thumbnail stored beside a spectrum image never replaces it.
     """
-    found = read_datasets(path)
-    for kind in prefer or ():
-        for ds in found:
-            if ds.kind == kind:
-                return ds
-    return max(found, key=lambda d: d.data.size)
+    return pick(read_datasets(path, decode_streams=decode_streams), prefer)
 
 
 from ._scilink import (calibrated_dataset, file_metadata,  # noqa: E402

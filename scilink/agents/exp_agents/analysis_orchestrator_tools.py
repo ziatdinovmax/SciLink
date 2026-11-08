@@ -1279,6 +1279,13 @@ class AnalysisOrchestratorTools:
             result["data_type"] = "unknown"
             result["suggested_agents"] = []
 
+    # Frames in one instrument file can be a series (a time or dose sequence)
+    # or repeated scans of one field meant to be combined; the planner says.
+    _STACK_NOTE = (" The file holds {n} frames, which the image agent analyses "
+                   "as a series of {n}; if they are repeated scans of one field "
+                   "to be aligned and combined rather than a sequence, say so "
+                   "in the objective.")
+
     _NATIVE_KIND_ROUTE = {
         "spectrum": ("1d_data", [0]),
         "spectrum_series": ("1d_series", [0]),
@@ -1287,11 +1294,22 @@ class AnalysisOrchestratorTools:
         "spectrum_image": ("hyperspectral", [2]),
     }
 
-    def _file_metadata_for(self, path: Path):
-        """SciLink metadata recorded in a DM / HyperSpy / EMD / Velox file, else None."""
+    @staticmethod
+    def _agent_prefer(agent_id):
+        """The dataset kinds each agent's loader takes from a native file, so the
+        metadata read for its run describes the array it analyses."""
+        from ...utils.readers import PREFER_CUBE, PREFER_CURVE, PREFER_IMAGE
+        return {0: PREFER_CURVE, 1: PREFER_IMAGE, 2: PREFER_CUBE}.get(agent_id, ())
+
+    def _file_metadata_for(self, path: Path, prefer=()):
+        """SciLink metadata recorded in a DM / HyperSpy / EMD / Velox file, else None.
+
+        ``prefer`` picks the dataset the analysing agent will load. The array
+        itself is not needed, so an event stream is not decoded for this.
+        """
         try:
             from ...utils.readers import calibrated_dataset, file_metadata
-            ds = calibrated_dataset(str(path))
+            ds = calibrated_dataset(str(path), prefer=prefer, decode_streams=False)
             return file_metadata(ds) if ds is not None else None
         except Exception as e:  # noqa: BLE001 - a file we cannot read adds nothing
             self.logger.warning(f"Could not read metadata from {path.name}: {e}")
@@ -1301,7 +1319,7 @@ class AnalysisOrchestratorTools:
         """Examine a DM / HyperSpy / EMD file through ``scilink.utils.readers``."""
         from ...utils.readers import file_metadata, read_datasets
         try:
-            found = read_datasets(str(path))
+            found = read_datasets(str(path), decode_streams=False)
         except Exception as e:  # noqa: BLE001
             result["data_type"] = "unknown"
             result["suggested_agents"] = []
@@ -1329,6 +1347,8 @@ class AnalysisOrchestratorTools:
             f"{tuple(primary.data.shape)} with its axis calibration and "
             "acquisition metadata (file_metadata). It needs no sidecar JSON, "
             "conversion or prepare step; the analysis agents load it directly.")
+        if primary.kind == "image_stack":
+            result["note"] += self._STACK_NOTE.format(n=primary.data.shape[0])
 
     def _register_all_tools(self):
         """Register all tools with OpenAI format."""
@@ -1725,7 +1745,7 @@ class AnalysisOrchestratorTools:
                     # array's shape (a 3-D image stack is not a datacube).
                     try:
                         from ...utils.readers import calibrated_dataset, file_metadata
-                        _ds = calibrated_dataset(str(path))
+                        _ds = calibrated_dataset(str(path), decode_streams=False)
                         if _ds is not None:
                             result["calibration"] = _ds.describe()["axes"]
                             result["file_metadata"] = file_metadata(_ds)
@@ -1735,6 +1755,9 @@ class AnalysisOrchestratorTools:
                             result["suggested_agents"] = _ag
                             result["primary_suggestion"] = _ag[0] if _ag else None
                             result["shape"] = list(_ds.data.shape)
+                            if _ds.kind == "image_stack":
+                                result["note"] = (result.get("note") or "") + \
+                                    self._STACK_NOTE.format(n=_ds.data.shape[0])
                     except Exception as _e:  # noqa: BLE001 - examination stays best-effort
                         result["calibration_error"] = f"{type(_e).__name__}: {_e}"
 
@@ -2841,7 +2864,8 @@ class AnalysisOrchestratorTools:
                     if not _resolved_from_sidecar and data_p.is_file():
                         # A DM / HyperSpy / EMD file records its own calibration
                         # and acquisition values: that is the metadata.
-                        _fmd = self._file_metadata_for(data_p)
+                        _fmd = self._file_metadata_for(
+                            data_p, prefer=self._agent_prefer(agent_id))
                         if _fmd is not None:
                             self.orch.current_metadata = _fmd
                             self.orch.current_metadata_owner = None
@@ -2902,11 +2926,15 @@ class AnalysisOrchestratorTools:
                     and not str(self.orch.current_metadata.get("metadata_source", "")
                                 ).startswith("Read from the")
                     and Path(data_path).is_file()):
-                _fmd = self._file_metadata_for(Path(data_path))
+                _fmd = self._file_metadata_for(
+                    Path(data_path), prefer=self._agent_prefer(agent_id))
                 if _fmd is not None:
                     from ...utils.readers import merge_file_metadata
-                    _merged, _filled, _conflicts = merge_file_metadata(
-                        self.orch.current_metadata, _fmd)
+                    # The schema's shape first (deterministic, no model): a
+                    # technique or material given at the top level must stand
+                    # where the agents read it, ahead of anything the file adds.
+                    _given, _ = normalize_metadata_dict(self.orch.current_metadata)
+                    _merged, _filled, _conflicts = merge_file_metadata(_given, _fmd)
                     if _conflicts:
                         _merged["metadata_conflicts_with_file"] = _conflicts
                         print("  ⚠️ The metadata given disagrees with what the file "
@@ -3298,6 +3326,21 @@ class AnalysisOrchestratorTools:
 
                 print(f"    Using agent: {type(agent).__name__}")
                 print(f"    Data: {data_path}")
+
+                # A single DM / HyperSpy / EMD file holding a frame stack goes
+                # to the image agent as the (N, H, W) array its stack path
+                # takes: a file path is one image to that agent.
+                if (agent_id == 1 and isinstance(actual_data_input, str)
+                        and Path(actual_data_input).is_file()):
+                    from ...utils.readers import records_calibration
+                    if records_calibration(actual_data_input):
+                        from ...utils.readers import PREFER_IMAGE, read_dataset
+                        _ds = read_dataset(actual_data_input, prefer=PREFER_IMAGE)
+                        if _ds.kind == "image_stack":
+                            print(f"    Frame stack {tuple(_ds.data.shape)} from "
+                                  f"{Path(actual_data_input).name}: passed as an "
+                                  "image series")
+                            actual_data_input = np.asarray(_ds.data)
 
                 # === Run analysis ===
                 analyze_kwargs = {

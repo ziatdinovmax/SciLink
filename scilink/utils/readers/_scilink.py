@@ -32,15 +32,43 @@ _TECHNIQUE = {
 }
 
 
+# What the file metadata says where the file records nothing. It keeps
+# metadata read from a file alone complete for the schema; it is never
+# written over, or beside, anything the person gave.
+NOT_RECORDED = "not recorded in the file"
+TECHNIQUE_NOT_NAMED = "(technique not named in the file)"
+
+
+def _is_placeholder(v) -> bool:
+    return isinstance(v, str) and (v == NOT_RECORDED or v.endswith(TECHNIQUE_NOT_NAMED))
+
+
 def is_native(path) -> bool:
     """A format only the readers open (``.dm3``, ``.dm4``, ``.hspy``, ``.emd``)."""
     from . import CALIBRATED_SUFFIXES
     return Path(str(path)).suffix.lower() in CALIBRATED_SUFFIXES
 
 
-def native_array(path, prefer: Sequence[str] = ()) -> np.ndarray:
-    from . import read_dataset
-    return read_dataset(path, prefer=prefer).data
+def native_array(path, prefer: Sequence[str] = (),
+                 accept: Optional[Sequence[str]] = None) -> np.ndarray:
+    """The array of the file's dataset of the first ``prefer`` kind.
+
+    With ``accept``, a file holding no dataset of an accepted kind is refused
+    by name rather than handing the caller another kind of data (a stack read
+    as an image, an image read as a cube).
+    """
+    from . import read_dataset, read_datasets, pick
+    if accept is None:
+        return read_dataset(path, prefer=prefer).data
+    found = read_datasets(path)
+    ds = pick(found, prefer)
+    if ds.kind not in accept:
+        from ._model import UnsupportedContent
+        held = ", ".join(sorted({f"{d.kind} {tuple(d.data.shape)}" for d in found}))
+        raise UnsupportedContent(
+            f"{Path(str(path)).name} holds {held}; this loader takes "
+            f"{' or '.join(accept)} data")
+    return ds.data
 
 
 def records_calibration(path) -> bool:
@@ -59,18 +87,18 @@ def records_calibration(path) -> bool:
     return False
 
 
-def calibrated_dataset(path, prefer: Sequence[str] = ()) -> Optional[Dataset]:
+def calibrated_dataset(path, prefer: Sequence[str] = (),
+                       decode_streams: bool = True) -> Optional[Dataset]:
     """The dataset when the file carries its own calibration, else None.
 
     True for the native formats and for an HDF5 file that is HyperSpy, EMD or
     Velox inside; a plain array (``.npy``, generic HDF5, an image) is None.
+    ``decode_streams=False`` when only the metadata is wanted (see
+    :func:`read_datasets`).
     """
     from . import read_dataset
-    suffix = Path(str(path)).suffix.lower()
-    if is_native(path):
-        return read_dataset(path, prefer=prefer)
-    if suffix in (".h5", ".hdf5", ".nxs") and records_calibration(path):
-        return read_dataset(path, prefer=prefer)
+    if records_calibration(path):
+        return read_dataset(path, prefer=prefer, decode_streams=decode_streams)
     return None
 
 
@@ -93,12 +121,12 @@ def file_metadata(ds: Dataset) -> Dict[str, Any]:
                   "spectrum_image": "spectrum image", "image": "image",
                   "image_stack": "image series"}.get(ds.kind, "data")
     exp: Dict[str, Any] = {
-        "technique": tech or (f"{sig} {kind_words} (technique not named in the file)"
-                              if sig else f"{kind_words} (technique not named in the file)")}
+        "technique": tech or (f"{sig} {kind_words} {TECHNIQUE_NOT_NAMED}"
+                              if sig else f"{kind_words} {TECHNIQUE_NOT_NAMED}")}
     if ds.metadata.get("microscope"):
         exp["instrument"] = ds.metadata["microscope"]
     md["experiment"] = exp
-    md["sample"] = {"material": "not recorded in the file"}
+    md["sample"] = {"material": NOT_RECORDED}
 
     ax = ds.signal_axis
     if ax is not None and ax.size >= 2:
@@ -157,13 +185,22 @@ def merge_file_metadata(given: Optional[Dict[str, Any]], from_file: Dict[str, An
     The person's metadata stands on every field it sets; the file fills the
     rest (nested dicts merged key by key). ``conflicts`` names each
     calibration value where the two disagree, so it is said, never resolved
-    silently.
+    silently. ``given`` should be in the schema's shape already (the
+    caller's deterministic normalizer); a technique or material it gives at
+    the top level is still never covered by the file's "not recorded"
+    placeholders, which are filled only into metadata that names neither.
     """
     merged: Dict[str, Any] = dict(given or {})
     filled: List[str] = []
+    flat = {k.lower() for k in merged if merged.get(k) not in (None, "")}
     for key, val in from_file.items():
         if key == "metadata_source" or (key == "sample" and key in merged):
             continue
+        if isinstance(val, dict):
+            val = {k2: v2 for k2, v2 in val.items()
+                   if not (_is_placeholder(v2) and k2.lower() in flat)}
+            if not val:
+                continue
         if key not in merged or merged[key] in (None, "", {}):
             merged[key] = val
             filled.append(key)

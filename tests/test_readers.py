@@ -394,3 +394,216 @@ def test_hdf5_routing_follows_the_files_own_axes(tmp_path):
     assert (r["file_kind"], r["data_type"], r["suggested_agents"]) == ("image_stack", "image_series", [1])
     r = json.loads(ex(str(tmp_path / "plain.h5")))
     assert r["data_type"] == "hyperspectral" and "file_kind" not in r
+
+
+# ------------------------------------------------------- review fixes -------
+
+def _velox_stream_file(path, seed=2, ny=3, nx=4, nch=64, frames=2):
+    """A Velox file with a HAADF frame stack and an EDS event stream; returns
+    the per-frame counts the stream encodes."""
+    rng = np.random.default_rng(seed)
+    counts = rng.integers(0, 3, size=(frames, ny * nx, nch))
+    stream = []
+    for f in range(frames):
+        for p in range(ny * nx):
+            for ch in range(nch):
+                stream += [ch] * int(counts[f, p, ch])
+            stream.append(65535)
+    stream += [5, 6]
+    with h5py.File(path, "w") as h:
+        h["Version"] = np.array([json.dumps({"format": "Velox"}).encode()], dtype=object)
+        img = h.create_group("Data/Image/a")
+        img["Data"] = rng.random((ny, nx, frames)).astype(np.float32)
+        img["Metadata"] = np.stack([_velox_md()] * frames, axis=1)
+        st = h.create_group("Data/SpectrumStream/b")
+        st["Data"] = np.asarray(stream, np.uint16)[:, None]
+        st["AcquisitionSettings"] = np.array([json.dumps(
+            {"bincount": str(nch), "RasterScanDefinition": {"Width": "512", "Height": "512"}}).encode()],
+            dtype=object)
+        st["Metadata"] = _velox_md()[:, None]
+    return counts
+
+
+def test_stream_decode_is_the_same_at_every_chunk_size(tmp_path, monkeypatch):
+    from scilink.utils.readers import emd
+    counts = _velox_stream_file(tmp_path / "v.emd", ny=5, nx=7, nch=32, frames=3)
+    want = counts.sum(0).reshape(5, 7, 32)
+    for chunk in (3, 50, 1000, 1 << 22):         # chunks that cut pixels and frames apart
+        monkeypatch.setattr(emd, "_STREAM_CHUNK", chunk)
+        got = read_dataset(tmp_path / "v.emd", prefer=("spectrum_image",)).data
+        np.testing.assert_array_equal(got, want)
+        assert got.dtype == np.uint32
+
+
+def test_probe_examine_and_metadata_never_decode_the_stream(tmp_path, monkeypatch):
+    """Only the loaders and the split need the counts; a probe, examine_data
+    and the metadata read get the shape without decoding the event stream."""
+    from scilink.agents.exp_agents.analysis_orchestrator_tools import AnalysisOrchestratorTools
+    from scilink.agents.meta_agent.meta_orchestrator_tools import _native_summary
+    from scilink.utils.readers import emd
+    _velox_stream_file(tmp_path / "v.emd")
+
+    def boom(*a, **k):
+        raise AssertionError("the event stream was decoded")
+    monkeypatch.setattr(emd, "_decode_stream", boom)
+    info = _native_summary(tmp_path / "v.emd")
+    assert info["data_kind"] == "spectrum_image" and info["shape"] == [3, 4, 64]
+    orch = types.SimpleNamespace(base_dir=str(tmp_path), _agent_registry={}, current_metadata=None)
+    tools = AnalysisOrchestratorTools(orch)
+    r = json.loads(tools.functions_map["examine_data"](str(tmp_path / "v.emd")))
+    assert r["data_type"] == "hyperspectral" and r["shape"] == [3, 4, 64]
+    md = tools._file_metadata_for(tmp_path / "v.emd", prefer=("spectrum_image",))
+    assert md["energy_range"]["units"] == "keV"
+
+
+def test_split_decodes_a_native_file_once(tmp_path, monkeypatch):
+    from scilink.utils.file_prep import split_with_reader, _file_paths
+    from scilink.utils.readers import emd
+    counts = _velox_stream_file(tmp_path / "v.emd")
+    calls = []
+    real = emd._decode_stream
+    monkeypatch.setattr(emd, "_decode_stream", lambda *a, **k: calls.append(1) or real(*a, **k))
+    r = split_with_reader(tmp_path / "v.emd", _file_paths(tmp_path / "v.emd", tmp_path / "o"))
+    assert r["status"] == "success" and len(calls) == 1
+    np.testing.assert_array_equal(np.load(r["data_path"]), counts.sum(0).reshape(3, 4, 64))
+    md = json.load(open(r["metadata_path"]))
+    assert [d["kind"] for d in md["other_datasets_in_file"]] == ["image_stack"]
+
+
+def test_a_failed_native_split_asks_consent_before_generated_code(dm_files, tmp_path, monkeypatch):
+    """Native files skip the consent prompt because their split runs no
+    generated code; when a reader fails, consent is asked before the
+    generated-code fallback, and a refusal stops it."""
+    import scilink.executors as ex
+    from scilink.agents.meta_agent.meta_orchestrator_tools import MetaOrchestratorTools
+    asked = []
+    monkeypatch.setattr(ex, "require_sandbox_approval", lambda **k: asked.append(k) or False)
+    d, v, *_ = dm_files
+    with h5py.File(tmp_path / "broken.emd", "w") as h:       # HDF5, but no EMD layout
+        h["junk"] = np.ones(3)
+    tools = MetaOrchestratorTools(types.SimpleNamespace(base_dir=tmp_path, model=None))
+    prep = tools.functions_map["prepare_inputs"]
+    r = json.loads(prep(str(d / f"si.dm{v}")))
+    assert r["status"] == "success" and r["deterministic"] and asked == []
+    r = json.loads(prep(str(tmp_path / "broken.emd")))
+    assert r["status"] == "error" and "declined" in r["message"] and len(asked) == 1
+    r = json.loads(prep([str(d / f"si.dm{v}"), str(tmp_path / "broken.emd")]))
+    by_file = {Path(x["file"]).name: x for x in r["results"]}
+    assert by_file[f"si.dm{v}"]["status"] == "success"
+    assert "declined" in by_file["broken.emd"]["message"] and len(asked) == 2
+
+
+def test_image_agent_loader_reads_a_hyperspy_hdf5_image(tmp_path):
+    from scilink.skills._shared.image_analysis_tools import load_image_data
+    img = np.random.default_rng(0).random((40, 48)).astype(np.float32)
+    _hspy(tmp_path / "img.hdf5", img, [("y", "nm", 0, .1, False), ("x", "nm", 0, .1, False)])
+    np.testing.assert_array_equal(load_image_data(str(tmp_path / "img.hdf5")), img)
+    with h5py.File(tmp_path / "plain.h5", "w") as h:          # a plain HDF5 keeps its old path
+        h["data"] = img
+    with pytest.raises(ValueError, match="Could not load image"):
+        load_image_data(str(tmp_path / "plain.h5"))
+
+
+def test_loaders_refuse_a_native_file_without_their_kind_of_data(tmp_path):
+    """A stack or a cube is never handed over as one frame, nor an image as a
+    cube: a native file holding none of the loader's kind is refused by name."""
+    import logging
+    from scilink.agents.exp_agents.hyperspectral_analysis_agent import HyperspectralAnalysisAgent
+    from scilink.live.modality import load_cube, load_image as live_image
+    from scilink.skills._shared.curve_fitting_tools import load_curve_data
+    stack = np.random.default_rng(1).random((5, 64, 64)).astype(np.float32)
+    _hspy(tmp_path / "stack.hspy", stack, [("time", "s", 0, .5, True), ("y", "nm", 0, .1, False),
+                                           ("x", "nm", 0, .1, False)])
+    img = stack[0]
+    _hspy(tmp_path / "img.hspy", img, [("y", "nm", 0, .1, False), ("x", "nm", 0, .1, False)])
+    stub = types.SimpleNamespace(logger=logging.getLogger("t"))
+    with pytest.raises(UnsupportedContent, match="image_stack"):
+        live_image(str(tmp_path / "stack.hspy"))
+    assert live_image(str(tmp_path / "img.hspy")).shape == (64, 64)
+    for load in (load_cube, load_curve_data,
+                 lambda p: HyperspectralAnalysisAgent._load_hyperspectral_data(stub, p)):
+        with pytest.raises((UnsupportedContent, ValueError)):
+            load(str(tmp_path / "img.hspy"))
+
+
+def _run_analysis_with(tmp_path, data_path, agent_id, **kw):
+    import contextlib, io, os
+    os.environ.setdefault("ANTHROPIC_API_KEY", "sk-dummy")
+    os.environ.setdefault("UNSAFE_EXECUTION_OK", "true")
+    from scilink.agents.exp_agents.analysis_orchestrator import (
+        AnalysisMode, AnalysisOrchestratorAgent)
+    seen = []
+
+    class Agent:
+        def analyze(self, data=None, system_info=None, **k):
+            seen.append({"data": data, "system_info": system_info})
+            return {"status": "success", "detailed_analysis": "ok", "scientific_claims": []}
+    with contextlib.redirect_stdout(io.StringIO()):
+        orch = AnalysisOrchestratorAgent(base_dir=str(tmp_path / "s"), api_key="sk-dummy",
+                                         model_name="claude-opus-4-6",
+                                         analysis_mode=AnalysisMode.AUTONOMOUS)
+        orch.create_agent_for_analysis = lambda *a, **k: Agent()
+        out = json.loads(orch.tools.execute_tool("run_analysis", data_path=str(data_path),
+                                                 agent_id=agent_id, **kw))
+    return out, seen
+
+
+def test_a_single_file_frame_stack_reaches_the_image_agent_as_a_stack(tmp_path):
+    stack = np.random.default_rng(1).random((5, 64, 64)).astype(np.float32)
+    _hspy(tmp_path / "stack.hspy", stack, [("time", "s", 0, .5, True), ("y", "nm", 0, .1, False),
+                                           ("x", "nm", 0, .1, False)])
+    out, seen = _run_analysis_with(tmp_path, tmp_path / "stack.hspy", 1)
+    assert out.get("status") == "success", out
+    assert isinstance(seen[-1]["data"], np.ndarray)
+    np.testing.assert_array_equal(seen[-1]["data"], stack)
+    img = stack[0]
+    _hspy(tmp_path / "img.hspy", img, [("y", "nm", 0, .1, False), ("x", "nm", 0, .1, False)])
+    out, seen = _run_analysis_with(tmp_path, tmp_path / "img.hspy", 1)
+    assert seen[-1]["data"] == str(tmp_path / "img.hspy")      # a single image stays a path
+
+
+def test_a_flat_sidecar_technique_and_material_stand_over_the_file(tmp_path):
+    spec = np.random.default_rng(2).random(200).astype(np.float32)
+    _hspy(tmp_path / "sp.hspy", spec, [("Energy", "eV", 280.0, 0.5, False)])
+    (tmp_path / "sp.json").write_text(json.dumps({"technique": "XPS", "material": "MoS2"}))
+    out, seen = _run_analysis_with(tmp_path, tmp_path / "sp.hspy", 0)
+    md = seen[-1]["system_info"]
+    assert md["experiment"]["technique"] == "XPS" and md["sample"]["material"] == "MoS2"
+    assert md["energy_range"]["start"] == pytest.approx(280.0)          # the file filled the axis
+    assert "not recorded" not in json.dumps(md) and "not named" not in json.dumps(md)
+
+
+def test_metadata_describes_the_dataset_the_agent_loads(tmp_path):
+    """A file whose largest dataset is not the one the agent takes: the
+    metadata for the run comes from the agent's dataset."""
+    rng = np.random.default_rng(4)
+    stack = rng.random((40, 32, 32)).astype(np.float32)          # 40960 values, the largest
+    cube = rng.random((8, 8, 100)).astype(np.float32)            # 6400 values
+    with h5py.File(tmp_path / "two.hspy", "w") as h:
+        h.attrs["file_format"] = "HyperSpy"
+        for name, data, axes in (
+                ("frames", stack, [("time", "s", 0, 1, True), ("y", "nm", 0, .1, False),
+                                   ("x", "nm", 0, .1, False)]),
+                ("si", cube, [("y", "nm", 0, .2, True), ("x", "nm", 0, .2, True),
+                              ("Energy", "eV", 500.0, 2.0, False)])):
+            g = h.create_group(f"Experiments/{name}")
+            g["data"] = data
+            for i, (n, u, off, sc, nav) in enumerate(axes):
+                a = g.create_group(f"axis-{i}")
+                a.attrs.update(name=n, units=u, offset=off, scale=sc, size=data.shape[i], navigate=nav)
+            g.create_group("metadata/Signal").attrs["signal_type"] = "EELS" if name == "si" else ""
+    out, seen = _run_analysis_with(tmp_path, tmp_path / "two.hspy", 2)
+    md = seen[-1]["system_info"]
+    assert md["energy_range"] == {"start": 500.0, "end": 698.0, "units": "eV"}
+    assert md["spatial_info"]["pixel_size"] == pytest.approx(0.2)
+
+
+def test_hyperspy_unset_values_are_not_values(tmp_path):
+    img = np.zeros((16, 16), np.float32)
+    _hspy(tmp_path / "n.hspy", img, [("y", "nm", 0, .1, False), ("x", "nm", 0, .1, False)])
+    with h5py.File(tmp_path / "n.hspy", "a") as h:
+        tem = h["Experiments/sig/metadata"].create_group("Acquisition_instrument/TEM")
+        tem.attrs.update(beam_energy="_None_", microscope="<undefined>")
+    md = file_metadata(read_dataset(tmp_path / "n.hspy"))
+    assert "_None_" not in json.dumps(md) and "<undefined>" not in json.dumps(md)
+    assert "instrument" not in md["experiment"] and "beam_energy_kV" not in md.get("acquisition", {})

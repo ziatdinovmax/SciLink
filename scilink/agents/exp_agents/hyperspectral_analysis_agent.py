@@ -2377,12 +2377,12 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         """Load hyperspectral data: .npy, .h5/.hdf5/.nxs (NeXus), or a file the
         readers open (.dm3/.dm4/.hspy/.emd) as a (y, x, channels) cube."""
         try:
-            from ...utils.readers import native_array, records_calibration
+            from ...utils.readers import PREFER_CUBE, native_array, records_calibration
             lower = data_path.lower()
             if lower.endswith('.npy'):
                 data = np.load(data_path)
             elif records_calibration(data_path):
-                data = native_array(data_path, prefer=("spectrum_image",))
+                data = native_array(data_path, prefer=PREFER_CUBE, accept=PREFER_CUBE)
             elif lower.endswith(('.h5', '.hdf5', '.nxs')):
                 from ...utils.hdf5_utils import load_hdf5_signal
                 data = load_hdf5_signal(data_path)

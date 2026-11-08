@@ -173,7 +173,8 @@ def _native_summary(path: Path) -> Dict[str, Any]:
     if path.stat().st_size > _NATIVE_PROBE_MAX_BYTES:
         # Routing does not need the array; the specialist reads it once.
         return {"read_natively": True, "note": note}
-    found = read_datasets(str(path))
+    # Kinds, shapes and axes only: an event stream is not decoded here.
+    found = read_datasets(str(path), decode_streams=False)
     primary = max(found, key=lambda d: d.data.size)
     sig = primary.signal_axis
     out: Dict[str, Any] = {
@@ -1774,9 +1775,13 @@ class MetaOrchestratorTools:
                 return json.dumps({"status": "error",
                                    "message": "File(s) not found: " + ", ".join(missing)})
             # Files SciLink reads natively are split by its readers with no
-            # generated code, so they need no sandbox approval.
+            # generated code, so consent is asked only if a reader fails and
+            # the generated-code fallback is about to run.
             from ...utils.readers import records_calibration as _records_cal
             _all_native = all(_records_cal(p) for p in pths)
+            _context = "Meta agent file preparation (lossless data/metadata split)"
+            _approve = ((lambda: require_sandbox_approval(context=_context))
+                        if _all_native else None)
             if not _all_native and not require_sandbox_approval(
                 context="Meta agent file preparation (lossless data/metadata split)"
             ):
@@ -1798,11 +1803,13 @@ class MetaOrchestratorTools:
             if len(pths) == 1:
                 result = _split_file(pths[0], model=self.orch.model, executor=executor,
                                      output_dir=out_dir, probe=probes[0],
-                                     logger=self.logger, max_retries=2)
+                                     logger=self.logger, max_retries=2,
+                                     approve_codegen=_approve)
             else:
                 result = _split_batch(pths, model=self.orch.model, executor=executor,
                                       output_dir=out_dir, probes=probes,
-                                      logger=self.logger, max_retries=2)
+                                      logger=self.logger, max_retries=2,
+                                      approve_codegen=_approve)
                 # Stage the verified pairs into ONE flat, stem-matched directory so
                 # the specialist can consume the whole batch as a series directory
                 # (run_analysis pairs each data file with its <stem>.json sidecar).

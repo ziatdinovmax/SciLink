@@ -519,11 +519,11 @@ class HyperspectralModality(CurveModality):
 def load_cube(data_path: Any) -> np.ndarray:
     """A datacube as (H, W, channels). ``.npy`` or HDF5, like the agent's loader."""
     path = Path(str(data_path))
-    from ..utils.readers import native_array, records_calibration
+    from ..utils.readers import PREFER_CUBE, native_array, records_calibration
     if path.suffix.lower() == ".npy":
         cube = np.load(path)
     elif records_calibration(path):
-        cube = native_array(path, prefer=("spectrum_image",))
+        cube = native_array(path, prefer=PREFER_CUBE, accept=PREFER_CUBE)
     elif path.suffix.lower() in (".h5", ".hdf5", ".nxs"):
         from ..utils.hdf5_utils import load_hdf5_signal
         cube = np.asarray(load_hdf5_signal(str(path)))
@@ -768,7 +768,8 @@ def load_image(data_path: Any) -> np.ndarray:
     if path.suffix.lower() == ".npy":
         a = np.load(path)
     elif records_calibration(path):
-        a = native_array(path, prefer=("image",))
+        # One frame: a stack or a cube is refused, never averaged into one.
+        a = native_array(path, prefer=("image",), accept=("image",))
     else:
         from ..skills._shared.image_analysis_tools import load_image_data
         a = np.asarray(load_image_data(str(path)))

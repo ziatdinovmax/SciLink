@@ -596,10 +596,14 @@ def load_curve_data(data_path: str, auto_orient: bool = True,
     # back as (x, y) on its calibrated axis.
     from scilink.utils.readers import records_calibration
     if records_calibration(data_path):
-        from scilink.utils.readers import read_dataset
-        ds = read_dataset(data_path, prefer=("spectrum",))
+        from scilink.utils.readers import PREFER_CURVE, UnsupportedContent, read_dataset
+        ds = read_dataset(data_path, prefer=PREFER_CURVE)
         if ds.kind == "spectrum":
             return np.column_stack([ds.axes[0].coordinates(), ds.data])
+        if ds.kind not in PREFER_CURVE:
+            raise UnsupportedContent(
+                f"{os.path.basename(data_path)} holds no spectrum (its data is "
+                f"{ds.kind} {tuple(ds.data.shape)}); the curve loader takes spectra")
         return _finish(ds.data)
 
     # NeXus / HDF5 — pull the signal and (when present) its axis so we

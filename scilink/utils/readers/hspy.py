@@ -17,12 +17,18 @@ from ._layout import canonicalize, uniform_or_values
 from ._model import Axis, Dataset, UnsupportedContent
 
 
+# How HyperSpy writes a value that is not set: ``None`` is stored as the
+# string ``_None_``, and older versions write ``<undefined>``.
+_UNSET = frozenset({"_None_", "<undefined>"})
+
+
 def _s(v) -> str:
     if isinstance(v, bytes):
-        return v.decode("utf-8", "replace")
+        v = v.decode("utf-8", "replace")
     if isinstance(v, np.ndarray) and v.shape == ():
         return _s(v.item())
-    return "" if v is None else str(v)
+    v = "" if v is None else str(v)
+    return "" if v.strip() in _UNSET else v
 
 
 def is_hyperspy(h5) -> bool:

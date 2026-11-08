@@ -60,8 +60,10 @@ def load_image(image_path, raw: bool = False):
 
         from scilink.utils.readers import records_calibration
         if records_calibration(image_path):
-            from scilink.utils.readers import native_array
-            img_array = native_array(image_path, prefer=("image",))
+            from scilink.utils.readers import PREFER_IMAGE, native_array
+            # A general loader (previews, auxiliary operands): the preferred
+            # kind when the file holds one, else its largest dataset.
+            img_array = native_array(image_path, prefer=PREFER_IMAGE)
             return img_array if raw else _normalize_to_uint8(img_array)
         if ext == '.npy' or ext in ('.h5', '.hdf5', '.nxs'):
             if ext == '.npy':
