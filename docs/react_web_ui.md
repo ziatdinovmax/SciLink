@@ -204,8 +204,10 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
     works, as a key login with no code.
   - **Secrets:** password, key passphrase and code go to the server for one
     login and are never stored, logged or returned; the form clears them
-    after each attempt. "Remember this profile" keeps only host, user, port,
-    method, key path and jump host, in the browser.
+    once a login was tried, and keeps them when the server stopped first
+    (e.g. 409 while a turn finishes), so a fresh code is not lost.
+    "Remember this profile" keeps only host, user, port, method, key path
+    and jump host, in the browser.
   - **Key login and jump hosts** use the SSH keys and agent of the account
     running SciLink, so they are offered only on a local server **without
     sign-in**. A server behind sign-in (tokens, `--users`, an auth proxy) is
@@ -223,6 +225,12 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
     follow-up.
   - The connection can't be changed while a turn is running (409): finish or
     stop the turn first, so no job is left half-submitted.
+  - **Jobs belong to their cluster:** a submitted job records the cluster
+    (`user@host:port`). After switching clusters, `get_job_status` and
+    `download_job_results` refuse that job and name the cluster to
+    reconnect to (job ids repeat across clusters).
+  - Needs paramiko >= 3.2 (a base dependency); an older one is reported
+    before any login (501).
 - **Sidebar**: model + provider fields (e.g. Bedrock region), API key /
   base URL (with "✓ available from ENV" captions — the server reports
   credential *availability*, never values), FutureHouse / Materials Project
