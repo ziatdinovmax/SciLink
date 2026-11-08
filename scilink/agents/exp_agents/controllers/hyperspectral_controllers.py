@@ -2612,10 +2612,9 @@ def _required_outputs_prompt(objective: str, target: dict) -> str:
         f"Analysis objective: {objective}\n\n"
         f"Target description: {target.get('description') or ''}\n\n"
         f"{_required_outputs_rules()}\n\n"
-        "Declare the target's required outputs under these rules: the exact "
-        "map keys of the quantities this target exists to deliver for the "
-        "objective. Return an empty list only when the objective is "
-        "exploratory and names no quantity.\n"
+        "Declare the target's required outputs under these rules, as map keys "
+        "(letters, digits and underscores). An empty list is the right answer "
+        "where the rules say to leave it empty.\n"
         'Output a JSON object: {"required_outputs": [...], "reason": "..."}'
     )
 
@@ -2629,11 +2628,22 @@ class SelectRefinementTargetController:
     def _declare_required_outputs(self, target: dict, state: dict) -> None:
         """A measurement target with no required outputs leaves the gate
         nothing to hold an attempt to (#810). When the run has an objective,
-        ask once for the declaration the planner skipped; the answer may be
-        an empty list (exploratory). Fails open: any problem keeps the plan
-        as it was."""
+        ask once for the declaration the planner skipped, under the planner's
+        own rules; the answer may be an empty list. Fails open: any problem
+        keeps the plan as it was.
+
+        The planner's value is normalised first, whatever happens next: a bare
+        string is one key (read as a list it became one key per letter), and
+        any other non-list is no declaration."""
+        current = target.get("required_outputs")
+        if isinstance(current, str):
+            current = [current.strip()] if current.strip() else []
+            target["required_outputs"] = current
+        elif "required_outputs" in target and not isinstance(current, list):
+            current = []
+            target["required_outputs"] = current
         objective = state.get("analysis_objective")
-        if target.get("required_outputs") or not objective:
+        if current or not objective:
             return
         try:
             response = self.model.generate_content(
@@ -2644,17 +2654,27 @@ class SelectRefinementTargetController:
             result_json, error_dict = self._parse_llm_response(response)
             if error_dict or not isinstance(result_json, dict):
                 raise ValueError(error_dict or "no JSON object")
-            keys = result_json.get("required_outputs")
-            if not isinstance(keys, list):
+            answer = result_json.get("required_outputs")
+            if not isinstance(answer, list):
                 raise ValueError("required_outputs is not a list")
-            keys = [k.strip() for k in keys if isinstance(k, str)]
-            keys = list(dict.fromkeys(k for k in keys if _OUTPUT_KEY_RE.match(k)))
+            usable = [k.strip() for k in answer
+                      if isinstance(k, str) and _OUTPUT_KEY_RE.match(k.strip())]
+            dropped = [k for k in answer
+                       if not (isinstance(k, str) and _OUTPUT_KEY_RE.match(k.strip()))]
+            if answer and not usable:
+                # An answer that named outputs but none usable is no
+                # declaration, never a deliberate empty one.
+                raise ValueError(f"no usable map key in {answer!r}")
+            keys = list(dict.fromkeys(usable))
         except Exception as e:  # noqa: BLE001 - the declaration is an addition, never a blocker
             self.logger.warning(f"Required-outputs declaration skipped: {e}")
             return
+        if dropped:
+            self.logger.warning("Required-outputs declaration: dropped entries that are "
+                                f"not map keys: {dropped!r}")
         target["required_outputs"] = keys
         self.logger.info(
-            f"🎯 Required outputs declared for the target: {keys or '[] (exploratory)'}"
+            f"🎯 Required outputs declared for the target: {keys or '[] (none required)'}"
             f" — {str(result_json.get('reason') or '').strip()[:200]}")
 
     def __init__(self, model, logger, generation_config, safety_settings, parse_fn: Callable):
@@ -4596,10 +4616,18 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     self.logger.warning(
                         f"    Skipping {feature_name}: its figure could not be drawn "
                         f"({type(_dash_exc).__name__}: {_dash_exc}).")
+                    # The map is numeric, frame-shaped and not all-NaN by
+                    # now, so the cause is rarely the script's: name the
+                    # error, and point at the script only for infinities.
+                    try:
+                        _has_inf = bool(np.isinf(result_map).any())
+                    except Exception:  # noqa: BLE001
+                        _has_inf = False
                     qc_failures.append(
-                        f"{feature_name}: the map could not be plotted for review "
-                        f"({type(_dash_exc).__name__}: {_dash_exc}); return it as a "
-                        f"numeric (H, W) array.")
+                        f"{feature_name}: its figure could not be drawn, so the map was "
+                        f"not reviewed ({type(_dash_exc).__name__}: {_dash_exc})."
+                        + (" The map holds infinite values; return NaN where a pixel has "
+                           "no valid estimate." if _has_inf else ""))
                     continue
 
                 if dashboard_bytes:
