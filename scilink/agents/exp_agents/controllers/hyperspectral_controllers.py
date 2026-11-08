@@ -531,6 +531,13 @@ def _render_band_flux_table(data, axis, axis_units: str, aux: dict | None = None
         return ""
 
 
+_FIELD_OVERVIEW_CAPTION = (
+    "FIELD OVERVIEW (made from the data, no model): the total signal over the axis, then "
+    "each main feature of the field-mean spectrum (a peak as its integrated signal, a dip "
+    "as its depth below a local baseline). Brightness is signal strength, not what a "
+    "region is.")
+
+
 def _field_overview(state: dict, max_features: int = 4) -> dict:
     """What the field looks like, for a planner that saw no decomposition.
 
@@ -569,9 +576,20 @@ def _field_overview(state: dict, max_features: int = 4) -> dict:
             sel = (axis >= f["position"] - half) & (axis <= f["position"] + half)
             if sel.sum() < 1:
                 continue
-            panels.append((np.nansum(data[:, :, sel], axis=2),
-                           f"{f.get('kind', 'feature')} at {f['position']:.4g} {units} "
-                           f"(±{half:.3g}): integrated signal"))
+            where = f"{f.get('kind', 'feature')} at {f['position']:.4g} {units} (±{half:.3g})"
+            if f.get("kind") == "dip":
+                # Depth below a straight baseline between the window's edges,
+                # pixel by pixel, so a stronger band is brighter, as for peaks.
+                idx = np.flatnonzero(sel)
+                i0, i1 = int(idx[0]), int(idx[-1])
+                left = np.nanmean(data[:, :, max(i0 - 3, 0):max(i0, 1)], axis=2)
+                right = np.nanmean(data[:, :, min(i1 + 1, e - 1):min(i1 + 4, e)], axis=2)
+                t = (axis[idx] - axis[idx[0]]) / max(float(axis[idx[-1]] - axis[idx[0]]), 1e-12)
+                base = left[:, :, None] + (right - left)[:, :, None] * t[None, None, :]
+                panels.append((np.nansum(base - data[:, :, idx], axis=2),
+                               f"{where}: depth below baseline"))
+            else:
+                panels.append((np.nansum(data[:, :, sel], axis=2), f"{where}: integrated signal"))
         n = len(panels)
         cols = min(n, 3)
         rows = -(-n // cols)
@@ -590,7 +608,8 @@ def _field_overview(state: dict, max_features: int = 4) -> dict:
         buf = io.BytesIO()
         fig.savefig(buf, format="jpeg", dpi=90)
         plt.close(fig)
-        return {"image": buf.getvalue(), "text": facts.get("text", ""), "n_panels": n}
+        return {"image": buf.getvalue(), "text": facts.get("facts_text", ""),
+                "caption": _FIELD_OVERVIEW_CAPTION}
     except Exception:  # noqa: BLE001 - advisory, never break planning
         return {}
 
@@ -817,6 +836,9 @@ def _data_facts(data, axis, axis_units: str, max_peaks: int = 4) -> dict:
             "window holds a LISTED feature is rejected.")
         strongest = feats[0]["sigma"] if feats else 0.0
         return {"text": "\n".join(lines),
+                # the facts alone, without the closing paragraph addressed to
+                # the code writer (windows, seeds, not_measurable): for a planner
+                "facts_text": "\n".join(lines[:-1]),
                 "measurable": strongest >= 5.0,
                 "strongest_sigma": strongest,
                 "sigma_mean": sigma_mean,
@@ -2897,11 +2919,10 @@ refinement targets are meaningful here — do not request `spatial` or
             overview = _field_overview(state) if skip_mode else {}
             if overview.get("image"):
                 # No decomposition, so no maps: show the field itself, and the
-                # field mean's features the code writer will be given.
-                prompt_parts.append(
-                    "\nFIELD OVERVIEW (made from the data, no model): the total signal over "
-                    "the axis, then the signal integrated over each main feature of the "
-                    "field-mean spectrum. Brightness is signal level, not what a region is.")
+                # field mean's features. Kept on state so a replan after the
+                # person's feedback sees the same evidence.
+                state["field_overview"] = overview
+                prompt_parts.append("\n" + overview["caption"])
                 prompt_parts.append({"mime_type": "image/jpeg", "data": overview["image"]})
                 if overview.get("text"):
                     prompt_parts.append("\n" + overview["text"])

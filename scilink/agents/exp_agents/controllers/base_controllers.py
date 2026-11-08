@@ -581,6 +581,15 @@ class IterativeFeedbackController:
             if image_bytes:
                 prompt_parts.append(f"\n{img['label']}:")
                 prompt_parts.append({"mime_type": "image/jpeg", "data": image_bytes})
+        # With no analysis images (a hyperspectral run that skipped
+        # decomposition), the field overview the first plan saw, so the
+        # revised plan is made on the same evidence.
+        _overview = state.get("field_overview") or {}
+        if not state.get("analysis_images") and _overview.get("image"):
+            prompt_parts.append("\n" + _overview.get("caption", "Field overview:"))
+            prompt_parts.append({"mime_type": "image/jpeg", "data": _overview["image"]})
+            if _overview.get("text"):
+                prompt_parts.append("\n" + _overview["text"])
         
         # Inject mandatory instructions here
         prompt_parts.append(f"\n\n### DECISION RULES\n{self.refinement_instruction}")
