@@ -916,6 +916,10 @@ class PlanningAgent(BaseAgent):
             print(f"  - Building Scientific KB with {len(doc_chunks)} chunks...")
             self.kb_docs.build(doc_chunks)
             self.kb_docs.save(self.kb_docs_index, self.kb_docs_chunks, sources_path=self.kb_docs_sources_path)
+        elif knowledge_paths:
+            print("  - ⚠️  Nothing to embed from the knowledge paths: no document "
+                  "(PDF, text, markdown) yielded text — folders of records are "
+                  "queried with query_knowledge_data, not embedded. Docs KB unchanged.")
         else:
             print("  - ℹ️  No Scientific docs provided. Docs KB unchanged.")
 

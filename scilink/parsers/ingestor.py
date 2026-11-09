@@ -8,6 +8,44 @@ from .excel_parser import parse_adaptive_excel
 
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.gif'}
 
+# Extensions the ingestor reads as DOCUMENTS: every file is parsed and
+# embedded, however many sit in one folder. A paper is a paper whether it
+# arrives alone or as the tenth of a folder.
+DOCUMENT_EXTENSIONS = {'.pdf', '.txt', '.md', '.py', '.java', '.r', '.cpp', '.h', '.js'}
+
+# A folder holding this many files of one non-document extension is a
+# DIRECTORY DATABASE (thousands of JSON / CSV records): its files are left
+# out of the embedded knowledge base and served by plan mode's
+# `query_knowledge_data`, which runs generated code over the records.
+DIR_DB_MIN_FILES = 10
+
+
+def is_directory_database_extension(ext: str) -> bool:
+    """Whether files of this extension can form a directory database.
+
+    Documents (PDF, text, markdown, code) never do: they are embedded one
+    by one. Images never do: they go to the vision path. Everything else —
+    JSON and CSV records, spreadsheets, formats the ingestor does not read
+    (.cif, .xyz, ...) — does, once a folder holds ``DIR_DB_MIN_FILES`` of
+    them. One predicate for the ingestor and the knowledge-data scanner,
+    so a folder is never a database to one and documents to the other.
+    """
+    ext = (ext or "").lower()
+    return ext not in DOCUMENT_EXTENSIONS and ext not in IMAGE_EXTENSIONS
+
+
+def directory_databases(file_paths: List[str]) -> Dict[tuple, int]:
+    """Map ``(folder, extension) -> count`` for every folder that holds
+    ``DIR_DB_MIN_FILES`` or more files of one directory-database extension
+    among ``file_paths`` (already expanded, one file per entry)."""
+    from collections import Counter
+    counts: Dict[tuple, int] = Counter()
+    for f_path in file_paths:
+        p = Path(f_path)
+        counts[(str(p.parent), p.suffix.lower())] += 1
+    return {key: n for key, n in counts.items()
+            if n >= DIR_DB_MIN_FILES and is_directory_database_extension(key[1])}
+
 # File extensions the ingestor / directory scanner recognises.
 SUPPORTED_EXTENSIONS = {
     '.py', '.java', '.r', '.cpp', '.h', '.js', '.json',
@@ -95,22 +133,17 @@ def ingest_files(file_paths: List[str], is_code_mode: bool, code_chunk_size: int
                 expanded_paths.append(f_path)
 
     # 1b. Detect directory databases — skip files that belong to large
-    #     uniform collections (e.g., 4764 JSON records). These are queried
-    #     structurally via query_knowledge_data, not embedded as text chunks.
-    from collections import Counter
-    _dir_ext_counts: Dict[str, Counter] = {}
-    for f_path in expanded_paths:
-        p = Path(f_path)
-        parent_key = str(p.parent)
-        if parent_key not in _dir_ext_counts:
-            _dir_ext_counts[parent_key] = Counter()
-        _dir_ext_counts[parent_key][p.suffix.lower()] += 1
-    _skip_dir_ext = set()
-    for dir_path, ext_counts in _dir_ext_counts.items():
-        for ext, count in ext_counts.items():
-            if count >= 10:
-                _skip_dir_ext.add((dir_path, ext))
-                print(f"  - 📁 Skipping {count} {ext} files in {Path(dir_path).name} (directory database, queryable via query_knowledge_data)")
+    #     uniform collections of RECORDS (e.g., 4764 JSON records). These
+    #     are queried structurally via query_knowledge_data, not embedded
+    #     as text chunks. Documents never form one: a folder of ten papers
+    #     is ten papers (a count-only rule dropped them all and nothing
+    #     told the user).
+    _skip_dir_ext = directory_databases(expanded_paths)
+    for (dir_path, ext), count in _skip_dir_ext.items():
+        print(f"  - 📁 {count} {ext or 'extensionless'} files in "
+              f"{Path(dir_path).name}: a directory database of records, "
+              "not embedded in the knowledge base; query them with "
+              "query_knowledge_data")
 
     # 2. Process each file
     for f_path in expanded_paths:
