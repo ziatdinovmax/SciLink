@@ -1,3 +1,15 @@
+import os as _os
+import sys as _sys
+
+# On macOS the torch and faiss-cpu wheels each bundle their own libomp.dylib.
+# Importing torch first (below) decides which copy loads first, but both
+# still load, and the second aborts the process ("OMP: Error #15") the first
+# time faiss runs a search — every dense knowledge-base lookup. Before any
+# import, so it is set when either runtime initializes; a value the user set
+# is kept.
+if _sys.platform == "darwin":
+    _os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 from importlib.metadata import version as _pkg_version, PackageNotFoundError
 
 try:

@@ -129,7 +129,8 @@ class KnowledgeBase:
         Processes a list of text chunks, generates embeddings in batches,
         and builds the vector index.
         """
-        import faiss
+        from ._faiss import load_faiss
+        faiss = load_faiss()
 
         if not chunks:
             print("⚠️  KnowledgeBase build skipped: No chunks provided.")
@@ -234,7 +235,8 @@ class KnowledgeBase:
 
     def save(self, index_path: str, chunks_path: str, repo_map_path: str = None, sources_path: str = None):
         """Saves the FAISS index, text chunks, and optionally the repo maps to disk."""
-        import faiss
+        from ._faiss import load_faiss
+        faiss = load_faiss()
 
         if self.index:
             faiss.write_index(self.index, index_path)
@@ -270,7 +272,8 @@ class KnowledgeBase:
 
     def load(self, index_path: str, chunks_path: str, repo_map_path: str = None, sources_path: str = None) -> bool:
         """Loads a pre-built FAISS index, chunks, and repo maps from disk."""
-        import faiss
+        from ._faiss import load_faiss
+        faiss = load_faiss()
 
         index_file = Path(index_path)
         chunks_file = Path(chunks_path)

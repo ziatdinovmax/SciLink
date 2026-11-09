@@ -570,7 +570,8 @@ def import_kb(name: str,
         except Exception:  # noqa: BLE001 - listing is best-effort metadata
             source_names = []
         try:
-            import faiss
+            from ._faiss import load_faiss
+            faiss = load_faiss()
             n_vectors = int(faiss.read_index(str(staging / _DOCS_FILES[0])).ntotal)
         except Exception:  # noqa: BLE001 - count is best-effort metadata
             n_vectors = None
