@@ -6,14 +6,13 @@ order:
 
   1. ``SCILINK_SIMULATE`` env var, if set — ``0/false/no/off`` forces
      off, ``1/true/yes/on`` forces on. Other values fall through.
-  2. Otherwise, probe whether ``paramiko`` (the [sim]-exclusive SSH
-     dependency) can be imported.
+  2. Otherwise, probe whether ``ase`` can be imported. The simulation
+     agents need it, and it is a core dependency, so this is on unless
+     someone removed it.
 
-The probe used to also require ``ase``, but ase can ride along via
-unrelated libraries (e.g. ``sidpy`` from the pycroscopy ecosystem), so
-``ase`` being importable is not a reliable signal that the user opted
-into ``scilink[sim]``. ``paramiko`` has no such cross-ecosystem
-overlap in our user base.
+The probe used to check ``paramiko`` as a sign that the user installed
+``scilink[sim]``. Both are core dependencies now, and simulate mode
+needs nothing from that extra.
 
 Note: the result is cached for the process lifetime (``@lru_cache``).
 Changing ``SCILINK_SIMULATE`` requires restarting Streamlit.
@@ -36,7 +35,7 @@ def simulate_enabled() -> bool:
     if override in _FALSE:
         return False
     try:
-        import paramiko  # noqa: F401
+        import ase  # noqa: F401
     except ImportError:
         return False
     return True

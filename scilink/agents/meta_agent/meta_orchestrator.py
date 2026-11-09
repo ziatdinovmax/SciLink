@@ -97,7 +97,7 @@ __SPECIALIST_CAPABILITIES__
 Computational simulation — building atomic structures, generating and
 validating engine inputs, and RUNNING + refining DFT / classical-MD / MLIP
 simulations — is `delegate_to_simulation`, listed in SPECIALIST CAPABILITIES
-above when available (it needs the `scilink[sim]` extra; if it is absent from
+above when available (it needs ASE; if it is absent from
 that inventory, simulation is unavailable in this build and you should say so
 rather than fabricate a result).
 
@@ -1423,7 +1423,7 @@ class MetaOrchestratorAgent:
         except Exception as e:  # noqa: BLE001
             self.logger.warning(f"planning capability probe failed: {e}")
 
-        # Simulation is optional (needs the `ase`-backed `scilink[sim]` extra).
+        # Simulation needs `ase` (a core dependency, but it can be removed).
         # The probe constructs the sim child, which hard-imports `ase`; if that
         # is absent the ImportError is swallowed here and the section is simply
         # omitted, so the routing inventory honestly reflects what this build

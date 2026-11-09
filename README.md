@@ -33,7 +33,7 @@ as Claude Code, call it as a scientific specialist over MCP.
 
 ```bash
 pip install scilink           # core, including the web UI
-pip install "scilink[sim]"    # + simulation stack (ASE, atomate2, …)
+pip install "scilink[sim]"    # + atomate2 VASP inputs, grain boundaries, MD analysis
 ```
 
 Set a model key (any one of these):

@@ -438,9 +438,9 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
     (`.xyz`/`.extxyz`/`.cif`/`.vasp`, POSCAR/CONTCAR) drawn by the server
     with ASE from the views the simulation agents render, farther atoms
     paler so one hidden behind another shows through, with a
-    Rendered|Source toggle (a trajectory shows its last frame; needs
-    `scilink[sim]`). The simulation agents' structures (under the meta
-    session's `simulation/`) open instead in an interactive 3Dmol.js view
+    Rendered|Source toggle (a trajectory shows its last frame). The
+    simulation agents' structures (under the meta session's
+    `simulation/`) open instead in an interactive 3Dmol.js view
     (rotate, zoom, hover an atom, ball-and-stick or space-filling, spin; a
     slab opens surface-up), with 3D|Views|Source;
   - chat ↔ explorer cross-links: artifact cards jump to the file in the

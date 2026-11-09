@@ -72,11 +72,17 @@ dependencies = [
     # SSH to HPC clusters: the web UI's HPC panel (default install) and the
     # simulation agents. 3.2 is the floor for auth_strategy (MFA login).
     "paramiko>=3.2.0",
+    # Atomic structures: the simulation agents build and write every structure
+    # with ASE, and the web UI draws structure files with it. Small, wheel-only,
+    # and its dependencies (numpy, scipy, matplotlib) are already core.
+    "ase>=3.23",   # read_lammps_data(atom_style=...)
 ]
 
 [project.optional-dependencies]
+# The heavier simulation pieces: deterministic VASP inputs (atomate2), grain
+# boundaries (aimsgb) and MD trajectory analysis (mdanalysis). ASE itself is
+# core, so building structures and writing DFT inputs needs no extra.
 sim = [
-    "ase>=3.23",   # read_lammps_data(atom_style=...)
     "aimsgb>=1.1.1",
     "atomate2>=0.0.21",
     "mdanalysis>=2.9.0",

@@ -916,11 +916,11 @@ fourth mode**; it's an orchestrator-of-orchestrators with a different role
 
 **Scope: analysis + planning + simulation.** Simulation delegation is now
 wired (`delegate_to_simulation`). Because `scilink.agents.sim_agents`
-hard-imports `ase` (an optional dependency), the meta module must stay
-importable without it: the tool's body and the orchestrator's
+hard-imports `ase` (a core dependency, but one a user can remove), the meta
+module must stay importable without it: the tool's body and the orchestrator's
 `_get_simulation_child` / `_delegate` "simulation" branch all do the
 `simulation_orchestrator` import *inside the function*, never at module scope,
-and the tool returns a clean "install scilink[sim]" error if `ase` is absent.
+and the tool returns a clean "pip install ase" error if `ase` is absent.
 The simulation child is structure-centric, so — unlike the planning child — it
 needs no `data_dir` at construction; it lives in `<meta_session>/simulation/`.
 

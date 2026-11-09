@@ -1101,9 +1101,10 @@ class MetaOrchestratorTools:
                                    context_from: list = None,
                                    label: str = None) -> str:
             # Guarded import INSIDE the function: scilink.agents.sim_agents
-            # hard-imports the optional `ase` dependency, and the meta module
-            # must stay importable without it. Return a clean error if the
-            # [sim] extra is absent rather than crashing the meta.
+            # hard-imports `ase`, and the meta module
+            # must stay importable without it. ASE is a core dependency, so
+            # this only fires if it was removed: return a clean error rather
+            # than crashing the meta.
             try:
                 from ..sim_agents.simulation_orchestrator import (  # noqa: F401
                     SimulationOrchestratorAgent,
@@ -1111,8 +1112,8 @@ class MetaOrchestratorTools:
             except ImportError as e:
                 return json.dumps({
                     "status": "error",
-                    "message": ("Simulation support requires the optional [sim] "
-                                "extra (pip install scilink[sim])."),
+                    "message": ("Simulation support needs ASE, which is not "
+                                "installed (pip install ase)."),
                     "detail": str(e),
                 })
             print("  " + _handoff(f"⚛️ Delegating to simulation specialist: {task[:80]}..."))
