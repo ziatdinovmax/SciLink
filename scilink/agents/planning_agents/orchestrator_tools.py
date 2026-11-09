@@ -7056,10 +7056,14 @@ class OrchestratorTools:
         # structure collection in one folder.
         _RECORD_EXTENSIONS = {".json", ".csv", ".xlsx", ".xls", ".parquet", ".tsv"}
 
+        @_lru_cache(maxsize=32)
         def _structure_collection(dir_path: str) -> Optional[dict]:
             """``{"structure_files", "files"}`` when ``dir_path`` (subfolders
-            included) holds at least DIR_DB_MIN_FILES structure files and no
-            table-like records rival them (a folder of CIFs beside as many CSV
+            included) holds at least DIR_DB_MIN_FILES CIFs and no table-like
+            records rival them. Only CIFs count: POSCAR/CONTCAR and xyz files
+            are as often calculation outputs and trajectories (a folder of
+            VASP runs), which a script should still screen as it is. Memoized
+            per path, as _inspect_directory is. Records rival the CIFs (a folder of CIFs beside as many CSV
             or JSON records stays queryable as it is; companion files such as
             .hkl/.fcf, or a few stray records, do not count). None otherwise.
             Stops counting after _STRUCTURE_SCAN_LIMIT files."""
@@ -7074,7 +7078,7 @@ class OrchestratorTools:
                     if name.startswith('.'):
                         continue
                     n_files += 1
-                    if structure_format(name) is not None:
+                    if structure_format(name) == "cif":
                         n_struct += 1
                     else:
                         ext = Path(name).suffix.lower()
@@ -7108,9 +7112,9 @@ class OrchestratorTools:
                 "tool": tool,
                 "directory": dir_path,
                 "structure_files": f"{found['structure_files']}{more}",
-                "message": (f"This folder holds {found['structure_files']}{more} structure "
-                            f"files (CIF/POSCAR/xyz, subfolders included). A script that "
-                            f"parses each one does not fit the query time limit. {step}"),
+                "message": (f"This folder holds {found['structure_files']}{more} CIF files "
+                            f"(subfolders included). A script that parses each one does not "
+                            f"fit the query time limit. {step}"),
             })
 
         @_lru_cache(maxsize=32)
@@ -7808,9 +7812,9 @@ class OrchestratorTools:
 
             # a structure collection is indexed first (#804): answered before
             # the consent below, since no generated code would run
-            _direct = Path(database_path).expanduser()
-            if _direct.is_dir():
-                index_first = _index_first(str(_direct.resolve()), "screen_database")
+            _folder, _err = _structure_folder(database_path)
+            if _folder is not None:
+                index_first = _index_first(str(_folder), "screen_database")
                 if index_first:
                     return index_first
 
@@ -7841,9 +7845,6 @@ class OrchestratorTools:
                                     f"files use query_knowledge_data."),
                     })
 
-            index_first = _index_first(dir_path, "screen_database")
-            if index_first:
-                return index_first
             print(f"    - Inspecting directory: {dir_name}")
             try:
                 info = _inspect_directory(dir_path)
@@ -8039,14 +8040,17 @@ class OrchestratorTools:
         # =====================================================================
         # STRUCTURE INDEX (#804): a folder of CIF / POSCAR / xyz files as a table
         # =====================================================================
-        def _structure_index_file(dir_path: Path) -> Path:
+        def _structure_index_file(dir_path: Path, recursive: bool = True) -> Path:
             """Where the index of ``dir_path`` lives: one CSV per folder, in the
-            session's knowledge folder, where query_knowledge_data finds it."""
+            session's knowledge folder, where query_knowledge_data finds it. A
+            top-level-only index has its own file, so it never replaces (or
+            stands in for) the full one."""
             import hashlib
             import re as _re
             h = hashlib.sha256(str(dir_path.resolve()).encode("utf-8")).hexdigest()[:8]
             name = _re.sub(r"[^A-Za-z0-9_.-]+", "_", dir_path.name)[:40] or "structures"
-            return Path(self.orch.base_dir) / "knowledge" / f"structure_index_{name}_{h}.csv"
+            top = "" if recursive else "_toplevel"
+            return Path(self.orch.base_dir) / "knowledge" / f"structure_index_{name}_{h}{top}.csv"
 
         def _structure_folder(directory: str):
             """``(folder, error)`` for a path, or a folder name under a knowledge
@@ -8079,7 +8083,7 @@ class OrchestratorTools:
             dir_path, err = _structure_folder(directory)
             if err:
                 return err
-            out = _structure_index_file(dir_path)
+            out = _structure_index_file(dir_path, recursive)
             try:
                 result = _si.build_index(dir_path, out, recursive=recursive, refresh=refresh)
             except Exception as e:

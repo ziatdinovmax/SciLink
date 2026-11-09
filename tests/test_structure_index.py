@@ -510,3 +510,82 @@ def test_companion_files_do_not_stop_the_redirect(planner, tmp_path, monkeypatch
     r = json.loads(planner.tools.execute_tool(
         "query_knowledge_data", query="count", file_name=str(tmp_path / "ccdc")))
     assert r["status"] == "index_structures_first"
+
+
+# ── PR review (#822) ─────────────────────────────────────────────────────
+
+def test_a_folder_of_calculation_runs_is_not_redirected(planner, tmp_path, monkeypatch):
+    import scilink.executors as ex
+    monkeypatch.setattr(ex, "require_sandbox_approval", lambda *a, **k: False)
+    from ase.build import bulk
+    import ase.io
+    for i in range(20):                       # VASP runs: POSCAR + CONTCAR + OUTCAR each
+        run = tmp_path / "runs" / f"run_{i:02d}"
+        run.mkdir(parents=True)
+        for name in ("POSCAR", "CONTCAR"):
+            ase.io.write(run / name, bulk("Si", "diamond", a=5.43), format="vasp")
+        (run / "OUTCAR").write_text("free  energy   TOTEN  =  -10.8 eV\n")
+    r = json.loads(planner.tools.execute_tool(
+        "query_knowledge_data", query="lowest energy", file_name=str(tmp_path / "runs")))
+    assert r["status"] == "error" and "approval declined" in r["message"]   # the usual path
+
+
+def test_a_top_level_index_never_replaces_the_full_one(planner, tmp_path):
+    _collection(tmp_path / "cifs")
+    _write(tmp_path / "cifs", "top.cif", NACL)
+    full = json.loads(planner.tools.execute_tool("index_structures", directory=str(tmp_path / "cifs")))
+    top = json.loads(planner.tools.execute_tool("index_structures", directory=str(tmp_path / "cifs"),
+                                                recursive=False))
+    assert full["index_file"] != top["index_file"] and top["n_rows"] == 1
+    assert len(pd.read_csv(full["index_file"])) == 13
+
+
+def test_screen_database_by_folder_name_redirects_before_consent(planner, monkeypatch):
+    import scilink.executors as ex
+    monkeypatch.setattr(ex, "require_sandbox_approval",
+                        lambda *a, **k: pytest.fail("no consent asked: no code would run"))
+    for i in range(12):                       # a flat folder: discovery lists it by name
+        _write(Path(planner.base_dir) / "knowledge" / "cod_subset", f"s{i:02d}.cif", NACL)
+    r = json.loads(planner.tools.execute_tool(
+        "screen_database", query="densest", database_path="cod_subset"))
+    assert r["status"] == "index_structures_first"
+
+
+def test_an_impossible_space_group_number_keeps_the_row(tmp_path):
+    r = _row(_write(tmp_path, "bad_sg.cif", NACL.replace(
+        "_space_group_IT_number 225", "_space_group_IT_number 999")))
+    assert r["crystal_system"] is None and r["formula"] == "Cl Na" and r["a"] == 5.64
+
+
+def test_text_columns_survive_the_csv_round_trip(tmp_path):
+    _tree(tmp_path / "s")
+    _write(tmp_path / "s", "123.cif", NACL.replace("data_nacl", "data_123"))
+    out = tmp_path / "index.csv"
+    si.build_index(tmp_path / "s", out, compute_symmetry=False)
+    _write(tmp_path / "s", "new.cif", SPLIT)
+    df = si.build_index(tmp_path / "s", out, compute_symmetry=False).df    # mixes reused + new
+    assert (df[df["path"].str.endswith(("/nacl.cif", "/new.cif", "/123.cif"))]["subfolder"] == "").all()
+    assert df[df["path"].str.endswith("/123.cif")].iloc[0]["data_block"] == "123"
+
+
+def test_symmetry_is_skipped_for_huge_cells_unless_asked(tmp_path, monkeypatch):
+    pytest.importorskip("pymatgen.core")
+    from ase.build import bulk
+    import ase.io
+    ase.io.write(tmp_path / "small.cif", bulk("Cu", "fcc", a=3.61, cubic=True), format="cif")
+    ase.io.write(tmp_path / "big.cif", bulk("Cu", "fcc", a=3.61, cubic=True).repeat((2, 2, 2)),
+                 format="cif")
+    monkeypatch.setattr(si, "SYMMETRY_MAX_ATOMS", 10)
+    auto = {Path(r["path"]).name: r for r in si.build_index(tmp_path).df.to_dict("records")}
+    assert auto["small.cif"]["computed_spacegroup_number"] == 225
+    assert pd.isna(auto["big.cif"]["computed_spacegroup_number"])
+    asked = si.parse_structure_file(tmp_path / "big.cif", tmp_path, compute_symmetry=True)
+    assert asked["computed_spacegroup_number"] == 225
+
+
+def test_the_xrd_view_leaves_out_files_nobody_can_read(tmp_path):
+    from scilink.skills.structure_matching._backends import _cif_index
+    _write(tmp_path, "nacl.cif", NACL)
+    _write(tmp_path, "broken.cif", "data_x\nthis is not a cif\n")
+    df = _cif_index._xrd_view(si.build_index(tmp_path, compute_symmetry=True).df)
+    assert [Path(p).name for p in df["path"]] == ["nacl.cif"]

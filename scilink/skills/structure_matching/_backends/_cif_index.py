@@ -69,7 +69,8 @@ def _xrd_view(df):
     the file the index's own values stand (the check rejects it anyway)."""
     if df is None or df.empty:
         return df
-    df = df.copy()
+    # a file neither ASE nor pymatgen could read cannot be a candidate
+    df = df[df["elements"].notna() | df["computed_elements"].notna()].copy()
     computed = pd.to_numeric(df["computed_spacegroup_number"], errors="coerce")
     declared = pd.to_numeric(df["spacegroup_number"], errors="coerce")
     df["declared_spacegroup_number"] = declared

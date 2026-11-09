@@ -18,7 +18,8 @@ A file that cannot be parsed still gets a row, with ``parse_error`` set, and
 is listed by :func:`build_index`: nothing is dropped silently.
 
 This module lives in ``scilink.utils`` because its worker processes import
-it: ``scilink.knowledge`` loads the embedding stack (~14 s) on import.
+it: ``scilink.knowledge`` loads the embedding stack (~14 s) on import, while
+this module (with the ``scilink`` package, torch included) takes ~0.6 s.
 """
 from __future__ import annotations
 
@@ -50,6 +51,12 @@ COLUMNS = [
     "partial_occupancy", "min_distance", "overlapping_atoms", "carbon_without_hydrogen",
     "sites_match_formula", "parse_error", "mtime", "size", "index_version",
 ]
+
+# Columns that hold text (CSV round trips must not turn them into numbers).
+_TEXT_COLUMNS = ["path", "subfolder", "file_format", "data_block", "database_id", "formula",
+                 "formula_source", "reduced_formula", "elements", "metals",
+                 "spacegroup_symbol", "crystal_system", "computed_spacegroup_symbol",
+                 "computed_elements", "mineral_name", "parse_error"]
 
 # Atoms that can coexist and sit closer than this (Å) are flagged as overlapping.
 OVERLAP_DISTANCE = 0.5
@@ -268,9 +275,9 @@ _SYSTEMS = [(2, "triclinic"), (15, "monoclinic"), (74, "orthorhombic"),
 
 
 def _crystal_system(number: Optional[int]) -> Optional[str]:
-    if not number or number < 1:
+    if not number or not 1 <= number <= 230:
         return None
-    return next(name for top, name in _SYSTEMS if number <= top)
+    return next((name for top, name in _SYSTEMS if number <= top), None)
 
 
 def _empty_row(path: Path, root: Optional[Path], fmt: Optional[str]) -> dict:
@@ -551,14 +558,20 @@ def _ase_row(path: Path, fmt: str, row: dict) -> dict:
     return counts
 
 
-def _computed_symmetry(path: Path, row: dict) -> None:
-    """pymatgen's space group, as the XRD backend has always computed it."""
+# With symmetry left to the default, pymatgen's space group is skipped for
+# cells larger than this (seconds per file); an explicit request computes it.
+SYMMETRY_MAX_ATOMS = 2000
+
+
+def _computed_symmetry(path: Path, row: dict, struct=None) -> None:
+    """pymatgen's space group, as the XRD backend has always computed it.
+    ``struct``: pymatgen's reading of the file when already made."""
     try:
         from pymatgen.core import Structure
     except ImportError:
         return
     try:
-        struct = Structure.from_file(str(path))
+        struct = struct if struct is not None else Structure.from_file(str(path))
     except Exception:
         row["computed_spacegroup_number"] = -1
         return
@@ -604,26 +617,28 @@ def parse_structure_file(path, root=None, compute_symmetry: Optional[bool] = Non
             row["parse_error"] = (f"{type(e).__name__}: {e}" if str(e)
                                   else f"unreadable {fmt} file ({type(e).__name__})")[:300]
             composition = None
+        struct = None
         if fmt == "cif" and row["n_atoms"] is None:
             # ASE could not read the file or its sites: pymatgen may (a value
             # spread over two lines, a tag ASE's tokenizer rejects)
-            filled = _pymatgen_fill(path, row)
+            filled, struct = _pymatgen_fill(path, row)
             composition = filled if filled is not None else composition
         if composition is None:
             return row
-        _finish_row(row, composition, path, compute_symmetry)
+        _finish_row(row, composition, path, compute_symmetry, struct)
     return row
 
 
-def _pymatgen_fill(path: Path, row: dict) -> Optional[dict]:
-    """Cell, composition and density from pymatgen, for a CIF ASE could not
-    read; ``parse_error`` keeps ASE's reason. None without pymatgen or when
-    pymatgen cannot read it either."""
+def _pymatgen_fill(path: Path, row: dict):
+    """``(composition, structure)`` from pymatgen, for a CIF ASE could not
+    read (cell, density and counts go into ``row``; ``parse_error`` keeps
+    ASE's reason). ``(None, None)`` without pymatgen or when pymatgen cannot
+    read it either."""
     try:
         from pymatgen.core import Structure
         struct = Structure.from_file(str(path))
     except Exception:
-        return None
+        return None, None
     lat = struct.lattice
     row.update(a=float(round(lat.a, 5)), b=float(round(lat.b, 5)), c=float(round(lat.c, 5)),
                alpha=float(round(lat.alpha, 4)), beta=float(round(lat.beta, 4)),
@@ -646,11 +661,11 @@ def _pymatgen_fill(path: Path, row: dict) -> Optional[dict]:
     elif row["formula_source"] == "declared":
         row["sites_match_formula"] = _same_composition(_parse_formula(row["formula"]), counts)
     row["parse_error"] = f"sites read by pymatgen; ASE: {row['parse_error']}"[:300]
-    return counts
+    return counts, struct
 
 
 def _finish_row(row: dict, composition: dict, path: Path,
-                compute_symmetry: Optional[bool]) -> None:
+                compute_symmetry: Optional[bool], struct=None) -> None:
     els = sorted(el for el, n in composition.items() if n > 1e-6)
     row["elements"] = "-".join(els) if els else None
     row["metals"] = "-".join(e for e in els if e not in _NONMETALS) or None
@@ -658,9 +673,9 @@ def _finish_row(row: dict, composition: dict, path: Path,
     row["reduced_formula"] = _formula(_reduce(composition)) if composition else None
     row["carbon_without_hydrogen"] = "C" in els and "H" not in els
     if compute_symmetry is None:
-        compute_symmetry = pymatgen_available()
+        compute_symmetry = pymatgen_available() and (row["n_atoms"] or 0) <= SYMMETRY_MAX_ATOMS
     if compute_symmetry:
-        _computed_symmetry(path, row)
+        _computed_symmetry(path, row, struct)
 
 
 def _parse_batch(payload: dict) -> list[dict]:
@@ -689,7 +704,15 @@ class IndexResult:
 def _read_saved(out_path: Path):
     import pandas as pd
     try:
-        df = pd.read_parquet(out_path) if out_path.suffix == ".parquet" else pd.read_csv(out_path)
+        if out_path.suffix == ".parquet":
+            df = pd.read_parquet(out_path)
+        else:
+            df = pd.read_csv(out_path, dtype={c: "object" for c in _TEXT_COLUMNS})
+            # read_csv turns text back into numbers or NaN: keep it text
+            for c in _TEXT_COLUMNS:
+                if c in df.columns:
+                    df[c] = df[c].map(lambda v: v if isinstance(v, str) else None)
+            df["subfolder"] = df["subfolder"].fillna("")
     except Exception as e:
         _logger.info("Rebuilding structure index %s (could not read it: %s)", out_path, e)
         return None
@@ -731,7 +754,9 @@ def _parse_many(paths: list[str], root: Path, compute_symmetry: Optional[bool],
         return [parse_structure_file(p, root, compute_symmetry) for p in paths]
 
     from .child_process import ChildLost, run_in_child
-    size = max(50, math.ceil(len(paths) / (workers * 4)))
+    from .log_context import attributed_to_current
+    # two chunks per worker: each child pays ~0.6 s of imports
+    size = max(50, math.ceil(len(paths) / (workers * 2)))
     chunks = [paths[i:i + size] for i in range(0, len(paths), size)]
     payload = lambda ch: {"paths": ch, "root": str(root), "compute_symmetry": compute_symmetry}
 
@@ -739,9 +764,15 @@ def _parse_many(paths: list[str], root: Path, compute_symmetry: Optional[bool],
         try:
             return run_in_child("scilink.utils.structure_index:_parse_batch", payload(ch))
         except ChildLost as e:
-            _logger.warning("Structure-index worker lost (%s); parsing %d files here",
+            if e.killed:
+                raise            # killed (Stop, memory guard): do not redo it here
+            _logger.warning("Structure-index worker failed (%s); parsing %d files here",
                             e.reason, len(ch))
             return _parse_batch(payload(ch))
+
+    # pool threads count as the calling turn's workers, so its Stop reaches
+    # the child processes they start
+    run = attributed_to_current(run, tag="index")
 
     rows: list[dict] = []
     done = 0
@@ -770,8 +801,9 @@ def build_index(root, out_path=None, *, recursive: bool = True, refresh: bool = 
     out_path = Path(out_path) if out_path is not None else None
     # pymatgen's space group only when asked for (default: when installed)
     # and installed: a request without pymatgen must not mark every row stale
-    compute_symmetry = pymatgen_available() if compute_symmetry is None else (
-        bool(compute_symmetry) and pymatgen_available())
+    # None: per file, when pymatgen is installed and the cell is not huge
+    if compute_symmetry is not None:
+        compute_symmetry = bool(compute_symmetry) and pymatgen_available()
 
     saved = None if (refresh or out_path is None or not out_path.is_file()) else _read_saved(out_path)
     keep = None
@@ -784,8 +816,12 @@ def build_index(root, out_path=None, *, recursive: bool = True, refresh: bool = 
         same = ((merged["_mtime"] - merged["mtime"].astype(float)).abs() < 1e-3) & \
                (merged["_size"] == pd.to_numeric(merged["size"], errors="coerce").fillna(-1))
         # a saved row without computed symmetry is reparsed once it is wanted
-        if compute_symmetry:
-            same &= merged["computed_spacegroup_number"].notna() | merged["parse_error"].notna()
+        if compute_symmetry or (compute_symmetry is None and pymatgen_available()):
+            n = pd.to_numeric(merged["n_atoms"], errors="coerce")
+            wanted = (pd.Series(True, index=merged.index) if compute_symmetry
+                      else n.fillna(0) <= SYMMETRY_MAX_ATOMS)
+            same &= ~wanted | merged["computed_spacegroup_number"].notna() | \
+                merged["parse_error"].notna()
         keep = merged[same].drop(columns=["_mtime", "_size"])[COLUMNS]
         kept = set(keep["path"])
         to_parse = [p for p in to_parse if p not in kept]
