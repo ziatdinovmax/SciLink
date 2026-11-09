@@ -436,6 +436,13 @@ To inspect or query data files before deciding on a workflow, use `read_file` an
       * query_knowledge_data(query="average Li concentration in Permian Basin", file_name="PWSdatabase.xlsx")
       * query_knowledge_data(query="find all MOFs with void fraction > 0.8")
       * query_knowledge_data(query="how many unique basins are represented?")
+9c. `index_structures`: Turn a folder of crystal-structure files (CIF, POSCAR, xyz; subfolders
+    included) into a CSV with one row per file: formula, elements, cell parameters, density,
+    space group, and quality flags (partial occupancy, overlapping atoms, missing hydrogens).
+    - Call it FIRST for a structure collection, then query its `index_file` with
+      `query_knowledge_data` (elements present or absent, space group, lattice ranges for
+      substrate matching, density windows, structures fit for computation).
+    - A rerun parses only new or changed files.
 
 **OPTIMIZATION TOOLS:**
 10. `run_optimization`: Mathematical parameter suggestions via Bayesian Optimization.

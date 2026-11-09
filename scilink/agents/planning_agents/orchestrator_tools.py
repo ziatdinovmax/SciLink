@@ -7048,6 +7048,71 @@ class OrchestratorTools:
 
         from functools import lru_cache as _lru_cache
 
+        # A folder whose files (subfolders included) are mostly structure files
+        # is indexed first (#804): a generated script that parses every CIF
+        # runs into the query timeout, and the top-level sample misses a tree.
+        _STRUCTURE_SCAN_LIMIT = 20000
+        # Records a generated script queries as a table; they can rival a
+        # structure collection in one folder.
+        _RECORD_EXTENSIONS = {".json", ".csv", ".xlsx", ".xls", ".parquet", ".tsv"}
+
+        def _structure_collection(dir_path: str) -> Optional[dict]:
+            """``{"structure_files", "files"}`` when ``dir_path`` (subfolders
+            included) holds at least DIR_DB_MIN_FILES structure files and no
+            table-like records rival them (a folder of CIFs beside as many CSV
+            or JSON records stays queryable as it is; companion files such as
+            .hkl/.fcf, or a few stray records, do not count). None otherwise.
+            Stops counting after _STRUCTURE_SCAN_LIMIT files."""
+            import os as _os
+            from collections import Counter
+            from scilink.utils.structure_index import structure_format
+            n_files = n_struct = 0
+            others: Counter = Counter()
+            for root, dirs, files in _os.walk(dir_path):
+                dirs[:] = [d for d in dirs if not d.startswith('.')]
+                for name in files:
+                    if name.startswith('.'):
+                        continue
+                    n_files += 1
+                    if structure_format(name) is not None:
+                        n_struct += 1
+                    else:
+                        ext = Path(name).suffix.lower()
+                        if ext in _RECORD_EXTENSIONS:
+                            others[ext] += 1
+                if n_files >= _STRUCTURE_SCAN_LIMIT:
+                    break
+            if n_struct < DIR_DB_MIN_FILES:
+                return None
+            if any(n >= max(DIR_DB_MIN_FILES, n_struct // 2) for n in others.values()):
+                return None
+            return {"structure_files": n_struct, "files": n_files}
+
+        def _index_first(dir_path: str, tool: str) -> Optional[str]:
+            """The answer for a query on a structure collection: index it first
+            (or query its index, when it exists). None for any other folder."""
+            found = _structure_collection(dir_path)
+            if found is None:
+                return None
+            index_file = _structure_index_file(Path(dir_path))
+            more = "+" if found["files"] >= _STRUCTURE_SCAN_LIMIT else ""
+            if index_file.is_file():
+                step = (f"It is indexed: call query_knowledge_data(query=..., "
+                        f"file_name='{index_file}') (rerun index_structures first "
+                        "if files changed).")
+            else:
+                step = (f"Call index_structures(directory='{dir_path}') first, then "
+                        "query the index_file it returns with query_knowledge_data.")
+            return json.dumps({
+                "status": "index_structures_first",
+                "tool": tool,
+                "directory": dir_path,
+                "structure_files": f"{found['structure_files']}{more}",
+                "message": (f"This folder holds {found['structure_files']}{more} structure "
+                            f"files (CIF/POSCAR/xyz, subfolders included). A script that "
+                            f"parses each one does not fit the query time limit. {step}"),
+            })
+
         @_lru_cache(maxsize=32)
         def _inspect_directory(dir_path: str) -> dict:
             """Summarize directory contents for LLM-driven querying.
@@ -7518,6 +7583,13 @@ class OrchestratorTools:
                     "available_files": [f["name"] for f in queryable]
                 })
 
+            # a structure collection is indexed first (#804): answered before
+            # the consent below, since no generated code would run
+            if isinstance(target, dict) and target.get("type") == "directory":
+                index_first = _index_first(target["path"], "query_knowledge_data")
+                if index_first:
+                    return index_first
+
             # the query runs model-written code: the same consent every other
             # code-generation path asks for (#685), asked once the data is found,
             # so "no queryable files" and "declined" read differently
@@ -7734,6 +7806,14 @@ class OrchestratorTools:
 
             print(f"  ⚡ Tool: screen_database  '{query}'  top_k={top_k}")
 
+            # a structure collection is indexed first (#804): answered before
+            # the consent below, since no generated code would run
+            _direct = Path(database_path).expanduser()
+            if _direct.is_dir():
+                index_first = _index_first(str(_direct.resolve()), "screen_database")
+                if index_first:
+                    return index_first
+
             if not require_sandbox_approval(
                 interactive=True, allow_override=True,
                 context=f"Database screening over {database_path}",
@@ -7761,6 +7841,9 @@ class OrchestratorTools:
                                     f"files use query_knowledge_data."),
                     })
 
+            index_first = _index_first(dir_path, "screen_database")
+            if index_first:
+                return index_first
             print(f"    - Inspecting directory: {dir_name}")
             try:
                 info = _inspect_directory(dir_path)
@@ -7951,6 +8034,127 @@ class OrchestratorTools:
                 },
             },
             required=["query", "database_path"],
+        )
+
+        # =====================================================================
+        # STRUCTURE INDEX (#804): a folder of CIF / POSCAR / xyz files as a table
+        # =====================================================================
+        def _structure_index_file(dir_path: Path) -> Path:
+            """Where the index of ``dir_path`` lives: one CSV per folder, in the
+            session's knowledge folder, where query_knowledge_data finds it."""
+            import hashlib
+            import re as _re
+            h = hashlib.sha256(str(dir_path.resolve()).encode("utf-8")).hexdigest()[:8]
+            name = _re.sub(r"[^A-Za-z0-9_.-]+", "_", dir_path.name)[:40] or "structures"
+            return Path(self.orch.base_dir) / "knowledge" / f"structure_index_{name}_{h}.csv"
+
+        def _structure_folder(directory: str):
+            """``(folder, error)`` for a path, or a folder name under a knowledge
+            directory (subfolders included: a CIF tree need not look like a
+            directory database to be found by name)."""
+            direct = Path(directory).expanduser()
+            if direct.is_dir():
+                return direct.resolve(), None
+            roots = [Path(self.orch.base_dir) / "knowledge"]
+            if self.orch.knowledge_dir:
+                roots.insert(0, Path(self.orch.knowledge_dir))
+            for root in roots:
+                if (root / directory).is_dir():
+                    return (root / directory).resolve(), None
+            target, err = _resolve_knowledge_data_file(directory)
+            if err:
+                return None, err
+            tpath = target["path"] if isinstance(target, dict) else target
+            if not Path(tpath).is_dir():
+                return None, json.dumps({"status": "error", "message": (
+                    f"index_structures takes a folder; got '{directory}'.")})
+            return Path(tpath).resolve(), None
+
+        def index_structures(directory: str, recursive: bool = True,
+                             refresh: bool = False) -> str:
+            """Index a folder of structure files into a CSV, one row per file."""
+            from scilink.utils import structure_index as _si
+
+            print(f"  ⚡ Tool: index_structures  '{directory}'  recursive={recursive}")
+            dir_path, err = _structure_folder(directory)
+            if err:
+                return err
+            out = _structure_index_file(dir_path)
+            try:
+                result = _si.build_index(dir_path, out, recursive=recursive, refresh=refresh)
+            except Exception as e:
+                return json.dumps({"status": "error",
+                                   "message": f"Indexing {dir_path} failed: {type(e).__name__}: {e}"})
+            if not len(result.df):
+                return json.dumps({"status": "error", "message": (
+                    f"No structure files under {dir_path}"
+                    f"{'' if recursive else ' (top level only; try recursive=True)'}. "
+                    "Indexed formats: .cif, POSCAR/CONTCAR/.vasp, .xyz/.extxyz, .lmp.")})
+            summary = _si.summarize(result)
+            print(f"    - {summary['n_rows']} files indexed ({summary['n_parsed']} parsed, "
+                  f"{summary['n_reused']} reused, {summary['n_failed']} unreadable) → {out.name}")
+            return json.dumps({
+                "status": "success",
+                "directory": str(dir_path),
+                "index_file": str(out),
+                **summary,
+                "column_notes": (
+                    "One row per file. elements and metals are '-'-joined symbols "
+                    "('Fe-O'): split on '-' to test an element (a substring test "
+                    "would match 'F' inside 'Fe'). formula: as declared in the CIF "
+                    "(formula_source='declared') or counted from the atom sites "
+                    "weighted by occupancy ('counted'); reduced_formula and elements "
+                    "(e.g. 'O-Ti') are from the sites. spacegroup_number / "
+                    "crystal_system: as declared; computed_spacegroup_number: "
+                    "pymatgen's, when installed (spacegroup_mismatch when they "
+                    "differ). density in g/cm^3, volume in A^3, volume_per_atom in "
+                    "A^3/atom, n_atoms per cell. Quality flags: partial_occupancy, "
+                    "overlapping_atoms (min_distance in A between atoms that can "
+                    "coexist), carbon_without_hydrogen, sites_match_formula (False: "
+                    "the sites differ from the declared formula, e.g. hydrogens "
+                    "not placed). parse_error is set for files that could not be "
+                    "read, fully or in part."),
+                "next_steps": (
+                    f"Query the index with query_knowledge_data(query=..., "
+                    f"file_name='{out}'). Rerun index_structures after files change "
+                    "(only new or changed files are parsed)."),
+            }, default=str)
+
+        self._register_tool(
+            func=index_structures,
+            name="index_structures",
+            description=(
+                "Index a folder of crystal-structure files (CIF; also POSCAR/"
+                "CONTCAR, xyz/extxyz, LAMMPS data), subfolders included, into a "
+                "CSV table with one row per file: formula, elements, cell "
+                "parameters, volume, density, space group and crystal system, "
+                "and quality flags (partial occupancy, overlapping atoms, carbon "
+                "without hydrogen, sites that differ from the declared formula). "
+                "Call it before querying a structure collection: search the "
+                "returned index_file with query_knowledge_data (by elements, "
+                "space group, lattice-parameter or density ranges, fitness for "
+                "computation, whether a composition is present). Incremental: "
+                "a rerun parses only new or changed files. Reads files only; "
+                "runs no generated code."
+            ),
+            parameters={
+                "directory": {
+                    "type": "string",
+                    "description": (
+                        "Absolute path to the folder of structure files, or the "
+                        "folder's name if it is under the knowledge directory."
+                    ),
+                },
+                "recursive": {
+                    "type": "boolean",
+                    "description": "Include subfolders (default true).",
+                },
+                "refresh": {
+                    "type": "boolean",
+                    "description": "Re-parse every file instead of reusing the saved index (default false).",
+                },
+            },
+            required=["directory"],
         )
 
         # =====================================================================

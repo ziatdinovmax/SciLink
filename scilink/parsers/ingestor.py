@@ -25,9 +25,8 @@ def is_directory_database_extension(ext: str) -> bool:
 
     Documents (PDF, text, markdown, code) never do: they are embedded one
     by one. Images never do: they go to the vision path. Everything else —
-    JSON and CSV records, spreadsheets, formats the ingestor does not read
-    (.cif, .xyz, ...) — does, once a folder holds ``DIR_DB_MIN_FILES`` of
-    them. One predicate for the ingestor and the knowledge-data scanner,
+    JSON and CSV records, spreadsheets, structure files (.cif, .xyz, ...) —
+    does, once a folder holds ``DIR_DB_MIN_FILES`` of them. One predicate for the ingestor and the knowledge-data scanner,
     so a folder is never a database to one and documents to the other.
     """
     ext = (ext or "").lower()
@@ -68,6 +67,14 @@ def get_files_from_directory(directory_path: str) -> List[str]:
 
     print(f"  - 📂 Scanning directory: {path.name}...")
 
+    # Structure files (CIF, POSCAR, xyz) found by scanning are not embedded:
+    # a structure collection is often one file per subfolder, which the
+    # per-folder database rule never catches, and embedding thousands of
+    # CIFs as text helps no search. Plan mode's index_structures makes them
+    # a table. A CIF passed explicitly as a file is still read as text.
+    from scilink.utils.structure_index import structure_format
+    n_structures = 0
+
     for root, dirs, files in os.walk(path):
         # In-place modification to skip hidden dirs and common junk
         dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('__pycache__', 'venv', 'env', 'node_modules', '.git')]
@@ -78,8 +85,13 @@ def get_files_from_directory(directory_path: str) -> List[str]:
             file_path = Path(root) / file
             if file_path.suffix.lower() in SUPPORTED_EXTENSIONS:
                 found_files.append(str(file_path))
+            elif structure_format(file_path) is not None:
+                n_structures += 1
 
     print(f"    -> Found {len(found_files)} files in directory.")
+    if n_structures:
+        print(f"    -> {n_structures} structure files (CIF/POSCAR/xyz) not embedded; "
+              "index them with plan mode's index_structures to search them")
     return found_files
 
 def extract_images(file_paths: List[str]) -> List[str]:
@@ -181,7 +193,7 @@ def ingest_files(file_paths: List[str], is_code_mode: bool, code_chunk_size: int
             continue # Skip, handled by extract_images
         
         # --- ROUTE C: Text & Code Files ---
-        elif file_ext in ['.txt', '.md', '.py', '.java', '.r', '.cpp', '.h', '.js', '.json', '.csv']:
+        elif file_ext in ['.txt', '.md', '.py', '.java', '.r', '.cpp', '.h', '.js', '.json', '.csv', '.cif']:
             try:
                 with path.open('r', encoding='utf-8') as f: content = f.read()
                 
