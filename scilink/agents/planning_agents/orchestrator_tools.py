@@ -6996,8 +6996,7 @@ class OrchestratorTools:
         # A directory database is the ingestor's notion (one rule for both:
         # a folder the ingestor leaves out is the folder this tool serves,
         # and a folder of documents is neither).
-        from scilink.parsers.ingestor import (
-            DIR_DB_MIN_FILES, is_directory_database_extension)
+        from scilink.parsers.ingestor import DIR_DB_MIN_FILES, directory_databases
 
         def _summarize_json_value(value, max_str_len=200):
             """Return a compact string representation of a JSON value."""
@@ -7172,8 +7171,6 @@ class OrchestratorTools:
 
         def _discover_queryable_files() -> list:
             """Scan knowledge directories for queryable data files and directory databases."""
-            from collections import Counter
-
             search_dirs = set()
             # User-specified knowledge folder (or kb_storage/ default)
             if self.orch.knowledge_dir and Path(self.orch.knowledge_dir).exists():
@@ -7198,14 +7195,10 @@ class OrchestratorTools:
                         dirs_to_check.append(child)
 
             for d in dirs_to_check:
-                ext_counts = Counter()
-                for f in d.iterdir():
-                    if f.is_file() and not f.name.startswith('.'):
-                        ext_counts[f.suffix.lower()] += 1
-                # If any extension has enough files, treat whole directory as database
-                db_exts = {ext: count for ext, count in ext_counts.items()
-                           if count >= DIR_DB_MIN_FILES
-                           and is_directory_database_extension(ext)}
+                # The ingestor's rule, applied to this folder's own files
+                db_exts = {ext: count for (_, ext), count in directory_databases(
+                    [str(f) for f in d.iterdir()
+                     if f.is_file() and not f.name.startswith('.')]).items()}
                 if db_exts:
                     parts = ", ".join(f"{c} {e}" for e, c in sorted(db_exts.items()))
                     display_name = f"{d.name} ({parts} files)"

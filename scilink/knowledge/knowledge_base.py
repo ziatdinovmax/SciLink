@@ -422,6 +422,9 @@ class KnowledgeBase:
                 query_embedding.shape[1], what="query embeddings")
             raise EmbeddingDimensionMismatch(self._dense_disabled_reason)
 
+        # The OpenMP pin is per thread: a chat turn searches on its own thread.
+        from ._faiss import load_faiss
+        load_faiss()
         distances, indices = self.index.search(query_embedding, top_k)
         
         # Retrieve valid chunks (filtering out potential index errors)

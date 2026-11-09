@@ -647,6 +647,12 @@ def sandbox_env(extra: "dict | None" = None, source: "dict | None" = None) -> di
             continue
         if k in _SANDBOX_ENV_NAMES or k.startswith(_SANDBOX_ENV_PREFIXES):
             env[k] = v
+    # The duplicate-OpenMP allowance SciLink sets for its own process (see
+    # scilink/__init__.py) is not passed on: it trades a loud abort for a
+    # possibly wrong result, which a generated script must not inherit
+    # silently. A value the user set stays, as does the escape hatch below.
+    if src.get("_SCILINK_SET_KMP_DUPLICATE_LIB_OK"):
+        env.pop("KMP_DUPLICATE_LIB_OK", None)
     for name in (src.get("SCILINK_SANDBOX_ENV") or "").split(","):
         name = name.strip()
         if name and name in src:

@@ -803,7 +803,21 @@ existing directory wins over a same-named KB). Two settled rules:
 - **Retrieval is grounding, not a dependency.** Retrieval degrades
   through tiers — dense, then model-free keyword (BM25) over the stored
   chunks, then no-context — each with a warning; it must never abort
-  generation.
+  generation. A KB is retrievable when it HOLDS CHUNKS
+  (`rag_engine.kb_has_content`), with or without a dense index: a
+  keyword-only KB (no embedding model) has no index by design, and gating
+  on the index left it unread by every plan call.
+- **A folder of documents is never a directory database.** The folder
+  rule (`DIR_DB_MIN_FILES` of one extension in one folder → left out of
+  the KB, served by `query_knowledge_data`) applies to RECORDS only —
+  `ingestor.is_directory_database_extension`: not a document (PDF, text,
+  markdown, code; ten `.txt` files are ten documents), not an image. The
+  planning tool's knowledge-data DISCOVERY shares that one rule
+  (`directory_databases`), so a folder is never a database to one and
+  documents to the other; its SAMPLING step takes a folder a caller names
+  outright as the database the caller says it is (how a folder of `.txt`
+  records is still queried). A count-only rule dropped every upload of ten
+  papers, since the web saves them into one `knowledge/` folder.
 
 ## Why no `BaseChatOrchestrator` refactor
 
