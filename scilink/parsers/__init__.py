@@ -26,6 +26,10 @@ from .ingestor import (
     ingest_files,
     extract_images,
     get_files_from_directory,
+    directory_databases,
+    is_directory_database_extension,
+    DIR_DB_MIN_FILES,
+    DOCUMENT_EXTENSIONS,
     SUPPORTED_EXTENSIONS,
 )
 
@@ -40,5 +44,9 @@ __all__ = [
     "ingest_files",
     "extract_images",
     "get_files_from_directory",
+    "directory_databases",
+    "is_directory_database_extension",
+    "DIR_DB_MIN_FILES",
+    "DOCUMENT_EXTENSIONS",
     "SUPPORTED_EXTENSIONS",
 ]

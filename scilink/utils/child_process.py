@@ -131,6 +131,10 @@ def run_child(target: str, payload: Any, *, log_path: Optional[str] = None) -> C
     os.close(fd)
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(os.path.abspath(p or os.curdir) for p in sys.path)
+    # The child is a SciLink interpreter whose console (emoji narration) goes to
+    # a log or the caller's console: UTF-8 mode, as the CLI runs itself.
+    # A caller who set it stays in charge.
+    env.setdefault("PYTHONUTF8", "1")
     caller_pythonpath = json.dumps(os.environ.get("PYTHONPATH"))
     log_fh = None
     if log_path:

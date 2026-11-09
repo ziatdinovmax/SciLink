@@ -137,12 +137,27 @@ def parse_json_from_response(resp) -> "Tuple[Optional[Dict[str, Any]], Optional[
         )
 
 
+def kb_has_content(kb: Any) -> bool:
+    """Whether ``kb`` has anything to retrieve from: stored chunks (the
+    content; a keyword-only KB has only these) or a non-empty dense index."""
+    if kb is None:
+        return False
+    if getattr(kb, "chunks", None):
+        return True
+    index = getattr(kb, "index", None)
+    return bool(index) and getattr(index, "ntotal", 0) > 0
+
+
 def retrieve_context(kb: Any, query: str, top_k: int = 10, dedupe: bool = True) -> str:
     """Retrieve the top-k chunks for ``query`` from a ``KnowledgeBase`` and
     format them into a prompt-ready context block.
 
     The generic RAG retrieval step, with graceful degradation tiers. Returns
-    an empty string when the KB is empty or unbuilt. When dense retrieval
+    an empty string when the KB is empty or unbuilt. A KB is retrievable
+    when it HOLDS CHUNKS, with or without a dense index: a keyword-only KB
+    (built with no embedding model) has no index by design, and
+    ``kb.retrieve`` serves it through BM25. Gating on the index here left
+    such a KB unread by every plan-generation call. When dense retrieval
     fails (e.g. the query embedding call errors because the embedding
     provider that built the index is unavailable), keyword (BM25) retrieval
     over the stored chunk text takes over — model-free, so it works for any
@@ -150,7 +165,7 @@ def retrieve_context(kb: Any, query: str, top_k: int = 10, dedupe: bool = True) 
     yields nothing does generation proceed without retrieved context: a KB
     is grounding, not a dependency, and retrieval must never kill it.
     """
-    if not (kb is not None and kb.index and kb.index.ntotal > 0):
+    if not kb_has_content(kb):
         return ""
 
     from .knowledge_base import describe_error

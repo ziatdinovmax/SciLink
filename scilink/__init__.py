@@ -1,3 +1,19 @@
+import os as _os
+import sys as _sys
+
+# On macOS the torch and faiss-cpu wheels each bundle their own libomp.dylib.
+# Importing torch first (below) decides which copy loads first, but both
+# still load, and the second aborts the process ("OMP: Error #15") the first
+# time faiss runs a search — every dense knowledge-base lookup. Before any
+# import, so it is set when either runtime initializes; a value the user set
+# is kept. The marker tells ``executors.sandbox_env`` that SciLink set it, so
+# a generated script runs as it would without SciLink (a duplicate runtime
+# there aborts loudly instead of risking wrong results); child processes
+# inherit both and keep that knowledge.
+if _sys.platform == "darwin" and "KMP_DUPLICATE_LIB_OK" not in _os.environ:
+    _os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+    _os.environ["_SCILINK_SET_KMP_DUPLICATE_LIB_OK"] = "1"
+
 from importlib.metadata import version as _pkg_version, PackageNotFoundError
 
 try:

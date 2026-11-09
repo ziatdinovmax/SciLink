@@ -291,6 +291,31 @@ def test_the_target_runs_with_the_callers_pythonpath(monkeypatch):
     assert run_in_child("os:getenv", "PYTHONPATH") is None
 
 
+
+def test_run_child_starts_the_child_in_utf8_mode(monkeypatch):
+    """The child is a SciLink interpreter whose console (emoji narration) goes
+    to a log or the caller's console: it starts in UTF-8 mode, as the CLI runs
+    itself, and a caller's own value stays. Pinned on the environment handed to
+    the tracked runner, so no interpreter is started."""
+    import pickle
+    from scilink import executors
+    seen = []
+
+    def fake_run_tracked(argv, *, env=None, **kw):
+        seen.append(dict(env))
+        with open(argv[-2], "wb") as f:              # the result file the child would write
+            pickle.dump(("returned", "ok"), f)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(executors, "_run_tracked", fake_run_tracked)
+    monkeypatch.delenv("PYTHONUTF8", raising=False)
+    assert run_in_child("os:getcwd", None) == "ok"
+    assert seen[-1]["PYTHONUTF8"] == "1"
+    monkeypatch.setenv("PYTHONUTF8", "0")
+    run_in_child("os:getcwd", None)
+    assert seen[-1]["PYTHONUTF8"] == "0"                 # the caller's own value stays
+
+
 SHADOWED_DRIVER = """
 import sys
 sys.path.insert(1, {repo!r})
