@@ -2705,6 +2705,13 @@ def _required_outputs_prompt(objective: str, target: dict) -> str:
     )
 
 
+def _has_custom_code_target(plan) -> bool:
+    """Whether a plan (the planner's JSON) holds a `custom_code` target."""
+    targets = plan.get("targets") if isinstance(plan, dict) else None
+    return isinstance(targets, list) and any(
+        isinstance(t, dict) and t.get("type") == "custom_code" for t in targets)
+
+
 class SelectRefinementTargetController:
     """
     [🧠 LLM Step]
@@ -2762,6 +2769,38 @@ class SelectRefinementTargetController:
         self.logger.info(
             f"🎯 Required outputs declared for the target: {keys or '[] (none required)'}"
             f" — {str(result_json.get('reason') or '').strip()[:200]}")
+
+    def _ask_for_custom_code_target(self, prompt_parts: list, first: dict) -> dict:
+        """With decomposition skipped, a plan with no `custom_code` target
+        runs nothing, and the run used to end as a report written from no
+        data. Ask once more, showing the plan; keep the first answer if the
+        second is no better (the dynamic-analysis step then records that
+        nothing was measured)."""
+        self.logger.warning("Analysis plan has no custom_code target although "
+                            "decomposition was skipped; asking once more.")
+        retry_parts = list(prompt_parts) + [
+            f"\n\n--- YOUR PREVIOUS ANSWER ---\n{json.dumps(first, indent=2, default=str)}",
+            "\n\nDecomposition was skipped, so a `custom_code` target is the only "
+            "way anything in this plan is measured, and your answer has none: "
+            "return the plan again with the measurement the objective asks for "
+            "as a `custom_code` target.",
+        ]
+        try:
+            response = self.model.generate_content(
+                contents=retry_parts,
+                generation_config=None,
+                safety_settings=self.safety_settings,
+            )
+            second, error_dict = self._parse_llm_response(response)
+        except Exception as e:  # noqa: BLE001 - the retry is an addition, never a blocker
+            self.logger.warning(f"Re-asking for a custom_code target failed: {e}")
+            return first
+        if error_dict or not _has_custom_code_target(second):
+            self.logger.warning("The second answer has no custom_code target either; "
+                                "keeping the first.")
+            return first
+        self.logger.info("🎯 The second answer has a custom_code target; using it.")
+        return second
 
     def __init__(self, model, logger, generation_config, safety_settings, parse_fn: Callable):
         self.model = model
@@ -2972,8 +3011,12 @@ refinement targets are meaningful here — do not request `spatial` or
 
             if error_dict:
                 self.logger.error(f"LLM refinement selection failed: {error_dict}. Stopping loop.")
-                state["refinement_decision"] = {"refinement_needed": False, "reasoning": "LLM selection failed."}
+                state["refinement_decision"] = {"refinement_needed": False, "reasoning": "LLM selection failed.",
+                                                 "planning_failed": True}
                 return state
+
+            if skip_mode and not _has_custom_code_target(result_json):
+                result_json = self._ask_for_custom_code_target(prompt_parts, result_json)
 
             # Get Raw Targets
             raw_targets = result_json.get("targets", [])
@@ -3023,7 +3066,8 @@ refinement targets are meaningful here — do not request `spatial` or
 
         except Exception as e:
             self.logger.error(f"❌ LLM Step Failed: Refinement selection: {e}", exc_info=True)
-            state["refinement_decision"] = {"refinement_needed": False, "reasoning": f"Exception: {e}"}
+            state["refinement_decision"] = {"refinement_needed": False, "reasoning": f"Exception: {e}",
+                                             "planning_failed": True}
             
         return state
     
@@ -3516,6 +3560,23 @@ class RunDynamicAnalysisController:
         
         # Gatekeeping: If no code requested, skip
         if not custom_targets and not decision.get("requires_custom_code", False):
+            if state.get("skip_decomposition"):
+                # Decomposition was skipped, so this was the only stage that
+                # measures anything: a plan with nothing to run is not a
+                # success (the planner already re-asked once).
+                self.logger.warning("Decomposition was skipped and the plan has no "
+                                    "custom_code target: nothing was measured.")
+                why = ("The analysis planner failed"
+                       if decision.get("planning_failed")
+                       else "The analysis plan had nothing to compute")
+                state.setdefault("degradation_notes", []).append({
+                    "kind": "withheld",
+                    "confidence": "none",
+                    "missing_required": [],
+                    "caveat": (f"{why}, so no maps or measurements were "
+                               "produced. Any description of the data is not "
+                               "based on a measurement."),
+                })
             return state
 
         self.logger.info(f"\n\n💻 --- DYNAMIC ANALYSIS: PROCESSING {len(custom_targets)} TASKS --- 💻\n")
