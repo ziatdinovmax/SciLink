@@ -173,7 +173,7 @@ def _read_structure(path: Path):
     try:
         from ase.io import read
     except ImportError:
-        raise ValueError("drawing a structure needs ASE — install scilink[sim]")
+        raise ValueError("drawing a structure needs ASE (pip install ase)")
     from scilink.utils.structure_views import _center_structure_for_visualization
 
     size = path.stat().st_size
