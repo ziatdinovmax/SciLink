@@ -54,8 +54,13 @@ def _run(req, devnull, home):
         os.dup2(err_fd, 2)
         os.close(out_fd)
         os.close(err_fd)
-        sys.stdout = io.TextIOWrapper(os.fdopen(os.dup(1), "wb"), encoding="utf-8", line_buffering=True)
-        sys.stderr = io.TextIOWrapper(os.fdopen(os.dup(2), "wb"), encoding="utf-8", line_buffering=True)
+        # The error handlers UTF-8 mode gives a fresh interpreter's streams: a
+        # surrogate-escaped file name prints on stdout instead of raising, as
+        # it does under the cold executor, and the read-back below replaces it.
+        sys.stdout = io.TextIOWrapper(os.fdopen(os.dup(1), "wb"), encoding="utf-8",
+                                      errors="surrogateescape", line_buffering=True)
+        sys.stderr = io.TextIOWrapper(os.fdopen(os.dup(2), "wb"), encoding="utf-8",
+                                      errors="backslashreplace", line_buffering=True)
         sys.argv = [script]
         try:
             runpy.run_path(script, run_name="__main__")

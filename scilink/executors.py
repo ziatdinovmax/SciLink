@@ -600,7 +600,7 @@ def get_execution_description():
 _SANDBOX_ENV_NAMES = frozenset({
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LANGUAGE",
     "TMPDIR", "TEMP", "TMP", "DISPLAY", "PWD",
-    "PYTHONPATH", "PYTHONHOME", "PYTHONHASHSEED", "PYTHONIOENCODING",
+    "PYTHONPATH", "PYTHONHOME", "PYTHONHASHSEED",
     "PYTHONUNBUFFERED", "PYTHONDONTWRITEBYTECODE", "PYTHONWARNINGS",
     "VIRTUAL_ENV", "MPLBACKEND", "MPLCONFIGDIR", "MP_API_KEY",
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
@@ -625,6 +625,14 @@ _SANDBOX_ENV_PREFIXES = (
 # Never passed, whatever family they fall in.
 _SANDBOX_ENV_DENY = frozenset({"SCILINK_API_KEY", "SCILINK_WEB_TOKEN", "HF_TOKEN"})
 _SECRET_SUFFIXES = ("_TOKEN", "_SECRET", "_PASSWORD", "_PASSWD", "_CREDENTIALS")
+# What every generated script's interpreter is told about its encoding,
+# and how the executors decode what it writes. UTF-8 mode alone: it gives
+# stdout ``utf-8`` with ``surrogateescape``, so a print of a file name that
+# is not valid UTF-8 (surrogate-escaped by ``os.listdir``) still writes.
+# ``PYTHONIOENCODING=utf-8`` beside it would make stdout strict, and that
+# print would raise and spend the attempt.
+SANDBOX_UTF8_ENV = {"PYTHONUTF8": "1"}
+SANDBOX_PIPE_ENCODING = {"encoding": "utf-8", "errors": "replace"}
 
 
 def sandbox_env(extra: "dict | None" = None, source: "dict | None" = None) -> dict:
@@ -643,6 +651,16 @@ def sandbox_env(extra: "dict | None" = None, source: "dict | None" = None) -> di
         name = name.strip()
         if name and name in src:
             env[name] = src[name]
+    # A generated script runs in UTF-8 mode on every platform: the
+    # executors decode its pipes as UTF-8, so its stdio must write UTF-8 too.
+    # Without this the child's stdout took the locale encoding (cp1252 on
+    # Windows) and a print of a check mark raised UnicodeEncodeError, costing
+    # a whole attempt. A parent's PYTHONIOENCODING is dropped here, after the
+    # allowlist and the escape hatch: it would win over UTF-8 mode and pin the
+    # child's stdout to a legacy encoding, or to a strict one. Both come
+    # before ``extra``, which an executor passes deliberately.
+    env.pop("PYTHONIOENCODING", None)
+    env.update(SANDBOX_UTF8_ENV)
     env.update({str(k): str(v) for k, v in (extra or {}).items() if v is not None})
     return env
 
@@ -755,7 +773,7 @@ def run_generated_script(script_path, *, timeout=None, args=None, cwd=None, extr
     paths the script was given still resolve."""
     argv = [sys.executable, str(script_path), *[str(a) for a in (args or [])]]
     return _run_tracked(argv, timeout=timeout, cwd=cwd, env=sandbox_env(extra_env),
-                        preexec=_sandbox_preexec())
+                        preexec=_sandbox_preexec(), **SANDBOX_PIPE_ENCODING)
 
 
 def run_engine(cmd, *, timeout=None, cwd=None, env=None, shell=False, input=None, text=None,
@@ -834,6 +852,7 @@ class ScriptExecutor:
                 text=True, env=env, cwd=script_dir,
                 preexec_fn=_sandbox_preexec(),
                 start_new_session=_NEW_SESSION,
+                **SANDBOX_PIPE_ENCODING,   # the child writes UTF-8 (sandbox_env); read it as such
             )
             _mark_own_group(proc)
             # Register so OutputCapture.kill_subprocesses() can terminate it.
@@ -914,7 +933,8 @@ class WarmScriptExecutor(ScriptExecutor):
                 [sys.executable, "-u", worker], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, text=True, bufsize=1,
                 env=sandbox_env({"MP_API_KEY": self.mp_api_key} if self.mp_api_key else None),
-                preexec_fn=_sandbox_preexec(), start_new_session=_NEW_SESSION)
+                preexec_fn=_sandbox_preexec(), start_new_session=_NEW_SESSION,
+                **SANDBOX_PIPE_ENCODING)   # the protocol is UTF-8 on both sides
             _mark_own_group(self._proc)
             ready = self._read_line(30.0)
             self._runs = 0

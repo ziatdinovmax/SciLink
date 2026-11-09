@@ -10,7 +10,7 @@ import os
 
 import pytest
 
-from scilink.executors import ScriptExecutor, WarmScriptExecutor, sandbox_env
+from scilink.executors import SANDBOX_UTF8_ENV, ScriptExecutor, WarmScriptExecutor, sandbox_env
 
 SECRETS = {
     "ANTHROPIC_API_KEY": "sk-a", "OPENAI_API_KEY": "sk-o", "GOOGLE_API_KEY": "g",
@@ -31,7 +31,9 @@ def _child_env(res):
 
 def test_allowlist_keeps_the_stack_and_drops_every_secret():
     env = sandbox_env(source={**SECRETS, **KEPT})
-    assert env == KEPT
+    assert env == {**KEPT, **SANDBOX_UTF8_ENV}     # UTF-8 mode is always added
+    # the parent's PYTHONIOENCODING never reaches the child: UTF-8 mode governs its stdio
+    assert "PYTHONIOENCODING" not in sandbox_env(source={**KEPT, "PYTHONIOENCODING": "cp1252"})
 
 
 def test_explicit_extras_and_the_site_escape_hatch():
@@ -88,4 +90,4 @@ def test_platform_essentials_pass_through():
     src = {"SYSTEMROOT": "C:\\Windows", "COMSPEC": "cmd.exe", "PATHEXT": ".EXE", "USERPROFILE": "C:\\U",
            "LOCALAPPDATA": "C:\\L", "__CF_USER_TEXT_ENCODING": "0x1F5:0:0", "LD_LIBRARY_PATH": "/opt/lib",
            "ASE_VASP_COMMAND": "vasp", "VASP_PP_PATH": "/pp", "SLURM_JOB_ID": "7"}
-    assert sandbox_env(source=src) == src
+    assert sandbox_env(source=src) == {**src, **SANDBOX_UTF8_ENV}
