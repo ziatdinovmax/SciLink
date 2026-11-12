@@ -381,6 +381,42 @@ def _orbit(rotations, translations, pos, tol: float = 1e-3) -> list:
     return [list(k) for k in kept]
 
 
+# A setting or origin suffix never changes the group number: ":H", ":2", " R",
+# " S", "(origin choice 2)".
+_SETTING_SUFFIX = re.compile(r"\s*(:\s*\S+|\s[HRSZ]|\(\s*origin choice\s*\d\s*\))\s*$", re.I)
+
+
+def _number_from_symbol(symbol: str) -> Optional[int]:
+    """The space-group number of a Hermann–Mauguin symbol ("P 31 2 1" → 152).
+
+    Setting suffixes are dropped, then ASE is tried on the symbol and on its
+    short form ("P 1 21/c 1" → "P 21/c"); ASE knows standard settings only,
+    so pymatgen's symbol table (when installed) resolves the others
+    ("P 1 21/n 1", "P b n m", full symbols). None when neither knows it."""
+    from ase.spacegroup import Spacegroup
+    base = _SETTING_SUFFIX.sub("", symbol.replace("_", "")).strip()
+    short = " ".join(t for t in base.split() if t != "1")
+    for candidate in dict.fromkeys((base, short)):
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                return int(Spacegroup(candidate).no)
+        except Exception:
+            continue
+    try:
+        from pymatgen.symmetry.groups import SpaceGroup
+    except ImportError:
+        return None
+    for candidate in dict.fromkeys((symbol, base, short)):
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                return int(SpaceGroup(candidate).int_number)
+        except Exception:
+            continue
+    return None
+
+
 def _expander(block, ops, number, cell):
     """A function: fractional position → its symmetry copies.
 
@@ -405,10 +441,9 @@ def _expander(block, ops, number, cell):
         except Exception:
             # a full monoclinic symbol ("P 1 21/c 1") ASE does not list: try
             # its short form ("P 21/c")
-            short = " ".join(t for t in symbol.split() if t != "1")
-            if not short or short == symbol:
+            no = _number_from_symbol(symbol)
+            if no is None:
                 raise
-            no = Spacegroup(short).no
     if no in _RHOMBOHEDRAL:
         # axes from the cell, not from a crystal-system tag or the symbol
         # (ASE reads "trigonal" as rhombohedral axes, a bare symbol as hexagonal)
@@ -499,8 +534,10 @@ def _cif_row(path: Path, row: dict) -> dict:
         pass
 
     sg = _num(_tag(block, *_SG_NUMBER_TAGS))
-    row["spacegroup_number"] = int(sg) if sg else None
     row["spacegroup_symbol"] = _text(_tag(block, *_SG_SYMBOL_TAGS))
+    if not sg and row["spacegroup_symbol"]:
+        sg = _number_from_symbol(row["spacegroup_symbol"])   # symbol only: still searchable
+    row["spacegroup_number"] = int(sg) if sg else None
     row["crystal_system"] = (_text(g("_space_group_crystal_system")
                                    or g("_symmetry_cell_setting")) or "").lower() or \
         _crystal_system(row["spacegroup_number"])

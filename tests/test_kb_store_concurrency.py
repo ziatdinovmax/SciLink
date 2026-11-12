@@ -32,7 +32,8 @@ def _fake_build(target, embedding_model, api_key, base_url, ocr_model, record_as
     return 7, 7
 
 
-def _slow_append(target, new_doc_paths, embedding_model, api_key, base_url, ocr_model, record_as):
+def _slow_append(target, new_doc_paths, embedding_model, api_key, base_url, ocr_model, record_as,
+                 known_cif_count=0):
     time.sleep(0.3)                     # embedding takes a while
     (target / "default_kb_docs.faiss").write_bytes(b"GROWN")
     return len(new_doc_paths), 2 * len(new_doc_paths)

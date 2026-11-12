@@ -910,7 +910,8 @@ class PlanningAgent(BaseAgent):
         if knowledge_paths:
             print(f"Processing {len(knowledge_paths)} Scientific Paths...")
             doc_chunks.extend(ingest_files(knowledge_paths, is_code_mode=False,
-                                           ocr_model=self.model))
+                                           ocr_model=self.model,
+                                           known_cif_count=self._ingested_cif_count(knowledge_paths)))
 
         if doc_chunks:
             print(f"  - Building Scientific KB with {len(doc_chunks)} chunks...")
@@ -945,6 +946,23 @@ class PlanningAgent(BaseAgent):
 
         self._kb_is_built = True
         return True
+
+    def _ingested_cif_count(self, new_paths: List[str]) -> int:
+        """CIFs the docs KB already ingested, not counting ``new_paths``: an
+        incremental build then applies the CIF collection rule as a fresh
+        build of every source would. ``source_difference`` records the new
+        sources at the end of the history before they are ingested, so those
+        last entries are left out."""
+        history = list(getattr(self.kb_docs, "sources", None) or [])
+        n_new = len(new_paths or [])
+        earlier = history[:-n_new] if n_new and len(history) >= n_new else history
+        count = 0
+        for s in earlier:
+            if isinstance(s, dict):
+                count += sum(1 for f in s.get("files") or [] if str(f).lower().endswith(".cif"))
+            elif isinstance(s, str) and s.lower().endswith(".cif"):
+                count += 1
+        return count
 
     def _ensure_kb_is_ready(self, knowledge_paths: Optional[List[str]] = None, code_paths: Optional[List[str]] = None) -> bool:
         new_science = self.kb_docs.source_difference(knowledge_paths)

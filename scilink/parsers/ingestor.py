@@ -48,7 +48,7 @@ def directory_databases(file_paths: List[str]) -> Dict[tuple, int]:
 # File extensions the ingestor / directory scanner recognises.
 SUPPORTED_EXTENSIONS = {
     '.py', '.java', '.r', '.cpp', '.h', '.js', '.json',
-    '.csv', '.txt', '.md', '.pdf',
+    '.csv', '.txt', '.md', '.pdf', '.cif',
     '.xlsx', '.xls',
     '.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.gif'
 }
@@ -67,14 +67,6 @@ def get_files_from_directory(directory_path: str) -> List[str]:
 
     print(f"  - 📂 Scanning directory: {path.name}...")
 
-    # Structure files (CIF, POSCAR, xyz) found by scanning are not embedded:
-    # a structure collection is often one file per subfolder, which the
-    # per-folder database rule never catches, and embedding thousands of
-    # CIFs as text helps no search. Plan mode's index_structures makes them
-    # a table. A CIF passed explicitly as a file is still read as text.
-    from scilink.utils.structure_index import structure_format
-    n_structures = 0
-
     for root, dirs, files in os.walk(path):
         # In-place modification to skip hidden dirs and common junk
         dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('__pycache__', 'venv', 'env', 'node_modules', '.git')]
@@ -85,13 +77,8 @@ def get_files_from_directory(directory_path: str) -> List[str]:
             file_path = Path(root) / file
             if file_path.suffix.lower() in SUPPORTED_EXTENSIONS:
                 found_files.append(str(file_path))
-            elif structure_format(file_path) is not None:
-                n_structures += 1
 
     print(f"    -> Found {len(found_files)} files in directory.")
-    if n_structures:
-        print(f"    -> {n_structures} structure files (CIF/POSCAR/xyz) not embedded; "
-              "index them with plan mode's index_structures to search them")
     return found_files
 
 def extract_images(file_paths: List[str]) -> List[str]:
@@ -124,13 +111,21 @@ def extract_images(file_paths: List[str]) -> List[str]:
 
 
 def ingest_files(file_paths: List[str], is_code_mode: bool, code_chunk_size: int = 20000,
-                 repo_name: str = None, ocr_model: Any = None) -> List[Dict[str, Any]]:
+                 repo_name: str = None, ocr_model: Any = None,
+                 known_cif_count: int = 0) -> List[Dict[str, Any]]:
     """
     Recursively finds files and routes them to the
     correct parser (PDF, Excel, or Text) based on extension.
 
     When ``ocr_model`` is supplied, scanned/sparse PDF pages are transcribed
     via the vision-OCR fallback.
+
+    CIFs follow one rule, however they arrive (named or found in a folder):
+    ``DIR_DB_MIN_FILES`` or more across the whole input (subfolders included,
+    plus ``known_cif_count`` CIFs already in the knowledge base these files
+    join) are a structure collection and are not embedded — plan mode's
+    ``index_structures`` makes them a searchable table; fewer are reference
+    files and are read as text.
     """
     chunks = []
     expanded_paths = []
@@ -150,8 +145,30 @@ def ingest_files(file_paths: List[str], is_code_mode: bool, code_chunk_size: int
     #     as text chunks. Documents never form one: a folder of ten papers
     #     is ten papers (a count-only rule dropped them all and nothing
     #     told the user).
+    # A file named and also found in a folder named beside it is one file:
+    # counted (and embedded) once.
+    _seen = set()
+    _unique = []
+    for f in expanded_paths:
+        key = str(Path(f).resolve())
+        if key not in _seen:
+            _seen.add(key)
+            _unique.append(f)
+    expanded_paths = _unique
+
     _skip_dir_ext = directory_databases(expanded_paths)
-    for (dir_path, ext), count in _skip_dir_ext.items():
+    _cifs = [f for f in expanded_paths if Path(f).suffix.lower() == '.cif']
+    _n_cifs = len(_cifs) + known_cif_count
+    _skip_cifs = _n_cifs >= DIR_DB_MIN_FILES
+    if _skip_cifs and _cifs:
+        _with = (f" ({_n_cifs} with those already in the knowledge base)"
+                 if known_cif_count else "")
+        print(f"  - 📁 {len(_cifs)} CIF files{_with}: a structure collection, "
+              "not embedded in the knowledge base; index it with plan mode's "
+              "index_structures to search it")
+    # the collection rule above covers CIFs; the per-folder note would repeat it
+    _skip_dir_ext_notes = {k: v for k, v in _skip_dir_ext.items() if k[1] != '.cif'}
+    for (dir_path, ext), count in _skip_dir_ext_notes.items():
         print(f"  - 📁 {count} {ext or 'extensionless'} files in "
               f"{Path(dir_path).name}: a directory database of records, "
               "not embedded in the knowledge base; query them with "
@@ -166,6 +183,8 @@ def ingest_files(file_paths: List[str], is_code_mode: bool, code_chunk_size: int
 
         # Skip files belonging to detected directory databases
         if (str(path.parent), path.suffix.lower()) in _skip_dir_ext:
+            continue
+        if _skip_cifs and path.suffix.lower() == '.cif':
             continue
 
         file_ext = path.suffix.lower()

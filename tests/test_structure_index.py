@@ -409,12 +409,12 @@ def test_screen_database_redirects_before_asking_consent(planner, tmp_path, monk
     assert r["status"] == "index_structures_first"
 
 
-def test_scanned_cifs_are_not_embedded_but_a_named_one_is(tmp_path, capsys):
+def test_a_cif_collection_spread_over_subfolders_is_not_embedded(tmp_path, capsys):
     from scilink.parsers.ingestor import ingest_files
     for i in range(30):                        # one CIF per folder: no folder reaches 10
         _write(tmp_path / "tree" / f"m{i:02d}", "s.cif", NACL)
     assert ingest_files([str(tmp_path / "tree")], is_code_mode=False) == []
-    assert "30 structure files (CIF/POSCAR/xyz) not embedded" in capsys.readouterr().out
+    assert "30 CIF files: a structure collection" in capsys.readouterr().out
     one = _write(tmp_path, "one.cif", NACL)
     chunks = ingest_files([str(one)], is_code_mode=False)
     assert chunks and "_chemical_formula_sum" in chunks[0]["text"]
@@ -589,3 +589,92 @@ def test_the_xrd_view_leaves_out_files_nobody_can_read(tmp_path):
     _write(tmp_path, "broken.cif", "data_x\nthis is not a cif\n")
     df = _cif_index._xrd_view(si.build_index(tmp_path, compute_symmetry=True).df)
     assert [Path(p).name for p in df["path"]] == ["nacl.cif"]
+
+
+# ── Maxim's review of #822 ───────────────────────────────────────────────
+
+def test_a_symbol_only_cif_still_gets_its_space_group(tmp_path):
+    r = _row(_write(tmp_path, "quartz.cif", _cif(
+        "q", (4.913, 4.913, 5.405, 90, 90, 120), [("Si1", "Si", 0.47, 0, 0, 1)],
+        hm="P 31 2 1")))
+    assert r["spacegroup_number"] == 152 and r["crystal_system"] == "trigonal"
+    r = _row(_write(tmp_path, "mono.cif", _cif(
+        "m", (5.0, 6.0, 7.0, 90, 98.3, 90), [("O1", "O", 0.1, 0.2, 0.3, 1)], hm="P 1 21/c 1")))
+    assert r["spacegroup_number"] == 14 and r["crystal_system"] == "monoclinic"
+
+
+def _cif_sources(chunks):
+    return sorted(Path(c["metadata"]["source"]).name for c in chunks
+                  if str(c["metadata"].get("source", "")).endswith(".cif"))
+
+
+@pytest.mark.parametrize("n_cifs, embedded", [(3, True), (12, False)])
+def test_cifs_are_handled_the_same_named_or_found_in_a_folder(tmp_path, n_cifs, embedded):
+    # #822 review: the decision depends on the collection, not on the route
+    from scilink.parsers.ingestor import ingest_files
+    root = tmp_path / "kb"
+    for i in range(n_cifs):
+        _write(root / f"m{i:02d}", f"s{i:02d}.cif", NACL)
+    _write(root, "readme.txt", "notes about these structures")
+    files = sorted(str(p) for p in root.rglob("*") if p.is_file())
+    by_path = ingest_files(files, is_code_mode=False)
+    by_folder = ingest_files([str(root)], is_code_mode=False)
+    assert _cif_sources(by_path) == _cif_sources(by_folder)
+    assert bool(_cif_sources(by_path)) is embedded
+    assert any(str(c["metadata"].get("source", "")).endswith("readme.txt") for c in by_folder)
+
+
+def test_cifs_already_in_the_kb_count_toward_the_collection(tmp_path):
+    from scilink.parsers.ingestor import ingest_files
+    files = [str(_write(tmp_path, f"a{i}.cif", NACL)) for i in range(3)]
+    assert _cif_sources(ingest_files(files, is_code_mode=False))                   # 3: kept
+    assert not _cif_sources(ingest_files(files, is_code_mode=False, known_cif_count=8))  # 11
+
+
+# ── review of the #822 fixes ─────────────────────────────────────────────
+
+@pytest.mark.parametrize("symbol, number", [
+    ("P 31 2 1", 152), ("R -3 m:H", 166), ("R -3 c :H", 167), ("F d -3 m :2", 227),
+    ("F d -3 m S", 227), ("P 6_3/m m c", 194), ("I 41/a m d (origin choice 2)", 141),
+])
+def test_symbols_with_setting_suffixes_resolve(symbol, number):
+    assert si._number_from_symbol(symbol) == number
+
+
+@pytest.mark.parametrize("symbol, number", [("P 1 21/n 1", 14), ("P b n m", 62), ("P 21 n b", 33)])
+def test_non_standard_settings_resolve_through_pymatgen(symbol, number):
+    pytest.importorskip("pymatgen.core")
+    assert si._number_from_symbol(symbol) == number
+
+
+def test_an_unknown_symbol_gives_no_number():
+    assert si._number_from_symbol("Q 9 9") is None
+
+
+def test_a_folder_and_a_file_inside_it_count_once(tmp_path):
+    from scilink.parsers.ingestor import ingest_files
+    files = [str(_write(tmp_path / "refs", f"r{i}.cif", NACL)) for i in range(5)]
+    chunks = ingest_files([str(tmp_path / "refs")] + files, is_code_mode=False)
+    names = _cif_sources(chunks)
+    assert sorted(set(names)) == [f"r{i}.cif" for i in range(5)]       # embedded, not a "collection"
+    assert len(names) == len(_cif_sources(ingest_files([str(tmp_path / "refs")], is_code_mode=False)))
+
+
+def test_a_cif_only_add_that_makes_a_collection_says_so(tmp_path):
+    from scilink.knowledge import kb_store
+    files = [str(_write(tmp_path, f"a{i}.cif", NACL)) for i in range(3)]
+    with pytest.raises(ValueError, match="structure collection"):
+        kb_store._append_index_into(tmp_path, files, "m", None, None, None,
+                                    record_as=tmp_path, known_cif_count=8)
+
+
+def test_the_planning_kb_counts_cifs_it_ingested_before():
+    from types import SimpleNamespace
+    from scilink.agents.planning_agents.planning_agent import PlanningAgent
+    agent = PlanningAgent.__new__(PlanningAgent)
+    agent.kb_docs = SimpleNamespace(sources=[
+        {"path": "/old", "files": ["x.cif", "y.CIF", "notes.pdf"]},
+        "/one/ref.cif",
+        {"path": "/new", "files": ["n1.cif", "n2.cif"]},      # recorded last: the new source
+    ])
+    assert agent._ingested_cif_count(["/new"]) == 3

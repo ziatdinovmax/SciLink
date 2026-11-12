@@ -119,7 +119,7 @@ class TestRecordsAreStillADirectoryDatabase:
         assert ingest_files(paths, is_code_mode=False) == []
         out = capsys.readouterr().out
         assert out.count("Unsupported file type") == 0
-        assert "30 .cif files in cifs" in out
+        assert "30 CIF files: a structure collection" in out
 
 
 class TestOneRuleForIngestorAndScanner:
@@ -143,7 +143,7 @@ class TestOneRuleForIngestorAndScanner:
         not to DOCUMENT_EXTENSIONS would fall under the folder rule again —
         the dropped-papers bug for that type."""
         assert SUPPORTED_EXTENSIONS - DOCUMENT_EXTENSIONS - IMAGE_EXTENSIONS == {
-            '.csv', '.json', '.xls', '.xlsx'}
+            '.cif', '.csv', '.json', '.xls', '.xlsx'}
         assert DOCUMENT_EXTENSIONS <= SUPPORTED_EXTENSIONS
         assert not (DOCUMENT_EXTENSIONS & IMAGE_EXTENSIONS)
 
