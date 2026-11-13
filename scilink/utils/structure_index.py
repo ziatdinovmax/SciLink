@@ -417,6 +417,44 @@ def _number_from_symbol(symbol: str) -> Optional[int]:
     return None
 
 
+def _ase_number(symbol: str) -> Optional[int]:
+    """The group number of ``symbol`` only if ASE lists it as written, or as
+    its short form ("P 1 21/c 1" → "P 21/c"): the symbols whose operations
+    ASE knows in exactly that setting. No suffix stripping and no pymatgen:
+    a non-standard setting ("P b n m", "C 1 2/c 1:b2") must not be expanded
+    with the standard setting's operations. None otherwise."""
+    if not symbol:
+        return None
+    from ase.spacegroup import Spacegroup
+    short = " ".join(t for t in symbol.split() if t != "1")
+    for candidate in dict.fromkeys((symbol, short)):
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                return int(Spacegroup(candidate).no)
+        except Exception:
+            continue
+    return None
+
+
+def _is_standard_symbol(symbol: str, number: int) -> bool:
+    """Whether ``symbol`` is group ``number``'s standard symbol in ASE's table,
+    full or short form, spaces ignored ("Fm-3m" = "F m -3 m", "P 1 21/c 1" =
+    "P 21/c"). False for another setting of the group ("P b n m" for 62)."""
+    from ase.spacegroup import Spacegroup
+
+    def forms(sym):
+        tokens = sym.split()
+        return {"".join(tokens), "".join(t for t in tokens if t != "1")}
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            standard = Spacegroup(int(number)).symbol
+    except Exception:
+        return False
+    return bool(forms(symbol) & forms(standard))
+
+
 def _expander(block, ops, number, cell):
     """A function: fractional position → its symmetry copies.
 
@@ -433,17 +471,22 @@ def _expander(block, ops, number, cell):
         return lambda pos: _orbit(rot, trans, pos)
     from ase.spacegroup import Spacegroup
     symbol = _text(_tag(block, *_SG_SYMBOL_TAGS)) or ""
+    # Expanding needs the operations of the file's own setting. The symbol
+    # lookup that labels the row (_number_from_symbol, with pymatgen and
+    # suffix stripping) is not used here: it maps a non-standard setting
+    # ("P b n m") to its group number, whose standard operations (Pnma)
+    # would expand the coordinates in the wrong frame. A setting ASE does
+    # not know raises instead, and pymatgen's reader fills the row.
+    ase_no = _ase_number(symbol)
     if number:
         no = int(number)
     else:
         try:
             no = block.get_spacegroup(True).no
         except Exception:
-            # a full monoclinic symbol ("P 1 21/c 1") ASE does not list: try
-            # its short form ("P 21/c")
-            no = _number_from_symbol(symbol)
-            if no is None:
+            if ase_no is None:
                 raise
+            no = ase_no
     if no in _RHOMBOHEDRAL:
         # axes from the cell, not from a crystal-system tag or the symbol
         # (ASE reads "trigonal" as rhombohedral axes, a bare symbol as hexagonal)
@@ -453,8 +496,15 @@ def _expander(block, ops, number, cell):
     elif re.search(r"(:\s*2|\s[SZ])\s*$", symbol):
         sg = Spacegroup(no, setting=2)                 # origin choice 2
     else:
+        # ASE builds the group from the number when one is declared, whatever
+        # the symbol says. Only the standard setting is safe to expand that
+        # way: a file in another setting ("P b n m" with 62) raises, and
+        # pymatgen's reader fills the row.
+        if symbol and not _is_standard_symbol(symbol, no):
+            raise ValueError(f"symbol {symbol!r} is not group {no}'s standard setting "
+                             "and no symmetry operations are listed")
         try:
-            sg = block.get_spacegroup(True)        # the file's own setting, as before
+            sg = block.get_spacegroup(True)
         except Exception:
             sg = Spacegroup(no)
     return lambda pos: sg.equivalent_sites([pos], onduplicates="keep")[0]

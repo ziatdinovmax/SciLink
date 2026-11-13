@@ -678,3 +678,49 @@ def test_the_planning_kb_counts_cifs_it_ingested_before():
         {"path": "/new", "files": ["n1.cif", "n2.cif"]},      # recorded last: the new source
     ])
     assert agent._ingested_cif_count(["/new"]) == 3
+
+
+# ── Maxim's second review of #822: non-standard settings ─────────────────
+
+_PBNM = [("Gd1", "Gd", 0.9845, 0.0603, 0.25), ("Fe1", "Fe", 0.5, 0.0, 0.0),
+         ("O1", "O", 0.0976, 0.4699, 0.25), ("O2", "O", 0.6963, 0.3005, 0.0517)]
+_PBNM_CELL = (5.346, 5.611, 7.669, 90, 90, 90)
+
+
+@pytest.mark.parametrize("number", [None, 62])
+def test_a_non_standard_setting_is_never_expanded_in_the_standard_frame(tmp_path, number):
+    # GdFeO3 in Pbnm with no operations listed: expanding the Pbnm coordinates
+    # with Pnma's operations doubled the mirror sites (28 atoms, density 12.5)
+    pytest.importorskip("pymatgen.core")
+    r = _row(_write(tmp_path, "gdfeo3.cif", _cif(
+        "g", _PBNM_CELL, [s + (1,) for s in _PBNM], formula="Fe Gd O3",
+        hm="P b n m", sg_number=number)))
+    assert r["n_atoms"] == 20.0 and r["sites_match_formula"] is True
+    assert r["density"] == pytest.approx(7.54, abs=0.02)
+    assert r["spacegroup_number"] == 62                     # the label still comes from the symbol
+
+
+def test_without_pymatgen_a_non_standard_setting_is_left_unread_not_wrong(tmp_path, monkeypatch):
+    monkeypatch.setattr(si, "_pymatgen_fill", lambda path, row: (None, None))
+    r = _row(_write(tmp_path, "gdfeo3.cif", _cif(
+        "g", _PBNM_CELL, [s + (1,) for s in _PBNM], formula="Fe Gd O3",
+        hm="P b n m", sg_number=62)))
+    assert r["n_atoms"] is None and r["parse_error"].startswith("sites:")
+    assert r["formula"] == "Fe Gd O3"                       # the tags are still read
+
+
+def test_the_standard_setting_is_expanded_by_ase(tmp_path, monkeypatch):
+    monkeypatch.setattr(si, "_pymatgen_fill", lambda path, row: (None, None))
+    pnma = [(l, t, y, z, x, 1) for l, t, x, y, z in _PBNM]   # Pnma = Pbnm with axes (b, c, a)
+    r = _row(_write(tmp_path, "pnma.cif", _cif(
+        "p", (5.611, 7.669, 5.346, 90, 90, 90), pnma, formula="Fe Gd O3",
+        hm="P n m a", sg_number=62)))
+    assert r["parse_error"] is None and r["n_atoms"] == 20.0
+
+
+@pytest.mark.parametrize("symbol, number, standard", [
+    ("Fm-3m", 225, True), ("F m -3 m", 225, True), ("P 1 21/c 1", 14, True), ("P21/c", 14, True),
+    ("P n m a", 62, True), ("P b n m", 62, False), ("P 63/m m c", 194, True),
+])
+def test_standard_symbol_check(symbol, number, standard):
+    assert si._is_standard_symbol(symbol, number) is standard
