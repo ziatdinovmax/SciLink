@@ -720,7 +720,96 @@ def test_the_standard_setting_is_expanded_by_ase(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("symbol, number, standard", [
     ("Fm-3m", 225, True), ("F m -3 m", 225, True), ("P 1 21/c 1", 14, True), ("P21/c", 14, True),
-    ("P n m a", 62, True), ("P b n m", 62, False), ("P 63/m m c", 194, True),
+    ("P n m a", 62, True), ("PNMA", 62, True), ("P b n m", 62, False), ("P 63/m m c", 194, True),
+    ("C12/m1", 12, True), ("I4_1/amd", 141, True),
+    ("P 1 1 21/m", 11, False), ("P 21/m 1 1", 11, False),     # other unique axes
 ])
 def test_standard_symbol_check(symbol, number, standard):
     assert si._is_standard_symbol(symbol, number) is standard
+
+
+def _no_pymatgen(monkeypatch):
+    monkeypatch.setattr(si, "_pymatgen_fill", lambda path, row: (None, None))
+
+
+@pytest.mark.parametrize("hm, number, site", [
+    ("F d -3 m:2", None, (0.125, 0.125, 0.125)), ("F d -3 m:2", 227, (0.125, 0.125, 0.125)),
+    ("F d -3 m Z", None, (0.125, 0.125, 0.125)),
+    ("F d -3 m:1", None, (0.0, 0.0, 0.0)), ("F d -3 m:1", 227, (0.0, 0.0, 0.0)),
+])
+def test_origin_suffixes_expand_in_their_own_origin(tmp_path, monkeypatch, hm, number, site):
+    _no_pymatgen(monkeypatch)                 # ASE alone must get these right
+    r = _row(_write(tmp_path, "si.cif", _cif("s", CUBIC(5.431), [("Si1", "Si") + site + (1,)],
+                                            hm=hm, sg_number=number)))
+    assert r["parse_error"] is None and r["n_atoms"] == 8.0
+
+
+def test_a_compact_full_monoclinic_symbol_is_expanded_by_ase(tmp_path, monkeypatch):
+    _no_pymatgen(monkeypatch)
+    r = _row(_write(tmp_path, "c2m.cif", _cif(
+        "c", (8.0, 6.0, 5.0, 90, 100, 90), [("O1", "O", 0.1, 0.2, 0.3, 1)], hm="C12/m1")))
+    assert r["parse_error"] is None and r["n_atoms"] == 8.0
+
+
+@pytest.mark.parametrize("hm, number", [
+    ("P 1 1 21/m", None), ("P 1 1 21/m", 11),        # unique axis c
+    ("P n m m :2", 59), ("P n m m Z", 59),          # axis permutation + origin choice
+    ("C 1 2/c 1:b2", 15),                          # cell choice 2
+    ("A b a a :2", 68),
+])
+def test_settings_ase_does_not_list_are_never_expanded_by_ase(tmp_path, monkeypatch, hm, number):
+    _no_pymatgen(monkeypatch)
+    r = _row(_write(tmp_path, "x.cif", _cif(
+        "x", (5.1, 5.7, 6.3, 90, 90, 90), [("O1", "O", 0.11, 0.21, 0.31, 1)],
+        hm=hm, sg_number=number)))
+    assert r["n_atoms"] is None and r["parse_error"].startswith("sites:")
+
+
+@pytest.mark.parametrize("hm, number", [("C c m b", None), ("P n m m :2", 59), ("C 1 2/c 1:b2", 15)])
+def test_an_unreliable_pymatgen_reading_is_not_used(tmp_path, hm, number):
+    # pymatgen reads "C c m b" without a number as P1, and gets the other two
+    # wrong: the row is left unread rather than filled with a wrong count
+    pytest.importorskip("pymatgen.core")
+    r = _row(_write(tmp_path, "y.cif", _cif(
+        "y", (5.1, 5.7, 6.3, 90, 90, 90), [("O1", "O", 0.11, 0.21, 0.31, 1)],
+        hm=hm, sg_number=number)))
+    assert r["n_atoms"] is None
+
+
+# ── second review of the rewrite ─────────────────────────────────────────
+
+@pytest.mark.parametrize("hm", ["P m 3 m", "Pm3m", "P 4/m -3 2/m"])
+def test_a_correct_pymatgen_reading_on_multiplicity_one_sites_is_kept(tmp_path, hm):
+    # B2 NiAl: 2 atoms is right. The site count doesn't grow, but pymatgen did
+    # apply the symmetry (48 operations), so its reading must not be rejected.
+    pytest.importorskip("pymatgen.core")
+    r = _row(_write(tmp_path, "nial.cif", _cif(
+        "b2", CUBIC(2.88), [("Ni1", "Ni", 0, 0, 0, 1), ("Al1", "Al", 0.5, 0.5, 0.5, 1)],
+        hm=hm, sg_number=221)))
+    assert r["n_atoms"] == 2.0 and r["elements"] == "Al-Ni"
+
+
+def test_a_hall_symbol_only_file_is_not_read_as_p1(tmp_path):
+    pytest.importorskip("pymatgen.core")
+    text = _cif("h", (5.0, 6.0, 7.0, 90, 100, 90), [("O1", "O", 0.11, 0.21, 0.31, 1)])
+    text = text.replace("loop_", "_symmetry_space_group_name_Hall '-P 2ybc'\nloop_", 1)
+    r = _row(_write(tmp_path, "hall.cif", text))
+    assert r["n_atoms"] is None or r["n_atoms"] == 4.0       # never the unexpanded 1
+
+
+def test_an_r_group_in_a_slightly_uneven_hexagonal_cell(tmp_path):
+    # a and b differ by ~0.1% in the file: still hexagonal axes (angles decide)
+    r = _row(_write(tmp_path, "cor.cif", _cif(
+        "c", (4.756, 4.762, 12.991, 90, 90, 120), CORUNDUM_SITES, sg_number=167, hm="R -3 c")))
+    assert r["n_atoms"] == 30.0
+
+
+def test_old_screw_axis_notation_and_a_suffix_without_a_space(tmp_path, monkeypatch):
+    monkeypatch.setattr(si, "_pymatgen_fill", lambda path, row: (None, None))
+    r = _row(_write(tmp_path, "shelx.cif", _cif(
+        "p", (5.0, 6.0, 7.0, 90, 100, 90), [("O1", "O", 0.11, 0.21, 0.31, 1)],
+        hm="P 2(1)/c", sg_number=14)))
+    assert r["parse_error"] is None and r["n_atoms"] == 4.0
+    r = _row(_write(tmp_path, "si.cif", _cif(
+        "s", CUBIC(5.431), [("Si1", "Si", 0.125, 0.125, 0.125, 1)], hm="Fd-3mZ", sg_number=227)))
+    assert r["parse_error"] is None and r["n_atoms"] == 8.0

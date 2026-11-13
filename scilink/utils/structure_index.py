@@ -417,52 +417,81 @@ def _number_from_symbol(symbol: str) -> Optional[int]:
     return None
 
 
-def _ase_number(symbol: str) -> Optional[int]:
-    """The group number of ``symbol`` only if ASE lists it as written, or as
-    its short form ("P 1 21/c 1" → "P 21/c"): the symbols whose operations
-    ASE knows in exactly that setting. No suffix stripping and no pymatgen:
-    a non-standard setting ("P b n m", "C 1 2/c 1:b2") must not be expanded
-    with the standard setting's operations. None otherwise."""
-    if not symbol:
-        return None
-    from ase.spacegroup import Spacegroup
-    short = " ".join(t for t in symbol.split() if t != "1")
-    for candidate in dict.fromkeys((symbol, short)):
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                return int(Spacegroup(candidate).no)
-        except Exception:
-            continue
-    return None
+# Groups whose two ITA origin choices ASE lists as settings 1 and 2. (ASE's
+# "setting 2" means a different cell choice for monoclinic groups and the
+# rhombohedral axes for R groups, so those never take an origin suffix here.)
+_TWO_ORIGINS = {48, 50, 59, 68, 70, 85, 86, 88, 125, 126, 129, 130, 133, 134, 137,
+                138, 141, 142, 201, 203, 222, 224, 227, 228}
+# Suffixes that name an origin or the hexagonal/rhombohedral axes; any other
+# ":..." suffix (a cell choice such as ":b2") is a setting this index does not
+# expand.
+_ORIGIN_OR_AXES = re.compile(r"(?:\s*:\s*([12HRhr])|\s+([SZHRszhr])|(?<=[^\sA-Z])([SZHR]))\s*$")
+
+
+def _split_symbol(symbol: str):
+    """``(base, origin, axes, ok)`` of a Hermann–Mauguin symbol: the symbol
+    without its suffix, origin 1/2 (or None), axes "H"/"R" (or None), and ok
+    = False when it carries a suffix this index does not understand."""
+    sym = (symbol or "").replace("_", "").strip()
+    sym = re.sub(r"(\d)\((\d)\)", r"\1\2", sym)          # SHELX "P 2(1)/c" → "P 21/c"
+    origin = axes = None
+    m = _ORIGIN_OR_AXES.search(sym)
+    if m:
+        tag = (m.group(1) or m.group(2) or m.group(3)).upper()
+        sym = sym[:m.start()].strip()
+        if tag in "12":
+            origin = int(tag)
+        elif tag == "S":
+            origin = 1
+        elif tag == "Z":
+            origin = 2
+        else:
+            axes = tag
+    m = re.search(r"\(\s*origin\s+choice\s*([12])\s*\)\s*$", sym, re.I)
+    if m and origin is None:
+        origin, sym = int(m.group(1)), sym[:m.start()].strip()
+    if ":" in sym or "(" in sym:
+        return sym, origin, axes, False
+    return sym, origin, axes, True
+
+
+def _compact(symbol: str) -> str:
+    return "".join(symbol.split()).replace("_", "").lower()
 
 
 def _is_standard_symbol(symbol: str, number: int) -> bool:
-    """Whether ``symbol`` is group ``number``'s standard symbol in ASE's table,
-    full or short form, spaces ignored ("Fm-3m" = "F m -3 m", "P 1 21/c 1" =
-    "P 21/c"). False for another setting of the group ("P b n m" for 62)."""
+    """Whether ``symbol`` (suffix already removed) is group ``number``'s
+    standard setting: ASE's symbol for the group, compared without spaces or
+    case ("Fm-3m" = "F m -3 m", "PNMA" = "P n m a"). For a monoclinic group
+    the full b-unique form also counts ("P 1 21/c 1", "C12/m1"); the other
+    unique axes ("P 1 1 21/m", "P 21/m 1 1") are different settings."""
     from ase.spacegroup import Spacegroup
-
-    def forms(sym):
-        tokens = sym.split()
-        return {"".join(tokens), "".join(t for t in tokens if t != "1")}
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             standard = Spacegroup(int(number)).symbol
     except Exception:
         return False
-    return bool(forms(symbol) & forms(standard))
+    forms = {_compact(standard)}
+    tokens = standard.split()
+    if 3 <= int(number) <= 15 and len(tokens) == 2:
+        forms.add(_compact(f"{tokens[0]} 1 {tokens[1]} 1"))      # b-unique full symbol
+    return _compact(symbol) in forms
 
 
 def _expander(block, ops, number, cell):
     """A function: fractional position → its symmetry copies.
 
-    Listed operations are applied as given (they are the file's own
-    definition; a group name ASE does not recognise must not lose the
-    sites). Without them the group comes from the number or symbol, and a
-    rhombohedral group takes its axes from the cell, not from a crystal-
-    system tag (ASE reads "trigonal" as rhombohedral axes)."""
+    Listed operations are applied as given: they are the file's own
+    definition of its setting. Without them, ASE's operations for the group
+    are used only when the symbol is the group's STANDARD setting (or there
+    is no symbol): the coordinates are then in the frame those operations
+    assume. A rhombohedral group takes its axes from the cell; a group with
+    two origin choices takes origin 2 when the symbol says so. Anything else
+    (another axis order such as "P b n m", another unique axis, a cell-choice
+    suffix, origin 2 on a group without one) raises, and the row falls back
+    to pymatgen's reader, or is left unread: never expanded in the wrong
+    frame."""
     import numpy as np
     if ops:
         from ase.spacegroup.spacegroup import parse_sitesym
@@ -471,42 +500,32 @@ def _expander(block, ops, number, cell):
         return lambda pos: _orbit(rot, trans, pos)
     from ase.spacegroup import Spacegroup
     symbol = _text(_tag(block, *_SG_SYMBOL_TAGS)) or ""
-    # Expanding needs the operations of the file's own setting. The symbol
-    # lookup that labels the row (_number_from_symbol, with pymatgen and
-    # suffix stripping) is not used here: it maps a non-standard setting
-    # ("P b n m") to its group number, whose standard operations (Pnma)
-    # would expand the coordinates in the wrong frame. A setting ASE does
-    # not know raises instead, and pymatgen's reader fills the row.
-    ase_no = _ase_number(symbol)
-    if number:
-        no = int(number)
-    else:
-        try:
-            no = block.get_spacegroup(True).no
-        except Exception:
-            if ase_no is None:
-                raise
-            no = ase_no
+    base, origin, axes, understood = _split_symbol(symbol)
+    if not understood:
+        raise ValueError(f"symbol {symbol!r} names a setting this index does not expand")
+    no = int(number) if number else (_number_from_symbol(symbol) if symbol else None)
+    if not no:
+        raise ValueError("no space group: neither a number nor a known symbol")
+    if base and not _is_standard_symbol(base, no):
+        raise ValueError(f"symbol {symbol!r} is not group {no}'s standard setting "
+                         "and no symmetry operations are listed")
     if no in _RHOMBOHEDRAL:
-        # axes from the cell, not from a crystal-system tag or the symbol
-        # (ASE reads "trigonal" as rhombohedral axes, a bare symbol as hexagonal)
+        # axes from the cell, not from a crystal-system tag or a suffix
         a, b, c, al, be, ga = cell.cellpar()
-        hexagonal = abs(a - b) < 1e-3 * a and abs(ga - 120.0) < 0.1
-        sg = Spacegroup(no, setting=1 if hexagonal else 2)
-    elif re.search(r"(:\s*2|\s[SZ])\s*$", symbol):
-        sg = Spacegroup(no, setting=2)                 # origin choice 2
+        # hexagonal axes: alpha = beta = 90, gamma = 120 (or 60); a rhombohedral
+        # cell (alpha = beta = gamma != 90) can never match
+        hexagonal = (abs(al - 90.0) < 0.5 and abs(be - 90.0) < 0.5
+                     and min(abs(ga - 120.0), abs(ga - 60.0)) < 0.5)
+        setting = 1 if hexagonal else 2
+    elif origin == 2:
+        if no not in _TWO_ORIGINS:
+            raise ValueError(f"origin choice 2 given for group {no}, which has one origin")
+        setting = 2
     else:
-        # ASE builds the group from the number when one is declared, whatever
-        # the symbol says. Only the standard setting is safe to expand that
-        # way: a file in another setting ("P b n m" with 62) raises, and
-        # pymatgen's reader fills the row.
-        if symbol and not _is_standard_symbol(symbol, no):
-            raise ValueError(f"symbol {symbol!r} is not group {no}'s standard setting "
-                             "and no symmetry operations are listed")
-        try:
-            sg = block.get_spacegroup(True)
-        except Exception:
-            sg = Spacegroup(no)
+        setting = 1
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        sg = Spacegroup(no, setting=setting)
     return lambda pos: sg.equivalent_sites([pos], onduplicates="keep")[0]
 
 
@@ -595,6 +614,21 @@ def _cif_row(path: Path, row: dict) -> dict:
                                 or g("_cell_measurement_temperature"))
     row["mineral_name"] = _text(_tag(block, "_chemical_name_mineral", "_chemical_name.mineral"))
 
+    # for the pymatgen fallback's sanity check (dropped before the row is returned)
+    row["_has_ops"] = bool(_tag(block, "_space_group_symop_operation_xyz", "_symmetry_equiv_pos_as_xyz",
+                                "_space_group_symop.operation_xyz", "_symmetry_equiv.pos_as_xyz"))
+    row["_asym_sites"] = len(block.get("_atom_site_fract_x") or [])
+    _base, _origin, _axes, _understood = _split_symbol(_text(_tag(block, *_SG_SYMBOL_TAGS)) or "")
+    _hall = _text(_tag(block, "_symmetry_space_group_name_hall", "_space_group_name_hall",
+                       "_space_group.name_hall")) or ""
+    row["_symbol_names_symmetry"] = ((bool(_base) and _compact(_base) not in ("p1",))
+                                     or (bool(_hall) and _compact(_hall) not in ("p1",)))
+    # Settings neither reader handles reliably: an unknown suffix (":b2"), or
+    # an origin choice on a non-standard axis order ("P n m m :2", where
+    # pymatgen's counts are wrong too). Their rows are left unread.
+    row["_setting_unknown"] = bool(_base) and (not _understood or (
+        _origin is not None and bool(row.get("spacegroup_number"))
+        and not _is_standard_symbol(_base, row["spacegroup_number"])))
     declared = _text(_tag(block, "_chemical_formula_sum", "_chemical_formula.sum"))
     counts = None
     try:
@@ -710,22 +744,80 @@ def parse_structure_file(path, root=None, compute_symmetry: Optional[bool] = Non
             # spread over two lines, a tag ASE's tokenizer rejects)
             filled, struct = _pymatgen_fill(path, row)
             composition = filled if filled is not None else composition
+        for key in ("_has_ops", "_asym_sites", "_symbol_names_symmetry", "_setting_unknown"):
+            row.pop(key, None)
         if composition is None:
             return row
         _finish_row(row, composition, path, compute_symmetry, struct)
     return row
 
 
+def _group_orders(number: int) -> set:
+    """Operation counts (centring included) of group ``number`` in ASE's
+    settings: one count, or two for a rhombohedral group (hexagonal and
+    rhombohedral axes). Empty when ASE does not know the group."""
+    from ase.spacegroup import Spacegroup
+    counts = set()
+    for setting in ((1, 2) if number in _RHOMBOHEDRAL else (1,)):
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                counts.add(int(Spacegroup(int(number), setting=setting).nsymop))
+        except Exception:
+            pass
+    return counts
+
+
 def _pymatgen_fill(path: Path, row: dict):
     """``(composition, structure)`` from pymatgen, for a CIF ASE could not
     read (cell, density and counts go into ``row``; ``parse_error`` keeps
-    ASE's reason). ``(None, None)`` without pymatgen or when pymatgen cannot
-    read it either."""
+    ASE's reason). ``(None, None)`` without pymatgen, when pymatgen cannot
+    read it either, or when its reading is not trustworthy (see below)."""
     try:
-        from pymatgen.core import Structure
-        struct = Structure.from_file(str(path))
+        return _pymatgen_fill_unchecked(path, row)
+    except Exception as e:                     # never let the fallback break the row
+        logging.getLogger(__name__).debug("pymatgen fallback failed for %s: %s", path, e)
+        return None, None
+
+
+def _pymatgen_fill_unchecked(path: Path, row: dict):
+    try:
+        from pymatgen.io.cif import CifParser
+        parser = CifParser(str(path))
+        struct = parser.parse_structures(primitive=False)[0]
     except Exception:
         return None, None
+    reason = row.get("parse_error") or "ASE could not read the sites"
+    no_ops = row.get("_has_ops") is False
+    if no_ops and row.get("_setting_unknown"):
+        # a cell-choice suffix (":b2"), or an origin choice on a non-standard
+        # axis order: neither reader handles these reliably
+        row["parse_error"] = f"{reason}; setting not handled by either reader"[:300]
+        return None, None
+    # pymatgen reads a symbol it cannot resolve as P1. With no operations
+    # listed and a file that names symmetry (a non-P1 symbol, Hall symbol or
+    # group number), applying a single operation means no symmetry was used:
+    # unread beats wrong. (Sites on multiplicity-1 positions are fine: the
+    # count of operations, not of sites, is what tells.)
+    names_symmetry = (row.get("spacegroup_number") or 0) > 1 or row.get("_symbol_names_symmetry")
+    n_ops = getattr(parser, "symmetry_operations", None)
+    if n_ops is not None:
+        no_symmetry_applied = len(n_ops) <= 1
+    else:                                      # older pymatgen: fall back to the site count
+        no_symmetry_applied = len(struct) <= (row.get("_asym_sites") or 0)
+    if no_ops and names_symmetry and no_symmetry_applied:
+        row["parse_error"] = f"{reason}; pymatgen applied no symmetry"[:300]
+        return None, None
+    # A partial reading: pymatgen applied operations, but not as many as the
+    # group has (e.g. "P 21/c 1 1": 2 of group 14's 4). Rhombohedral groups
+    # may be on either axes, so either setting's count is accepted.
+    sg = row.get("spacegroup_number") or 0
+    if no_ops and n_ops is not None and sg > 1:
+        expected = _group_orders(sg)
+        if expected and len(n_ops) not in expected:
+            row["parse_error"] = (f"{reason}; pymatgen applied {len(n_ops)} of group "
+                                  f"{sg}'s {'/'.join(map(str, sorted(expected)))} operations")[:300]
+            return None, None
     lat = struct.lattice
     row.update(a=float(round(lat.a, 5)), b=float(round(lat.b, 5)), c=float(round(lat.c, 5)),
                alpha=float(round(lat.alpha, 4)), beta=float(round(lat.beta, 4)),
