@@ -1,7 +1,6 @@
 # scilink/agents/sim_agents/structure_pipeline.py
 
 import os
-import sys
 import logging
 from io import StringIO
 from typing import Optional, Dict, Any
@@ -69,17 +68,10 @@ class StructurePipeline:
         if mp_api_key is None:
             mp_api_key = get_api_key('materials_project')
 
-        # Setup logging
+        # The process's logging belongs to its host (a script, the terminal
+        # shell, the web server), so nothing is configured here: the run's
+        # own copy for workflow_log.txt is captured by build_structure alone.
         self.log_capture = StringIO()
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s: %(name)s: %(message)s',
-            force=True,
-            handlers=[
-                logging.StreamHandler(sys.stdout),
-                logging.StreamHandler(self.log_capture)
-            ]
-        )
         self.logger = logging.getLogger(__name__)
 
         self.api_key = api_key
@@ -146,7 +138,21 @@ class StructurePipeline:
         print(f"📁 Output:  {self.output_dir}/")
         print(f"{'='*60}")
 
-        result = self.generate_and_validate(user_request, structure_class=structure_class, **kwargs)
+        root = logging.getLogger()
+        capture = logging.StreamHandler(self.log_capture)
+        capture.setLevel(logging.INFO)
+        capture.setFormatter(logging.Formatter(
+            '%(asctime)s - %(levelname)s: %(name)s: %(message)s'))
+        root_level = root.level
+        if root_level > logging.INFO:
+            root.setLevel(logging.INFO)
+        root.addHandler(capture)
+        try:
+            result = self.generate_and_validate(
+                user_request, structure_class=structure_class, **kwargs)
+        finally:
+            root.removeHandler(capture)
+            root.setLevel(root_level)
 
         if result.get("status") == "success":
             print(f"✅ Structure generated: "
