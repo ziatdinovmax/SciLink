@@ -28,7 +28,7 @@ def extract_text(path: Union[str, Path], max_pages: int = None,
     """Extract plain text (and markdown tables, for PDFs) from a document.
 
     Supports text-like (``.pdf``, ``.docx``, ``.md``, ``.txt``, ``.json``,
-    ``.yaml``/``.yml``) and tabular (``.csv``, ``.xlsx``/``.xls``) documents.
+    ``.yaml``/``.yml``, ``.cif``) and tabular (``.csv``, ``.xlsx``/``.xls``) documents.
     Returns a dict with ``text``, ``n_chars`` and a format-specific count
     (``n_pages`` for PDFs, ``n_paragraphs`` for DOCX). PDFs also report
     ``n_ocr_pages`` — pages transcribed via the vision-OCR fallback.
@@ -112,7 +112,7 @@ def extract_text(path: Union[str, Path], max_pages: int = None,
         info["n_tables"] = len(d.tables)
         info["n_figures"] = count_docx_figures(path)
         text = d.composed()
-    elif ext in (".md", ".txt", ".json", ".yaml", ".yml"):
+    elif ext in (".md", ".txt", ".json", ".yaml", ".yml", ".cif"):
         text = path.read_text(errors="replace")
     elif ext in (".csv", ".xlsx", ".xls"):
         from .excel_parser import parse_adaptive_excel
@@ -136,7 +136,7 @@ def extract_text(path: Union[str, Path], max_pages: int = None,
     else:
         raise ValueError(
             f"Unsupported document type '{ext}' — extract_text handles "
-            f".pdf, .docx, .md, .txt, .json, .yaml/.yml, "
+            f".pdf, .docx, .md, .txt, .json, .yaml/.yml, .cif, "
             f".csv and .xlsx/.xls."
         )
 

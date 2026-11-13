@@ -659,9 +659,19 @@ def add_to_kb(name: str,
             shutil.copy2(f, added_dir / f.name)
             staged_new.append(str(added_dir / f.name))
 
+        # CIFs already stored count toward the collection rule, so an add
+        # decides as a later rebuild of the whole sources/ folder would
+        known_cifs = _count_cifs(final / "sources")
+        new_cifs = sum(1 for f in new_files if f.suffix.lower() == ".cif")
+        from ..parsers.ingestor import DIR_DB_MIN_FILES
+        if new_cifs and 0 < known_cifs < DIR_DB_MIN_FILES <= known_cifs + new_cifs:
+            _logger.warning(
+                f"KB '{name}': with these, its {known_cifs + new_cifs} CIFs are a "
+                f"structure collection; the {known_cifs} already embedded stay until "
+                f"'scilink kb rebuild {name}' (which leaves the collection out).")
         n_chunks, n_added = _append_index_into(
             staging, staged_new, embedding_model, api_key, base_url,
-            ocr_model, record_as=final / "sources",
+            ocr_model, record_as=final / "sources", known_cif_count=known_cifs,
         )
         _write_manifest(
             staging,
@@ -679,18 +689,36 @@ def add_to_kb(name: str,
     return read_manifest(final)
 
 
+def _count_cifs(folder: Path) -> int:
+    """CIFs under ``folder`` as a rebuild's folder scan sees them (any case
+    of the extension; hidden folders skipped)."""
+    return sum(1 for f in folder.rglob("*")
+               if f.is_file() and f.suffix.lower() == ".cif"
+               and not any(part.startswith(".") for part in f.relative_to(folder).parts))
+
+
 def _append_index_into(target: Path, new_doc_paths: List[str],
                        embedding_model: str, api_key: Optional[str],
                        base_url: Optional[str], ocr_model: Any,
-                       record_as: Path) -> Tuple[int, int]:
+                       record_as: Path,
+                       known_cif_count: int = 0) -> Tuple[int, int]:
     """Ingest only ``new_doc_paths`` and append them to ``target``'s
     persisted index. Returns (n_new_chunks, n_new_vectors)."""
     from ..parsers import ingest_files
     from .knowledge_base import KnowledgeBase
 
     chunks = ingest_files(new_doc_paths, is_code_mode=False,
+                          known_cif_count=known_cif_count,
                           ocr_model=ocr_model)
     if not chunks:
+        from ..parsers.ingestor import DIR_DB_MIN_FILES
+        n_cifs = sum(1 for p in new_doc_paths if Path(p).suffix.lower() == ".cif")
+        if n_cifs and n_cifs + known_cif_count >= DIR_DB_MIN_FILES:
+            raise ValueError(
+                f"The new documents are CIF files that make a structure collection "
+                f"({n_cifs + known_cif_count} CIFs with those already in the KB), which "
+                "is not embedded. Index the folder with plan mode's index_structures "
+                "and query it there instead.")
         raise ValueError(
             "No ingestible content found in the new documents "
             "(supported: PDF, text/markdown, Excel/CSV, images with OCR)."

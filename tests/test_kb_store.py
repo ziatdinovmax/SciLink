@@ -207,7 +207,7 @@ class TestCreateRebuild:
 # ── incremental add ─────────────────────────────────────────────────────
 
 def _fake_append(target, new_doc_paths, embedding_model, api_key, base_url,
-                 ocr_model, record_as):
+                 ocr_model, record_as, known_cif_count=0):
     """Stand-in for _append_index_into: touches the index, returns counts."""
     (target / "default_kb_docs.faiss").write_bytes(b"GROWN")
     return len(new_doc_paths), 2 * len(new_doc_paths)
@@ -232,6 +232,30 @@ class TestAddToKb:
         assert manifest["n_chunks"] == 7 + 1
         assert "extra.md" in manifest["sources"]
         assert (kb_store.kb_path("grow") / "sources" / "extra.md").exists()
+
+    def test_add_counts_stored_cifs_like_a_rebuild_would(self, store, tmp_path,
+                                                         monkeypatch):
+        # #822 review: 8 CIFs already stored + 3 added = 11, a collection. The
+        # add must decide as a rebuild of the whole sources/ folder would.
+        monkeypatch.setattr(kb_store, "_build_index_into", _fake_build)
+        seed = tmp_path / "seed"
+        seed.mkdir()
+        (seed / "paper.md").write_text("base")
+        for i in range(8):                                   # upper-case extension too
+            (seed / f"ref_{i}.{'CIF' if i % 2 else 'cif'}").write_text("data_x\n")
+        kb_store.create_kb("cifkb", [str(seed)])
+        seen = {}
+
+        def capture(*a, known_cif_count=0, **k):
+            seen["known"] = known_cif_count
+            return _fake_append(*a, **k)
+        monkeypatch.setattr(kb_store, "_append_index_into", capture)
+        new = tmp_path / "new"
+        new.mkdir()
+        for i in range(3):
+            (new / f"add_{i}.cif").write_text("data_y\n")
+        kb_store.add_to_kb("cifkb", [str(new)])
+        assert seen["known"] == 8
 
     def test_add_refuses_duplicate_basenames(self, store, tmp_path,
                                              monkeypatch):

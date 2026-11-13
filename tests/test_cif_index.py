@@ -161,15 +161,16 @@ def test_unchanged_fingerprint_reuses_cache(tmp_path, isolated_cache, monkeypatc
     _populate(tmp_path)
     df1 = _cif_index.load_or_build_index(tmp_path)
 
-    # Spy on _parse_one to count invocations on the second call
+    # Spy on the shared per-file parser to count invocations on the second call
+    from scilink.utils import structure_index
     n_parses = {"count": 0}
-    original = _cif_index._parse_one
+    original = structure_index.parse_structure_file
 
-    def counting_parse(path):
+    def counting_parse(*args, **kwargs):
         n_parses["count"] += 1
-        return original(path)
+        return original(*args, **kwargs)
 
-    monkeypatch.setattr(_cif_index, "_parse_one", counting_parse)
+    monkeypatch.setattr(structure_index, "parse_structure_file", counting_parse)
     df2 = _cif_index.load_or_build_index(tmp_path)
     assert n_parses["count"] == 0  # nothing re-parsed
     assert len(df1) == len(df2)

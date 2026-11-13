@@ -25,9 +25,8 @@ def is_directory_database_extension(ext: str) -> bool:
 
     Documents (PDF, text, markdown, code) never do: they are embedded one
     by one. Images never do: they go to the vision path. Everything else —
-    JSON and CSV records, spreadsheets, formats the ingestor does not read
-    (.cif, .xyz, ...) — does, once a folder holds ``DIR_DB_MIN_FILES`` of
-    them. One predicate for the ingestor and the knowledge-data scanner,
+    JSON and CSV records, spreadsheets, structure files (.cif, .xyz, ...) —
+    does, once a folder holds ``DIR_DB_MIN_FILES`` of them. One predicate for the ingestor and the knowledge-data scanner,
     so a folder is never a database to one and documents to the other.
     """
     ext = (ext or "").lower()
@@ -49,7 +48,7 @@ def directory_databases(file_paths: List[str]) -> Dict[tuple, int]:
 # File extensions the ingestor / directory scanner recognises.
 SUPPORTED_EXTENSIONS = {
     '.py', '.java', '.r', '.cpp', '.h', '.js', '.json',
-    '.csv', '.txt', '.md', '.pdf',
+    '.csv', '.txt', '.md', '.pdf', '.cif',
     '.xlsx', '.xls',
     '.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.gif'
 }
@@ -112,13 +111,21 @@ def extract_images(file_paths: List[str]) -> List[str]:
 
 
 def ingest_files(file_paths: List[str], is_code_mode: bool, code_chunk_size: int = 20000,
-                 repo_name: str = None, ocr_model: Any = None) -> List[Dict[str, Any]]:
+                 repo_name: str = None, ocr_model: Any = None,
+                 known_cif_count: int = 0) -> List[Dict[str, Any]]:
     """
     Recursively finds files and routes them to the
     correct parser (PDF, Excel, or Text) based on extension.
 
     When ``ocr_model`` is supplied, scanned/sparse PDF pages are transcribed
     via the vision-OCR fallback.
+
+    CIFs follow one rule, however they arrive (named or found in a folder):
+    ``DIR_DB_MIN_FILES`` or more across the whole input (subfolders included,
+    plus ``known_cif_count`` CIFs already in the knowledge base these files
+    join) are a structure collection and are not embedded — plan mode's
+    ``index_structures`` makes them a searchable table; fewer are reference
+    files and are read as text.
     """
     chunks = []
     expanded_paths = []
@@ -138,8 +145,30 @@ def ingest_files(file_paths: List[str], is_code_mode: bool, code_chunk_size: int
     #     as text chunks. Documents never form one: a folder of ten papers
     #     is ten papers (a count-only rule dropped them all and nothing
     #     told the user).
+    # A file named and also found in a folder named beside it is one file:
+    # counted (and embedded) once.
+    _seen = set()
+    _unique = []
+    for f in expanded_paths:
+        key = str(Path(f).resolve())
+        if key not in _seen:
+            _seen.add(key)
+            _unique.append(f)
+    expanded_paths = _unique
+
     _skip_dir_ext = directory_databases(expanded_paths)
-    for (dir_path, ext), count in _skip_dir_ext.items():
+    _cifs = [f for f in expanded_paths if Path(f).suffix.lower() == '.cif']
+    _n_cifs = len(_cifs) + known_cif_count
+    _skip_cifs = _n_cifs >= DIR_DB_MIN_FILES
+    if _skip_cifs and _cifs:
+        _with = (f" ({_n_cifs} with those already in the knowledge base)"
+                 if known_cif_count else "")
+        print(f"  - 📁 {len(_cifs)} CIF files{_with}: a structure collection, "
+              "not embedded in the knowledge base; index it with plan mode's "
+              "index_structures to search it")
+    # the collection rule above covers CIFs; the per-folder note would repeat it
+    _skip_dir_ext_notes = {k: v for k, v in _skip_dir_ext.items() if k[1] != '.cif'}
+    for (dir_path, ext), count in _skip_dir_ext_notes.items():
         print(f"  - 📁 {count} {ext or 'extensionless'} files in "
               f"{Path(dir_path).name}: a directory database of records, "
               "not embedded in the knowledge base; query them with "
@@ -154,6 +183,8 @@ def ingest_files(file_paths: List[str], is_code_mode: bool, code_chunk_size: int
 
         # Skip files belonging to detected directory databases
         if (str(path.parent), path.suffix.lower()) in _skip_dir_ext:
+            continue
+        if _skip_cifs and path.suffix.lower() == '.cif':
             continue
 
         file_ext = path.suffix.lower()
@@ -181,7 +212,7 @@ def ingest_files(file_paths: List[str], is_code_mode: bool, code_chunk_size: int
             continue # Skip, handled by extract_images
         
         # --- ROUTE C: Text & Code Files ---
-        elif file_ext in ['.txt', '.md', '.py', '.java', '.r', '.cpp', '.h', '.js', '.json', '.csv']:
+        elif file_ext in ['.txt', '.md', '.py', '.java', '.r', '.cpp', '.h', '.js', '.json', '.csv', '.cif']:
             try:
                 with path.open('r', encoding='utf-8') as f: content = f.read()
                 
