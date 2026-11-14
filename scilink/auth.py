@@ -58,6 +58,7 @@ def infer_provider(model_name: str) -> Optional[str]:
     
     Returns:
         Provider name ('google', 'openai', 'anthropic', 'bedrock') or None
+        (also for a "<prefix>/..." name whose prefix is not one of these).
     """
     if not model_name:
         return None
@@ -77,7 +78,13 @@ def infer_provider(model_name: str) -> Optional[str]:
         }
         if prefix in prefix_map:
             return prefix_map[prefix]
-    
+        # Any other prefix is a route of its own (vertex_ai/, openrouter/,
+        # azure/, ollama/, ...): the name after it says which model, not
+        # whose key. "vertex_ai/gemini-…" authenticates through ADC and
+        # "openrouter/google/gemini-…" with an OpenRouter key; matching
+        # "gemini" in them handed both the Google key.
+        return None
+
     # Infer from model name patterns
     if model_lower.startswith(('gpt-', 'o1-', 'o3-')):
         return 'openai'

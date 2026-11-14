@@ -6,6 +6,7 @@ beside a base URL, none for Bedrock. ``scilink serve`` used to take the first
 of SCILINK / GEMINI / OPENAI / ANTHROPIC that was set, whatever the model.
 """
 import importlib.util
+import os
 import sys
 
 import pytest
@@ -65,6 +66,17 @@ def test_another_vendors_key_is_not_used(clean_env):
     assert auth.resolve_llm_key("claude-opus-5-5") == (None, None)
 
 
+@pytest.mark.parametrize("model", [
+    "vertex_ai/gemini-2.5-pro", "openrouter/google/gemini-2.5-pro",
+    "openrouter/anthropic/claude-opus-5-5", "azure/gpt-4o",
+])
+def test_a_routed_model_is_not_handed_a_vendors_key(clean_env, model):
+    """The name after another route's prefix says which model, not whose key."""
+    _all_keys(clean_env)
+    assert auth.infer_provider(model) is None
+    assert auth.resolve_llm_key(model) == (None, None)
+
+
 def test_bedrock_carries_no_key(clean_env):
     _all_keys(clean_env)
     model = "bedrock/us.anthropic.claude-opus-4-8"
@@ -120,7 +132,6 @@ def test_shell_asks_for_what_is_missing(clean_env):
     creds = bootstrap.resolve_llm_credentials("bedrock/us.anthropic.claude-opus-4-8",
                                               None, None, ask)
     assert (creds.api_key, creds.source) == (None, "prompt")
-    import os
     assert os.environ.pop("AWS_BEARER_TOKEN_BEDROCK") == "bearer"
 
 
@@ -144,6 +155,8 @@ def test_serve_warns_and_starts_without_a_vendor_key(clean_env, capsys):
 @pytest.mark.parametrize("model", [
     "bedrock/us.anthropic.claude-opus-4-8",     # AWS profile, instance role, ...
     "ollama/llama3", "azure/gpt-4o", "o4-mini", "my-local-model",
+    "vertex_ai/gemini-2.5-pro",                 # ADC, not a Google API key
+    "openrouter/google/gemini-2.5-pro", "openrouter/anthropic/claude-opus-5-5",
 ])
 def test_serve_says_nothing_where_it_cannot_know(clean_env, capsys, model):
     """A warning is for a vendor whose env var is known and unset. The AWS
@@ -179,8 +192,13 @@ def _run_serve(monkeypatch, argv):
     monkeypatch.setattr(ms, "create_server", fake_create_server)
     monkeypatch.setattr(ms, "run_stdio", fake_run_stdio)
     monkeypatch.setattr(sys, "argv", ["scilink serve", *argv])
-    monkeypatch.setattr(sys, "stdout", sys.stdout)       # main() redirects it
-    code = serve.main()
+    stdout = sys.stdout                                  # main() redirects it
+    try:
+        code = serve.main()
+    finally:
+        # restored here, not by monkeypatch: under `pytest -s` capsys tears
+        # down first and monkeypatch then put back a closed buffer
+        sys.stdout = stdout
     return code, seen
 
 
@@ -212,9 +230,20 @@ def test_serve_reads_the_key_from_the_credentials_file(clean_env, tmp_path):
     d.mkdir()
     (d / "credentials.env").write_text("ANTHROPIC_API_KEY=from-file\n")
     clean_env.setenv("GEMINI_API_KEY", "gemini-key")
-    code, seen = _run_serve(clean_env, ["--model", "claude-opus-5-5"])
-    assert code == 0 and seen["api_key"] == "from-file"
-    clean_env.delenv("ANTHROPIC_API_KEY", raising=False)   # set by the loader
+    try:
+        code, seen = _run_serve(clean_env, ["--model", "claude-opus-5-5"])
+        assert code == 0 and seen["api_key"] == "from-file"
+    finally:
+        # The loader wrote the variable itself. monkeypatch.delenv here would
+        # record "from-file" as the original and restore it at teardown, into
+        # every later test of the session; pop it, as the Bedrock test does.
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+
+
+def test_the_credentials_file_test_leaves_no_key_behind():
+    """Runs after it: the fake key must not outlive the test above."""
+    if os.environ.get("ANTHROPIC_API_KEY") == "from-file":
+        pytest.fail("a fake ANTHROPIC_API_KEY leaked into the session")
 
 
 @needs_mcp
