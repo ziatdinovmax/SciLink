@@ -222,3 +222,9 @@ Set the key matching your model provider — `ANTHROPIC_API_KEY`,
 proxy, `SCILINK_API_KEY` together with `--base-url`. The proxy key is not a
 vendor credential; vendor endpoints reject it. MCP-server deployments can keep
 all of these in `~/.scilink/credentials.env` instead of the client config.
+
+Every entry point resolves the key the same way: `--api-key` wins; with
+`--base-url` the key is `SCILINK_API_KEY`; a `bedrock/...` model uses
+`AWS_BEARER_TOKEN_BEDROCK` or the AWS credential chain; otherwise the key of
+the model's own vendor. Several vendors' keys can be set at once — each model
+is called with its own.

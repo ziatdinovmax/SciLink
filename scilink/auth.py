@@ -143,6 +143,40 @@ def find_env_var_for_model(model_name: str) -> Optional[tuple]:
     return find_env_var(provider) if provider else None
 
 
+def resolve_llm_key(model_name: str, base_url: Optional[str] = None,
+                    api_key: Optional[str] = None) -> tuple:
+    """Which key a chat model is called with, and where it came from.
+
+    The one rule every command-line entry point shares (the terminal shell,
+    headless ``-p``, ``scilink serve``), read from the environment only —
+    nothing is asked:
+
+    * an explicit ``api_key`` wins;
+    * with a ``base_url`` the endpoint is the internal proxy, whose key is
+      ``SCILINK_API_KEY`` and never a vendor's;
+    * a Bedrock model carries no key: its bearer token or the AWS credential
+      chain is read from the environment by the client;
+    * otherwise the conventional env var of THE MODEL'S vendor — never
+      another vendor's key, and never the proxy key.
+
+    Returns ``(key, source)``. ``source`` names where the credential was
+    found (``"flag"``, an env var, ``"AWS environment"``) and is ``None``
+    when nothing was: the caller then asks, warns or lets the client
+    library auto-detect. ``key`` is ``None`` for Bedrock by design.
+    """
+    if api_key:
+        return api_key, "flag"
+    if base_url:
+        key = get_internal_proxy_key()
+        return (key, INTERNAL_PROXY_KEY) if key else (None, None)
+    if infer_provider(model_name) == 'bedrock':
+        if os.getenv("AWS_BEARER_TOKEN_BEDROCK") or os.getenv("AWS_ACCESS_KEY_ID"):
+            return None, "AWS environment"
+        return None, None
+    found = find_env_var_for_model(model_name)
+    return (found[1], found[0]) if found else (None, None)
+
+
 class APIKeyManager:
     """Simple API key management with environment variable auto-discovery."""
     

@@ -66,6 +66,40 @@ def _print_mcp_json(args) -> int:
     return 0
 
 
+def resolve_api_key(model: str, base_url, api_key):
+    """The key this server's orchestrators are built with.
+
+    The rule is the terminal shell's (``auth.resolve_llm_key``): the key of
+    the MODEL'S vendor, the proxy key only with ``--base-url``, none for
+    Bedrock. It used to be the first of SCILINK / GEMINI / OPENAI / ANTHROPIC
+    that was set, whatever the model — so a machine with two vendors' keys
+    sent one vendor's key to the other, and a proxy key went to a vendor.
+
+    Nothing is asked here (stdin is the transport). A missing vendor key is
+    a warning on stderr and ``None``, which leaves the client library to find
+    one; a proxy with no key cannot work, and is an error.
+    """
+    from scilink import auth
+
+    key, source = auth.resolve_llm_key(model, base_url, api_key)
+    if source:
+        return key
+    if base_url:
+        raise ValueError(
+            f"--base-url needs the proxy key: set {auth.INTERNAL_PROXY_KEY} "
+            "(in the environment or ~/.scilink/credentials.env) or pass --api-key.")
+    provider = auth.infer_provider(model)
+    if provider == "bedrock":
+        wanted = "AWS_BEARER_TOKEN_BEDROCK or AWS credentials"
+    else:
+        wanted = " or ".join(auth.ENV_VARS.get(provider, [])) or "the provider's API key"
+    print(f"Warning: no credential found for model {model!r} (expected {wanted}, "
+          "in the environment or ~/.scilink/credentials.env). Starting anyway; "
+          "model calls will fail unless the client library finds one.",
+          file=sys.stderr)
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="scilink serve",
@@ -175,19 +209,6 @@ def main():
     if args.print_mcp_json:
         return _print_mcp_json(args)
 
-    # Resolve API key
-    api_key = args.api_key
-    if api_key is None:
-        for env_var in [
-            "SCILINK_API_KEY",
-            "GEMINI_API_KEY",
-            "OPENAI_API_KEY",
-            "ANTHROPIC_API_KEY",
-        ]:
-            api_key = os.environ.get(env_var)
-            if api_key:
-                break
-
     # The MCP stdio transport reads sys.stdin.buffer and writes
     # sys.stdout.buffer.  Save the real stdout before redirecting
     # Python-level sys.stdout to stderr, so print() calls from
@@ -203,13 +224,23 @@ def main():
     sys.stdout = sys.stderr
 
     try:
-        from scilink.mcp_server import create_server, run_stdio, run_sse
+        from scilink.mcp_server import (create_server, run_stdio, run_sse,
+                                        _load_shared_credentials)
     except ImportError as exc:
         print(
             f"Error: {exc}\n"
             "Install MCP support with: pip install scilink",
             file=sys.stderr,
         )
+        return 1
+
+    # ~/.scilink/credentials.env first: the key is resolved from the
+    # environment, and that file is where a secret-free client config keeps it.
+    _load_shared_credentials()
+    try:
+        api_key = resolve_api_key(args.model, args.base_url, args.api_key)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
         return 1
 
     server = create_server(
