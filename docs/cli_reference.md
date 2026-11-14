@@ -228,3 +228,5 @@ Every entry point resolves the key the same way: `--api-key` wins; with
 `AWS_BEARER_TOKEN_BEDROCK` or the AWS credential chain; otherwise the key of
 the model's own vendor. Several vendors' keys can be set at once — each model
 is called with its own.
+A vendor's key is never sent to a `--base-url` endpoint: a local
+OpenAI-compatible server that accepts any key needs one passed with `--api-key`.

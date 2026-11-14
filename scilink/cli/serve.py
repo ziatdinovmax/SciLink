@@ -75,9 +75,13 @@ def resolve_api_key(model: str, base_url, api_key):
     that was set, whatever the model — so a machine with two vendors' keys
     sent one vendor's key to the other, and a proxy key went to a vendor.
 
-    Nothing is asked here (stdin is the transport). A missing vendor key is
-    a warning on stderr and ``None``, which leaves the client library to find
-    one; a proxy with no key cannot work, and is an error.
+    Nothing is asked here (stdin is the transport). A proxy with no key
+    cannot work, and is an error. A missing key of a vendor SciLink knows is
+    a warning on stderr and ``None``, which leaves the client library to
+    find one; nothing is said about Bedrock (the AWS credential chain has
+    sources this cannot see) or a model whose provider is not recognised (a
+    local model needs no key, and another route's key is the client
+    library's to find).
     """
     from scilink import auth
 
@@ -86,17 +90,17 @@ def resolve_api_key(model: str, base_url, api_key):
         return key
     if base_url:
         raise ValueError(
-            f"--base-url needs the proxy key: set {auth.INTERNAL_PROXY_KEY} "
-            "(in the environment or ~/.scilink/credentials.env) or pass --api-key.")
+            f"--base-url needs a key: set {auth.INTERNAL_PROXY_KEY} (in the "
+            "environment or ~/.scilink/credentials.env) or pass --api-key. A "
+            "vendor's key in the environment is never sent to a --base-url "
+            "endpoint; for a local endpoint that takes any key, pass one with "
+            "--api-key.")
     provider = auth.infer_provider(model)
-    if provider == "bedrock":
-        wanted = "AWS_BEARER_TOKEN_BEDROCK or AWS credentials"
-    else:
-        wanted = " or ".join(auth.ENV_VARS.get(provider, [])) or "the provider's API key"
-    print(f"Warning: no credential found for model {model!r} (expected {wanted}, "
-          "in the environment or ~/.scilink/credentials.env). Starting anyway; "
-          "model calls will fail unless the client library finds one.",
-          file=sys.stderr)
+    if provider in ("anthropic", "openai", "google"):
+        print(f"Warning: no {' or '.join(auth.ENV_VARS[provider])} found for model "
+              f"{model!r} (in the environment or ~/.scilink/credentials.env). "
+              "Starting anyway; model calls will fail unless the client library "
+              "finds a credential.", file=sys.stderr)
     return None
 
 
@@ -116,13 +120,17 @@ def main():
         "--api-key",
         type=str,
         default=None,
-        help="API key (default: auto-detect from env vars)",
+        help=("API key (default: the model's own vendor's key from the "
+              "environment or ~/.scilink/credentials.env; SCILINK_API_KEY "
+              "with --base-url; none for a bedrock/... model)"),
     )
     parser.add_argument(
         "--base-url",
         type=str,
         default=None,
-        help="OpenAI-compatible endpoint URL",
+        help=("OpenAI-compatible endpoint URL (an internal proxy or a local "
+              "server). Its key is SCILINK_API_KEY or --api-key, never a "
+              "vendor's key from the environment"),
     )
     parser.add_argument(
         "--mode",

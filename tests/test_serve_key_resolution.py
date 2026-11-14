@@ -5,6 +5,7 @@ and ``scilink serve``: the key of the model's own vendor, the proxy key only
 beside a base URL, none for Bedrock. ``scilink serve`` used to take the first
 of SCILINK / GEMINI / OPENAI / ANTHROPIC that was set, whatever the model.
 """
+import importlib.util
 import sys
 
 import pytest
@@ -125,8 +126,12 @@ def test_shell_asks_for_what_is_missing(clean_env):
 
 # ── scilink serve ────────────────────────────────────────────────
 
-pytest.importorskip("mcp")
 from scilink.cli import serve  # noqa: E402
+
+# Only the tests that start the server need the MCP package; the rule itself
+# is tested without it.
+needs_mcp = pytest.mark.skipif(importlib.util.find_spec("mcp") is None,
+                               reason="mcp is not installed")
 
 
 def test_serve_warns_and_starts_without_a_vendor_key(clean_env, capsys):
@@ -134,6 +139,18 @@ def test_serve_warns_and_starts_without_a_vendor_key(clean_env, capsys):
     assert serve.resolve_api_key("claude-opus-5-5", None, None) is None
     err = capsys.readouterr().err
     assert "ANTHROPIC_API_KEY" in err and "gemini-key" not in err
+
+
+@pytest.mark.parametrize("model", [
+    "bedrock/us.anthropic.claude-opus-4-8",     # AWS profile, instance role, ...
+    "ollama/llama3", "azure/gpt-4o", "o4-mini", "my-local-model",
+])
+def test_serve_says_nothing_where_it_cannot_know(clean_env, capsys, model):
+    """A warning is for a vendor whose env var is known and unset. The AWS
+    credential chain and an unrecognised provider are not that."""
+    clean_env.setenv("OPENAI_API_KEY", "openai-key")
+    assert serve.resolve_api_key(model, None, None) is None
+    assert capsys.readouterr().err == ""
 
 
 def test_serve_refuses_a_proxy_without_its_key(clean_env):
@@ -167,6 +184,7 @@ def _run_serve(monkeypatch, argv):
     return code, seen
 
 
+@needs_mcp
 def test_serve_passes_the_models_key_not_the_first_one_set(clean_env):
     _all_keys(clean_env)
     code, seen = _run_serve(clean_env, ["--model", "claude-opus-5-5"])
@@ -178,6 +196,7 @@ def test_serve_passes_the_models_key_not_the_first_one_set(clean_env):
     assert seen["api_key"] == "proxy-key" and seen["base_url"] == "https://proxy/v1"
 
 
+@needs_mcp
 def test_serve_bedrock_passes_no_key(clean_env):
     _all_keys(clean_env)
     clean_env.setenv("AWS_BEARER_TOKEN_BEDROCK", "token")
@@ -185,6 +204,7 @@ def test_serve_bedrock_passes_no_key(clean_env):
     assert code == 0 and seen["api_key"] is None
 
 
+@needs_mcp
 def test_serve_reads_the_key_from_the_credentials_file(clean_env, tmp_path):
     """The file is loaded BEFORE the key is resolved: it used to be read
     inside create_server, after the environment had already been scanned."""
@@ -197,7 +217,20 @@ def test_serve_reads_the_key_from_the_credentials_file(clean_env, tmp_path):
     clean_env.delenv("ANTHROPIC_API_KEY", raising=False)   # set by the loader
 
 
+@needs_mcp
 def test_serve_exits_on_a_proxy_without_its_key(clean_env, capsys):
     code, seen = _run_serve(clean_env, ["--base-url", "https://proxy/v1"])
     assert code == 1 and seen == {}
     assert "SCILINK_API_KEY" in capsys.readouterr().err
+
+
+@needs_mcp
+def test_serve_never_sends_a_vendor_key_to_a_base_url(clean_env, capsys):
+    """A local OpenAI-compatible endpoint used to be handed whichever vendor
+    key was set. It now needs --api-key (any value the endpoint accepts)."""
+    clean_env.setenv("OPENAI_API_KEY", "openai-key")
+    local = ["--model", "llama3", "--base-url", "http://localhost:11434/v1"]
+    code, seen = _run_serve(clean_env, local)
+    assert code == 1 and seen == {} and "--api-key" in capsys.readouterr().err
+    code, seen = _run_serve(clean_env, local + ["--api-key", "unused"])
+    assert code == 0 and seen["api_key"] == "unused"
