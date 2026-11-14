@@ -155,10 +155,16 @@ def _positive_seconds(text: str) -> float:
     return value
 
 
+def _quantity(text: str) -> str:
+    if not text.strip():
+        raise argparse.ArgumentTypeError("a target is the name of a quantity, not an empty string")
+    return text.strip()
+
+
 def _scope_flags(p: argparse.ArgumentParser) -> None:
     """What the result is for, said as flags and not as prose in the task:
     applied to every analysis deterministically, like ``--profile``."""
-    p.add_argument("--targets", type=str, nargs="+", dest="targets", metavar="QUANTITY",
+    p.add_argument("--targets", type=_quantity, nargs="+", dest="targets", metavar="QUANTITY",
                    help="The quantities the result is needed for, in plain words (e.g. "
                         "--targets \"G band position\" \"D/G ratio\"). The quality "
                         "verifier judges whether THOSE are trustworthy and stops asking "
@@ -403,13 +409,17 @@ Metadata Options:
                        metavar="PATH",
                        help="Prior analysis run folder(s), or recipe file(s) (a script .py "
                             "beside its .recipe.json, a dynamic_analysis_records.json), "
-                            "that every analysis in this session builds on. Reference "
-                            "material unless --reuse-locked-script is given.")
+                            "that the analyses in this session build on. Reference "
+                            "material unless --reuse-locked-script is given (a datacube "
+                            "analysis uses a prior run only as a replay). Not kept by a "
+                            "resumed session: pass it again.")
         p.add_argument("--reuse-locked-script", action="store_true", dest="reuse_locked_script",
                        help="Replay the locked script of --prior-analysis verbatim instead "
                             "of re-deriving the model: for the NEXT measurement of the same "
-                            "series, so the new feature row has the same columns. The "
-                            "result's reuse_validity says whether the recipe still fits.")
+                            "series, so the new feature row has the same columns. It "
+                            "applies to the first analysis of each dataset; the result's "
+                            "reuse_validity says whether the recipe still fits, and a "
+                            "follow-up on the same data is free to re-derive.")
         _extras_flags(p, "scilink analyze", agents=True)
         _session_flags(p)
         _deprecated_flags(p)

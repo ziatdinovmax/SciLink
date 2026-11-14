@@ -74,6 +74,8 @@ def test_analyze_without_the_flags_is_built_as_before(monkeypatch):
     (["--time-budget", "soon"], "not a number"),
     (["--time-budget", "inf"], "positive"),
     (["--time-budget", "nan"], "positive"),
+    (["--targets", ""], "empty string"),
+    (["--targets", "width", "  "], "empty string"),
 ])
 def test_analyze_refuses_what_cannot_work(argv, message, capsys, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -146,12 +148,27 @@ class _RecordingAgent:
         return {"status": "success", "detailed_analysis": "ok", "scientific_claims": []}
 
 
-def _run_analysis(o, tmp_path, **tool_args):
-    data = tmp_path / "curve.csv"
+class _StrictAgent(_RecordingAgent):
+    """A custom agent (--agents) whose analyze() takes none of the reuse arguments."""
+
+    def analyze(self, data, system_info=None, objective=None, hints=None):
+        type(self).calls.append({"ran": True})
+        return {"status": "success", "detailed_analysis": "ok", "scientific_claims": []}
+
+
+def _run_analysis(o, tmp_path, agent=_RecordingAgent, name="curve.csv", **tool_args):
+    data = tmp_path / name
     data.write_text("x,y\n" + "\n".join(f"{i},{i * i}" for i in range(50)))
     _RecordingAgent.calls = []
-    agent_id = max(o._agent_registry) + 1
-    o.register_agent(agent_id, _RecordingAgent)
+    # each call brings its own minimal metadata (analysis_goal), as a fresh
+    # dataset does; the previous dataset's is not this one's
+    o.current_metadata = None
+    o.current_metadata_owner = None
+    registered = {type(a) if not isinstance(a, type) else a: i
+                  for i, a in o._agent_registry.items()}
+    agent_id = registered.get(agent) or max(o._agent_registry) + 1
+    if agent not in registered:
+        o.register_agent(agent_id, agent)
     out = json.loads(o.tools.execute_tool("run_analysis", data_path=str(data),
                                           agent_id=agent_id,
                                           analysis_goal="a test curve; fit it", **tool_args))
@@ -170,12 +187,57 @@ def test_run_analysis_applies_the_session_scope_and_reuse(tmp_path, monkeypatch)
     assert call["prior_analysis_paths"] == ["/runs/a"] and call["reuse_locked_script"] is True
 
 
-def test_the_callers_recipe_comes_first_and_the_calls_own_are_kept(tmp_path, monkeypatch):
+def test_a_replay_takes_the_callers_recipe_first(tmp_path, monkeypatch):
+    """A replay uses the first recipe it is given: the caller's leads."""
     monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
-    o = _orchestrator(tmp_path, monkeypatch, prior_analysis_paths=["/runs/a"])
+    o = _orchestrator(tmp_path, monkeypatch, prior_analysis_paths=["/runs/a"],
+                      reuse_locked_script=True)
     call = _run_analysis(o, tmp_path, prior_analysis_paths=["/runs/b", "/runs/a"])
     assert call["prior_analysis_paths"] == ["/runs/a", "/runs/b"]
-    assert call["reuse_locked_script"] is False          # reference only: not asked for
+    assert call["reuse_locked_script"] is True
+
+
+def test_reference_material_goes_after_the_calls_own_paths(tmp_path, monkeypatch):
+    """Without --reuse-locked-script the caller's runs are reference only. A
+    call that asks for a replay or an edit of ITS OWN prior run must get that
+    run first — it used to get the caller's, and edited the wrong script."""
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+    o = _orchestrator(tmp_path, monkeypatch, prior_analysis_paths=["/runs/a"])
+    call = _run_analysis(o, tmp_path, prior_analysis_paths=["/runs/b"],
+                         reuse_locked_script=True)
+    assert call["prior_analysis_paths"] == ["/runs/b", "/runs/a"]
+    assert call["reuse_locked_script"] is True           # the call's own ask
+    call = _run_analysis(o, tmp_path, name="other.csv")
+    assert call["prior_analysis_paths"] == ["/runs/a"] and call["reuse_locked_script"] is False
+
+
+def test_a_forced_replay_has_a_way_out(tmp_path, monkeypatch):
+    """The replay is forced on a dataset's FIRST analysis. The follow-up the
+    system prompt asks for after a replay that did not fit ("re-run without
+    reuse_locked_script"), or an independent verification, is not replayed
+    again; another dataset's first analysis is."""
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+    o = _orchestrator(tmp_path, monkeypatch, prior_analysis_paths=["/runs/a"],
+                      reuse_locked_script=True)
+    first = _run_analysis(o, tmp_path)
+    assert first["reuse_locked_script"] is True
+    again = _run_analysis(o, tmp_path)                       # same data: the LLM's follow-up
+    assert again["reuse_locked_script"] is False
+    assert again["prior_analysis_paths"] == ["/runs/a"]      # still there, as reference
+    edit = _run_analysis(o, tmp_path, prior_analysis_paths=["/runs/b"], reuse_locked_script=True)
+    assert edit["prior_analysis_paths"] == ["/runs/b", "/runs/a"]
+    other = _run_analysis(o, tmp_path, name="next.csv")
+    assert other["reuse_locked_script"] is True and other["prior_analysis_paths"] == ["/runs/a"]
+
+
+def test_a_custom_agent_that_takes_no_prior_run_is_run_as_before(tmp_path, monkeypatch, capsys):
+    """It used to fail on every call with an unexpected keyword argument."""
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+    o = _orchestrator(tmp_path, monkeypatch, prior_analysis_paths=["/runs/a"],
+                      reuse_locked_script=True)
+    call = _run_analysis(o, tmp_path, agent=_StrictAgent)
+    assert call == {"ran": True}
+    assert "is not used" in capsys.readouterr().out
 
 
 def test_no_session_defaults_leaves_the_call_as_it_was(tmp_path, monkeypatch):
@@ -196,6 +258,13 @@ def test_meta_flags_become_the_sessions_default_depth(monkeypatch):
                        "scilink.agents.meta_agent.meta_orchestrator", "MetaOrchestratorAgent")
     assert seen["analysis_depth"] == {"profile": "extract", "targets": ["D/G ratio"],
                                       "time_budget_s": 300.0}
+
+
+def test_meta_refuses_an_empty_target_at_the_command_line(capsys):
+    """Not as a constructor exception after the session has started."""
+    with pytest.raises(SystemExit):
+        _parse(MetaAdapter(), ["--targets", ""])
+    assert "empty string" in capsys.readouterr().err
 
 
 def test_meta_builds_its_analysis_children_with_the_default_depth(tmp_path, monkeypatch):

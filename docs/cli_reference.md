@@ -71,9 +71,17 @@ scilink analyze -p "Fit the D and G bands" --data ./s2.csv \
   on those (curve and image analyses).
 - `--time-budget SECONDS` — a soft wall-clock budget per analysis; when it is
   spent the best result so far comes back marked unverified.
-- `--prior-analysis PATH ...` — prior run folders or recipe files every analysis
-  builds on; reference material unless `--reuse-locked-script` is given, which
-  replays the locked script verbatim (read `reuse_validity` in the result).
+- `--prior-analysis PATH ...` — prior run folders or recipe files the analyses
+  build on; reference material unless `--reuse-locked-script` is given, which
+  replays the locked script verbatim on the first analysis of each dataset
+  (read `reuse_validity` in the result). A follow-up on the same data — the
+  re-run after a replay that did not fit, a verification — is free to
+  re-derive. The prior run must be of the same kind of data: a datacube
+  analysis asked to replay a curve run fails, and uses a prior run only as a
+  replay.
+
+These flags, like `--profile`, are not stored in the session: pass them again
+on `--resume` / `--restore`.
 
 Mission control takes `--profile`, `--targets` and `--time-budget` as the
 default depth of its analysis delegations and fan-out branches; a delegation

@@ -3397,18 +3397,44 @@ class AnalysisOrchestratorTools:
                 if self.orch.active_knowledge:
                     analyze_kwargs["prior_knowledge"] = self.orch.active_knowledge
                 # Recipe reuse fixed by whoever drives this orchestrator
-                # (--prior-analysis / --reuse-locked-script): applied here, to
-                # every call, like the depth below. The caller's paths come
-                # first — a replay takes the first recipe it is given — and
-                # this call's own are kept after them.
+                # (--prior-analysis / --reuse-locked-script), applied here
+                # like the depth below, to the FIRST analysis of each dataset.
+                # A later run_analysis on the same data is this orchestrator's
+                # own follow-up — the re-run after a replay that did not fit,
+                # an independent verification, a surgical edit of the run just
+                # made — and keeps its own arguments, with the caller's runs
+                # as reference after its own. Without that, a forced replay
+                # had no way out and a follow-up edited the wrong script (a
+                # replay and an edit take the first recipe they are given).
+                # Offered only to an agent whose analyze() takes them: a
+                # custom agent that does not is run as it always was.
                 _caller_prior = getattr(self.orch, "default_prior_analysis_paths", None)
                 if _caller_prior:
+                    import inspect as _inspect
+                    _params = _inspect.signature(agent.analyze).parameters
+                    _var_kw = any(p.kind is p.VAR_KEYWORD for p in _params.values())
+                    _takes = lambda name: name in _params or _var_kw  # noqa: E731
+                    _first_look = not any(
+                        r.get("data_path") == data_path
+                        and r.get("agent_id") not in ("prepare", "derive")
+                        for r in self.orch.analysis_results)
                     _own = ([prior_analysis_paths] if isinstance(prior_analysis_paths, str)
                             else list(prior_analysis_paths or []))
-                    prior_analysis_paths = list(_caller_prior) + [
-                        p for p in _own if p not in _caller_prior]
-                if getattr(self.orch, "default_reuse_locked_script", False):
-                    reuse_locked_script = True
+                    _force = bool(getattr(self.orch, "default_reuse_locked_script", False)
+                                  and _first_look and _takes("reuse_locked_script"))
+                    if not _takes("prior_analysis_paths"):
+                        print(f"  ℹ️  Prior analysis set by the caller is not used: "
+                              f"{self.AGENT_NAMES.get(agent_id, 'this agent')} does not take one.")
+                    elif _force:
+                        prior_analysis_paths = list(_caller_prior) + [
+                            p for p in _own if p not in _caller_prior]
+                        reuse_locked_script = True
+                        print("  ℹ️  Recipe reuse is set by the caller: replaying the locked "
+                              f"script of {Path(_caller_prior[0]).name} on this dataset's "
+                              "first analysis.")
+                    else:
+                        prior_analysis_paths = _own + [
+                            p for p in _caller_prior if p not in _own]
                 if prior_analysis_paths:
                     analyze_kwargs["prior_analysis_paths"] = prior_analysis_paths
                 if reference_scripts:
