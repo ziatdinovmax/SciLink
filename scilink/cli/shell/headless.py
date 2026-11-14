@@ -2,7 +2,8 @@
 
 Runs the mode's ``run_task`` under full autonomy with every human-feedback
 question auto-accepted, narrates on stderr, and prints the result on
-stdout as text, markdown or JSON. Exit status follows the task's status.
+stdout as text, markdown or JSON. Exit status follows the task's status
+(``exit_code``): 0 success, 1 error, 3 finished with reservations.
 """
 
 from __future__ import annotations
@@ -39,6 +40,15 @@ def render_result(result: Dict[str, Any], fmt: str) -> str:
     if files:
         lines += ["", "Files:" if fmt == "text" else "## Files"]
         lines += [f"- {f}" for f in files]
+    verification = result.get("verification") or {}
+    if verification.get("analyses"):
+        lines += ["", "Verification:" if fmt == "text" else "## Verification",
+                  f"- {verification.get('verified', 0)} of {verification['analyses']} "
+                  "analyses verified"]
+        lines += [f"- not verified: {u.get('analysis_id')} ({u.get('reason')})"
+                  for u in verification.get("unverified") or []]
+        lines += [f"- failed: {f.get('analysis_id')} (status={f.get('status')})"
+                  for f in verification.get("failed") or []]
     warnings = result.get("warnings") or []
     if warnings:
         lines += ["", "Warnings:" if fmt == "text" else "## Warnings"]
@@ -48,8 +58,27 @@ def render_result(result: Dict[str, Any], fmt: str) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def exit_code(result: Dict[str, Any]) -> int:
-    return 0 if str(result.get("status", "")).lower() in ("success", "ok", "completed", "done") else 1
+# Exit statuses of a ``-p`` run. 2 is a start-up failure (credentials, a
+# bad flag), 130 an interrupt.
+EXIT_OK, EXIT_ERROR, EXIT_RESERVATIONS = 0, 1, 3
+
+
+def exit_code(result: Dict[str, Any], *, strict: bool = False) -> int:
+    """0 when the task succeeded, 1 when it failed, 3 when it finished with
+    something a caller must read the result for: a ``partial`` status (a
+    meta turn in which some delegations failed), and under ``--strict`` a
+    success whose analyses were not all verified. Without ``--strict`` an
+    unverified result still exits 0, as it always has — the count is in the
+    result's ``verification`` either way."""
+    status = str(result.get("status", "")).lower()
+    if status == "partial":
+        return EXIT_RESERVATIONS
+    if status not in ("success", "ok", "completed", "done"):
+        return EXIT_ERROR
+    verification = result.get("verification") or {}
+    if strict and verification.get("all_verified") is False:
+        return EXIT_RESERVATIONS
+    return EXIT_OK
 
 
 def run(adapter, args, task: str, *, console: Console = None) -> int:
@@ -89,4 +118,4 @@ def run(adapter, args, task: str, *, console: Console = None) -> int:
         return 130
     sys.stdout.write(render_result(result, fmt))
     sys.stdout.flush()
-    return exit_code(result)
+    return exit_code(result, strict=bool(getattr(args, "strict", False)))

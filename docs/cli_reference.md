@@ -148,6 +148,33 @@ scilink analyze --resume analysis_session_20260919_101500    # ... or name it
 scilink --verbose                                            # full narration from the start
 ```
 
+### Headless results (`-p`)
+
+`-p` runs one task autonomously, narrates on stderr and prints the result on
+stdout (`--output-format text | markdown | json`). The JSON is the mode's
+`run_task` result. Two things in it tell a script whether to trust the run:
+
+- **`status`** — `success`, `error`, or (Mission Control only) `partial`: some
+  delegations produced a result and some did not. A turn whose every
+  delegation failed is an `error`, whatever the reply says. Mission Control
+  also lists the turn's delegations under `delegation_results`.
+- **`verification`** — over the analyses the task ran: `analyses`, `verified`,
+  the `unverified` ones (a result was produced but not approved by its own
+  checks, with the reason), the `failed` ones, and `all_verified` (`null` when
+  no analysis ran). `status: success` says the task ran, not that its fits
+  were approved.
+
+| Exit status | Meaning |
+|---|---|
+| 0 | success |
+| 1 | the task failed |
+| 2 | could not start (credentials, a bad flag) |
+| 3 | finished with reservations: a `partial` turn, or with `--strict` a success whose analyses were not all verified |
+| 130 | interrupted |
+
+Without `--strict` an unverified result exits 0, as before; the count is in
+`verification` either way.
+
 ### Slash commands
 
 Shared by every mode: `/help`, `/status` (`/state`), `/mode [level]`

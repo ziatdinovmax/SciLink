@@ -455,6 +455,55 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
     return reconstructed_verdict(full)
 
 
+def verification_summary(rows) -> Dict[str, Any]:
+    """One answer over a task's ``analyses`` rows: was everything verified?
+
+    A task's ``status`` says the task ran; each row's ``verified`` says
+    whether that analysis passed its own checks. A caller that reads only the
+    status (an exit code, a job state) took a salvaged or unverified result
+    for an approved one, so the rows are counted here, once, for every
+    surface that reports a task: ``run_task``, the meta's ledger, headless
+    ``-p``.
+
+    ``all_verified`` is True when every analysis produced a result and was
+    verified, False when any was not, and None when no analysis ran (nothing
+    was verified and nothing failed to be). ``unverified`` lists the analyses
+    that produced a result that was not approved, with the reason; ``failed``
+    the ones that produced none.
+    """
+    rows = [r for r in (rows or []) if isinstance(r, dict)]
+    failed = [r for r in rows if r.get("status") not in ("success", "partial")]
+    produced = [r for r in rows if r.get("status") in ("success", "partial")]
+    unverified = [r for r in produced if not r.get("verified")]
+    return {
+        "analyses": len(rows),
+        "verified": len(produced) - len(unverified),
+        "unverified": [{"analysis_id": r.get("analysis_id"), "reason": r.get("reason")}
+                       for r in unverified],
+        "failed": [{"analysis_id": r.get("analysis_id"), "status": r.get("status")}
+                   for r in failed],
+        "all_verified": (not unverified and not failed) if rows else None,
+    }
+
+
+def merge_verification(summaries) -> Optional[Dict[str, Any]]:
+    """Several tasks' :func:`verification_summary` as one (a meta turn's
+    delegations). None when none of them carries one."""
+    parts = [s for s in (summaries or []) if isinstance(s, dict) and "analyses" in s]
+    if not parts:
+        return None
+    unverified = [u for s in parts for u in (s.get("unverified") or [])]
+    failed = [f for s in parts for f in (s.get("failed") or [])]
+    n = sum(int(s.get("analyses") or 0) for s in parts)
+    return {
+        "analyses": n,
+        "verified": sum(int(s.get("verified") or 0) for s in parts),
+        "unverified": unverified,
+        "failed": failed,
+        "all_verified": (not unverified and not failed) if n else None,
+    }
+
+
 def replay_certification_reason(full_result: Optional[dict]) -> Optional[str]:
     """Why a replay's interpretation is not certified (#753), for the
     ``analyses`` row beside :func:`replay_escalation`, so a reader quotes
