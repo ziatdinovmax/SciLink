@@ -46,10 +46,38 @@ scilink simulate --mode autopilot --request "rutile TiO2 supercell with one O va
   `--knowledge-dir` (path or KB name), `--code-dir`, `--embedding-model`,
   `--tools`, `--skills`, `--mcp`.
 - **`analyze`**: `--data`, `--metadata`, `--mode {co-pilot,autopilot,autonomous}`,
-  `--session-dir`, `--agents`, `--skills`, `--tools`, `--mcp`.
+  `--profile {thorough,quick,extract}`, `--targets`, `--time-budget`,
+  `--prior-analysis`, `--reuse-locked-script`, `--session-dir`, `--agents`,
+  `--skills`, `--tools`, `--mcp`.
 - **`simulate`**: `--mode {co-pilot,autopilot,autonomous}`, `--request`
   (one-shot), `--session-dir`, `--tools`, `--skills`, `--mp-api-key`,
   `--futurehouse-api-key`.
+
+**Scope, budget and recipe reuse are flags, not prose.** What a result is for
+is known to whoever asks for it, so `analyze` takes it as typed flags that are
+applied to every analysis of the session whatever the orchestrator's model
+decides to pass:
+
+```bash
+# a first measurement: say which numbers matter and how long it may take
+scilink analyze -p "Fit the D and G bands" --data ./s1.csv \
+    --targets "G band position" "D/G ratio" --time-budget 300 --output-format json
+# the next one: replay the first run's locked script, so the feature row has the same columns
+scilink analyze -p "Fit the D and G bands" --data ./s2.csv \
+    --prior-analysis <output_directory of the first run> --reuse-locked-script --output-format json
+```
+
+- `--targets` — the quantities the result is needed for; verification is spent
+  on those (curve and image analyses).
+- `--time-budget SECONDS` — a soft wall-clock budget per analysis; when it is
+  spent the best result so far comes back marked unverified.
+- `--prior-analysis PATH ...` — prior run folders or recipe files every analysis
+  builds on; reference material unless `--reuse-locked-script` is given, which
+  replays the locked script verbatim (read `reuse_validity` in the result).
+
+Mission control takes `--profile`, `--targets` and `--time-budget` as the
+default depth of its analysis delegations and fan-out branches; a delegation
+for which it names a depth of its own uses that one.
 
 Custom extensions: `--tools` (Python tool files) and `--skills` (markdown
 skill bundles) are accepted by all chat modes; `--mcp` (external MCP

@@ -477,6 +477,7 @@ class MetaOrchestratorAgent:
         knowledge_dir: Optional[str] = None,
         launch_dir: Optional[str] = None,
         file_roots: Optional[List[str]] = None,
+        analysis_depth: Optional[Dict[str, Any]] = None,
     ):
         refuse_in_spawn_bootstrap(type(self).__name__)
         self.logger = logging.getLogger(self.__class__.__name__)
@@ -614,6 +615,13 @@ class MetaOrchestratorAgent:
             else self.MAX_TOOL_ITERATIONS
         )
         self._last_chat_hit_iter_cap = False
+
+        # The session's analysis depth (--profile / --targets / --time-budget
+        # on the meta): the default every analysis specialist and fan-out
+        # worker is built with. A delegation that names a typed depth of its
+        # own replaces it for that delegation, as for any session default.
+        from .fanout import analysis_depth as _analysis_depth
+        self.default_analysis_depth: Dict[str, Any] = _analysis_depth(analysis_depth)
 
         if restore_checkpoint and self.checkpoint_path.exists():
             self._restore_checkpoint()

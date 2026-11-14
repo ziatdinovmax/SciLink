@@ -3396,6 +3396,19 @@ class AnalysisOrchestratorTools:
                     analyze_kwargs["task_mode"] = task_mode
                 if self.orch.active_knowledge:
                     analyze_kwargs["prior_knowledge"] = self.orch.active_knowledge
+                # Recipe reuse fixed by whoever drives this orchestrator
+                # (--prior-analysis / --reuse-locked-script): applied here, to
+                # every call, like the depth below. The caller's paths come
+                # first — a replay takes the first recipe it is given — and
+                # this call's own are kept after them.
+                _caller_prior = getattr(self.orch, "default_prior_analysis_paths", None)
+                if _caller_prior:
+                    _own = ([prior_analysis_paths] if isinstance(prior_analysis_paths, str)
+                            else list(prior_analysis_paths or []))
+                    prior_analysis_paths = list(_caller_prior) + [
+                        p for p in _own if p not in _caller_prior]
+                if getattr(self.orch, "default_reuse_locked_script", False):
+                    reuse_locked_script = True
                 if prior_analysis_paths:
                     analyze_kwargs["prior_analysis_paths"] = prior_analysis_paths
                 if reference_scripts:

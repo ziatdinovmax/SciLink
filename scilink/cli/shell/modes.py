@@ -145,6 +145,33 @@ def _extras_flags(p: argparse.ArgumentParser, prog: str, *, mcp: bool = True,
                             "server-filesystem,/tmp")
 
 
+def _positive_seconds(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number of seconds: {text!r}") from None
+    if not value > 0 or value == float("inf"):
+        raise argparse.ArgumentTypeError(f"must be a positive number of seconds: {text!r}")
+    return value
+
+
+def _scope_flags(p: argparse.ArgumentParser) -> None:
+    """What the result is for, said as flags and not as prose in the task:
+    applied to every analysis deterministically, like ``--profile``."""
+    p.add_argument("--targets", type=str, nargs="+", dest="targets", metavar="QUANTITY",
+                   help="The quantities the result is needed for, in plain words (e.g. "
+                        "--targets \"G band position\" \"D/G ratio\"). The quality "
+                        "verifier judges whether THOSE are trustworthy and stops asking "
+                        "for refinement of features they do not depend on. Curve and "
+                        "image analyses; quote a name with spaces.")
+    p.add_argument("--time-budget", type=_positive_seconds, dest="time_budget_s",
+                   metavar="SECONDS",
+                   help="Soft wall-clock budget for each analysis, in seconds. Once it "
+                        "is spent, optional stages are skipped and the best result so "
+                        "far comes back marked unverified; a call or script already "
+                        "running is not interrupted.")
+
+
 def _session_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--session-dir", type=str, dest="session_dir",
                    help="Session directory for outputs (default: auto-generated)")
@@ -224,6 +251,14 @@ apply here):
                        help="Stable knowledge/KB for planning delegations: a directory OR "
                             "the name of a knowledge base from the persistent store "
                             "(scilink kb list).")
+        p.add_argument("--profile", type=str, choices=["thorough", "quick", "extract"],
+                       default=None,
+                       help="Default depth of delegated analyses (see scilink analyze "
+                            "--help). With --targets / --time-budget it is the default "
+                            "every analysis delegation and fan-out branch starts from; a "
+                            "delegation for which Mission Control names a depth of its "
+                            "own uses that one.")
+        _scope_flags(p)
         _extras_flags(p, "scilink")
         _session_flags(p)
 
@@ -250,6 +285,9 @@ apply here):
             restore_checkpoint=restore,
             meta_mode=MetaMode[_ENUM_NAME[self.autonomy_from_args(args)]],
             knowledge_dir=args.knowledge_dir,
+            analysis_depth={"profile": getattr(args, "profile", None),
+                            "targets": getattr(args, "targets", None),
+                            "time_budget_s": getattr(args, "time_budget_s", None)},
         )
 
     def get_autonomy(self, agent) -> str:
@@ -261,8 +299,13 @@ apply here):
 
     def status_fields(self, agent):
         children = getattr(agent, "_children", None) or {}
-        return [("Specialists active", ", ".join(sorted(children)) or "none"),
+        rows = [("Specialists active", ", ".join(sorted(children)) or "none"),
                 ("Delegations", str(len(getattr(agent, "_delegation_ledger", None) or [])))]
+        depth = getattr(agent, "default_analysis_depth", None) or {}
+        if depth:
+            rows.append(("Analysis depth", _depth_text(depth.get("profile"), depth.get("targets"),
+                                                       depth.get("time_budget_s"))))
+        return rows
 
     def extra_commands(self):
         return [Command("/delegations", "The delegation ledger", _delegations,
@@ -312,6 +355,8 @@ Examples:
   scilink analyze --mode autopilot --data ./data/
   scilink analyze --mode autonomous --data ./sample.npy --metadata ./description.txt
   scilink analyze --profile quick --data ./spectrum.csv      # a fast look, same gates
+  scilink analyze -p "Fit the D and G bands" --data ./s2.csv --targets "D/G ratio" \\
+      --prior-analysis ./run1_output_dir --reuse-locked-script   # next point, same columns
   scilink analyze -p "Analyze ./grains.tif" --output-format json   # headless
 
 Analysis Modes:
@@ -353,6 +398,18 @@ Metadata Options:
                              "can end flagged, or in error when the verifier still rejects at "
                              "the iteration cap, where 'thorough' would converge. A first fit "
                              "that produces nothing gets one re-plan before a run gives up."))
+        _scope_flags(p)
+        p.add_argument("--prior-analysis", type=str, nargs="+", dest="prior_analysis_paths",
+                       metavar="PATH",
+                       help="Prior analysis run folder(s), or recipe file(s) (a script .py "
+                            "beside its .recipe.json, a dynamic_analysis_records.json), "
+                            "that every analysis in this session builds on. Reference "
+                            "material unless --reuse-locked-script is given.")
+        p.add_argument("--reuse-locked-script", action="store_true", dest="reuse_locked_script",
+                       help="Replay the locked script of --prior-analysis verbatim instead "
+                            "of re-deriving the model: for the NEXT measurement of the same "
+                            "series, so the new feature row has the same columns. The "
+                            "result's reuse_validity says whether the recipe still fits.")
         _extras_flags(p, "scilink analyze", agents=True)
         _session_flags(p)
         _deprecated_flags(p)
@@ -364,6 +421,13 @@ Metadata Options:
             parser.error(f"--data path does not exist: {args.data_path}")
         if args.metadata_path and not Path(args.metadata_path).exists():
             parser.error(f"--metadata path does not exist: {args.metadata_path}")
+        for path in getattr(args, "prior_analysis_paths", None) or []:
+            if not Path(path).exists():
+                parser.error(f"--prior-analysis path does not exist: {path}")
+        if getattr(args, "reuse_locked_script", False) \
+                and not getattr(args, "prior_analysis_paths", None):
+            parser.error("--reuse-locked-script needs --prior-analysis: "
+                         "there is no recipe to replay")
         super().validate_args(parser, args)
 
     def build(self, args, creds, session_dir, *, restore, extras):
@@ -376,6 +440,13 @@ Metadata Options:
             base_url=creds.base_url,
             analysis_mode=AnalysisMode[_ENUM_NAME[self.autonomy_from_args(args)]],
             analysis_profile=getattr(args, "profile", None),
+            analysis_targets=getattr(args, "targets", None),
+            analysis_time_budget_s=getattr(args, "time_budget_s", None),
+            # absolute: the agents resolve a relative path against the session
+            prior_analysis_paths=[str(Path(p).absolute())
+                                  for p in getattr(args, "prior_analysis_paths", None) or []]
+            or None,
+            reuse_locked_script=bool(getattr(args, "reuse_locked_script", False)),
             restore_checkpoint=restore,
             futurehouse_api_key=resolve_optional_key(args.futurehouse_api_key, "FUTUREHOUSE_API_KEY"),
         )
@@ -390,7 +461,10 @@ Metadata Options:
     def status_fields(self, agent):
         return [("Current data", str(getattr(agent, "current_data_path", None) or "none")),
                 ("Data type", str(getattr(agent, "current_data_type", None) or "none")),
-                ("Analysis depth", str(getattr(agent, "default_profile", None) or "thorough")),
+                ("Analysis depth", _depth_text(getattr(agent, "default_profile", None),
+                                               getattr(agent, "default_targets", None),
+                                               getattr(agent, "default_time_budget_s", None))),
+                ("Prior analysis", _prior_text(agent)),
                 ("Selected agent", str(getattr(agent, "selected_agent_id", None))),
                 ("Metadata", "yes" if getattr(agent, "current_metadata", None) else "no"),
                 ("Analyses completed", str(len(getattr(agent, "analysis_results", None) or [])))]
@@ -442,6 +516,23 @@ Metadata Options:
     def headless_run(self, agent, task, context=None):
         from scilink.agents.exp_agents.analysis_orchestrator import AnalysisMode
         return agent.run_task(task, context=context, autonomy=AnalysisMode.AUTONOMOUS)
+
+
+def _depth_text(profile, targets, time_budget_s) -> str:
+    parts = [str(profile or "thorough")]
+    if targets:
+        parts.append("targets: " + ", ".join(map(str, targets)))
+    if time_budget_s:
+        parts.append(f"budget {time_budget_s:g} s per analysis")
+    return "; ".join(parts)
+
+
+def _prior_text(agent) -> str:
+    paths = getattr(agent, "default_prior_analysis_paths", None) or []
+    if not paths:
+        return "none"
+    how = "replayed" if getattr(agent, "default_reuse_locked_script", False) else "reference"
+    return f"{', '.join(Path(p).name for p in paths)} ({how})"
 
 
 def _agents(shell, arg: str) -> None:
