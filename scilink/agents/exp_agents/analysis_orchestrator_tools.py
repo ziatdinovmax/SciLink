@@ -345,6 +345,62 @@ def _dataset_key(data_path: str) -> str:
         return data_path
 
 
+def caller_reuse(*, caller_prior, caller_replays: bool, records, data_path,
+                 own_paths=None, own_replay: bool = False, own_edits=None):
+    """What one ``run_analysis`` call is given of the recipe reuse the
+    session's caller fixed (``--prior-analysis`` / ``--reuse-locked-script``).
+
+    Returns ``(prior_analysis_paths, reuse_locked_script, forced)``.
+
+    * **The caller's replay is forced on a dataset's first analysis**
+      (``forced``): the caller's runs first — a replay takes the first
+      recipe it is given — and the call's own after them. "First" means no
+      earlier run on this dataset that produced a result or executed a
+      replay. A run that failed outright did neither, so its retry is still
+      the replay (a transient failure must not turn the next attempt into a
+      fresh derivation with new feature names). The dataset is compared by
+      its canonical key, so another spelling of the path is the same
+      dataset, and a member file of a folder already analysed as a series
+      is covered by it.
+    * **After that the call keeps its own arguments**: the re-run the
+      system prompt asks for when a replay did not fit, an independent
+      verification, an edit of the run just made.
+    * **A call that replays a run made in this session keeps it, even on a
+      first look**: that run exists because the session re-derived a model
+      (the caller's recipe did not fit some dataset), and forcing the next
+      dataset back onto the recipe known not to fit costs a failed replay
+      and a second analysis every time.
+    * **The caller's runs are appended as reference only to a call that is
+      not itself a replay or an edit.** A replay and ``script_edits`` use
+      the first path that yields a recipe; with the caller's run appended, a
+      call whose own path yields none (it failed, a typo) silently replayed
+      or edited the caller's script where it used to be refused.
+    """
+    caller_prior = [str(p) for p in caller_prior or []]
+    own = [own_paths] if isinstance(own_paths, str) else [str(p) for p in own_paths or []]
+    if not caller_prior:
+        return (own or None), bool(own_replay), False
+
+    def ran(record) -> bool:
+        if record.get("agent_id") in ("prepare", "derive"):
+            return False
+        if record.get("status") in ("success", "partial"):
+            return True
+        return bool(((record.get("full_result") or {}).get("reuse_validity") or {}))
+
+    seen = any(ran(r) and r.get("data_path")
+               and _same_dataset(str(r["data_path"]), str(data_path)) for r in records or [])
+    session_runs = {_dataset_key(str(r["output_directory"]))
+                    for r in records or [] if r.get("output_directory")}
+    replays_a_session_run = bool(own_replay and own and _dataset_key(own[0]) in session_runs)
+
+    if caller_replays and not seen and not replays_a_session_run:
+        return caller_prior + [p for p in own if p not in caller_prior], True, True
+    if own_replay or own_edits:
+        return (own or None), bool(own_replay), False
+    return own + [p for p in caller_prior if p not in own], False, False
+
+
 def _same_dataset(owner: str, requested: str) -> bool:
     """Does metadata bound to *owner* also cover *requested*?
 
@@ -3397,44 +3453,31 @@ class AnalysisOrchestratorTools:
                 if self.orch.active_knowledge:
                     analyze_kwargs["prior_knowledge"] = self.orch.active_knowledge
                 # Recipe reuse fixed by whoever drives this orchestrator
-                # (--prior-analysis / --reuse-locked-script), applied here
-                # like the depth below, to the FIRST analysis of each dataset.
-                # A later run_analysis on the same data is this orchestrator's
-                # own follow-up — the re-run after a replay that did not fit,
-                # an independent verification, a surgical edit of the run just
-                # made — and keeps its own arguments, with the caller's runs
-                # as reference after its own. Without that, a forced replay
-                # had no way out and a follow-up edited the wrong script (a
-                # replay and an edit take the first recipe they are given).
-                # Offered only to an agent whose analyze() takes them: a
-                # custom agent that does not is run as it always was.
+                # (--prior-analysis / --reuse-locked-script): decided by
+                # caller_reuse(), offered only to an agent whose analyze()
+                # takes the arguments (a custom agent that does not is run
+                # as it always was).
                 _caller_prior = getattr(self.orch, "default_prior_analysis_paths", None)
                 if _caller_prior:
                     import inspect as _inspect
                     _params = _inspect.signature(agent.analyze).parameters
                     _var_kw = any(p.kind is p.VAR_KEYWORD for p in _params.values())
-                    _takes = lambda name: name in _params or _var_kw  # noqa: E731
-                    _first_look = not any(
-                        r.get("data_path") == data_path
-                        and r.get("agent_id") not in ("prepare", "derive")
-                        for r in self.orch.analysis_results)
-                    _own = ([prior_analysis_paths] if isinstance(prior_analysis_paths, str)
-                            else list(prior_analysis_paths or []))
-                    _force = bool(getattr(self.orch, "default_reuse_locked_script", False)
-                                  and _first_look and _takes("reuse_locked_script"))
-                    if not _takes("prior_analysis_paths"):
+                    if not ("prior_analysis_paths" in _params or _var_kw):
                         print(f"  ℹ️  Prior analysis set by the caller is not used: "
                               f"{self.AGENT_NAMES.get(agent_id, 'this agent')} does not take one.")
-                    elif _force:
-                        prior_analysis_paths = list(_caller_prior) + [
-                            p for p in _own if p not in _caller_prior]
-                        reuse_locked_script = True
-                        print("  ℹ️  Recipe reuse is set by the caller: replaying the locked "
-                              f"script of {Path(_caller_prior[0]).name} on this dataset's "
-                              "first analysis.")
                     else:
-                        prior_analysis_paths = _own + [
-                            p for p in _caller_prior if p not in _own]
+                        prior_analysis_paths, reuse_locked_script, _forced = caller_reuse(
+                            caller_prior=_caller_prior,
+                            caller_replays=bool(
+                                getattr(self.orch, "default_reuse_locked_script", False)
+                                and ("reuse_locked_script" in _params or _var_kw)),
+                            records=self.orch.analysis_results, data_path=data_path,
+                            own_paths=prior_analysis_paths, own_replay=reuse_locked_script,
+                            own_edits=script_edits)
+                        if _forced:
+                            print("  ℹ️  Recipe reuse is set by the caller: replaying the locked "
+                                  f"script of {Path(_caller_prior[0]).name} on this dataset's "
+                                  "first analysis.")
                 if prior_analysis_paths:
                     analyze_kwargs["prior_analysis_paths"] = prior_analysis_paths
                 if reference_scripts:

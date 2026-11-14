@@ -112,6 +112,8 @@ def test_constructor_refuses_a_replay_with_no_recipe(tmp_path, monkeypatch):
         _orchestrator(tmp_path, monkeypatch, reuse_locked_script=True)
     with pytest.raises(ValueError, match="positive"):
         _orchestrator(tmp_path, monkeypatch, analysis_time_budget_s=-1)
+    with pytest.raises(ValueError, match="prior_analysis_paths"):
+        _orchestrator(tmp_path, monkeypatch, reuse_locked_script=True, prior_analysis_paths=[])
 
 
 def test_a_tasks_own_depth_still_replaces_the_session_default_for_that_task(tmp_path, monkeypatch):
@@ -156,10 +158,16 @@ class _StrictAgent(_RecordingAgent):
         return {"status": "success", "detailed_analysis": "ok", "scientific_claims": []}
 
 
-def _run_analysis(o, tmp_path, agent=_RecordingAgent, name="curve.csv", **tool_args):
+_UNSET = object()
+
+
+def _run_analysis(o, tmp_path, agent=_RecordingAgent, name="curve.csv", data_path=_UNSET,
+                  must_succeed=True, keep_calls=False, **tool_args):
     data = tmp_path / name
     data.write_text("x,y\n" + "\n".join(f"{i},{i * i}" for i in range(50)))
-    _RecordingAgent.calls = []
+    if not keep_calls:
+        _RecordingAgent.calls = []
+        agent.calls = []
     # each call brings its own minimal metadata (analysis_goal), as a fresh
     # dataset does; the previous dataset's is not this one's
     o.current_metadata = None
@@ -169,11 +177,14 @@ def _run_analysis(o, tmp_path, agent=_RecordingAgent, name="curve.csv", **tool_a
     agent_id = registered.get(agent) or max(o._agent_registry) + 1
     if agent not in registered:
         o.register_agent(agent_id, agent)
-    out = json.loads(o.tools.execute_tool("run_analysis", data_path=str(data),
-                                          agent_id=agent_id,
+    if data_path is not None:
+        tool_args["data_path"] = str(data) if data_path is _UNSET else data_path
+    out = json.loads(o.tools.execute_tool("run_analysis", agent_id=agent_id,
                                           analysis_goal="a test curve; fit it", **tool_args))
-    assert _RecordingAgent.calls, out
-    return _RecordingAgent.calls[-1]
+    assert agent.calls, out
+    if must_succeed:
+        assert out.get("status") != "error", out
+    return agent.calls[-1]
 
 
 def test_run_analysis_applies_the_session_scope_and_reuse(tmp_path, monkeypatch):
@@ -198,17 +209,27 @@ def test_a_replay_takes_the_callers_recipe_first(tmp_path, monkeypatch):
 
 
 def test_reference_material_goes_after_the_calls_own_paths(tmp_path, monkeypatch):
-    """Without --reuse-locked-script the caller's runs are reference only. A
-    call that asks for a replay or an edit of ITS OWN prior run must get that
-    run first — it used to get the caller's, and edited the wrong script."""
+    """Without --reuse-locked-script the caller's runs are reference only:
+    appended after the paths of a call that is not itself a replay."""
     monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
     o = _orchestrator(tmp_path, monkeypatch, prior_analysis_paths=["/runs/a"])
-    call = _run_analysis(o, tmp_path, prior_analysis_paths=["/runs/b"],
-                         reuse_locked_script=True)
+    call = _run_analysis(o, tmp_path, prior_analysis_paths=["/runs/b"])
     assert call["prior_analysis_paths"] == ["/runs/b", "/runs/a"]
-    assert call["reuse_locked_script"] is True           # the call's own ask
+    assert call["reuse_locked_script"] is False
     call = _run_analysis(o, tmp_path, name="other.csv")
     assert call["prior_analysis_paths"] == ["/runs/a"] and call["reuse_locked_script"] is False
+
+
+def test_the_callers_run_is_never_a_fallback_recipe_for_the_calls_own_replay(tmp_path, monkeypatch):
+    """A replay and script_edits use the first path that yields a recipe.
+    With the caller's run appended, a call whose own path yields none
+    replayed or edited the caller's script where main refuses."""
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+    o = _orchestrator(tmp_path, monkeypatch, prior_analysis_paths=["/runs/a"])
+    call = _run_analysis(o, tmp_path, prior_analysis_paths=["/runs/b"], reuse_locked_script=True)
+    assert call["prior_analysis_paths"] == ["/runs/b"] and call["reuse_locked_script"] is True
+    call = _run_analysis(o, tmp_path, reuse_locked_script=True)        # no paths of its own
+    assert call["prior_analysis_paths"] is None and call["reuse_locked_script"] is True
 
 
 def test_a_forced_replay_has_a_way_out(tmp_path, monkeypatch):
@@ -224,10 +245,116 @@ def test_a_forced_replay_has_a_way_out(tmp_path, monkeypatch):
     again = _run_analysis(o, tmp_path)                       # same data: the LLM's follow-up
     assert again["reuse_locked_script"] is False
     assert again["prior_analysis_paths"] == ["/runs/a"]      # still there, as reference
-    edit = _run_analysis(o, tmp_path, prior_analysis_paths=["/runs/b"], reuse_locked_script=True)
-    assert edit["prior_analysis_paths"] == ["/runs/b", "/runs/a"]
     other = _run_analysis(o, tmp_path, name="next.csv")
     assert other["reuse_locked_script"] is True and other["prior_analysis_paths"] == ["/runs/a"]
+
+
+def test_the_way_out_does_not_depend_on_how_the_path_is_spelled(tmp_path, monkeypatch):
+    """Found in review: the follow-up was recognised by comparing the raw
+    strings, so the same file as a relative path, with ./, or omitted (the
+    orchestrator's absolute current_data_path) was forced to replay again."""
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+    monkeypatch.chdir(tmp_path)
+    o = _orchestrator(tmp_path, monkeypatch, prior_analysis_paths=["/runs/a"],
+                      reuse_locked_script=True)
+    assert _run_analysis(o, tmp_path, data_path="curve.csv")["reuse_locked_script"] is True
+    for spelling in (str(tmp_path / "curve.csv"), "./curve.csv",
+                     str(tmp_path / "sub" / ".." / "curve.csv")):
+        (tmp_path / "sub").mkdir(exist_ok=True)
+        assert _run_analysis(o, tmp_path, data_path=spelling)["reuse_locked_script"] is False, spelling
+    o.current_data_path = str((tmp_path / "curve.csv").absolute())
+    assert _run_analysis(o, tmp_path, data_path=None)["reuse_locked_script"] is False
+
+
+class _FailsOnce(_RecordingAgent):
+    """First call: the given outcome. Later calls: a normal result."""
+    outcome = "error"
+
+    def analyze(self, data, system_info=None, **kwargs):
+        first = not type(self).calls
+        type(self).calls.append({"reuse_locked_script": kwargs.get("reuse_locked_script", False)})
+        if first and type(self).outcome == "raise":
+            raise RuntimeError("transient")
+        if first:
+            return {"status": "error", "error": "transient"}
+        return {"status": "success", "detailed_analysis": "ok", "scientific_claims": []}
+
+
+@pytest.mark.parametrize("outcome", ["error", "raise"])
+def test_a_run_that_failed_outright_does_not_use_up_the_replay(tmp_path, monkeypatch, outcome):
+    """An error status used it up (the retry became a fresh derivation with
+    new feature names) while an exception did not. Neither produced a result
+    nor executed a replay, so the retry is still the caller's replay."""
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+    o = _orchestrator(tmp_path, monkeypatch, prior_analysis_paths=["/runs/a"],
+                      reuse_locked_script=True)
+    _FailsOnce.outcome = outcome
+    _run_analysis(o, tmp_path, agent=_FailsOnce, must_succeed=False)
+    calls = list(_FailsOnce.calls)
+    _run_analysis(o, tmp_path, agent=_FailsOnce, keep_calls=True)
+    assert [c["reuse_locked_script"] for c in calls + _FailsOnce.calls[len(calls):]] == [True, True]
+    assert _run_analysis(o, tmp_path, agent=_FailsOnce, keep_calls=True) \
+        ["reuse_locked_script"] is False                 # a result exists now: the way out
+
+
+def test_a_replay_of_a_run_this_session_made_is_kept_on_a_first_look(tmp_path, monkeypatch):
+    """The session re-derived a model because the caller's recipe did not
+    fit; the next dataset replaying THAT run is not forced back onto the
+    recipe known not to fit. Any other path the model names is not trusted
+    over the caller's."""
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+    o = _orchestrator(tmp_path, monkeypatch, prior_analysis_paths=["/runs/a"],
+                      reuse_locked_script=True)
+    _run_analysis(o, tmp_path, name="s2.csv")                 # forced replay of /runs/a
+    _run_analysis(o, tmp_path, name="s2.csv")                 # the re-derivation
+    rederived = o.analysis_results[-1]["output_directory"]
+    call = _run_analysis(o, tmp_path, name="s3.csv", prior_analysis_paths=[rederived],
+                         reuse_locked_script=True)
+    assert call["prior_analysis_paths"] == [rederived] and call["reuse_locked_script"] is True
+    call = _run_analysis(o, tmp_path, name="s4.csv", prior_analysis_paths=["/elsewhere/run"],
+                         reuse_locked_script=True)
+    assert call["prior_analysis_paths"] == ["/runs/a", "/elsewhere/run"]
+
+
+def test_the_reuse_rule_on_its_own(tmp_path):
+    from scilink.agents.exp_agents.analysis_orchestrator_tools import caller_reuse
+    rec = lambda **kw: dict({"agent_id": 1, "status": "success", "data_path": "/d/a.csv",  # noqa: E731
+                             "output_directory": "/s/run_a", "full_result": {}}, **kw)
+    common = dict(caller_prior=["/runs/a"], data_path="/d/a.csv")
+    # no caller: the call is what it was
+    assert caller_reuse(caller_prior=None, caller_replays=False, records=[], data_path="/d/a.csv",
+                        own_paths=["/x"], own_replay=True) == (["/x"], True, False)
+    assert caller_reuse(caller_prior=None, caller_replays=False, records=[],
+                        data_path="/d/a.csv") == (None, False, False)
+    # a string from the model is one path
+    assert caller_reuse(**common, caller_replays=True, records=[], own_paths="/x") == \
+        (["/runs/a", "/x"], True, True)
+    # preparation and derivation records are not a first analysis
+    steps = [rec(agent_id="prepare"), rec(agent_id="derive")]
+    assert caller_reuse(**common, caller_replays=True, records=steps)[2] is True
+    # a replay that executed and did not fit released the dataset, whatever its status
+    poor = [rec(status="error", full_result={"reuse_validity": {"reused": True, "verdict": "poor"}})]
+    assert caller_reuse(**common, caller_replays=True, records=poor) == (["/runs/a"], False, False)
+    # a member file of a folder already analysed as a series is that dataset
+    folder = tmp_path / "series"
+    folder.mkdir()
+    (folder / "a.csv").write_text("x,y\n0,0\n")
+    series = [rec(data_path=str(folder))]
+    assert caller_reuse(caller_prior=["/runs/a"], caller_replays=True, records=series,
+                        data_path=str(folder / "a.csv"))[2] is False
+    # an edit of the call's own run never gets the caller's script appended
+    assert caller_reuse(**common, caller_replays=False, records=[], own_paths=["/s/run_a"],
+                        own_edits=[{"old": "a", "new": "b"}]) == (["/s/run_a"], False, False)
+
+
+def test_the_constructor_is_as_strict_as_the_command_line(tmp_path, monkeypatch):
+    o = _orchestrator(tmp_path, monkeypatch, analysis_targets="D/G ratio",
+                      prior_analysis_paths="/runs/a")
+    assert o.default_targets == ["D/G ratio"]                 # not one target per character
+    assert o.default_prior_analysis_paths == ["/runs/a"]
+    for bad in (float("inf"), float("nan"), True, 0, "90"):
+        with pytest.raises(ValueError, match="positive, finite"):
+            _orchestrator(tmp_path, monkeypatch, analysis_time_budget_s=bad)
 
 
 def test_a_custom_agent_that_takes_no_prior_run_is_run_as_before(tmp_path, monkeypatch, capsys):
