@@ -56,6 +56,27 @@ def test_no_analysis_is_neither_verified_nor_not():
     assert verification_summary(None)["analyses"] == 0
 
 
+def test_a_step_that_passed_its_own_gate_is_not_an_unverified_analysis():
+    """A preparation or a derivation carries no verification record, so its
+    row says verified=False by construction; it is not an analysis."""
+    prep = dict(_row("prep", verified=False, reason="no verification record"),
+                agent_name="DataPreparation")
+    derive = dict(_row("der", verified=False, reason="no verification record"),
+                  agent_name="OutputDerivation")
+    v = verification_summary([prep, _row("a"), derive])
+    assert v == {"analyses": 1, "verified": 1, "unverified": [], "failed": [],
+                 "all_verified": True}
+    assert verification_summary([prep])["all_verified"] is None       # no analysis ran
+    failed_prep = dict(prep, status="error")
+    v = verification_summary([failed_prep, _row("a")])
+    assert v["all_verified"] is False and v["failed"][0]["analysis_id"] == "prep"
+
+
+def test_a_missing_verdict_is_not_verified():
+    v = verification_summary([{"analysis_id": "a", "status": "success"}])
+    assert v["all_verified"] is False and v["unverified"][0]["analysis_id"] == "a"
+
+
 def test_merge_over_delegations():
     a = verification_summary([_row("a")])
     b = verification_summary([_row("b", verified=False, reason="r")])
@@ -64,6 +85,18 @@ def test_merge_over_delegations():
     assert merged["all_verified"] is False and merged["unverified"][0]["analysis_id"] == "b"
     assert merge_verification([None, None]) is None
     assert merge_verification([verification_summary([])])["all_verified"] is None
+
+
+def test_merge_names_the_delegation_and_counts_the_empty_ones():
+    ok = verification_summary([_row("a")])
+    bad = verification_summary([_row("a", verified=False, reason="r")])   # ids repeat
+    merged = merge_verification([(1, ok), (2, bad)])
+    assert merged["unverified"] == [{"analysis_id": "a", "reason": "r", "delegation": 2}]
+    # one delegation verified, two analysed nothing: not "all verified"
+    merged = merge_verification([(1, ok), (2, verification_summary([])),
+                                 (3, verification_summary([]))])
+    assert merged["analyses"] == 1 and merged["verified"] == 1
+    assert merged["all_verified"] is False and merged["without_analysis"] == 2
 
 
 # ── analyze: run_task carries it ─────────────────────────────────
@@ -168,10 +201,13 @@ def test_every_delegation_failed_is_an_error_even_with_a_reply():
     assert res["delegation_results"][0]["status"] == "error"
 
 
-def test_some_delegations_failed_is_partial_with_its_own_exit_code():
+def test_some_delegations_failed_is_partial():
+    """Said in the status always; in the exit code only under --strict (a
+    retry that worked looks the same to the ledger, and exited 0 before)."""
     meta = _Meta(script=[_entry(1), _entry(2, "error", error="boom")])
     res = MetaAdapter().headless_run(meta, "analyze both")
-    assert res["status"] == "partial" and headless.exit_code(res) == headless.EXIT_RESERVATIONS
+    assert res["status"] == "partial" and headless.exit_code(res) == headless.EXIT_OK
+    assert headless.exit_code(res, strict=True) == headless.EXIT_RESERVATIONS
     assert res["files_produced"] == ["/out/1.png"]            # not the failed one's
     assert any("#2" in w and "boom" in w for w in res["warnings"])
     assert "error" not in res
@@ -183,6 +219,34 @@ def test_a_restored_sessions_earlier_delegations_are_not_this_tasks():
     assert res["status"] == "success" and res["delegations"] == 1
     assert [d["index"] for d in res["delegation_results"]] == [2]
     assert res["files_produced"] == ["/out/2.png"]
+
+
+def test_a_fanout_resumed_in_place_is_this_turns_work(tmp_path, monkeypatch):
+    """resume_fanout reopens its entries where they are, below the ledger's
+    length at the start of the turn: they were invisible, so a resume whose
+    every branch failed was a success with no delegations."""
+    from scilink.agents.meta_agent.meta_orchestrator import MetaMode, MetaOrchestratorAgent
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    m = MetaOrchestratorAgent(base_dir=str(tmp_path / "meta"),
+                              model_name="anthropic/claude-sonnet-4-5",
+                              meta_mode=MetaMode.AUTONOMOUS, launch_dir=str(tmp_path))
+    old = m._open_delegation("analysis", "an earlier, finished task", None, None)
+    m._close_delegation(old, {"status": "success", "summary": "s"})
+    branch = m._open_delegation("analysis", "a fan-out branch", None, None)
+    m._close_delegation(branch, {"status": "interrupted", "error": "server restarted"})
+
+    def resume(task):                      # what resume_fanout does: same entry, closed again
+        import time
+        time.sleep(0.01)
+        branch["status"] = "running"
+        m._close_delegation(branch, {"status": "error", "error": "budget exceeded"})
+        return "The resumed branch failed."
+    m.chat = resume
+    res = MetaAdapter().headless_run(m, "resume the fan-out")
+    assert [d["index"] for d in res["delegation_results"]] == [branch["index"]]
+    assert res["status"] == "error" and "budget exceeded" in res["error"]
+    assert headless.exit_code(res) == headless.EXIT_ERROR
 
 
 def test_a_chat_error_is_an_error():
@@ -246,7 +310,8 @@ def test_exit_codes():
     ok = {"status": "success"}
     assert headless.exit_code(ok) == 0 and headless.exit_code(ok, strict=True) == 0
     assert headless.exit_code({"status": "error"}) == 1
-    assert headless.exit_code({"status": "partial"}) == 3
+    assert headless.exit_code({"status": "partial"}) == 0          # as before
+    assert headless.exit_code({"status": "partial"}, strict=True) == 3
     unverified = {"status": "success", "verification": {"all_verified": False}}
     assert headless.exit_code(unverified) == 0                 # unchanged without --strict
     assert headless.exit_code(unverified, strict=True) == 3

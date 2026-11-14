@@ -166,19 +166,22 @@ stdout (`--output-format text | markdown | json`). The JSON is the mode's
 
 | Exit status | Meaning |
 |---|---|
-| 0 | success |
+| 0 | success (and, without `--strict`, a `partial` turn) |
 | 1 | the task failed |
 | 2 | could not start (credentials, a bad flag) |
-| 3 | finished with reservations: a `partial` turn, or with `--strict` a success not backed by verified analyses |
+| 3 | `--strict` only: finished, but read the result before using it |
 | 130 | interrupted |
 
-`--strict` is for a task that is meant to analyse data: it exits 0 only when at
-least one analysis ran and every one was verified. A task that could not find
-its data still ends in a reply, so its status is `success`; under `--strict` it
-exits 3, because `verification.analyses` is 0. It judges only a result that
-carries a `verification` (analyze always; Mission Control when the turn
-delegated an analysis; plan and simulate never). Without `--strict` such a
-result exits 0, as before; the count is in `verification` either way.
+`--strict` is for a task that is meant to analyse data. It exits 0 only when
+at least one analysis ran, every analysis was verified and, in Mission Control,
+no delegation failed and every analysis delegation ran an analysis. A task that
+could not find its data still ends in a reply, so its status is `success`;
+under `--strict` it exits 3, because `verification.analyses` is 0. Verification
+is judged only on a result that carries one (analyze always; Mission Control
+when the turn delegated an analysis; plan and simulate never), and a
+data-preparation or derivation step is not counted as an analysis. Without
+`--strict` the exit status is 0 or 1 as before; `status` and `verification`
+are in the result either way.
 
 ### Slash commands
 

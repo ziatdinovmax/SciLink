@@ -46,11 +46,22 @@ def turn_status(reply: str, entries: List[Dict[str, Any]], *, chat_error=None,
     return "partial" if len(failed) < len(entries) else "error"
 
 
-def turn_result(agent, task: str, reply: str, since: int = 0) -> Dict[str, Any]:
-    """The structured result of the turn that added ledger entries after
-    position ``since`` (the ledger's length before ``chat()`` was called)."""
+def turn_entries(ledger: List[Dict[str, Any]], since: int = 0,
+                 started_at: str = "") -> List[Dict[str, Any]]:
+    """The ledger entries one turn worked on: the ones it appended (after
+    position ``since``) and the earlier ones it closed again — a resumed
+    fan-out reopens its entries in place, so their position says nothing and
+    their ``completed_at`` does."""
+    return [e for i, e in enumerate(ledger) if isinstance(e, dict)
+            and (i >= since or (started_at and str(e.get("completed_at") or "") >= started_at))]
+
+
+def turn_result(agent, task: str, reply: str, since: int = 0,
+                started_at: str = "") -> Dict[str, Any]:
+    """The structured result of one turn: ``since`` is the ledger's length
+    and ``started_at`` the ISO time before ``chat()`` was called."""
     ledger = list(getattr(agent, "_delegation_ledger", None) or [])
-    entries = [e for e in ledger[since:] if isinstance(e, dict)]
+    entries = turn_entries(ledger, since, started_at)
     chat_error = getattr(agent, "_last_chat_error", None)
     cap = bool(getattr(agent, "_last_chat_hit_iter_cap", False))
     status = turn_status(reply, entries, chat_error=chat_error, hit_iteration_cap=cap)
@@ -92,7 +103,7 @@ def turn_result(agent, task: str, reply: str, since: int = 0) -> Dict[str, Any]:
             for e in entries],
     }
     from ..exp_agents._verification_record import merge_verification
-    verification = merge_verification(e.get("verification") for e in entries)
+    verification = merge_verification((e.get("index"), e.get("verification")) for e in entries)
     if verification is not None:
         result["verification"] = verification
     if status == "error":

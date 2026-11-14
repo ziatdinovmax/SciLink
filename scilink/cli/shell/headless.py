@@ -3,7 +3,8 @@
 Runs the mode's ``run_task`` under full autonomy with every human-feedback
 question auto-accepted, narrates on stderr, and prints the result on
 stdout as text, markdown or JSON. Exit status follows the task's status
-(``exit_code``): 0 success, 1 error, 3 finished with reservations.
+(``exit_code``): 0 success, 1 error, and with ``--strict`` 3 for a result
+to read before using.
 """
 
 from __future__ import annotations
@@ -64,19 +65,24 @@ EXIT_OK, EXIT_ERROR, EXIT_RESERVATIONS = 0, 1, 3
 
 
 def exit_code(result: Dict[str, Any], *, strict: bool = False) -> int:
-    """0 when the task succeeded, 1 when it failed, 3 when it finished with
-    something a caller must read the result for: a ``partial`` status (a
-    meta turn in which some delegations failed), and under ``--strict`` a
-    success that is not backed by verified analyses — one was not verified,
-    one failed, or none ran at all (a task that could not find its data
-    still ends in a reply, and a reply is a success). ``--strict`` judges
-    only a result that carries a ``verification``: analyze mode always does,
-    the meta when the turn delegated an analysis, plan and simulate never.
-    Without ``--strict`` such a result exits 0, as it always has — the count
-    is in ``verification`` either way."""
+    """0 when the task succeeded, 1 when it failed. ``--strict`` adds 3,
+    "finished, read the result before using it":
+
+    * a ``partial`` status — a meta turn in which some delegations failed
+      and some did not (the reply may account for it, e.g. a retry that
+      worked, which the ledger cannot tell);
+    * a success that is not backed by verified analyses — one was not
+      verified, one failed, or none ran at all (a task that could not find
+      its data still ends in a reply, and a reply is a success). This is
+      judged only on a result that carries a ``verification``: analyze mode
+      always does, the meta when the turn delegated an analysis, plan and
+      simulate never.
+
+    Without ``--strict`` both exit 0, as they always have; the status and
+    the count are in the result either way."""
     status = str(result.get("status", "")).lower()
     if status == "partial":
-        return EXIT_RESERVATIONS
+        return EXIT_RESERVATIONS if strict else EXIT_OK
     if status not in ("success", "ok", "completed", "done"):
         return EXIT_ERROR
     verification = result.get("verification")
