@@ -46,10 +46,50 @@ scilink simulate --mode autopilot --request "rutile TiO2 supercell with one O va
   `--knowledge-dir` (path or KB name), `--code-dir`, `--embedding-model`,
   `--tools`, `--skills`, `--mcp`.
 - **`analyze`**: `--data`, `--metadata`, `--mode {co-pilot,autopilot,autonomous}`,
-  `--session-dir`, `--agents`, `--skills`, `--tools`, `--mcp`.
+  `--profile {thorough,quick,extract}`, `--targets`, `--time-budget`,
+  `--prior-analysis`, `--reuse-locked-script`, `--session-dir`, `--agents`,
+  `--skills`, `--tools`, `--mcp`.
 - **`simulate`**: `--mode {co-pilot,autopilot,autonomous}`, `--request`
   (one-shot), `--session-dir`, `--tools`, `--skills`, `--mp-api-key`,
   `--futurehouse-api-key`.
+
+**Scope, budget and recipe reuse are flags, not prose.** What a result is for
+is known to whoever asks for it, so `analyze` takes it as typed flags that are
+applied to every analysis of the session whatever the orchestrator's model
+decides to pass:
+
+```bash
+# a first measurement: say which numbers matter and how long it may take
+scilink analyze -p "Fit the D and G bands" --data ./s1.csv \
+    --targets "G band position" "D/G ratio" --time-budget 300 --output-format json
+# the next one: replay the first run's locked script, so the feature row has the same columns
+scilink analyze -p "Fit the D and G bands" --data ./s2.csv \
+    --prior-analysis <output_directory of the first run> --reuse-locked-script --output-format json
+```
+
+- `--targets` — the quantities the result is needed for; verification is spent
+  on those (curve and image analyses).
+- `--time-budget SECONDS` — a soft wall-clock budget per analysis; when it is
+  spent the best result so far comes back marked unverified.
+- `--prior-analysis PATH ...` — prior run folders or recipe files the analyses
+  build on; reference material unless `--reuse-locked-script` is given, which
+  replays the locked script verbatim on the first analysis of each dataset
+  (read `reuse_validity` in the result). A follow-up on the same data — the
+  re-run after a replay that did not fit, a verification — is free to
+  re-derive; a run that failed outright is retried as the replay, once (a
+  replay that is refused, or fails twice, is dropped for that dataset and the
+  session says so); and once
+  the session has re-derived a model, a later dataset may replay that run
+  instead of the recipe that did not fit. The prior run must be of the same kind of data: a datacube
+  analysis asked to replay a curve run fails, and uses a prior run only as a
+  replay.
+
+These flags, like `--profile`, are not stored in the session: pass them again
+on `--resume` / `--restore`.
+
+Mission control takes `--profile`, `--targets` and `--time-budget` as the
+default depth of its analysis delegations and fan-out branches; a delegation
+for which it names a depth of its own uses that one.
 
 Custom extensions: `--tools` (Python tool files) and `--skills` (markdown
 skill bundles) are accepted by all chat modes; `--mcp` (external MCP

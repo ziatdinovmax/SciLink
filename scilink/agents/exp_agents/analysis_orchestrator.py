@@ -579,6 +579,17 @@ class AnalysisOrchestratorAgent:
             a follow-up `run_analysis` call with `prior_analysis_paths`,
             not by in-agent auto-escalation.
 
+        analysis_profile / analysis_targets / analysis_time_budget_s: The
+            session's depth and scope (``--profile``, ``--targets``,
+            ``--time-budget``), applied to every ``run_analysis`` call. A
+            ``run_task`` that names its own replaces them for that task.
+        prior_analysis_paths / reuse_locked_script: Prior runs or recipe
+            files every analysis of the session builds on, and whether
+            their locked script is replayed verbatim (``--prior-analysis``,
+            ``--reuse-locked-script``). The replay is forced on the first
+            analysis of each dataset and the runs are reference material
+            after that; the rule is ``caller_reuse`` in the tools module.
+
         google_api_key: DEPRECATED. Use 'api_key' instead.
         local_model: DEPRECATED. Use 'base_url' instead.
     """
@@ -608,6 +619,10 @@ class AnalysisOrchestratorAgent:
         image_analysis_depth: str = "basic",
         max_iterations: Optional[int] = None,
         analysis_profile: Optional[str] = None,
+        analysis_targets: Optional[List[str]] = None,
+        analysis_time_budget_s: Optional[float] = None,
+        prior_analysis_paths: Optional[List[str]] = None,
+        reuse_locked_script: bool = False,
         # Deprecated
         google_api_key: Optional[str] = None,
         local_model: Optional[str] = None,
@@ -673,8 +688,38 @@ class AnalysisOrchestratorAgent:
         # and it must not depend on the orchestrator LLM choosing to repeat
         # it as a tool argument.
         self.default_profile: Optional[str] = analysis_profile
-        self.default_targets: Optional[List[str]] = None
-        self.default_time_budget_s: Optional[float] = None
+        # Held to what the command line and the meta's analysis_depth accept:
+        # a single name is one target (never iterated per character), and a
+        # budget is a positive, finite number of seconds.
+        if isinstance(analysis_targets, str):
+            analysis_targets = [analysis_targets]
+        self.default_targets: Optional[List[str]] = (
+            [str(t).strip() for t in analysis_targets if str(t).strip()] or None
+            if analysis_targets else None)
+        if analysis_time_budget_s is not None:
+            import math as _math
+            if (isinstance(analysis_time_budget_s, bool)
+                    or not isinstance(analysis_time_budget_s, (int, float))
+                    or not _math.isfinite(analysis_time_budget_s)
+                    or analysis_time_budget_s <= 0):
+                raise ValueError("analysis_time_budget_s must be a positive, finite number "
+                                 f"of seconds (got {analysis_time_budget_s!r})")
+        self.default_time_budget_s: Optional[float] = (
+            float(analysis_time_budget_s) if analysis_time_budget_s else None)
+        # Recipe reuse fixed by the caller, by the same rule: the prior runs
+        # (or recipe files) every analysis of this session builds on, and
+        # whether their locked script is REPLAYED rather than read as
+        # reference. Left to the orchestrator LLM this was prose it had to
+        # repeat as two tool arguments, and a miss cost a full re-analysis
+        # with new feature names instead of a replay.
+        if isinstance(prior_analysis_paths, str):
+            prior_analysis_paths = [prior_analysis_paths]
+        if reuse_locked_script and not prior_analysis_paths:
+            raise ValueError("reuse_locked_script needs prior_analysis_paths: "
+                             "there is no recipe to replay")
+        self.default_prior_analysis_paths: Optional[List[str]] = (
+            [str(p) for p in prior_analysis_paths] if prior_analysis_paths else None)
+        self.default_reuse_locked_script: bool = bool(reuse_locked_script)
 
         self.futurehouse_api_key = futurehouse_api_key
         if not self.futurehouse_api_key:

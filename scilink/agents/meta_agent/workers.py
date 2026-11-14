@@ -87,6 +87,7 @@ def build_child(orch: Any, mode: str, base_dir: Path, *, restore: bool = False,
 
     if mode == "analysis":
         from ..exp_agents.analysis_orchestrator import AnalysisOrchestratorAgent, AnalysisMode
+        _depth = getattr(orch, "default_analysis_depth", None) or {}
         child = AnalysisOrchestratorAgent(
             base_dir=str(base_dir),
             api_key=orch.api_key,
@@ -98,6 +99,10 @@ def build_child(orch: Any, mode: str, base_dir: Path, *, restore: bool = False,
             restore_checkpoint=restore,
             analysis_mode=AnalysisMode.CO_PILOT if persistent else AnalysisMode.AUTONOMOUS,
             file_roots=roots,
+            # the meta session's default depth; a delegation's own replaces it
+            analysis_profile=_depth.get("profile"),
+            analysis_targets=_depth.get("targets"),
+            analysis_time_budget_s=_depth.get("time_budget_s"),
         )
     elif mode == "planning":
         from ..planning_agents.planning_orchestrator import (

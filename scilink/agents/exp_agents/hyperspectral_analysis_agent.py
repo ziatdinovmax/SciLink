@@ -401,6 +401,14 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                             "first, then point prior_analysis_paths at its "
                             "result directory."),
                     },
+                    # A refusal is a replay that was decided: there is no
+                    # recipe here to replay. It says so in the shape every
+                    # reader of a replay already reads, so a caller that
+                    # forced the replay does not take it for a transient
+                    # failure and force it again.
+                    "reuse_validity": {
+                        "reused": False, "verdict": "refused",
+                        "message": "No approved prior script to replay"},
                     "output_directory": str(self.output_dir),
                 }
             if replay_reference is None:
