@@ -357,6 +357,10 @@ def caller_reuse(*, caller_prior, caller_replays: bool, records, data_path,
     session's caller fixed (``--prior-analysis`` / ``--reuse-locked-script``).
 
     Returns ``(prior_analysis_paths, reuse_locked_script, forced)``.
+    ``forced`` is True when the caller's replay is applied to this call,
+    ``"dropped"`` when it would have been and the cap on forced attempts is
+    what stopped it (the one case worth telling the user about), and False
+    otherwise — a follow-up, a replay of a session run, no replay asked.
 
     * **The caller's replay is forced on a dataset's first analysis**
       (``forced``): the caller's runs first — a replay takes the first
@@ -408,12 +412,13 @@ def caller_reuse(*, caller_prior, caller_replays: bool, records, data_path,
                     for r in records or [] if r.get("output_directory")}
     replays_a_session_run = bool(own_replay and own and _dataset_key(own[0]) in session_runs)
 
-    if (caller_replays and not seen and not replays_a_session_run
-            and forced_before < MAX_FORCED_REPLAYS):
+    would_force = caller_replays and not seen and not replays_a_session_run
+    if would_force and forced_before < MAX_FORCED_REPLAYS:
         return caller_prior + [p for p in own if p not in caller_prior], True, True
+    dropped = "dropped" if would_force else False
     if own_replay or own_edits:
-        return (own or None), bool(own_replay), False
-    return own + [p for p in caller_prior if p not in own], False, False
+        return (own or None), bool(own_replay), dropped
+    return own + [p for p in caller_prior if p not in own], False, dropped
 
 
 def _same_dataset(owner: str, requested: str) -> bool:
@@ -3493,13 +3498,15 @@ class AnalysisOrchestratorTools:
                             records=self.orch.analysis_results, data_path=data_path,
                             own_paths=prior_analysis_paths, own_replay=reuse_locked_script,
                             own_edits=script_edits, forced_before=_attempts.get(_key, 0))
-                        if _forced:
+                        if _forced is True:
                             _attempts[_key] = _attempts.get(_key, 0) + 1
                             print("  ℹ️  Recipe reuse is set by the caller: replaying the locked "
                                   f"script of {Path(_caller_prior[0]).name} on this dataset's "
                                   "first analysis.")
-                        elif _replays and _attempts.get(_key, 0) == MAX_FORCED_REPLAYS:
-                            _attempts[_key] += 1          # said once
+                        elif _forced == "dropped" and _attempts.get(_key, 0) == MAX_FORCED_REPLAYS:
+                            # the rule says the cap is why (not a follow-up on
+                            # a dataset whose retry succeeded); said once
+                            _attempts[_key] += 1
                             print(f"  ℹ️  The caller's recipe reuse is dropped for this dataset: "
                                   f"{MAX_FORCED_REPLAYS} replays of "
                                   f"{Path(_caller_prior[0]).name} produced no result. This "

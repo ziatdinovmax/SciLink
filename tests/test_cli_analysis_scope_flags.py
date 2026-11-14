@@ -281,7 +281,8 @@ class _FailsOnce(_RecordingAgent):
 
 
 @pytest.mark.parametrize("outcome", ["error", "raise"])
-def test_a_run_that_failed_outright_does_not_use_up_the_replay(tmp_path, monkeypatch, outcome):
+def test_a_run_that_failed_outright_does_not_use_up_the_replay(tmp_path, monkeypatch, capsys,
+                                                                outcome):
     """An error status used it up (the retry became a fresh derivation with
     new feature names) while an exception did not. Neither produced a result
     nor executed a replay, so the retry is still the caller's replay."""
@@ -293,8 +294,11 @@ def test_a_run_that_failed_outright_does_not_use_up_the_replay(tmp_path, monkeyp
     calls = list(_FailsOnce.calls)
     _run_analysis(o, tmp_path, agent=_FailsOnce, keep_calls=True)
     assert [c["reuse_locked_script"] for c in calls + _FailsOnce.calls[len(calls):]] == [True, True]
+    capsys.readouterr()
     assert _run_analysis(o, tmp_path, agent=_FailsOnce, keep_calls=True) \
         ["reuse_locked_script"] is False                 # a result exists now: the way out
+    # two forced attempts were made and the second SUCCEEDED: nothing was dropped
+    assert "reuse is dropped" not in capsys.readouterr().out
 
 
 class _AlwaysRefuses(_RecordingAgent):
@@ -407,6 +411,11 @@ def test_the_reuse_rule_on_its_own(tmp_path):
     # the backstop: two forced attempts that left nothing, then released
     assert caller_reuse(**common, caller_replays=True, records=[], forced_before=1)[2] is True
     assert caller_reuse(**common, caller_replays=True, records=[], forced_before=2) == \
+        (["/runs/a"], False, "dropped")
+    # ... and "dropped" is said only when the cap is the reason: a dataset whose
+    # second forced attempt produced a result is a follow-up, not a drop
+    done = [rec()]
+    assert caller_reuse(**common, caller_replays=True, records=done, forced_before=2) == \
         (["/runs/a"], False, False)
     # a member file of a folder already analysed as a series is that dataset
     folder = tmp_path / "series"
