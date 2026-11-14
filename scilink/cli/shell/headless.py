@@ -67,16 +67,20 @@ def exit_code(result: Dict[str, Any], *, strict: bool = False) -> int:
     """0 when the task succeeded, 1 when it failed, 3 when it finished with
     something a caller must read the result for: a ``partial`` status (a
     meta turn in which some delegations failed), and under ``--strict`` a
-    success whose analyses were not all verified. Without ``--strict`` an
-    unverified result still exits 0, as it always has — the count is in the
-    result's ``verification`` either way."""
+    success that is not backed by verified analyses — one was not verified,
+    one failed, or none ran at all (a task that could not find its data
+    still ends in a reply, and a reply is a success). ``--strict`` judges
+    only a result that carries a ``verification``: analyze mode always does,
+    the meta when the turn delegated an analysis, plan and simulate never.
+    Without ``--strict`` such a result exits 0, as it always has — the count
+    is in ``verification`` either way."""
     status = str(result.get("status", "")).lower()
     if status == "partial":
         return EXIT_RESERVATIONS
     if status not in ("success", "ok", "completed", "done"):
         return EXIT_ERROR
-    verification = result.get("verification") or {}
-    if strict and verification.get("all_verified") is False:
+    verification = result.get("verification")
+    if strict and isinstance(verification, dict) and verification.get("all_verified") is not True:
         return EXIT_RESERVATIONS
     return EXIT_OK
 

@@ -35,11 +35,11 @@ def build_parser(adapter) -> argparse.ArgumentParser:
     g.add_argument("--output-format", dest="output_format", choices=OUTPUT_FORMATS,
                    default="text", help="Headless output format (default: text)")
     g.add_argument("--strict", action="store_true",
-                   help="Headless: exit 3, not 0, when the task succeeded but an analysis "
-                        "in it was not verified or failed (see the result's "
-                        "'verification'). Exit statuses: 0 success, 1 error, 2 could not "
-                        "start, 3 finished with reservations (also a meta turn in which "
-                        "some delegations failed)")
+                   help="Headless, for a task that is meant to analyse data: exit 3, not "
+                        "0, unless at least one analysis ran and every analysis was "
+                        "verified (see the result's 'verification'). Exit statuses: 0 "
+                        "success, 1 error, 2 could not start, 3 finished with "
+                        "reservations (also a meta turn in which some delegations failed)")
     g.add_argument("--yes", "-y", action="store_true",
                    help="Pre-approve generated-code execution without asking")
     g.add_argument("--resume", dest="resume", nargs="?", const=True, default=None,

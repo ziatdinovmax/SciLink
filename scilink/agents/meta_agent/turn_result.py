@@ -60,6 +60,13 @@ def turn_result(agent, task: str, reply: str, since: int = 0) -> Dict[str, Any]:
                 f"(status={e.get('status')})" + (f": {e['error']}" if e.get("error") else ".")
                 for e in failed]
     warnings += [w for e in entries for w in (e.get("warnings") or [])]
+    # A delegation that ran no analysis is a success by its status (the
+    # specialist replied) and has nothing to show: said here, since neither
+    # the status nor the files say it.
+    warnings += [f"Delegation #{e.get('index')} (analysis) ran no analysis."
+                 for e in entries if e not in failed and e.get("mode") == "analysis"
+                 and isinstance(e.get("verification"), dict)
+                 and not e["verification"].get("analyses")]
 
     result: Dict[str, Any] = {
         "status": status,

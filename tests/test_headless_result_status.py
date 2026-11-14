@@ -205,6 +205,19 @@ def test_the_meta_result_carries_the_delegations_verification():
     json.dumps(res)                                           # what -p prints
 
 
+def test_an_analysis_delegation_that_analysed_nothing_is_named():
+    """Seen live: the specialist could not find the file, replied, and the
+    delegation closed as a success with no analysis in it."""
+    meta = _Meta(script=[_entry(1, verification=verification_summary([]), files_produced=[],
+                                key_findings=[])],
+                 reply="The file was not found.")
+    res = MetaAdapter().headless_run(meta, "analyze missing.csv")
+    assert res["status"] == "success" and res["verification"]["analyses"] == 0
+    assert res["warnings"] == ["Delegation #1 (analysis) ran no analysis."]
+    assert headless.exit_code(res) == headless.EXIT_OK
+    assert headless.exit_code(res, strict=True) == headless.EXIT_RESERVATIONS
+
+
 def test_a_turn_with_no_analysis_has_no_verification():
     res = turn_result(_Meta(script=[_entry(1, mode="planning")]), "plan", "Planned.", 0)
     assert "verification" not in res and headless.exit_code(res, strict=True) == headless.EXIT_OK
@@ -237,8 +250,13 @@ def test_exit_codes():
     unverified = {"status": "success", "verification": {"all_verified": False}}
     assert headless.exit_code(unverified) == 0                 # unchanged without --strict
     assert headless.exit_code(unverified, strict=True) == 3
-    nothing = {"status": "success", "verification": {"all_verified": None}}
-    assert headless.exit_code(nothing, strict=True) == 0
+    # no analysis ran: a reply, a success, and nothing behind it
+    nothing = {"status": "success", "verification": {"analyses": 0, "all_verified": None}}
+    assert headless.exit_code(nothing) == 0 and headless.exit_code(nothing, strict=True) == 3
+    # a mode with no analyses to verify (plan, simulate) is not judged
+    assert headless.exit_code({"status": "success", "campaign_state": {}}, strict=True) == 0
+    verified = {"status": "success", "verification": {"analyses": 2, "all_verified": True}}
+    assert headless.exit_code(verified, strict=True) == 0
     # an error stays an error under --strict
     assert headless.exit_code({"status": "error", "verification": {"all_verified": False}},
                               strict=True) == 1
