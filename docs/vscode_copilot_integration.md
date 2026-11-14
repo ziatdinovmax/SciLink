@@ -82,7 +82,7 @@ Add the following configuration (replace the `command` path with the output from
 
 - **`command`**: The absolute path to your `scilink` binary. Using the full path avoids PATH-resolution issues when VS Code is launched from the OS app launcher rather than a terminal.
 - **`args`**: The `serve` subcommand starts SciLink's MCP server. `--mode both` exposes both analysis and planning tools (use `analyze` or `plan` for just one set). `--autonomy autonomous` lets the LLM chain tools without pausing for approval. `--model` sets the LLM that SciLink's internal agents use (see "Choosing a model" below).
-- **`env`**: API keys for SciLink's LLM backend. The `${input:...}` syntax tells VS Code to prompt you for the key on first use and store it securely in the system keychain — the key is never written to disk. Swap `ANTHROPIC_API_KEY` for `GEMINI_API_KEY`, `OPENAI_API_KEY`, or `SCILINK_API_KEY` depending on your provider.
+- **`env`**: API keys for SciLink's LLM backend. The `${input:...}` syntax tells VS Code to prompt you for the key on first use and store it securely in the system keychain — the key is never written to disk. Swap `ANTHROPIC_API_KEY` for `GEMINI_API_KEY` or `OPENAI_API_KEY` to match the vendor of the `--model` you chose (the server uses the key of the model's own vendor, whichever others are set). `SCILINK_API_KEY` is the key of an OpenAI-compatible proxy and is used only together with `--base-url`.
 - **`inputs`**: Defines the secure prompt that `${input:anthropic_api_key}` references. Set `password: true` so VS Code masks the input field.
 
 ### Why not use the "Add MCP Server" button?

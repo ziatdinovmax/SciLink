@@ -66,6 +66,44 @@ def _print_mcp_json(args) -> int:
     return 0
 
 
+def resolve_api_key(model: str, base_url, api_key):
+    """The key this server's orchestrators are built with.
+
+    The rule is the terminal shell's (``auth.resolve_llm_key``): the key of
+    the MODEL'S vendor, the proxy key only with ``--base-url``, none for
+    Bedrock. It used to be the first of SCILINK / GEMINI / OPENAI / ANTHROPIC
+    that was set, whatever the model — so a machine with two vendors' keys
+    sent one vendor's key to the other, and a proxy key went to a vendor.
+
+    Nothing is asked here (stdin is the transport). A proxy with no key
+    cannot work, and is an error. A missing key of a vendor SciLink knows is
+    a warning on stderr and ``None``, which leaves the client library to
+    find one; nothing is said about Bedrock (the AWS credential chain has
+    sources this cannot see) or a model whose provider is not recognised (a
+    local model needs no key, and another route's key is the client
+    library's to find).
+    """
+    from scilink import auth
+
+    key, source = auth.resolve_llm_key(model, base_url, api_key)
+    if source:
+        return key
+    if base_url:
+        raise ValueError(
+            f"--base-url needs a key: set {auth.INTERNAL_PROXY_KEY} (in the "
+            "environment or ~/.scilink/credentials.env) or pass --api-key. A "
+            "vendor's key in the environment is never sent to a --base-url "
+            "endpoint; for a local endpoint that takes any key, pass one with "
+            "--api-key.")
+    provider = auth.infer_provider(model)
+    if provider in ("anthropic", "openai", "google"):
+        print(f"Warning: no {' or '.join(auth.ENV_VARS[provider])} found for model "
+              f"{model!r} (in the environment or ~/.scilink/credentials.env). "
+              "Starting anyway; model calls will fail unless the client library "
+              "finds a credential.", file=sys.stderr)
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="scilink serve",
@@ -82,13 +120,17 @@ def main():
         "--api-key",
         type=str,
         default=None,
-        help="API key (default: auto-detect from env vars)",
+        help=("API key (default: the model's own vendor's key from the "
+              "environment or ~/.scilink/credentials.env; SCILINK_API_KEY "
+              "with --base-url; none for a bedrock/... model)"),
     )
     parser.add_argument(
         "--base-url",
         type=str,
         default=None,
-        help="OpenAI-compatible endpoint URL",
+        help=("OpenAI-compatible endpoint URL (an internal proxy or a local "
+              "server). Its key is SCILINK_API_KEY or --api-key, never a "
+              "vendor's key from the environment"),
     )
     parser.add_argument(
         "--mode",
@@ -175,19 +217,6 @@ def main():
     if args.print_mcp_json:
         return _print_mcp_json(args)
 
-    # Resolve API key
-    api_key = args.api_key
-    if api_key is None:
-        for env_var in [
-            "SCILINK_API_KEY",
-            "GEMINI_API_KEY",
-            "OPENAI_API_KEY",
-            "ANTHROPIC_API_KEY",
-        ]:
-            api_key = os.environ.get(env_var)
-            if api_key:
-                break
-
     # The MCP stdio transport reads sys.stdin.buffer and writes
     # sys.stdout.buffer.  Save the real stdout before redirecting
     # Python-level sys.stdout to stderr, so print() calls from
@@ -203,13 +232,23 @@ def main():
     sys.stdout = sys.stderr
 
     try:
-        from scilink.mcp_server import create_server, run_stdio, run_sse
+        from scilink.mcp_server import (create_server, run_stdio, run_sse,
+                                        _load_shared_credentials)
     except ImportError as exc:
         print(
             f"Error: {exc}\n"
             "Install MCP support with: pip install scilink",
             file=sys.stderr,
         )
+        return 1
+
+    # ~/.scilink/credentials.env first: the key is resolved from the
+    # environment, and that file is where a secret-free client config keeps it.
+    _load_shared_credentials()
+    try:
+        api_key = resolve_api_key(args.model, args.base_url, args.api_key)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
         return 1
 
     server = create_server(

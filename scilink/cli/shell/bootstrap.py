@@ -52,30 +52,23 @@ def resolve_llm_credentials(model: str, base_url: Optional[str],
     Enter meaning "let LiteLLM auto-detect".
     """
     spec = provider_for(model)
-    if api_key:
-        return Credentials(api_key, base_url, spec.name, "flag")
+    key, source = auth.resolve_llm_key(model, base_url, api_key)
+    if source:
+        return Credentials(key, base_url, spec.name, source)
     if base_url:
-        key = auth.get_internal_proxy_key()
-        if key:
-            return Credentials(key, base_url, spec.name, auth.INTERNAL_PROXY_KEY)
         key = ask(f"Proxy API key ({auth.INTERNAL_PROXY_KEY}): ", secret=True).strip()
         if not key:
             raise BootstrapError(
                 "An API key is required for the internal proxy: set "
                 f"{auth.INTERNAL_PROXY_KEY} or pass --api-key.")
         return Credentials(key, base_url, spec.name, "prompt")
-    if model.startswith("bedrock/"):
-        if os.getenv("AWS_BEARER_TOKEN_BEDROCK") or os.getenv("AWS_ACCESS_KEY_ID"):
-            return Credentials(None, None, spec.name, "AWS environment")
+    if auth.infer_provider(model) == "bedrock":
         token = ask("Bedrock bearer token (Enter = default AWS credential "
                     "discovery): ", secret=True).strip()
         if token:
             os.environ["AWS_BEARER_TOKEN_BEDROCK"] = token
             return Credentials(None, None, spec.name, "prompt")
         return Credentials(None, None, spec.name, "auto")
-    kv = auth.find_env_var_for_model(model)
-    if kv:
-        return Credentials(kv[1], None, spec.name, kv[0])
     key = ask(f"{spec.name} {spec.key_label} (Enter = let LiteLLM auto-detect): ",
               secret=True).strip()
     return Credentials(key or None, None, spec.name, "prompt" if key else "auto")
