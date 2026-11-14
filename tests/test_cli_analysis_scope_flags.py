@@ -297,6 +297,75 @@ def test_a_run_that_failed_outright_does_not_use_up_the_replay(tmp_path, monkeyp
         ["reuse_locked_script"] is False                 # a result exists now: the way out
 
 
+class _AlwaysRefuses(_RecordingAgent):
+    """Refuses every replay the way an agent with no recipe to replay does,
+    and analyses normally otherwise. ``marked`` adds the reuse_validity the
+    hyperspectral agent's refusal carries; a custom agent may not."""
+    marked = False
+
+    def analyze(self, data, system_info=None, **kwargs):
+        reuse = kwargs.get("reuse_locked_script", False)
+        type(self).calls.append({"reuse_locked_script": reuse})
+        if reuse:
+            out = {"status": "error", "error": {"error": "No approved prior script to replay"}}
+            if type(self).marked:
+                out["reuse_validity"] = {"reused": False, "verdict": "refused"}
+            return out
+        return {"status": "success", "detailed_analysis": "ok", "scientific_claims": []}
+
+
+@pytest.mark.parametrize("marked, forced_calls", [(True, 1), (False, 2)])
+def test_a_refused_replay_is_not_forced_forever(tmp_path, monkeypatch, capsys, marked, forced_calls):
+    """Found in the second review: a refusal is deterministic, and an error
+    record with no replay marker was read as a transient failure — the retry
+    was forced and refused again on every call, with no argument that got
+    out. A refusal that says what it is releases the dataset at once; one
+    that does not is bounded at two forced attempts."""
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+    o = _orchestrator(tmp_path, monkeypatch, prior_analysis_paths=["/runs/curve_run"],
+                      reuse_locked_script=True)
+    _AlwaysRefuses.marked = marked
+    seen = []
+    for i in range(4):
+        _run_analysis(o, tmp_path, agent=_AlwaysRefuses, must_succeed=False, keep_calls=i > 0)
+        seen = [c["reuse_locked_script"] for c in _AlwaysRefuses.calls]
+        if not seen[-1]:
+            break
+    assert seen == [True] * forced_calls + [False]            # released, then analysed
+    assert o.analysis_results[-1]["status"] == "success"
+    assert ("reuse is dropped for this dataset" in capsys.readouterr().out) is (not marked)
+    # another dataset still gets the caller's replay
+    assert _run_analysis(o, tmp_path, agent=_AlwaysRefuses, name="other.csv", must_succeed=False,
+                         keep_calls=True)["reuse_locked_script"] is True
+
+
+def test_the_hyperspectral_refusal_says_what_it_is(tmp_path, monkeypatch):
+    """The real agent's 'no recipe to replay' result, read by the rule."""
+    import numpy as np
+    from scilink.agents.exp_agents.analysis_orchestrator_tools import caller_reuse
+    from scilink.agents.exp_agents.hyperspectral_analysis_agent import HyperspectralAnalysisAgent
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path / "home"))
+    prior = tmp_path / "curve_run"                      # a run folder with no cube recipe in it
+    prior.mkdir()
+    (prior / "analysis_results.json").write_text("{}")
+    agent = HyperspectralAnalysisAgent(model_name="anthropic/claude-sonnet-4-5",
+                                       output_dir=str(tmp_path / "out"),
+                                       enable_human_feedback=False)
+    cube = tmp_path / "cube.npy"
+    np.save(cube, np.zeros((4, 4, 8)))
+    result = agent.analyze(str(cube), prior_analysis_paths=[str(prior)],
+                           reuse_locked_script=True)
+    assert result["status"] == "error"
+    assert result["reuse_validity"] == {"reused": False, "verdict": "refused",
+                                        "message": "No approved prior script to replay"}
+    record = {"agent_id": 3, "status": "error", "data_path": str(cube), "full_result": result,
+              "output_directory": str(tmp_path / "out")}
+    assert caller_reuse(caller_prior=[str(prior)], caller_replays=True, records=[record],
+                        data_path=str(cube)) == ([str(prior)], False, False)
+
+
 def test_a_replay_of_a_run_this_session_made_is_kept_on_a_first_look(tmp_path, monkeypatch):
     """The session re-derived a model because the caller's recipe did not
     fit; the next dataset replaying THAT run is not forced back onto the
@@ -335,6 +404,10 @@ def test_the_reuse_rule_on_its_own(tmp_path):
     # a replay that executed and did not fit released the dataset, whatever its status
     poor = [rec(status="error", full_result={"reuse_validity": {"reused": True, "verdict": "poor"}})]
     assert caller_reuse(**common, caller_replays=True, records=poor) == (["/runs/a"], False, False)
+    # the backstop: two forced attempts that left nothing, then released
+    assert caller_reuse(**common, caller_replays=True, records=[], forced_before=1)[2] is True
+    assert caller_reuse(**common, caller_replays=True, records=[], forced_before=2) == \
+        (["/runs/a"], False, False)
     # a member file of a folder already analysed as a series is that dataset
     folder = tmp_path / "series"
     folder.mkdir()

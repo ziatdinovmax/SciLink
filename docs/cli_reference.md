@@ -76,7 +76,9 @@ scilink analyze -p "Fit the D and G bands" --data ./s2.csv \
   replays the locked script verbatim on the first analysis of each dataset
   (read `reuse_validity` in the result). A follow-up on the same data — the
   re-run after a replay that did not fit, a verification — is free to
-  re-derive; a run that failed outright is retried as the replay; and once
+  re-derive; a run that failed outright is retried as the replay, once (a
+  replay that is refused, or fails twice, is dropped for that dataset and the
+  session says so); and once
   the session has re-derived a model, a later dataset may replay that run
   instead of the recipe that did not fit. The prior run must be of the same kind of data: a datacube
   analysis asked to replay a curve run fails, and uses a prior run only as a

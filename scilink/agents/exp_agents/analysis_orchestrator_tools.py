@@ -345,8 +345,14 @@ def _dataset_key(data_path: str) -> str:
         return data_path
 
 
+#: How many times the caller's replay is forced on one dataset before it is
+#: dropped: the first analysis and one retry of a failure that left nothing.
+MAX_FORCED_REPLAYS = 2
+
+
 def caller_reuse(*, caller_prior, caller_replays: bool, records, data_path,
-                 own_paths=None, own_replay: bool = False, own_edits=None):
+                 own_paths=None, own_replay: bool = False, own_edits=None,
+                 forced_before: int = 0):
     """What one ``run_analysis`` call is given of the recipe reuse the
     session's caller fixed (``--prior-analysis`` / ``--reuse-locked-script``).
 
@@ -358,7 +364,15 @@ def caller_reuse(*, caller_prior, caller_replays: bool, records, data_path,
       earlier run on this dataset that produced a result or executed a
       replay. A run that failed outright did neither, so its retry is still
       the replay (a transient failure must not turn the next attempt into a
-      fresh derivation with new feature names). The dataset is compared by
+      fresh derivation with new feature names) — once: after
+      ``MAX_FORCED_REPLAYS`` forced attempts on a dataset (``forced_before``
+      counts them) the replay is dropped for it, whatever those attempts
+      left behind. A failure is not always transient: a replay that is
+      REFUSED (no recipe in the prior run, a prior run of another kind of
+      data) fails the same way every time, and an agent that does not mark
+      its refusal with a ``reuse_validity`` would be forced onto it on every
+      call, with no argument the orchestrator could pass to get out. The
+      dataset is compared by
       its canonical key, so another spelling of the path is the same
       dataset, and a member file of a folder already analysed as a series
       is covered by it.
@@ -394,7 +408,8 @@ def caller_reuse(*, caller_prior, caller_replays: bool, records, data_path,
                     for r in records or [] if r.get("output_directory")}
     replays_a_session_run = bool(own_replay and own and _dataset_key(own[0]) in session_runs)
 
-    if caller_replays and not seen and not replays_a_session_run:
+    if (caller_replays and not seen and not replays_a_session_run
+            and forced_before < MAX_FORCED_REPLAYS):
         return caller_prior + [p for p in own if p not in caller_prior], True, True
     if own_replay or own_edits:
         return (own or None), bool(own_replay), False
@@ -3466,18 +3481,29 @@ class AnalysisOrchestratorTools:
                         print(f"  ℹ️  Prior analysis set by the caller is not used: "
                               f"{self.AGENT_NAMES.get(agent_id, 'this agent')} does not take one.")
                     else:
+                        _replays = bool(
+                            getattr(self.orch, "default_reuse_locked_script", False)
+                            and ("reuse_locked_script" in _params or _var_kw))
+                        # forced attempts per dataset, counted here because a
+                        # run that raised leaves no record to count
+                        _attempts = self.orch.__dict__.setdefault("_forced_replays", {})
+                        _key = _dataset_key(str(data_path))
                         prior_analysis_paths, reuse_locked_script, _forced = caller_reuse(
-                            caller_prior=_caller_prior,
-                            caller_replays=bool(
-                                getattr(self.orch, "default_reuse_locked_script", False)
-                                and ("reuse_locked_script" in _params or _var_kw)),
+                            caller_prior=_caller_prior, caller_replays=_replays,
                             records=self.orch.analysis_results, data_path=data_path,
                             own_paths=prior_analysis_paths, own_replay=reuse_locked_script,
-                            own_edits=script_edits)
+                            own_edits=script_edits, forced_before=_attempts.get(_key, 0))
                         if _forced:
+                            _attempts[_key] = _attempts.get(_key, 0) + 1
                             print("  ℹ️  Recipe reuse is set by the caller: replaying the locked "
                                   f"script of {Path(_caller_prior[0]).name} on this dataset's "
                                   "first analysis.")
+                        elif _replays and _attempts.get(_key, 0) == MAX_FORCED_REPLAYS:
+                            _attempts[_key] += 1          # said once
+                            print(f"  ℹ️  The caller's recipe reuse is dropped for this dataset: "
+                                  f"{MAX_FORCED_REPLAYS} replays of "
+                                  f"{Path(_caller_prior[0]).name} produced no result. This "
+                                  "call keeps its own arguments.")
                 if prior_analysis_paths:
                     analyze_kwargs["prior_analysis_paths"] = prior_analysis_paths
                 if reference_scripts:
