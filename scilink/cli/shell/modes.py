@@ -272,15 +272,13 @@ apply here):
         return [args.initial_message] if getattr(args, "initial_message", None) else []
 
     def headless_run(self, agent, task, context=None):
+        """The meta has no ``run_task``: one ``chat()`` turn, reported from
+        the delegations that turn worked on (a restored session's earlier
+        ones are not this task's; a fan-out it resumed is)."""
+        from scilink.agents.meta_agent.turn_result import ledger_snapshot, turn_result
+        before = ledger_snapshot(agent)
         reply = agent.chat(task)
-        ledger = getattr(agent, "_delegation_ledger", None) or []
-        files = [f for e in ledger for f in (e.get("files_produced") or [])]
-        findings = [k for e in ledger for k in (e.get("key_findings") or [])]
-        failed = [e for e in ledger if str(e.get("status", "")).lower() in ("error", "failed")]
-        return {"status": "error" if failed and not reply else "success", "task": task,
-                "summary": reply or "", "files_produced": files, "key_findings": findings,
-                "delegations": len(ledger),
-                "warnings": [e.get("error") for e in failed if e.get("error")]}
+        return turn_result(agent, task, reply, before)
 
 
 def _delegations(shell, arg: str) -> None:

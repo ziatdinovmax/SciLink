@@ -34,6 +34,13 @@ def build_parser(adapter) -> argparse.ArgumentParser:
                         "(autonomous; every question is auto-accepted)")
     g.add_argument("--output-format", dest="output_format", choices=OUTPUT_FORMATS,
                    default="text", help="Headless output format (default: text)")
+    g.add_argument("--strict", action="store_true",
+                   help="Headless, for a task that is meant to analyse data: exit 3, not "
+                        "0, unless at least one analysis ran, every analysis was verified "
+                        "and (Mission Control) no delegation failed; see 'status' and "
+                        "'verification' in the result. Exit statuses: 0 success, 1 error, "
+                        "2 could not start, 3 (--strict only) read the result before "
+                        "using it")
     g.add_argument("--yes", "-y", action="store_true",
                    help="Pre-approve generated-code execution without asking")
     g.add_argument("--resume", dest="resume", nargs="?", const=True, default=None,

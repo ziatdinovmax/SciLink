@@ -455,6 +455,101 @@ def analysis_verdict(full_result: Optional[dict]) -> Dict[str, Any]:
     return reconstructed_verdict(full)
 
 
+# Rows of a task that are steps around an analysis, not analyses: they pass
+# or fail a gate of their own and carry no verification record, so their
+# ``verified`` is False by construction ("no verification record") and says
+# nothing. A failed one is still a failure of the task.
+_STEP_AGENTS = ("DataPreparation", "OutputDerivation")
+
+
+def verification_summary(rows) -> Dict[str, Any]:
+    """One answer over a task's ``analyses`` rows: was everything verified?
+
+    A task's ``status`` says the task ran; each row's ``verified`` says
+    whether that analysis passed its own checks. A caller that reads only the
+    status (an exit code, a job state) took a salvaged or unverified result
+    for an approved one, so the rows are counted here, once, for every
+    surface that reports a task: ``run_task``, the meta's ledger, headless
+    ``-p``.
+
+    ``all_verified`` is True when every analysis produced a result and was
+    verified, False when any was not (or any row failed), and None when no
+    analysis ran (nothing was verified and nothing failed to be).
+    ``unverified`` lists the analyses that produced a result that was not
+    approved, with the reason; ``failed`` the rows that produced none. A
+    data-preparation or derivation step that succeeded is not an analysis
+    and is not counted; one that failed is listed under ``failed``.
+    """
+    rows = [r for r in (rows or []) if isinstance(r, dict)]
+    failed = [r for r in rows if r.get("status") not in ("success", "partial")]
+    produced = [r for r in rows if r.get("status") in ("success", "partial")
+                and r.get("agent_name") not in _STEP_AGENTS]
+    unverified = [r for r in produced if r.get("verified") is not True]
+    steps = sum(1 for r in rows if r.get("status") in ("success", "partial")
+                and r.get("agent_name") in _STEP_AGENTS)
+    return {
+        "analyses": len(produced) + len(failed),
+        # preparation / derivation steps that passed their own gate
+        "steps": steps,
+        "verified": len(produced) - len(unverified),
+        "unverified": [{"analysis_id": r.get("analysis_id"), "reason": r.get("reason")}
+                       for r in unverified],
+        "failed": [{"analysis_id": r.get("analysis_id"), "status": r.get("status")}
+                   for r in failed],
+        "all_verified": (not unverified and not failed) if (produced or failed) else None,
+    }
+
+
+def did_nothing(summary) -> bool:
+    """A task's verification that shows no analysis and no step that passed."""
+    return (isinstance(summary, dict) and not int(summary.get("analyses") or 0)
+            and not int(summary.get("steps") or 0))
+
+
+def merge_verification(summaries) -> Optional[Dict[str, Any]]:
+    """Several tasks' :func:`verification_summary` as one (a meta turn's
+    analysis delegations). None when none of them carries one.
+
+    ``all_verified`` is True only when EVERY task's is, and None only when no
+    task ran an analysis. A task that did NOTHING beside one that was
+    verified — no analysis and no step that passed, the "file not found"
+    delegation — is not "all verified" and is counted under
+    ``without_analysis``. A task that only prepared data (a successful
+    step, no analysis) did its job: preparing in one delegation and
+    analysing in the next is the prescribed shape for raw-instrument data.
+    An item of ``summaries`` may be a ``(tag, summary)`` pair; the tag (a
+    delegation index) is then put on that task's ``unverified`` and
+    ``failed`` items as ``delegation``, since analysis ids repeat across
+    sessions.
+    """
+    parts = []
+    for item in summaries or []:
+        tag, summary = item if isinstance(item, tuple) else (None, item)
+        if isinstance(summary, dict) and "analyses" in summary:
+            parts.append((tag, summary))
+    if not parts:
+        return None
+
+    def tagged(key):
+        return [dict(x, delegation=tag) if tag is not None else x
+                for tag, s in parts for x in (s.get(key) or [])]
+
+    unverified, failed = tagged("unverified"), tagged("failed")
+    n = sum(int(s.get("analyses") or 0) for _, s in parts)
+    empty = sum(1 for _, s in parts if did_nothing(s))
+    merged = {
+        "analyses": n,
+        "steps": sum(int(s.get("steps") or 0) for _, s in parts),
+        "verified": sum(int(s.get("verified") or 0) for _, s in parts),
+        "unverified": unverified,
+        "failed": failed,
+        "all_verified": (not unverified and not failed and not empty) if n else None,
+    }
+    if empty and len(parts) > 1:
+        merged["without_analysis"] = empty
+    return merged
+
+
 def replay_certification_reason(full_result: Optional[dict]) -> Optional[str]:
     """Why a replay's interpretation is not certified (#753), for the
     ``analyses`` row beside :func:`replay_escalation`, so a reader quotes

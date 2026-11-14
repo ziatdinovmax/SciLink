@@ -15,7 +15,8 @@ from scilink.utils.text_io import atomic_write_json
 import logging
 from ._verification_record import (analysis_verdict, replay_certification_reason, replay_escalation,
                                    series_anchor_unit, series_coverage,
-                                   ungated_outputs_of, failed_outputs_of)
+                                   ungated_outputs_of, failed_outputs_of,
+                                   verification_summary)
 import os
 import time
 from pathlib import Path
@@ -1760,6 +1761,9 @@ class AnalysisOrchestratorAgent:
             ],
             "warnings": warnings,
         }
+        # status says the task ran; this says whether what it produced was
+        # verified — one field, so a caller need not walk the rows.
+        result["verification"] = verification_summary(result["analyses"])
         if _depth:
             result["depth"] = _depth
         if error_msg:

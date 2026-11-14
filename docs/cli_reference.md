@@ -148,6 +148,50 @@ scilink analyze --resume analysis_session_20260919_101500    # ... or name it
 scilink --verbose                                            # full narration from the start
 ```
 
+### Headless results (`-p`)
+
+`-p` runs one task autonomously, narrates on stderr and prints the result on
+stdout (`--output-format text | markdown | json`). The JSON is the mode's
+`run_task` result. Two things in it tell a script whether to trust the run:
+
+- **`status`** — `success`, `error`, or (Mission Control only) `partial`: some
+  delegations produced a result and some did not. A turn whose every
+  delegation failed is an `error`, whatever the reply says. Mission Control
+  also lists the turn's delegations under `delegation_results`.
+- **`verification`** — over the analyses the task ran: `analyses`, `verified`,
+  the `unverified` ones (a result was produced but not approved by its own
+  checks, with the reason), the `failed` ones, and `all_verified` (`null` when
+  no analysis ran). `status: success` says the task ran, not that its fits
+  were approved.
+
+| Exit status | Meaning |
+|---|---|
+| 0 | success (and, without `--strict`, a `partial` turn) |
+| 1 | the task failed |
+| 2 | could not start (credentials, a bad flag) |
+| 3 | `--strict` only: finished, but read the result before using it |
+| 130 | interrupted |
+
+`--strict` is for a task that is meant to analyse data. It exits 0 only when
+at least one analysis ran, every analysis was verified and, in Mission Control,
+no delegation failed. A task that could not find its data still ends in a
+reply, so its status is `success`; under `--strict` it exits 3, because
+`verification.analyses` is 0. Details:
+
+- Verification is judged only on a result that carries one: analyze always;
+  Mission Control when the turn delegated an analysis; plan and simulate never.
+- A data-preparation or derivation step that passed its own gate is counted
+  under `verification.steps`, not as an analysis. A delegation that only
+  prepared data is fine beside one that analysed it; a delegation that did
+  nothing at all (no analysis, no step) is counted under `without_analysis`
+  and fails `--strict`.
+- An analysis that crashed is listed under `failed`, like one that returned
+  an error.
+
+Without `--strict` the exit status is 0 or 1 as before; `status` and
+`verification` are in the result either way, and text / markdown output says
+when the status is not `success`.
+
 ### Slash commands
 
 Shared by every mode: `/help`, `/status` (`/state`), `/mode [level]`

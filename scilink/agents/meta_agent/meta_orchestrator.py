@@ -614,6 +614,7 @@ class MetaOrchestratorAgent:
             else self.MAX_TOOL_ITERATIONS
         )
         self._last_chat_hit_iter_cap = False
+        self._last_chat_error: Optional[str] = None
 
         if restore_checkpoint and self.checkpoint_path.exists():
             self._restore_checkpoint()
@@ -1876,6 +1877,10 @@ class MetaOrchestratorAgent:
                                  if isinstance(a, dict) and a.get("analysis_id")],
                 "recommended_parameters": recommended_parameters,
                 "recommended_values": recommended_values,
+                # Whether what an analysis delegation produced was verified
+                # (the child's own count over its analyses): the status above
+                # only says the delegation ran.
+                "verification": result.get("verification"),
             })
         # A completed delegation is the ledger state worth preserving — the
         # every-N-messages auto-save left short sessions (fewer than
@@ -2268,6 +2273,7 @@ class MetaOrchestratorAgent:
         _set_evlog(str(_P(self.base_dir) / "events.jsonl"))
         self.message_count += 1
         self._last_chat_hit_iter_cap = False
+        self._last_chat_error = None
 
         # First-turn: fill the system prompt's specialist-capability inventory
         # from the children's live tool registries (idempotent thereafter).
@@ -2314,6 +2320,9 @@ class MetaOrchestratorAgent:
 
         except Exception as e:
             logging.error(f"Chat Error: {e}", exc_info=True)
+            # The reply below is returned as a normal string (the CLI and the
+            # UI show it); a programmatic caller reads the flag.
+            self._last_chat_error = str(e)
             print("  💾 Error detected - saving emergency checkpoint...")
             self._auto_checkpoint()
             return f"❌ Error: {e}\n\n(Emergency checkpoint saved to {self.checkpoint_path})"

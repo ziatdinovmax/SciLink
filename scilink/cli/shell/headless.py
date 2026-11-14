@@ -2,7 +2,9 @@
 
 Runs the mode's ``run_task`` under full autonomy with every human-feedback
 question auto-accepted, narrates on stderr, and prints the result on
-stdout as text, markdown or JSON. Exit status follows the task's status.
+stdout as text, markdown or JSON. Exit status follows the task's status
+(``exit_code``): 0 success, 1 error, and with ``--strict`` 3 for a result
+to read before using.
 """
 
 from __future__ import annotations
@@ -31,6 +33,10 @@ def render_result(result: Dict[str, Any], fmt: str) -> str:
     if fmt == "json":
         return json.dumps(result, indent=2, default=str)
     lines = [result.get("summary") or ""]
+    status = str(result.get("status", "")).lower()
+    if status and status not in ("success", "ok", "completed", "done"):
+        # the JSON says it; text and markdown read as a normal answer without it
+        lines += ["", f"Status: {status}" if fmt == "text" else f"**Status:** {status}"]
     findings = result.get("key_findings") or []
     if findings:
         lines += ["", "Key findings:" if fmt == "text" else "## Key findings"]
@@ -39,6 +45,18 @@ def render_result(result: Dict[str, Any], fmt: str) -> str:
     if files:
         lines += ["", "Files:" if fmt == "text" else "## Files"]
         lines += [f"- {f}" for f in files]
+    verification = result.get("verification") or {}
+    if verification.get("analyses"):
+        lines += ["", "Verification:" if fmt == "text" else "## Verification",
+                  f"- {verification.get('verified', 0)} of {verification['analyses']} "
+                  "analyses verified"]
+        lines += [f"- not verified: {u.get('analysis_id')} ({u.get('reason')})"
+                  for u in verification.get("unverified") or []]
+        lines += [f"- failed: {f.get('analysis_id')} (status={f.get('status')})"
+                  for f in verification.get("failed") or []]
+        if verification.get("without_analysis"):
+            lines.append(f"- {verification['without_analysis']} analysis delegation(s) "
+                         "ran nothing")
     warnings = result.get("warnings") or []
     if warnings:
         lines += ["", "Warnings:" if fmt == "text" else "## Warnings"]
@@ -48,8 +66,36 @@ def render_result(result: Dict[str, Any], fmt: str) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def exit_code(result: Dict[str, Any]) -> int:
-    return 0 if str(result.get("status", "")).lower() in ("success", "ok", "completed", "done") else 1
+# Exit statuses of a ``-p`` run. 2 is a start-up failure (credentials, a
+# bad flag), 130 an interrupt.
+EXIT_OK, EXIT_ERROR, EXIT_RESERVATIONS = 0, 1, 3
+
+
+def exit_code(result: Dict[str, Any], *, strict: bool = False) -> int:
+    """0 when the task succeeded, 1 when it failed. ``--strict`` adds 3,
+    "finished, read the result before using it":
+
+    * a ``partial`` status — a meta turn in which some delegations failed
+      and some did not (the reply may account for it, e.g. a retry that
+      worked, which the ledger cannot tell);
+    * a success that is not backed by verified analyses — one was not
+      verified, one failed, or none ran at all (a task that could not find
+      its data still ends in a reply, and a reply is a success). This is
+      judged only on a result that carries a ``verification``: analyze mode
+      always does, the meta when the turn delegated an analysis, plan and
+      simulate never.
+
+    Without ``--strict`` both exit 0, as they always have; the status and
+    the count are in the result either way."""
+    status = str(result.get("status", "")).lower()
+    if status == "partial":
+        return EXIT_RESERVATIONS if strict else EXIT_OK
+    if status not in ("success", "ok", "completed", "done"):
+        return EXIT_ERROR
+    verification = result.get("verification")
+    if strict and isinstance(verification, dict) and verification.get("all_verified") is not True:
+        return EXIT_RESERVATIONS
+    return EXIT_OK
 
 
 def run(adapter, args, task: str, *, console: Console = None) -> int:
@@ -89,4 +135,4 @@ def run(adapter, args, task: str, *, console: Console = None) -> int:
         return 130
     sys.stdout.write(render_result(result, fmt))
     sys.stdout.flush()
-    return exit_code(result)
+    return exit_code(result, strict=bool(getattr(args, "strict", False)))
