@@ -4,7 +4,7 @@ The meta has no ``run_task`` — it is the top-level caller — so a
 programmatic caller of ``chat()`` (headless ``-p``) had only the reply text
 to go by, and called a turn a success whenever there was one: a turn whose
 every delegation failed still exited 0. The delegation ledger knows better.
-This reads the entries the turn added and gives the same fields the
+This reads the entries the turn worked on and gives the same fields the
 specialists' ``run_task`` returns, with a status derived from them.
 """
 
@@ -46,26 +46,44 @@ def turn_status(reply: str, entries: List[Dict[str, Any]], *, chat_error=None,
     return "partial" if len(failed) < len(entries) else "error"
 
 
-def turn_entries(ledger: List[Dict[str, Any]], since: int = 0,
-                 started_at: str = "") -> List[Dict[str, Any]]:
-    """The ledger entries one turn worked on: the ones it appended (after
-    position ``since``) and the earlier ones it closed again — a resumed
-    fan-out reopens its entries in place, so their position says nothing and
-    their ``completed_at`` does."""
-    return [e for i, e in enumerate(ledger) if isinstance(e, dict)
-            and (i >= since or (started_at and str(e.get("completed_at") or "") >= started_at))]
+def ledger_snapshot(agent) -> Dict[Any, Any]:
+    """The ledger as it stands before a turn: ``{index: completed_at}``.
+
+    Taken AFTER the sweep ``chat()`` itself starts with: a restored session
+    can hold a delegation an earlier, stopped session left ``running``, and
+    the sweep closes it at the start of the next turn — it was then charged
+    to that turn as a failed delegation. Sweeping first makes it part of the
+    "before". Idempotent, so ``chat()`` sweeping again finds nothing.
+    """
+    sweep = getattr(agent, "_sweep_interrupted_delegations", None)
+    if callable(sweep):
+        sweep()
+    return {e.get("index"): e.get("completed_at")
+            for e in (getattr(agent, "_delegation_ledger", None) or []) if isinstance(e, dict)}
 
 
-def turn_result(agent, task: str, reply: str, since: int = 0,
-                started_at: str = "") -> Dict[str, Any]:
-    """The structured result of one turn: ``since`` is the ledger's length
-    and ``started_at`` the ISO time before ``chat()`` was called."""
+def turn_entries(ledger: List[Dict[str, Any]], before: Dict[Any, Any]) -> List[Dict[str, Any]]:
+    """The ledger entries one turn worked on: the ones it added, and the
+    earlier ones it closed again (a resumed fan-out reopens its entries in
+    place, so position says nothing). Read by CHANGE against the snapshot —
+    never by comparing timestamps, which misattributes entries on a host
+    whose clock is behind the one that wrote the ledger."""
+    return [e for e in ledger if isinstance(e, dict)
+            and (e.get("index") not in before or e.get("completed_at") != before[e.get("index")])]
+
+
+def turn_result(agent, task: str, reply: str,
+                before: Dict[Any, Any] = None) -> Dict[str, Any]:
+    """The structured result of one turn; ``before`` is the
+    :func:`ledger_snapshot` taken before ``chat()`` was called (none: every
+    entry is the turn's)."""
     ledger = list(getattr(agent, "_delegation_ledger", None) or [])
-    entries = turn_entries(ledger, since, started_at)
+    entries = turn_entries(ledger, before or {})
     chat_error = getattr(agent, "_last_chat_error", None)
     cap = bool(getattr(agent, "_last_chat_hit_iter_cap", False))
     status = turn_status(reply, entries, chat_error=chat_error, hit_iteration_cap=cap)
 
+    from ..exp_agents._verification_record import did_nothing, merge_verification
     failed = [e for e in entries if str(e.get("status", "")).lower() not in _PRODUCED]
     warnings = [f"Delegation #{e.get('index')} ({e.get('mode')}) did not complete "
                 f"(status={e.get('status')})" + (f": {e['error']}" if e.get("error") else ".")
@@ -76,8 +94,7 @@ def turn_result(agent, task: str, reply: str, since: int = 0,
     # the status nor the files say it.
     warnings += [f"Delegation #{e.get('index')} (analysis) ran no analysis."
                  for e in entries if e not in failed and e.get("mode") == "analysis"
-                 and isinstance(e.get("verification"), dict)
-                 and not e["verification"].get("analyses")]
+                 and did_nothing(e.get("verification"))]
 
     result: Dict[str, Any] = {
         "status": status,
@@ -102,12 +119,12 @@ def turn_result(agent, task: str, reply: str, since: int = 0,
              "verification": e.get("verification")}
             for e in entries],
     }
-    from ..exp_agents._verification_record import merge_verification
     verification = merge_verification((e.get("index"), e.get("verification")) for e in entries)
     if verification is not None:
         result["verification"] = verification
     if status == "error":
         result["error"] = (chat_error or (reply if cap else None)
                            or "; ".join(str(e.get("error")) for e in failed if e.get("error"))
-                           or "The turn produced no reply.")
+                           or ("The turn produced no reply." if not (reply or "").strip()
+                               else f"No delegation produced a result ({len(failed)} failed)."))
     return result

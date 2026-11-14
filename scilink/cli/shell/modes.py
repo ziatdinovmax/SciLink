@@ -275,12 +275,10 @@ apply here):
         """The meta has no ``run_task``: one ``chat()`` turn, reported from
         the delegations that turn worked on (a restored session's earlier
         ones are not this task's; a fan-out it resumed is)."""
-        from scilink.agents.meta_agent.turn_result import turn_result
-        from datetime import datetime
-        since = len(getattr(agent, "_delegation_ledger", None) or [])
-        started_at = datetime.now().isoformat()
+        from scilink.agents.meta_agent.turn_result import ledger_snapshot, turn_result
+        before = ledger_snapshot(agent)
         reply = agent.chat(task)
-        return turn_result(agent, task, reply, since, started_at)
+        return turn_result(agent, task, reply, before)
 
 
 def _delegations(shell, arg: str) -> None:

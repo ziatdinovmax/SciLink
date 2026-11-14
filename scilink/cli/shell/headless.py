@@ -33,6 +33,10 @@ def render_result(result: Dict[str, Any], fmt: str) -> str:
     if fmt == "json":
         return json.dumps(result, indent=2, default=str)
     lines = [result.get("summary") or ""]
+    status = str(result.get("status", "")).lower()
+    if status and status not in ("success", "ok", "completed", "done"):
+        # the JSON says it; text and markdown read as a normal answer without it
+        lines += ["", f"Status: {status}" if fmt == "text" else f"**Status:** {status}"]
     findings = result.get("key_findings") or []
     if findings:
         lines += ["", "Key findings:" if fmt == "text" else "## Key findings"]
@@ -50,6 +54,9 @@ def render_result(result: Dict[str, Any], fmt: str) -> str:
                   for u in verification.get("unverified") or []]
         lines += [f"- failed: {f.get('analysis_id')} (status={f.get('status')})"
                   for f in verification.get("failed") or []]
+        if verification.get("without_analysis"):
+            lines.append(f"- {verification['without_analysis']} analysis delegation(s) "
+                         "ran nothing")
     warnings = result.get("warnings") or []
     if warnings:
         lines += ["", "Warnings:" if fmt == "text" else "## Warnings"]

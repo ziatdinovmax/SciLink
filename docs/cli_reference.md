@@ -174,14 +174,23 @@ stdout (`--output-format text | markdown | json`). The JSON is the mode's
 
 `--strict` is for a task that is meant to analyse data. It exits 0 only when
 at least one analysis ran, every analysis was verified and, in Mission Control,
-no delegation failed and every analysis delegation ran an analysis. A task that
-could not find its data still ends in a reply, so its status is `success`;
-under `--strict` it exits 3, because `verification.analyses` is 0. Verification
-is judged only on a result that carries one (analyze always; Mission Control
-when the turn delegated an analysis; plan and simulate never), and a
-data-preparation or derivation step is not counted as an analysis. Without
-`--strict` the exit status is 0 or 1 as before; `status` and `verification`
-are in the result either way.
+no delegation failed. A task that could not find its data still ends in a
+reply, so its status is `success`; under `--strict` it exits 3, because
+`verification.analyses` is 0. Details:
+
+- Verification is judged only on a result that carries one: analyze always;
+  Mission Control when the turn delegated an analysis; plan and simulate never.
+- A data-preparation or derivation step that passed its own gate is counted
+  under `verification.steps`, not as an analysis. A delegation that only
+  prepared data is fine beside one that analysed it; a delegation that did
+  nothing at all (no analysis, no step) is counted under `without_analysis`
+  and fails `--strict`.
+- An analysis that crashed is listed under `failed`, like one that returned
+  an error.
+
+Without `--strict` the exit status is 0 or 1 as before; `status` and
+`verification` are in the result either way, and text / markdown output says
+when the status is not `success`.
 
 ### Slash commands
 

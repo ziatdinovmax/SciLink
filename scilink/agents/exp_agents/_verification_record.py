@@ -485,8 +485,12 @@ def verification_summary(rows) -> Dict[str, Any]:
     produced = [r for r in rows if r.get("status") in ("success", "partial")
                 and r.get("agent_name") not in _STEP_AGENTS]
     unverified = [r for r in produced if r.get("verified") is not True]
+    steps = sum(1 for r in rows if r.get("status") in ("success", "partial")
+                and r.get("agent_name") in _STEP_AGENTS)
     return {
         "analyses": len(produced) + len(failed),
+        # preparation / derivation steps that passed their own gate
+        "steps": steps,
         "verified": len(produced) - len(unverified),
         "unverified": [{"analysis_id": r.get("analysis_id"), "reason": r.get("reason")}
                        for r in unverified],
@@ -496,15 +500,25 @@ def verification_summary(rows) -> Dict[str, Any]:
     }
 
 
+def did_nothing(summary) -> bool:
+    """A task's verification that shows no analysis and no step that passed."""
+    return (isinstance(summary, dict) and not int(summary.get("analyses") or 0)
+            and not int(summary.get("steps") or 0))
+
+
 def merge_verification(summaries) -> Optional[Dict[str, Any]]:
     """Several tasks' :func:`verification_summary` as one (a meta turn's
     analysis delegations). None when none of them carries one.
 
-    ``all_verified`` is True only when EVERY task's is: a task that ran no
-    analysis beside one that was verified is not "all verified" (it is
-    counted under ``without_analysis``), and it is None only when no task
-    ran any. An item of ``summaries`` may be a ``(tag, summary)`` pair; the
-    tag (a delegation index) is then put on that task's ``unverified`` and
+    ``all_verified`` is True only when EVERY task's is, and None only when no
+    task ran an analysis. A task that did NOTHING beside one that was
+    verified — no analysis and no step that passed, the "file not found"
+    delegation — is not "all verified" and is counted under
+    ``without_analysis``. A task that only prepared data (a successful
+    step, no analysis) did its job: preparing in one delegation and
+    analysing in the next is the prescribed shape for raw-instrument data.
+    An item of ``summaries`` may be a ``(tag, summary)`` pair; the tag (a
+    delegation index) is then put on that task's ``unverified`` and
     ``failed`` items as ``delegation``, since analysis ids repeat across
     sessions.
     """
@@ -522,9 +536,10 @@ def merge_verification(summaries) -> Optional[Dict[str, Any]]:
 
     unverified, failed = tagged("unverified"), tagged("failed")
     n = sum(int(s.get("analyses") or 0) for _, s in parts)
-    empty = sum(1 for _, s in parts if not int(s.get("analyses") or 0))
+    empty = sum(1 for _, s in parts if did_nothing(s))
     merged = {
         "analyses": n,
+        "steps": sum(int(s.get("steps") or 0) for _, s in parts),
         "verified": sum(int(s.get("verified") or 0) for _, s in parts),
         "unverified": unverified,
         "failed": failed,

@@ -2946,6 +2946,10 @@ class AnalysisOrchestratorTools:
                         print("  📎 Filled from the file's own record: "
                               + ", ".join(_filled))
             
+            # Known to the handler below only once an analysis has been given
+            # an id: an error before that is a refused call, not a failed run.
+            analysis_id = None
+            analysis_output_dir = None
             try:
                 # === Handle directory / glob input - filter out metadata files ===
                 path = Path(data_path)
@@ -3717,9 +3721,27 @@ class AnalysisOrchestratorTools:
                     
             except Exception as e:
                 self.logger.error(f"Analysis error: {e}", exc_info=True)
+                # An analysis that RAISED is a failed analysis, like one whose
+                # agent returned an error status. It used to leave no record,
+                # so a task with one verified analysis and one that crashed
+                # reported every analysis verified.
+                if analysis_id and not any(r.get("analysis_id") == analysis_id
+                                           for r in self.orch.analysis_results):
+                    self.orch.analysis_results.append({
+                        "analysis_id": analysis_id,
+                        "timestamp": datetime.now().isoformat(),
+                        "data_path": data_path,
+                        "agent_id": agent_id,
+                        "agent_name": self.AGENT_NAMES.get(agent_id),
+                        "status": "error",
+                        "output_directory": str(analysis_output_dir),
+                        "full_result": {"status": "error", "error": str(e)},
+                        "novelty_assessment": None,
+                    })
                 return json.dumps({
                     "status": "error",
-                    "message": str(e)
+                    "message": str(e),
+                    **({"analysis_id": analysis_id} if analysis_id else {}),
                 })
         
         self._register_tool(

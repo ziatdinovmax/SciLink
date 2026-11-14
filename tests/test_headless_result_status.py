@@ -29,7 +29,7 @@ def _row(aid, status="success", verified=True, reason="approved"):
 
 def test_all_verified():
     v = verification_summary([_row("a"), _row("b")])
-    assert v == {"analyses": 2, "verified": 2, "unverified": [], "failed": [],
+    assert v == {"analyses": 2, "steps": 0, "verified": 2, "unverified": [], "failed": [],
                  "all_verified": True}
 
 
@@ -64,9 +64,10 @@ def test_a_step_that_passed_its_own_gate_is_not_an_unverified_analysis():
     derive = dict(_row("der", verified=False, reason="no verification record"),
                   agent_name="OutputDerivation")
     v = verification_summary([prep, _row("a"), derive])
-    assert v == {"analyses": 1, "verified": 1, "unverified": [], "failed": [],
+    assert v == {"analyses": 1, "steps": 2, "verified": 1, "unverified": [], "failed": [],
                  "all_verified": True}
-    assert verification_summary([prep])["all_verified"] is None       # no analysis ran
+    only = verification_summary([prep])
+    assert only["all_verified"] is None and only["steps"] == 1        # no analysis ran
     failed_prep = dict(prep, status="error")
     v = verification_summary([failed_prep, _row("a")])
     assert v["all_verified"] is False and v["failed"][0]["analysis_id"] == "prep"
@@ -97,6 +98,19 @@ def test_merge_names_the_delegation_and_counts_the_empty_ones():
                                  (3, verification_summary([]))])
     assert merged["analyses"] == 1 and merged["verified"] == 1
     assert merged["all_verified"] is False and merged["without_analysis"] == 2
+
+
+def test_preparing_in_one_delegation_and_analysing_in_the_next_is_verified():
+    """The shape CLAUDE.md prescribes for raw-instrument data. The preparing
+    delegation ran no analysis and did its job; it used to count against
+    all_verified, so this could never pass --strict through Mission Control."""
+    prep = verification_summary([dict(_row("prep", verified=False), agent_name="DataPreparation")])
+    assert prep["analyses"] == 0 and prep["steps"] == 1
+    merged = merge_verification([(1, prep), (2, verification_summary([_row("a")]))])
+    assert merged["all_verified"] is True and "without_analysis" not in merged
+    assert merged["analyses"] == 1 and merged["steps"] == 1
+    # a preparation alone is still no analysis
+    assert merge_verification([(1, prep)])["all_verified"] is None
 
 
 # ── analyze: run_task carries it ─────────────────────────────────
@@ -221,32 +235,92 @@ def test_a_restored_sessions_earlier_delegations_are_not_this_tasks():
     assert res["files_produced"] == ["/out/2.png"]
 
 
+def _real_meta(tmp_path, monkeypatch, name="meta", **kw):
+    from scilink.agents.meta_agent.meta_orchestrator import MetaMode, MetaOrchestratorAgent
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    return MetaOrchestratorAgent(base_dir=str(tmp_path / name),
+                                 model_name="anthropic/claude-sonnet-4-5",
+                                 meta_mode=MetaMode.AUTONOMOUS, launch_dir=str(tmp_path), **kw)
+
+
+def _chat_through_the_real_sweep(m, during=lambda: None, reply="Done."):
+    """chat() with the model loop replaced; it starts with the real sweep."""
+    def chat(task):
+        m._sweep_interrupted_delegations()
+        during()
+        return reply
+    m.chat = chat
+
+
+def test_a_delegation_left_running_by_an_earlier_session_is_not_this_turns(tmp_path, monkeypatch):
+    """Reproduced in review on the --restore -p path: chat() starts by
+    closing the entries a stopped session left running, with a fresh
+    completed_at, and the new turn was reported as an error for them."""
+    m = _real_meta(tmp_path, monkeypatch)
+    done = m._open_delegation("analysis", "finished earlier", None, None)
+    m._close_delegation(done, {"status": "success", "summary": "s"})
+    m._open_delegation("analysis", "stopped mid-run", None, None)        # left 'running'
+    m._auto_checkpoint()
+    restored = _real_meta(tmp_path, monkeypatch, restore_checkpoint=True)
+    assert [e["status"] for e in restored._delegation_ledger] == ["success", "running"]
+
+    _chat_through_the_real_sweep(restored, reply="Nothing to delegate.")
+    res = MetaAdapter().headless_run(restored, "what did we find?")
+    assert res["status"] == "success" and res["delegations"] == 0 and res["warnings"] == []
+    assert restored._delegation_ledger[1]["status"] == "interrupted"     # swept, on record
+
+    # and a real delegation in such a turn is reported alone
+    restored2 = _real_meta(tmp_path, monkeypatch, name="meta2")
+    restored2._open_delegation("analysis", "stopped mid-run", None, None)
+
+    def delegate():
+        e = restored2._open_delegation("analysis", "new work", None, None)
+        restored2._close_delegation(e, {"status": "success", "summary": "s"})
+    _chat_through_the_real_sweep(restored2, delegate)
+    res = MetaAdapter().headless_run(restored2, "analyze it")
+    assert res["status"] == "success" and [d["index"] for d in res["delegation_results"]] == [2]
+
+
 def test_a_fanout_resumed_in_place_is_this_turns_work(tmp_path, monkeypatch):
     """resume_fanout reopens its entries where they are, below the ledger's
     length at the start of the turn: they were invisible, so a resume whose
     every branch failed was a success with no delegations."""
-    from scilink.agents.meta_agent.meta_orchestrator import MetaMode, MetaOrchestratorAgent
-    monkeypatch.setenv("SCILINK_HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    m = MetaOrchestratorAgent(base_dir=str(tmp_path / "meta"),
-                              model_name="anthropic/claude-sonnet-4-5",
-                              meta_mode=MetaMode.AUTONOMOUS, launch_dir=str(tmp_path))
+    m = _real_meta(tmp_path, monkeypatch)
     old = m._open_delegation("analysis", "an earlier, finished task", None, None)
     m._close_delegation(old, {"status": "success", "summary": "s"})
     branch = m._open_delegation("analysis", "a fan-out branch", None, None)
+    branch["fanout"] = True
     m._close_delegation(branch, {"status": "interrupted", "error": "server restarted"})
 
-    def resume(task):                      # what resume_fanout does: same entry, closed again
-        import time
-        time.sleep(0.01)
+    def resume():                          # what resume_fanout does to a stale entry
+        branch["resumed_from_interruption"] = True
         branch["status"] = "running"
+        branch.pop("completed_at", None)
         m._close_delegation(branch, {"status": "error", "error": "budget exceeded"})
-        return "The resumed branch failed."
-    m.chat = resume
+    _chat_through_the_real_sweep(m, resume, reply="The resumed branch failed.")
     res = MetaAdapter().headless_run(m, "resume the fan-out")
     assert [d["index"] for d in res["delegation_results"]] == [branch["index"]]
     assert res["status"] == "error" and "budget exceeded" in res["error"]
     assert headless.exit_code(res) == headless.EXIT_ERROR
+
+    # a resumed branch still running when the turn ends (aborted) is the turn's too
+    branch["status"] = "interrupted"
+    before_abort = {"reply": "Stopped."}
+
+    def reopen_only():
+        branch["status"] = "running"
+        branch.pop("completed_at", None)
+    _chat_through_the_real_sweep(m, reopen_only, reply=before_abort["reply"])
+    res = MetaAdapter().headless_run(m, "resume again")
+    assert res["status"] == "error" and res["delegation_results"][0]["status"] == "running"
+
+
+def test_every_delegation_failed_with_no_error_text_does_not_claim_no_reply():
+    meta = _Meta(script=[_entry(1, "error")], reply="It did not work.")
+    res = MetaAdapter().headless_run(meta, "t")
+    assert res["status"] == "error" and "no reply" not in res["error"]
+    assert "No delegation produced a result" in res["error"]
 
 
 def test_a_chat_error_is_an_error():
@@ -283,22 +357,19 @@ def test_an_analysis_delegation_that_analysed_nothing_is_named():
 
 
 def test_a_turn_with_no_analysis_has_no_verification():
-    res = turn_result(_Meta(script=[_entry(1, mode="planning")]), "plan", "Planned.", 0)
+    res = MetaAdapter().headless_run(_Meta(script=[_entry(1, mode="planning")], reply="Planned."),
+                                     "plan")
+    assert res["delegations"] == 1
     assert "verification" not in res and headless.exit_code(res, strict=True) == headless.EXIT_OK
 
 
 def test_the_ledger_keeps_the_childs_verification(tmp_path, monkeypatch):
-    from scilink.agents.meta_agent.meta_orchestrator import MetaMode, MetaOrchestratorAgent
-    monkeypatch.setenv("SCILINK_HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    m = MetaOrchestratorAgent(base_dir=str(tmp_path / "meta"),
-                              model_name="anthropic/claude-sonnet-4-5",
-                              meta_mode=MetaMode.AUTONOMOUS, launch_dir=str(tmp_path))
+    m = _real_meta(tmp_path, monkeypatch)
     entry = m._open_delegation("analysis", "fit it", None, None)
     v = verification_summary([_row("a", verified=False, reason="salvaged")])
     m._close_delegation(entry, {"status": "success", "summary": "s", "verification": v})
     assert m._delegation_ledger[-1]["verification"] == v
-    res = turn_result(m, "fit it", "Fitted.", 0)
+    res = turn_result(m, "fit it", "Fitted.")
     assert res["verification"]["all_verified"] is False
     saved = json.loads((tmp_path / "meta" / "checkpoint.json").read_text())
     assert saved["delegation_ledger"][-1]["verification"]["unverified"][0]["analysis_id"] == "a"
@@ -345,3 +416,68 @@ def test_strict_flag_reaches_the_exit_code(tmp_path, capsys, monkeypatch):
     args = make_args(adapter, ["-p", "t", "--yes", "--strict", "--output-format", "json"])
     assert headless.run(adapter, args, "t") == 3
     assert json.loads(capsys.readouterr().out)["verification"]["all_verified"] is False
+
+
+def test_text_output_says_a_turn_was_not_a_success():
+    """Text and markdown printed a partial or failed turn like any answer."""
+    meta = _Meta(script=[_entry(1, verification=verification_summary([_row("a")])),
+                         _entry(2, "error", error="boom")], reply="One of two worked.")
+    res = MetaAdapter().headless_run(meta, "analyze both")
+    text = headless.render_result(res, "text")
+    assert "Status: partial" in text and "1 of 1 analyses verified" in text and "boom" in text
+    assert "**Status:** partial" in headless.render_result(res, "markdown")
+    ok = headless.render_result({"status": "success", "summary": "fine"}, "text")
+    assert "Status" not in ok
+
+
+# ── an analysis that raised is a failed analysis ─────────────────
+
+class _CrashingAgent:
+    def __init__(self, *a, **k):
+        pass
+
+    def analyze(self, data, system_info=None, **kwargs):
+        raise RuntimeError("detector overflow")
+
+
+class _VerifiedAgent(_CrashingAgent):
+    def analyze(self, data, system_info=None, **kwargs):
+        return {"status": "success", "detailed_analysis": "ok", "scientific_claims": [],
+                "verdict": verdict_record(verified=True, reason="approved", decided_by="qc_gate")}
+
+
+def test_a_crashed_analysis_is_counted_as_failed(tmp_path, monkeypatch):
+    """It left no record, so one verified analysis beside one that crashed
+    reported all_verified True and --strict exited 0."""
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+    o = AnalysisOrchestratorAgent(base_dir=str(tmp_path / "session"),
+                                  model_name="anthropic/claude-sonnet-4-5")
+    good, bad = max(o._agent_registry) + 1, max(o._agent_registry) + 2
+    o.register_agent(good, _VerifiedAgent)
+    o.register_agent(bad, _CrashingAgent)
+
+    def run(name, agent_id):
+        data = tmp_path / name
+        data.write_text("x,y\n" + "\n".join(f"{i},{i * i}" for i in range(50)))
+        o.current_metadata = o.current_metadata_owner = None
+        return json.loads(o.tools.execute_tool("run_analysis", data_path=str(data),
+                                               agent_id=agent_id, analysis_goal="a curve"))
+
+    def chat(prompt):
+        assert run("a.csv", good)["status"] == "success"
+        crashed = run("b.csv", bad)
+        assert crashed["status"] == "error" and crashed["analysis_id"]
+        return "One fitted, one crashed."
+    o.chat = chat
+    res = o.run_task("fit both")
+    v = res["verification"]
+    assert v["analyses"] == 2 and v["verified"] == 1 and v["all_verified"] is False
+    assert [f["status"] for f in v["failed"]] == ["error"]
+    assert headless.exit_code(res, strict=True) == headless.EXIT_RESERVATIONS
+    # a call refused before an analysis started leaves no row
+    n = len(o.analysis_results)
+    refused = json.loads(o.tools.execute_tool("run_analysis", data_path=str(tmp_path / "missing.csv"),
+                                              agent_id=good, analysis_goal="a curve"))
+    assert refused["status"] == "error" and len(o.analysis_results) == n
