@@ -247,6 +247,30 @@ def _resolve_candidate_escalation(agent: Any, requested: Any) -> bool:
     return "candidate_escalation" in params
 
 
+_DERIVE_DIR_RE = re.compile(r"^derive_(.+?)_derive_\d{8}_\d{6}_\d+$")
+
+
+def _derive_source_name(name: str) -> str:
+    """The source name a derive folder is named after.
+
+    A derive output is ``derive_<source>_derive_<YYYYMMDD_HHMMSS>_<NNN>``; when
+    the source is itself one, name the new folder after ITS source, so a chain
+    keeps one ``derive_`` prefix instead of stacking one per link. Folders named
+    before this (prefixes already stacked, the inner name cut to 30 characters)
+    are unwound too. Any other name is returned unchanged.
+    """
+    m = _DERIVE_DIR_RE.match(name)
+    if not m:
+        return name
+    inner = m.group(1)
+    # every leading prefix goes (older chains stacked them), so a source that was
+    # itself named "derive_..." loses that word too: cosmetic, and only in the name
+    while inner.startswith("derive_"):
+        inner = inner[len("derive_"):]
+    inner = re.sub(r"_derive_[\d_]*$", "", inner)   # an older chain's truncated timestamp
+    return inner or name
+
+
 _GLOB_MAGIC = ("*", "?", "[")
 
 
@@ -2198,7 +2222,7 @@ class AnalysisOrchestratorTools:
                     context="Derive a secondary artifact from a completed run (sandboxed script)"):
                 return json.dumps({"status": "aborted", "reason": "sandbox_declined",
                                    "message": "Code execution declined; nothing was derived."})
-            stem = re.sub(r"[^\w\-]", "_", Path(sources[0]).name)[:30]
+            stem = re.sub(r"[^\w\-]", "_", _derive_source_name(Path(sources[0]).name))[:30]
             self.orch._analysis_run_counter += 1
             derive_id = f"{stem}_derive_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{self.orch._analysis_run_counter:03d}"
             out_dir = self.orch.results_dir / f"derive_{derive_id}"

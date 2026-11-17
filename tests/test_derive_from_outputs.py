@@ -225,3 +225,39 @@ def test_prompt_routes_reshaping_to_the_new_tool():
     from scilink.agents.exp_agents import analysis_orchestrator as ao
     assert "`derive_from_outputs`" in ao._SYSTEM_PROMPT_BODY_POST
     assert "produce X from what run Y already computed" in ao._SYSTEM_PROMPT_BODY_POST
+
+
+# ── folder names along a chain of derives ──────────────────────────
+
+def test_a_derive_of_a_derive_is_named_after_the_original_source():
+    from scilink.agents.exp_agents.analysis_orchestrator_tools import _derive_source_name
+    # a derive output names its own source; anything else is left alone
+    assert _derive_source_name("derive_results_table_derive_20261016_144203_005") == "results_table"
+    assert _derive_source_name("analysis_image_ImageAnalysis_20260909_000001") == "analysis_image_ImageAnalysis_20260909_000001"
+    assert _derive_source_name("derive_settings") == "derive_settings"
+    assert _derive_source_name("x_derive_y") == "x_derive_y"
+    # a source name that itself contains "_derive_" keeps it
+    assert _derive_source_name("derive_x_derive_y_derive_20261016_144203_005") == "x_derive_y"
+    # folders named before the fix: stacked prefixes and a truncated inner timestamp are unwound
+    assert _derive_source_name("derive_derive_results_table_derive_20_derive_20261020_113350_006") == "results_table"
+    assert _derive_source_name("derive_derive_a_derive_20261016_14420_derive_20261020_113350_006") == "a"
+    # a cut inside the old "_derive" itself leaves a fragment no rule can tell from a real name
+    assert _derive_source_name("derive_derive_derive_results_table_de_derive_20261020_131622_013") == "results_table_de"
+
+
+def test_chained_derives_keep_one_prefix_and_the_source_name(tmp_path):
+    run = _prior_run(tmp_path)
+    t = _tools(tmp_path, FakeModel([]))
+    t.orch.analysis_results.append({"analysis_id": "img_001", "status": "success", "output_directory": str(run)})
+    first = json.loads(t.functions_map["derive_from_outputs"](task="table", analysis_id="img_001", code=TABLE_SCRIPT))
+    names = [Path(first["output_directory"]).name]
+    src = first["output_directory"]
+    for _ in range(2):   # derive from the previous derive's folder (the prior run rides along for the arrays)
+        out = json.loads(t.functions_map["derive_from_outputs"](task="table", source_paths=[src, str(run)], code=TABLE_SCRIPT))
+        assert out["status"] == "success"
+        names.append(Path(out["output_directory"]).name)
+        src = out["output_directory"]
+    stem = run.name[:30]
+    for name in names:
+        assert name.startswith(f"derive_{stem}_derive_") and name.count("derive_") == 2, name
+    assert len(set(names)) == 3
