@@ -263,11 +263,14 @@ def _derive_source_name(name: str) -> str:
     if not m:
         return name
     inner = m.group(1)
-    # every leading prefix goes (older chains stacked them), so a source that was
-    # itself named "derive_..." loses that word too: cosmetic, and only in the name
-    while inner.startswith("derive_"):
-        inner = inner[len("derive_"):]
-    inner = re.sub(r"_derive_[\d_]*$", "", inner)   # an older chain's truncated timestamp
+    if inner.startswith("derive_"):
+        # a name from before this: prefixes stacked and the inner name cut at 30
+        # characters. Only such names are cleaned, so a source called
+        # "x_derive_2" keeps its name; one called "derive_..." loses that word
+        # (the two cannot be told apart): cosmetic, and only in the name
+        while inner.startswith("derive_"):
+            inner = inner[len("derive_"):]
+        inner = re.sub(r"_derive_[\d_]*$", "", inner)   # the truncated timestamp
     return inner or name
 
 
