@@ -236,8 +236,9 @@ def test_a_derive_of_a_derive_is_named_after_the_original_source():
     assert _derive_source_name("analysis_image_ImageAnalysis_20260909_000001") == "analysis_image_ImageAnalysis_20260909_000001"
     assert _derive_source_name("derive_settings") == "derive_settings"
     assert _derive_source_name("x_derive_y") == "x_derive_y"
-    # a source name that itself contains "_derive_" keeps it
+    # a source name that itself contains "_derive_" keeps it, digits too
     assert _derive_source_name("derive_x_derive_y_derive_20261016_144203_005") == "x_derive_y"
+    assert _derive_source_name("derive_sample_derive_2_derive_20261117_101010_007") == "sample_derive_2"
     # folders named before the fix: stacked prefixes and a truncated inner timestamp are unwound
     assert _derive_source_name("derive_derive_results_table_derive_20_derive_20261020_113350_006") == "results_table"
     assert _derive_source_name("derive_derive_a_derive_20261016_14420_derive_20261020_113350_006") == "a"
