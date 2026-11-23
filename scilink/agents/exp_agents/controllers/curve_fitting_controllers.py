@@ -7973,7 +7973,17 @@ Return JSON with:
             return _fallback(str(e))
 
     def _log_verification_issues(self, verification: dict) -> None:
-        """Log verification issues in a readable format."""
+        """Log verification issues in a readable format.
+
+        Logging only: a malformed verifier payload (e.g. a field returned as a
+        list instead of a string) must never fail the attempt that produced it.
+        """
+        try:
+            self._format_verification_issues(verification)
+        except Exception as exc:  # noqa: BLE001 - display path, never fatal
+            self.logger.warning(f"   Could not format verification issues for the log: {exc}")
+
+    def _format_verification_issues(self, verification: dict) -> None:
         issues_count = len(verification.get("issues_found", []))
         overall_assessment = verification.get('overall_assessment', 'No assessment provided')
 
@@ -8009,7 +8019,7 @@ Return JSON with:
                         self.logger.info(f"            {line}")
 
         recommended = verification.get("recommended_action", "")
-        if recommended and recommended.lower() != "none":
+        if recommended and str(recommended).lower() != "none":
             self.logger.info("")
             self.logger.info(f"   Recommended action:")
             for line in self._wrap_text(recommended, width=65):
@@ -8905,7 +8915,15 @@ Return JSON with:
         return state
     
     def _wrap_text(self, text: str, width: int = 70) -> list:
-        """Wrap text to specified width, preserving words."""
+        """Wrap text to specified width, preserving words.
+
+        Accepts a list/tuple of strings (joined with '; ') or any other value
+        (converted with str()), since LLM-produced fields are not always strings.
+        """
+        if isinstance(text, (list, tuple)):
+            text = "; ".join(str(t) for t in text if t is not None)
+        elif text is not None and not isinstance(text, str):
+            text = str(text)
         if not text:
             return [""]
         
