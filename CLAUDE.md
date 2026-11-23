@@ -1580,6 +1580,11 @@ after every verified one. Recorded data is not an instrument called "replay": a
 (`system_info["instrument"]`, "Recorded on" in the tab), else under its folder,
 so two folders never share a memory by accident.
 
+**The web UI has no Live tab** (removed 2026-11-22). The live layer,
+`server/live_api.py` and its routes stay; where this section names the tab,
+its form, its cards or its buttons, it records what the tab did, which the
+routes still serve.
+
 **The tab has three real sources and one of them is the recommended shape.**
 "Your instrument" is an MCP server (any language, works on a shared server) or a
 Python `Instrument` class on the machine (local only: importing runs code);
