@@ -379,7 +379,7 @@ export function Sidebar({
       )}
 
       <label className="field">
-        <span>FutureHouse API key (optional)</span>
+        <span>Edison Scientific API key (optional)</span>
         <input
           type="password"
           value={fhApiKey}

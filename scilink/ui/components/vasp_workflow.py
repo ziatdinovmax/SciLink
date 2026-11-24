@@ -240,7 +240,7 @@ def _render_configure() -> None:
     )
     with st.expander("Advanced (optional)"):
         futurehouse_key = st.text_input(
-            "FutureHouse API key (for INCAR validation)",
+            "Edison Scientific API key (for INCAR validation)",
             type="password",
             key="vasp_fh_key",
             help="When set, the agent will validate the generated INCAR against literature and apply suggested fixes.",

@@ -1,7 +1,7 @@
 import json
 from scilink.utils.text_io import atomic_write_json
 import logging
-import os
+from scilink.auth import edison_api_key
 import time
 import re
 import pandas as pd
@@ -616,7 +616,7 @@ class PlanningOrchestratorAgent:
         base_url: Base URL for internal proxy endpoint.
         embedding_model: Embedding model name.
         embedding_api_key: API key for the embedding LLM provider.
-        futurehouse_api_key: Optional FutureHouse API key for literature search.
+        futurehouse_api_key: Optional Edison Scientific API key for literature search.
         restore_checkpoint: Whether to restore from previous checkpoint.
         autonomy_level: Level of autonomy (CO_PILOT, AUTOPILOT, or AUTONOMOUS).
         
@@ -841,11 +841,11 @@ class PlanningOrchestratorAgent:
         # Literature & Molecules agents (orchestrator-level tools)
         self.lit_agent = None
         self.mol_agent = None
-        if futurehouse_api_key or os.getenv("FUTUREHOUSE_API_KEY"):
+        if futurehouse_api_key or edison_api_key():
             from ..lit_agents.literature_agent import LiteratureSearchAgent
             from ..lit_agents.molecules_agent import MoleculesAgent
             from ..lit_agents.optimize_query import optimize_search_query
-            fh_key = futurehouse_api_key or os.getenv("FUTUREHOUSE_API_KEY")
+            fh_key = futurehouse_api_key or edison_api_key()
             try:
                 self.lit_agent = LiteratureSearchAgent(fh_key, max_wait_time=1500)
                 logging.info("✅ Orchestrator: Literature Search Agent initialized.")

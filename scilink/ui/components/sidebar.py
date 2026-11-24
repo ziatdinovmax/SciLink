@@ -60,7 +60,7 @@ def _seed_credentials_from_env(model: str) -> dict:
     if api_src and new_val == api_val:
         sources["api_key"] = api_src
 
-    # base_url / FutureHouse / Materials Project keys are model-independent —
+    # base_url / Edison Scientific / Materials Project keys are model-independent —
     # seed once (setdefault never clobbers a typed value).
     for field, state_key in (
         ("base_url", "cfg_base_url"),
@@ -331,7 +331,7 @@ def render_sidebar() -> None:
             # Proxy key was prefilled but no base URL is set — the proxy path
             # needs one, and vendors reject the proxy key without it.
             st.caption("⚠️ Proxy key detected — set a Base URL (or export `SCILINK_BASE_URL`) to use it.")
-        fh_api_key = st.text_input("FutureHouse API key (optional)", type="password", key="cfg_fh_api_key", disabled=_locked)
+        fh_api_key = st.text_input("Edison Scientific API key (optional)", type="password", key="cfg_fh_api_key", disabled=_locked)
         if _env_src.get("fh"):
             st.caption(f"✓ loaded from `{_env_src['fh']}`")
         mp_api_key = st.text_input("Materials Project API key (optional)", type="password", key="cfg_mp_api_key", disabled=_locked)

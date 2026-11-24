@@ -2,20 +2,18 @@
 Molecules Agent Module
 
 Provides a cheminformatics agent for synthesis planning and molecule design
-using the FutureHouse/Edison MOLECULES tool.
+using the Edison Scientific MOLECULES tool.
 """
 
-import os
+from scilink.auth import edison_api_key
 import logging
 import time
 from time import sleep
 from typing import Dict, Any, Optional
 
 
-# Guarded symbols from the sibling module — one choke point for the optional
-# FutureHouse stack (edison-client -> ldp -> fhlmi). Import never raises;
-# construction raises a clean RuntimeError via _require_edison().
-from .literature_agent import EdisonClient, JobNames, _require_edison
+from ._edison_http import EdisonClient, JobNames
+from .literature_agent import _is_terminal_failure
 
 
 class MoleculesAgent:
@@ -31,15 +29,14 @@ class MoleculesAgent:
         Initialize the Molecules agent.
 
         Args:
-            api_key: FutureHouse (Edison) API key.
+            api_key: Edison Scientific API key.
             max_wait_time: Maximum time to wait for response in seconds.
         """
         if api_key is None:
-            api_key = os.environ.get("FUTUREHOUSE_API_KEY")
+            api_key = edison_api_key()
         if not api_key:
-            raise ValueError("API key not provided and FUTUREHOUSE_API_KEY environment variable is not set.")
+            raise ValueError("No Edison Scientific API key was given and EDISON_PLATFORM_API_KEY is not set.")
 
-        _require_edison()
         self.client = EdisonClient(api_key=api_key)
         self.max_wait_time = max_wait_time
         self.logger = logging.getLogger(__name__)
@@ -88,7 +85,9 @@ class MoleculesAgent:
                         "query": prompt,
                     }
 
-                if status in ["failed", "error"]:
+                # any spelling of "this job is dead" (the platform reports
+                # ``fail`` and ``cancelled``), not a fixed pair of words
+                if _is_terminal_failure(status):
                     error_msg = f"MOLECULES query failed with status: {status}"
                     self.logger.error(error_msg)
                     return {"status": "error", "message": error_msg, "task_id": task_id}

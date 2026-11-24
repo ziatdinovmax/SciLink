@@ -31,7 +31,12 @@ keywords = [
 dependencies = [
     "litellm>=1.80.16",
     "atomai>=0.8.1",
-    "edison-client>=0.7.6",
+    # Edison Scientific's literature platform is called over HTTP by SciLink's
+    # own small client (scilink/agents/lit_agents/_edison_http.py), not through
+    # edison-client: that package's agent framework pins LiteLLM to old
+    # versions. httpx already arrives with litellm; declared because the
+    # literature tools must not depend on that.
+    "httpx>=0.27",
     "gdown>=5.2.0",
     "faiss-cpu>=1.12.0",
     "pymupdf>=1.26.5",

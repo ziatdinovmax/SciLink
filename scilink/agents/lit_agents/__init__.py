@@ -2,7 +2,7 @@
 Literature & External Knowledge Agents Module
 
 Provides agents for:
-- Literature search via FutureHouse/Edison API (OWL, CROW)
+- Literature search via Edison Scientific API (OWL, CROW)
 - Molecule design and synthesis planning via Edison MOLECULES tool
 - Novelty scoring of scientific claims
 - Query optimization for scientific databases

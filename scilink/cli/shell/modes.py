@@ -11,6 +11,8 @@ NOT here — they come from ``scilink.ui.vocabulary``.
 
 from __future__ import annotations
 
+from scilink.auth import EDISON_KEY_ENV_VARS
+from scilink.auth import EDISON_KEY_ENV_VARS
 import argparse
 import json
 from pathlib import Path
@@ -88,6 +90,13 @@ class ModeAdapter:
 
 
 # ── shared flag groups ───────────────────────────────────────────
+
+def _edison_key_flag(p: argparse.ArgumentParser, help: str) -> None:
+    """The Edison Scientific key's flag; the flag's earlier name is still
+    taken and left out of the help."""
+    p.add_argument("--edison-api-key", type=str, dest="futurehouse_api_key", metavar="KEY", help=help)
+    p.add_argument("--futurehouse-api-key", type=str, dest="futurehouse_api_key", help=argparse.SUPPRESS)
+
 
 def _model_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--model", type=str, default="claude-opus-5-5",
@@ -214,7 +223,8 @@ Environment Variables:
   ANTHROPIC_API_KEY        Anthropic API key (CLAUDE_API_KEY is an alias)
   OPENAI_API_KEY           OpenAI API key
   GEMINI_API_KEY           Google Gemini API key (GOOGLE_API_KEY is an alias)
-  FUTUREHOUSE_API_KEY      FutureHouse API key for literature search (optional)
+  EDISON_PLATFORM_API_KEY  Edison Scientific API key for literature search (optional;
+                           FUTUREHOUSE_API_KEY, its earlier name, is still read)
 """
 
 
@@ -244,8 +254,8 @@ apply here):
     def add_arguments(self, p: argparse.ArgumentParser) -> None:
         _model_flags(p)
         _embedding_flags(p)
-        p.add_argument("--futurehouse-api-key", type=str, dest="futurehouse_api_key",
-                       help="FutureHouse API key (or set FUTUREHOUSE_API_KEY env var). "
+        _edison_key_flag(p,
+                       help="Edison Scientific API key (or set EDISON_PLATFORM_API_KEY env var). "
                             "Enables literature search in delegated analysis.")
         p.add_argument("--mode", type=str, dest="mode", choices=["autopilot", "autonomous"],
                        default="autopilot",
@@ -287,7 +297,7 @@ apply here):
             embedding_model=args.embedding_model,
             embedding_api_key=args.embedding_api_key,
             embedding_base_url=args.embedding_base_url,
-            futurehouse_api_key=resolve_optional_key(args.futurehouse_api_key, "FUTUREHOUSE_API_KEY"),
+            futurehouse_api_key=resolve_optional_key(args.futurehouse_api_key, *EDISON_KEY_ENV_VARS),
             restore_checkpoint=restore,
             meta_mode=MetaMode[_ENUM_NAME[self.autonomy_from_args(args)]],
             knowledge_dir=args.knowledge_dir,
@@ -384,9 +394,9 @@ Metadata Options:
         p.add_argument("--mp-api-key", type=str, dest="mp_api_key",
                        help="Materials Project API key (or set MP_API_KEY env var). "
                             "Enables the MP tool-resolver in structure generation.")
-        p.add_argument("--futurehouse-api-key", type=str, dest="futurehouse_api_key",
-                       help="FutureHouse API key for novelty assessment / literature search "
-                            "(or set FUTUREHOUSE_API_KEY env var). Optional.")
+        _edison_key_flag(p,
+                       help="Edison Scientific API key for novelty assessment / literature search "
+                            "(or set EDISON_PLATFORM_API_KEY env var). Optional.")
         p.add_argument("--mode", type=str, choices=["co-pilot", "autopilot", "autonomous"],
                        default="co-pilot", help="Analysis mode (default: co-pilot)")
         p.add_argument("--data", type=str, dest="data_path", help="Path to data file or directory")
@@ -456,7 +466,7 @@ Metadata Options:
             or None,
             reuse_locked_script=bool(getattr(args, "reuse_locked_script", False)),
             restore_checkpoint=restore,
-            futurehouse_api_key=resolve_optional_key(args.futurehouse_api_key, "FUTUREHOUSE_API_KEY"),
+            futurehouse_api_key=resolve_optional_key(args.futurehouse_api_key, *EDISON_KEY_ENV_VARS),
         )
 
     def get_autonomy(self, agent) -> str:
@@ -585,9 +595,9 @@ Recommended project layout (co-pilot):
     def add_arguments(self, p: argparse.ArgumentParser) -> None:
         _model_flags(p)
         _embedding_flags(p)
-        p.add_argument("--futurehouse-api-key", type=str, dest="futurehouse_api_key",
-                       help="FutureHouse API key for literature search (or set "
-                            "FUTUREHOUSE_API_KEY env var). Optional.")
+        _edison_key_flag(p,
+                       help="Edison Scientific API key for literature search (or set "
+                            "EDISON_PLATFORM_API_KEY env var). Optional.")
         p.add_argument("--autonomy", type=str, choices=["co-pilot", "autopilot", "autonomous"],
                        default="co-pilot",
                        help="Autonomy level (default: co-pilot). Higher levels require --data-dir.")
@@ -641,7 +651,7 @@ Recommended project layout (co-pilot):
             embedding_model=args.embedding_model,
             embedding_api_key=args.embedding_api_key,
             embedding_base_url=args.embedding_base_url,
-            futurehouse_api_key=resolve_optional_key(args.futurehouse_api_key, "FUTUREHOUSE_API_KEY"),
+            futurehouse_api_key=resolve_optional_key(args.futurehouse_api_key, *EDISON_KEY_ENV_VARS),
             autonomy_level=AutonomyLevel[_ENUM_NAME[self.autonomy_from_args(args)]],
             data_dir=args.data_dir,
             knowledge_dir=args.knowledge_dir,
@@ -756,8 +766,8 @@ Scope:
         p.add_argument("--mp-api-key", type=str, dest="mp_api_key",
                        help="Materials Project API key (or set MP_API_KEY env var). "
                             "Enables the MP tool-resolver in structure generation.")
-        p.add_argument("--futurehouse-api-key", type=str, dest="futurehouse_api_key",
-                       help="FutureHouse API key (or set FUTUREHOUSE_API_KEY env var). "
+        _edison_key_flag(p,
+                       help="Edison Scientific API key (or set EDISON_PLATFORM_API_KEY env var). "
                             "Enables INCAR literature validation.")
         p.add_argument("--mode", type=str, dest="mode",
                        choices=["co-pilot", "autopilot", "autonomous"], default="co-pilot",
@@ -783,7 +793,7 @@ Scope:
             simulation_mode=SimulationMode[_ENUM_NAME[self.autonomy_from_args(args)]],
             restore_checkpoint=restore,
             mp_api_key=resolve_optional_key(args.mp_api_key, "MP_API_KEY", "MATERIALS_PROJECT_API_KEY"),
-            futurehouse_api_key=resolve_optional_key(args.futurehouse_api_key, "FUTUREHOUSE_API_KEY"),
+            futurehouse_api_key=resolve_optional_key(args.futurehouse_api_key, *EDISON_KEY_ENV_VARS),
         )
 
     def get_autonomy(self, agent) -> str:

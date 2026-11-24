@@ -51,7 +51,7 @@ scilink simulate --mode autopilot --request "rutile TiO2 supercell with one O va
   `--skills`, `--tools`, `--mcp`.
 - **`simulate`**: `--mode {co-pilot,autopilot,autonomous}`, `--request`
   (one-shot), `--session-dir`, `--tools`, `--skills`, `--mp-api-key`,
-  `--futurehouse-api-key`.
+  `--edison-api-key` (`--futurehouse-api-key`, its earlier name, is still taken).
 
 **Scope, budget and recipe reuse are flags, not prose.** What a result is for
 is known to whoever asks for it, so `analyze` takes it as typed flags that are

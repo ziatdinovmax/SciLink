@@ -11,6 +11,7 @@ in ``<session>/custom_skills/``, the Streamlit tab's convention.
 
 from __future__ import annotations
 
+from scilink.auth import edison_api_key
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -177,7 +178,7 @@ def knowledge_bases() -> List[Dict[str, Any]]:
 def draft_options(agent: Any) -> Dict[str, Any]:
     return {"knowledge_bases": knowledge_bases(),
             "literature_available": bool(getattr(agent, "futurehouse_api_key", None)
-                                         or __import__("os").environ.get("FUTUREHOUSE_API_KEY"))}
+                                         or edison_api_key())}
 
 
 def _kb_grounding(agent: Any, kb_ref: str, query: str) -> Tuple[str, Dict[str, Any]]:
@@ -203,12 +204,11 @@ def _kb_grounding(agent: Any, kb_ref: str, query: str) -> Tuple[str, Dict[str, A
 
 
 def _literature_grounding(agent: Any, query: str, max_wait: int = 900) -> Tuple[str, Dict[str, Any]]:
-    """One FutureHouse literature answer for the draft's query; the call
+    """One Edison Scientific literature answer for the draft's query; the call
     takes minutes, which is why the draft runs as a background job."""
-    import os
-    key = getattr(agent, "futurehouse_api_key", None) or os.environ.get("FUTUREHOUSE_API_KEY")
+    key = getattr(agent, "futurehouse_api_key", None) or edison_api_key()
     if not key:
-        return "", {"literature": "unavailable", "warning": "No FutureHouse key on this session."}
+        return "", {"literature": "unavailable", "warning": "No Edison Scientific key on this session."}
     from scilink.agents.lit_agents.literature_agent import LiteratureSearchAgent
     lit = LiteratureSearchAgent(api_key=key, max_wait_time=max_wait)
     res = lit._execute_crow_task(

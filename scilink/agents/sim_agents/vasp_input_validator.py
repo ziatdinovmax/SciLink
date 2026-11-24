@@ -11,7 +11,7 @@ Two-layer pre-run validation for VASP INCAR files:
      VASP tag list.
 
   2. LLM / literature check       (``IncarValidatorAgent.validate_and_improve_incar``)
-     Asks a FutureHouse literature agent + an LLM to judge whether the
+     Asks an Edison Scientific literature agent + an LLM to judge whether the
      parameter choices are physically appropriate for the system.
      Pre-existing behavior — moved here from val_agent.py as part of
      the 2026-05-17 split.
@@ -67,14 +67,14 @@ class IncarValidatorAgent:
     Two surfaces:
 
       * ``check_syntax(incar_content)`` — engine-native pymatgen check.
-        No LLM, no FutureHouse dependency.  Returns the same list shape
+        No LLM, no Edison Scientific dependency.  Returns the same list shape
         as the module-level ``check_incar_syntax`` and is provided as a
         convenience so callers that already hold a validator instance
         don't need a separate import.
 
       * ``validate_and_improve_incar(incar_content, system_description)``
         — LLM-driven literature review of parameter choices.  Requires
-        an LLM model + FutureHouse API key (existing pre-PR behavior).
+        an LLM model + Edison Scientific API key (existing pre-PR behavior).
 
     The two surfaces are independent: a caller that only needs the
     syntax pass can use the module function and skip the LLM init

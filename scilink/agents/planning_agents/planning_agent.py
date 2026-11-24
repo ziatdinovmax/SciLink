@@ -1126,7 +1126,7 @@ class PlanningAgent(BaseAgent):
         
         # Literature enters ONLY as caller-provided external_context (the
         # orchestrator's search_literature tool is the sanctioned path).
-        # The old internal fallback searched silently whenever a FutureHouse
+        # The old internal fallback searched silently whenever an Edison Scientific
         # key was present and no context was passed — an uninstructable
         # Edison call that neither the user nor the tool-calling LLM could
         # veto (seen firing against an explicit "no literature" request
@@ -3025,7 +3025,7 @@ Select the most appropriate strategy:
         **Workflow:**
 
         1. Knowledge Base Construction (if needed)
-        2. External Literature Search (optional, via FutureHouse)
+        2. External Literature Search (optional, via Edison Scientific)
         3. RAG-based Economic Analysis
         4. State Initialization (if starting fresh with TEA)
         5. Report Generation (JSON + HTML)

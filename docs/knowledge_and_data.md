@@ -75,13 +75,13 @@ metadata = generate_metadata_json_from_text("./experiment_notes.txt")
 ## Novelty assessment
 
 Analysis findings can be checked against the scientific literature to find
-what is genuinely new, through [FutureHouse](https://www.futurehouse.org/)
-agents (`FUTUREHOUSE_API_KEY`):
+what is genuinely new, through [Edison Scientific](https://edisonscientific.com/)
+agents (`EDISON_PLATFORM_API_KEY`; `FUTUREHOUSE_API_KEY`, the earlier name, is still read):
 
 ```
 👤 You: Assess novelty of these claims
 
-🤖 Agent: ⚡ Searching literature via FutureHouse...
+🤖 Agent: ⚡ Searching literature via Edison Scientific...
 
   📚 [Score 2/5] Mixed 2H/1T phase coexistence → Well-documented
   🤔 [Score 3/5] Sulfur vacancy density of 3.2 × 10¹³ cm⁻² → Similar measurements exist

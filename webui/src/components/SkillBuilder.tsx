@@ -278,7 +278,7 @@ export function SkillBuilder({
                   {(options?.knowledge_bases ?? []).map((k) => <option key={k.name} value={k.name}>{k.name}</option>)}
                 </select>
               </label>
-              <label className="mem-check" title={options?.literature_available === false ? "This session has no FutureHouse key; start a session with one to search the literature." : "One literature search (FutureHouse); typically several minutes."}>
+              <label className="mem-check" title={options?.literature_available === false ? "This session has no Edison Scientific key; start a session with one to search the literature." : "One literature search (Edison Scientific); typically several minutes."}>
                 <input type="checkbox" checked={literature} disabled={options?.literature_available === false} onChange={(e) => setLiterature(e.target.checked)} />
                 <span>search the literature{options?.literature_available === false ? " (no key on this session)" : ""}</span>
               </label>

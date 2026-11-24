@@ -25,6 +25,7 @@ For series analysis:
 """
 
 import os
+from scilink.auth import edison_api_key
 import json
 import logging
 from pathlib import Path
@@ -122,7 +123,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         model_name: LLM model name
         base_url: LLM API base URL
         output_dir: Output directory
-        futurehouse_api_key: FutureHouse API key for literature
+        futurehouse_api_key: Edison Scientific API key for literature
         use_literature: Enable literature search (default: False)
         run_preprocessing: Enable data preprocessing
         enable_human_feedback: Enable feedback loop (controls human-in-the-loop
@@ -269,7 +270,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Optional literature agent
         self.literature_agent = None
         if use_literature:
-            lit_key = futurehouse_api_key or os.getenv("FUTUREHOUSE_API_KEY")
+            lit_key = futurehouse_api_key or edison_api_key()
             if lit_key:
                 try:
                     self.literature_agent = FittingModelLiteratureAgent(

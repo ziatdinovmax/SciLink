@@ -497,21 +497,7 @@ def call_with_retries(call, retries: Optional[int], *, model: Optional[str] = No
             _logger.info(f"Retrying the LLM call (attempt {attempt + 2} of {retries + 1}).")
 
 
-def _sleep_unless_cancelled(seconds: float) -> None:
-    """A backoff sleep that ends early when the worker is cancelled (a budget
-    or memory cancel, the turn's Stop): up to a minute would otherwise pass
-    before the cancel could land."""
-    from ..utils.log_context import cancel_watched, raise_if_cancelled
-    if not cancel_watched():           # nothing can cancel this thread: one plain sleep
-        time.sleep(max(0.0, seconds))
-        return
-    deadline = time.monotonic() + max(0.0, seconds)
-    while True:
-        raise_if_cancelled()
-        left = deadline - time.monotonic()
-        if left <= 0:
-            return
-        time.sleep(min(1.0, left))
+from ..utils.log_context import sleep_unless_cancelled as _sleep_unless_cancelled  # noqa: E402
 
 
 # Providers are retiring the sampling knobs: a model that refuses them answers

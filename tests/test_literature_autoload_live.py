@@ -325,7 +325,7 @@ REAL_Q3 = ("What in-situ probes can track polymorph selection during "
 
 
 def part7_real_search_end_to_end():
-    """REAL Edison searches (needs FUTUREHOUSE_API_KEY; ~20-30 min):
+    """REAL Edison searches (needs EDISON_PLATFORM_API_KEY or FUTUREHOUSE_API_KEY; ~20-30 min):
     write site → headings/registry → index → auto-union refine, all on
     genuine third-party literature content."""
     print("\n=== 7. real Edison searches: write → index → union ===")
@@ -408,7 +408,7 @@ if __name__ == "__main__":
     if not os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
         sys.exit("AWS_BEARER_TOKEN_BEDROCK not set")
     os.environ.setdefault("AWS_REGION_NAME", "us-east-1")
-    default = (sorted(PARTS) if os.environ.get("FUTUREHOUSE_API_KEY")
+    default = (sorted(PARTS) if (os.environ.get("EDISON_PLATFORM_API_KEY") or os.environ.get("FUTUREHOUSE_API_KEY"))
                else [n for n in sorted(PARTS) if n != 7])
     wanted = [int(a) for a in sys.argv[1:]] or default
     if BASE.exists() and set(wanted) == set(PARTS):

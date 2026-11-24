@@ -291,7 +291,7 @@ class SimulationOrchestratorAgent:
         restore_checkpoint: Whether to restore from previous checkpoint.
         simulation_mode: Level of autonomy.
         mp_api_key: Materials Project API key (auto-discovered when None).
-        futurehouse_api_key: FutureHouse API key for INCAR literature
+        futurehouse_api_key: Edison Scientific API key for INCAR literature
             validation (auto-discovered when None).
 
         google_api_key: DEPRECATED. Use 'api_key' instead.

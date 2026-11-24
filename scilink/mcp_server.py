@@ -14,6 +14,7 @@ Supports three autonomy modes:
 The ``mcp`` package is installed by default with SciLink.
 """
 
+from scilink.auth import edison_api_key
 import asyncio
 import os
 import concurrent.futures
@@ -70,7 +71,7 @@ _AUTOPILOT_APPROVAL_TOOLS = {
 # These are the long-running tools where a blocking call can realistically
 # exceed the ~4 minute tool-call timeout in clients like Claude Desktop:
 #   - run_analysis / run_optimization: full agent analysis or BO loop
-#   - assess_novelty: FutureHouse literature search per claim (max_wait 600s each)
+#   - assess_novelty: Edison Scientific literature search per claim (max_wait 600s each)
 #   - get_recommendations: LLM synthesis over a full analysis record
 #   - generate_initial_plan / generate_implementation_code: RAG + LLM generation
 #     over potentially large docs/code knowledge bases
@@ -651,7 +652,7 @@ def create_server(
         mode: ``"analyze"``, ``"plan"``, or ``"both"``.
         session_dir: Directory for session outputs.
         analysis_mode: ``"autonomous"``, ``"autopilot"``, or ``"co-pilot"``.
-        futurehouse_api_key: Optional FutureHouse/Edison API key.
+        futurehouse_api_key: Optional Edison Scientific API key.
 
     Returns:
         A configured ``mcp.server.lowlevel.Server``.
@@ -1356,7 +1357,7 @@ def _init_orchestrators(state: dict, config: dict) -> None:
     api_key = config["api_key"]
     model_name = config["model_name"]
     base_url = config["base_url"]
-    fh_key = config["futurehouse_api_key"] or os.environ.get("FUTUREHOUSE_API_KEY")
+    fh_key = config["futurehouse_api_key"] or edison_api_key()
 
     # Restart durability. Each orchestrator gets its own base dir (in
     # --mode both they nest as <session>/analysis and <session>/planning,

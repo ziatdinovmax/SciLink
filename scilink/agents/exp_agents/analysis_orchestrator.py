@@ -17,7 +17,7 @@ from ._verification_record import (analysis_verdict, replay_certification_reason
                                    series_anchor_unit, series_coverage,
                                    ungated_outputs_of, failed_outputs_of,
                                    verification_summary)
-import os
+from scilink.auth import edison_api_key
 import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -420,7 +420,7 @@ def _build_agent_list_section(agent_registry: dict) -> str:
     return "\n".join(lines)
 
 
-# Literature section — injected into the prompt body only when a FutureHouse
+# Literature section — injected into the prompt body only when an Edison Scientific
 # API key is configured this session. Without a key the `search_literature`
 # tool errors at call time, so the orchestrator is not told to offer it.
 #
@@ -430,7 +430,7 @@ def _build_agent_list_section(agent_registry: dict) -> str:
 # on their own, since those modes have no interactive user to wait on (and
 # `run_task` pins the orchestrator into AUTONOMOUS).
 _LIT_TOOL_BLURB = (
-    "`search_literature` queries the FutureHouse Edison API and returns a\n"
+    "`search_literature` queries the Edison Scientific API and returns a\n"
     "`file_path`. Supplied via `literature_file`, the literature informs the\n"
     "analysis plan, the generated code, and the interpretation. (In curve-fitting\n"
     "`task_mode=\"identification\"` the planner withholds lit context to keep the\n"
@@ -440,7 +440,7 @@ _LIT_TOOL_BLURB = (
 # CO-PILOT: pause and ask the user, wait for their answer.
 _LITERATURE_SECTION_COPILOT = f"""
 **LITERATURE SEARCH — REQUIRED OFFER BEFORE ANALYSIS:**
-A FutureHouse API key is configured this session. Before the FIRST
+An Edison Scientific API key is configured this session. Before the FIRST
 `run_analysis` on a dataset you MUST first ask the user whether the analysis
 should be informed by a literature search of prior work, then wait for their
 answer — do NOT call `run_analysis` in the same turn as the question.
@@ -462,7 +462,7 @@ answer — do NOT call `run_analysis` in the same turn as the question.
 # AUTOPILOT / AUTONOMOUS: no interactive user — decide without asking.
 _LITERATURE_SECTION_AUTONOMOUS = f"""
 **LITERATURE SEARCH — CONSIDER BEFORE ANALYSIS:**
-A FutureHouse API key is configured this session. Before the FIRST
+An Edison Scientific API key is configured this session. Before the FIRST
 `run_analysis` on a dataset, decide for yourself whether a literature search
 would materially shape the analysis (method choice, parameter ranges,
 interpretation). If so, call `search_literature(query=...)` and pass the
@@ -502,7 +502,7 @@ def get_system_prompt(
         custom_skills: ``{name: path}`` dict of custom skills registered via
             register_skill(). When provided, a "Custom skills" section is
             appended so the LLM knows to pass them to ``run_analysis``.
-        literature_available: True iff a FutureHouse API key is configured.
+        literature_available: True iff an Edison Scientific API key is configured.
             When True, the prompt instructs the orchestrator to offer a
             literature search before the first analysis of a dataset.
     """
@@ -724,12 +724,12 @@ class AnalysisOrchestratorAgent:
         self.futurehouse_api_key = futurehouse_api_key
         if not self.futurehouse_api_key:
             # Try env var
-            self.futurehouse_api_key = os.environ.get("FUTUREHOUSE_API_KEY")
+            self.futurehouse_api_key = edison_api_key()
             
         if self.futurehouse_api_key:
              logging.info("📚 Literature Analysis enabled (API key found)")
         else:
-             logging.warning("⚠️ Literature Analysis disabled (No FutureHouse API key)")
+             logging.warning("⚠️ Literature Analysis disabled (No Edison Scientific API key)")
 
         # Gates the literature-search offer in the system prompt.
         self._literature_available = bool(self.futurehouse_api_key)

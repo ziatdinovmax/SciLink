@@ -191,11 +191,15 @@ def main():
     from scilink.server.tls import add_tls_arguments, tls_kwargs
     add_tls_arguments(parser, "the SSE transport")
     parser.add_argument(
-        "--futurehouse-key",
+        "--edison-key",
+        dest="futurehouse_key",
+        metavar="KEY",
         type=str,
         default=None,
-        help="FutureHouse/Edison API key for novelty assessment",
+        help="Edison Scientific API key for novelty assessment",
     )
+    # the flag's earlier name, still taken
+    parser.add_argument("--futurehouse-key", dest="futurehouse_key", type=str, help=argparse.SUPPRESS)
     parser.add_argument(
         "--print-mcp-json",
         action="store_true",
