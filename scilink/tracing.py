@@ -227,9 +227,13 @@ def note_llm_call(latency_s: Optional[float] = None,
                   prompt_tokens: Optional[int] = None,
                   completion_tokens: Optional[int] = None,
                   model: Optional[str] = None,
+                  cache_read_tokens: Optional[int] = None,
+                  cache_write_tokens: Optional[int] = None,
                   cost_usd: Optional[float] = None,
                   proxied: bool = False) -> None:
-    """Count one completed LLM call. Never raises.
+    """Count one completed LLM call. Never raises. ``cache_read_tokens`` and
+    ``cache_write_tokens`` are the part of ``prompt_tokens`` the provider's
+    prompt cache served or stored; they are read for the estimate only.
 
     ``cost_usd`` is the call's dollar estimate when the caller has one (the
     LiteLLM wrapper passes the cost LiteLLM put on the response); without
@@ -242,7 +246,10 @@ def note_llm_call(latency_s: Optional[float] = None,
             if not pricing.priced(model, proxied):
                 cost_usd = None
             elif cost_usd is None:
-                cost_usd = pricing.estimate_cost(model, prompt_tokens, completion_tokens)
+                cost_usd = pricing.estimate_cost(
+                    model, prompt_tokens, completion_tokens,
+                    cache_read_tokens=int(cache_read_tokens or 0),
+                    cache_write_tokens=int(cache_write_tokens or 0))
         except Exception:
             cost_usd = None
         sink = _usage_sink

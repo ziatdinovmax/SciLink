@@ -240,9 +240,9 @@ def test_a_bedrock_id_sent_through_a_base_url_gets_no_estimate():
     assert d["calls"] == 2 and d["priced_calls"] == 0 and d["cost_usd"] == 0
 
 
-def _response(prompt=10_000, completion=1_000, response_cost=None):
+def _response(prompt=10_000, completion=1_000, response_cost=None, **usage):
     from types import SimpleNamespace
-    r = SimpleNamespace(usage=SimpleNamespace(prompt_tokens=prompt, completion_tokens=completion),
+    r = SimpleNamespace(usage=SimpleNamespace(prompt_tokens=prompt, completion_tokens=completion, **usage),
                         choices=[])
     if response_cost is not None:
         r._hidden_params = {"response_cost": response_cost}
@@ -269,6 +269,27 @@ def test_the_litellm_wrapper_passes_litellms_own_figure_and_says_when_proxied():
     assert d["cost_usd"] == pytest.approx(0.4321 + pricing.estimate_cost(BEDROCK, 10_000, 1_000))
     assert pricing.response_cost(BEDROCK, _response(response_cost=0)) is None                # zero is no figure
     assert pricing.response_cost(BEDROCK, _response(response_cost=True)) is None
+
+
+def test_a_call_with_no_figure_from_litellm_is_priced_with_its_cached_input_apart():
+    """With no figure on the response the estimate is made from the token
+    counts, and the cached part of the prompt is read from the response in
+    either spelling a provider reports it in."""
+    from types import SimpleNamespace
+    from scilink.wrappers import litellm_wrapper
+    aware = pricing.estimate_cost(BEDROCK, 10_000, 1_000, cache_read_tokens=4_000, cache_write_tokens=1_000)
+    plain = pricing.estimate_cost(BEDROCK, 10_000, 1_000)
+    assert aware != pytest.approx(plain)
+    details = SimpleNamespace(cached_tokens=4_000, cache_creation_tokens=1_000)
+    for usage in ({"prompt_tokens_details": details},
+                  {"cache_read_input_tokens": 4_000, "cache_creation_input_tokens": 1_000}):
+        before = tracing.llm_counters()
+        litellm_wrapper._record_trace(BEDROCK, [], _response(**usage), 1.0)
+        d = tracing.counters_delta(before)
+        assert d["priced_calls"] == 1 and d["cost_usd"] == pytest.approx(aware)
+    before = tracing.llm_counters()
+    tracing.note_llm_call(1.0, 10_000, 1_000, model=BEDROCK, cache_read_tokens=4_000, cache_write_tokens=1_000)
+    assert tracing.counters_delta(before)["cost_usd"] == pytest.approx(aware)
 
 
 def test_a_model_the_table_does_not_hold_is_looked_up_once(monkeypatch):

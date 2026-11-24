@@ -215,37 +215,21 @@ def _cache_tokens(usage) -> tuple:
     return read, written
 
 
-def _call_cost(model: str, response, proxied: bool):
-    """The dollar estimate of one completed call, or None when its route has
-    no known price: LiteLLM's own figure for the model and route it resolved,
-    else the same table read from the response's token counts, with cached
-    input priced apart."""
-    from .. import pricing
-    cost = pricing.response_cost(model, response, proxied)
-    if cost is None:
-        u = getattr(response, "usage", None)
-        read, written = _cache_tokens(u)
-        cost = pricing.estimate_cost(model, getattr(u, "prompt_tokens", None),
-                                     getattr(u, "completion_tokens", None),
-                                     cache_read_tokens=read, cache_write_tokens=written, proxied=proxied)
-    return cost
-
-
 def _record_trace(model: str, messages, response, latency_s: float, proxied: bool = False) -> None:
     """Record one completed LLM call to the opt-in global tracer (no-op if disabled).
     ``proxied``: the call went to a base URL, whose price is not known."""
     try:
-        from .. import tracing
+        from .. import pricing, tracing
         u = getattr(response, "usage", None)
-        try:
-            cost = _call_cost(model, response, proxied)
-        except Exception:
-            cost = None
+        cache_read, cache_write = _cache_tokens(u)
         tracing.note_llm_call(
             latency_s=latency_s,
             prompt_tokens=getattr(u, "prompt_tokens", None),
             completion_tokens=getattr(u, "completion_tokens", None),
-            model=model, cost_usd=cost, proxied=proxied)
+            model=model, cache_read_tokens=cache_read, cache_write_tokens=cache_write,
+            # LiteLLM's own figure for the model and route it resolved; with
+            # none on the response the estimate is made from the token counts
+            cost_usd=pricing.response_cost(model, response, proxied), proxied=proxied)
         if not tracing.is_enabled():
             return
         text, finish = "", None
