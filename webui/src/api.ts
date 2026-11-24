@@ -61,6 +61,9 @@ export interface UsageRow {
   calls: number;
   prompt_tokens: number;
   completion_tokens: number;
+  // The dollar estimate of the row's calls that had a known price (a
+  // provider's own API), as the server words it; "" when none had one.
+  cost_text?: string;
 }
 
 export interface UsageSummary {
@@ -70,6 +73,9 @@ export interface UsageSummary {
   completion_tokens: number;
   total_tokens: number;
   llm_seconds: number;
+  // The dollar estimate of the period's calls that had a known price (a
+  // provider's own API), as the server words it ("" when none had one).
+  cost_text?: string;
   by_model: Record<string, UsageRow>;
   by_session: Record<string, UsageRow>;
   budget_tokens: number | null;
@@ -538,6 +544,8 @@ export const api = {
   authMe: () => req<AuthInfo>(`/auth/me`),
   opsStatus: () => req<OpsStatus>(`/ops/status`),
   usage: () => req<UsageSummary>(`/usage`),
+  // What one session's model calls have cost so far ("" when none had a price).
+  sessionCost: (id: string) => req<{ cost_text: string }>(`/sessions/${id}/cost`),
   login: (token: string) => req<{ user: string }>(`/auth/login`, json({ token })),
   logout: () => req<{ ok: boolean }>(`/auth/logout`, { method: "POST" }),
 

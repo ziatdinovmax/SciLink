@@ -172,8 +172,10 @@ def test_calls_made_for_a_worker_are_charged_to_it(ledger, tmp_path):
     [t.start() for t in threads]
     [t.join() for t in threads]
     s = ledger.summary()
-    assert s["by_worker"]["s1/w0"] == {"calls": 1, "prompt_tokens": 100, "completion_tokens": 10}
-    assert s["by_worker"]["s1/w1"] == {"calls": 1, "prompt_tokens": 100, "completion_tokens": 10}
+    row = {"calls": 1, "prompt_tokens": 100, "completion_tokens": 10,
+           "cost_usd": 0.0, "priced_calls": 0, "cost_text": ""}           # no route here has a known price
+    assert s["by_worker"]["s1/w0"] == row
+    assert s["by_worker"]["s1/w1"] == row
     assert set(s["by_worker"]) == {"s1/w0", "s1/w1"}
     assert s["by_session"]["s1"]["calls"] == 3
     assert s["by_session"]["unattributed"]["calls"] == 2

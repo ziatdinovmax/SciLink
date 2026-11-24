@@ -36,6 +36,7 @@ import time
 from .tool_schema import normalize_tools, openai_tools_need_no_reasoning as _openai_tools_need_no_reasoning
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Union
+from urllib.parse import urlparse
 from ..utils.child_process import refuse_in_spawn_bootstrap
 
 
@@ -198,16 +199,37 @@ def _normalize_model_name(model: str) -> str:
     return model
 
 
-def _record_trace(model: str, messages, response, latency_s: float) -> None:
-    """Record one completed LLM call to the opt-in global tracer (no-op if disabled)."""
+def _cache_tokens(usage) -> tuple:
+    """``(read, written)`` prompt tokens a call took from or put in the
+    provider's cache; both are part of ``prompt_tokens``. Zeros when the
+    provider reports none."""
+    def _int(v):
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            return 0
+    details = getattr(usage, "prompt_tokens_details", None)
+    read = _int(getattr(details, "cached_tokens", None)) or _int(getattr(usage, "cache_read_input_tokens", None))
+    written = (_int(getattr(details, "cache_creation_tokens", None))
+               or _int(getattr(usage, "cache_creation_input_tokens", None)))
+    return read, written
+
+
+def _record_trace(model: str, messages, response, latency_s: float, proxied: bool = False) -> None:
+    """Record one completed LLM call to the opt-in global tracer (no-op if disabled).
+    ``proxied``: the call went to a base URL, whose price is not known."""
     try:
-        from .. import tracing
+        from .. import pricing, tracing
         u = getattr(response, "usage", None)
+        cache_read, cache_write = _cache_tokens(u)
         tracing.note_llm_call(
             latency_s=latency_s,
             prompt_tokens=getattr(u, "prompt_tokens", None),
             completion_tokens=getattr(u, "completion_tokens", None),
-            model=model)
+            model=model, cache_read_tokens=cache_read, cache_write_tokens=cache_write,
+            # LiteLLM's own figure for the model and route it resolved; with
+            # none on the response the estimate is made from the token counts
+            cost_usd=pricing.response_cost(model, response, proxied), proxied=proxied)
         if not tracing.is_enabled():
             return
         text, finish = "", None
@@ -571,21 +593,55 @@ def _is_gpt6_or_later(model) -> bool:
     return bool(m) and int(m.group(1)) >= 6
 
 
-# Where LiteLLM sends an ``openai/`` request when no ``api_base`` is passed.
-_OPENAI_BASE_ENV = ("OPENAI_BASE_URL", "OPENAI_API_BASE")
+# Where a provider's client sends a request that names no ``api_base``: the
+# variables LiteLLM reads for it (in LiteLLM's order), the provider's own host
+# (a base on it, or on a subdomain of it, is no proxy), and whether LiteLLM's
+# global ``api_base`` applies to it. One table for every decision that turns
+# on "is this the provider's own endpoint": the Responses bridge below and the
+# dollar estimate (``scilink.pricing``).
+_PROVIDER_BASE = {
+    "openai": (("OPENAI_BASE_URL", "OPENAI_API_BASE"), "api.openai.com", True),
+    "anthropic": (("ANTHROPIC_API_BASE", "ANTHROPIC_BASE_URL"), "api.anthropic.com", True),
+    "gemini": (("GEMINI_API_BASE",), "generativelanguage.googleapis.com", True),
+    # a VPC endpoint is still AWS; anything else under this variable is a gateway
+    "bedrock": (("AWS_BEDROCK_RUNTIME_ENDPOINT",), "amazonaws.com", False),
+}
+_OPENAI_BASE_ENV = _PROVIDER_BASE["openai"][0]
+
+
+def _host_of(base) -> str:
+    """The host a base URL names, lower-cased; "" when it names none."""
+    text = str(base).strip()
+    try:
+        return (urlparse(text if "://" in text else "//" + text).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _custom_base(provider, api_base=None):
+    """The endpoint a ``provider`` request goes to when it is not the
+    provider's own: the ``api_base`` argument, else what LiteLLM itself reads
+    for that provider (``litellm.api_base``, then the environment). The
+    provider's own host counts as none, and it is the URL's HOST that is
+    compared: a gateway whose address merely contains the provider's name is
+    a gateway."""
+    names, own_host, takes_global = _PROVIDER_BASE.get(provider, ((), "", True))
+    candidates = [api_base]
+    if takes_global:
+        candidates.append(getattr(litellm, "api_base", None))
+    candidates += [os.environ.get(v) for v in names]
+    for base in candidates:
+        if base:
+            host = _host_of(base)
+            own = bool(own_host) and (host == own_host or host.endswith("." + own_host))
+            return None if own else base
+    return None
 
 
 def _custom_openai_base(api_base=None):
     """The OpenAI-compatible endpoint a request goes to when it is not
-    OpenAI's own: the ``api_base`` argument, else what LiteLLM itself reads
-    for the openai provider (``litellm.api_base``, then the environment).
-    OpenAI's own URL counts as none."""
-    candidates = [api_base, getattr(litellm, "api_base", None)]
-    candidates += [os.environ.get(v) for v in _OPENAI_BASE_ENV]
-    for base in candidates:
-        if base:
-            return None if "api.openai.com" in str(base) else base
-    return None
+    OpenAI's own (:func:`_custom_base`)."""
+    return _custom_base("openai", api_base)
 
 
 def _responses_api_model(model, api_base=None):
@@ -708,7 +764,8 @@ def litellm_completion(*args, **kwargs):
     response = _completion_with_retries(retries, **kwargs)
     # Every orchestrator chat loop comes through here: count it (and
     # trace it when tracing is on) like the wrapper classes do.
-    _record_trace(model, kwargs.get("messages"), response, time.perf_counter() - _t0)
+    _record_trace(model, kwargs.get("messages"), response, time.perf_counter() - _t0,
+                  proxied=bool(kwargs.get("api_base") or kwargs.get("base_url")))
     return response
 
 
@@ -847,7 +904,8 @@ class LiteLLMGenerativeModel:
             if stream:
                 return self._handle_stream(response)
             
-            _record_trace(self.model, messages, response, time.perf_counter() - _t0)
+            _record_trace(self.model, messages, response, time.perf_counter() - _t0,
+                          proxied=bool(self.base_url))
             return self._to_legacy_response(response)
 
         except Exception as e:
@@ -1216,7 +1274,8 @@ class LiteLLMChatSession:
         
         self._history.append({"role": "user", "content": user_content})
         
-        _record_trace(self._model.model, messages, response, time.perf_counter() - _t0)
+        _record_trace(self._model.model, messages, response, time.perf_counter() - _t0,
+                      proxied=bool(self._model.base_url))
         legacy_response = self._model._to_legacy_response(response)
         
         if legacy_response.text:

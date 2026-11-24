@@ -29,6 +29,11 @@ export const VOCAB = {
   },
   "consent_text": "I understand that the agent will execute generated Python code on my machine",
   "coordinator_mark": "⁤",
+  "cost_words": {
+    "figure": "≈ {amount}",
+    "note": "estimate at the provider's list prices, not a bill",
+    "partial": "{figure} for {priced} of {calls} calls"
+  },
   "default_activity": "Agent is working…",
   "enter_accepts_hint": "Enter = {accept}",
   "handoff_prefixes": [

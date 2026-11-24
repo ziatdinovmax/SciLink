@@ -90,7 +90,11 @@ class Shell:
         self.session_dir: Optional[Path] = None
         self.creds: Optional[bootstrap.Credentials] = None
         self.extras: Dict[str, Any] = {}
-        self.totals = {"calls": 0, "seconds": 0.0, "prompt_tokens": 0, "completion_tokens": 0}
+        # What this session's model calls have moved since the shell started
+        # (``totals``): the process counters, so a call made outside a turn
+        # (naming the session) is counted as well as the turns'.
+        from scilink import tracing
+        self._usage_start = tracing.llm_counters()
         self._quit = False
         self._prefill = ""      # text for the next prompt (a draft typed mid-turn)
         # A plain session for bootstrap questions and the HITL widgets; the
@@ -171,6 +175,9 @@ class Shell:
         self.session_dir = path
         self.widgets.session_dir = str(path)
         register_session(path, self.mode)
+        # /cost is "this session": what the session left behind is not the resumed one's
+        from scilink import tracing
+        self._usage_start = tracing.llm_counters()
         self.console.print(f"[green]✓[/] resumed [bold]{path.name}[/]")
 
     def _banner(self) -> None:
@@ -181,13 +188,18 @@ class Shell:
                            f"[dim]{self.model_label()} · {self.session_dir}[/]")
         self.console.print(f"[dim]{m['blurb']}. Type /help for commands.[/]\n")
 
+    @property
+    def totals(self) -> Dict[str, Any]:
+        """Calls, tokens, seconds and the dollar estimate of every model call
+        this process made since the shell started (``/cost``)."""
+        from scilink import tracing
+        return tracing.counters_delta(self._usage_start)
+
     # ── turns ──────────────────────────────────────────────────
 
     def turn(self, text: str) -> None:
         res = run_turn(self.agent, text, session_dir=str(self.session_dir),
                        renderer=self.renderer, ask_question=self.widgets.ask)
-        for k in self.totals:
-            self.totals[k] += res.tokens.get(k, 0)
         if res.result and not res.stopped:
             self._auto_title(text, res.result)
         if res.error and not self.renderer.verbose:

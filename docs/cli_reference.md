@@ -241,6 +241,21 @@ Shared by every mode: `/help`, `/status` (`/state`), `/mode [level]`
 Per mode: `/delegations` (meta), `/agents` and `/schema` (analyze),
 `/objective` (plan), `/structures` (simulate).
 
+On a model called through its provider's own API (Anthropic, OpenAI, Google
+Gemini, or Amazon Bedrock with `--model bedrock/...`) the line under each
+answer and `/cost` end with a dollar estimate (`≈ $0.15`): the provider's
+list price for the calls made, with cached input priced apart. It is an
+estimate, not a bill. A model reached through `--base-url` (or a base URL
+set in the environment) shows none, since a proxy bills by its own rules,
+and neither does any other route. The prices are LiteLLM's table, which
+LiteLLM downloads when it starts, so a price change or a new model reaches
+the estimate without a SciLink release; a model the table does not hold yet
+shows no figure. The arithmetic is the installed LiteLLM's: version 1.81
+prices a GPT-6 prompt-cache write and a GPT-6 prompt over 272k tokens at the
+base input rate, so those calls read low (up to a fifth on a loop's first
+call); 1.110 prices both as the table lists them. The web interface shows
+the same figure in the sidebar.
+
 ## Persistent memory — `scilink memory`
 
 Learned skills (graduated or distilled from sessions) live under `~/.scilink/`

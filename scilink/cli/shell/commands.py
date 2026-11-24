@@ -262,12 +262,24 @@ def _verbose(shell, arg: str) -> None:
                         f"[bold]{'on' if shell.renderer.verbose else 'off'}[/]")
 
 
+def cost_line(totals: dict) -> str:
+    """What ``/cost`` prints: the session's calls, tokens and time in the
+    model, and the dollar estimate where a call had a known price."""
+    from ... import pricing
+    t = totals
+    n = int(t.get("calls", 0))
+    parts = [f"This session: {n} LLM call{'' if n == 1 else 's'}",
+             f"{int(t.get('prompt_tokens', 0)):,} tokens in",
+             f"{int(t.get('completion_tokens', 0)):,} out",
+             f"{t.get('seconds', 0.0):.0f}s in model calls"]
+    cost = pricing.cost_text(t.get("cost_usd"), n, t.get("priced_calls"))
+    if cost:
+        parts.append(cost)
+    return " · ".join(parts)
+
+
 def _cost(shell, arg: str) -> None:
-    t = shell.totals
-    shell.console.print(
-        f"This session: {int(t.get('calls', 0))} LLM calls · "
-        f"{int(t.get('prompt_tokens', 0)):,} tokens in · {int(t.get('completion_tokens', 0)):,} out · "
-        f"{t.get('seconds', 0.0):.0f}s in model calls")
+    shell.console.print(cost_line(shell.totals))
 
 
 def _sessions(shell, arg: str) -> None:
@@ -315,7 +327,7 @@ def core_commands() -> List[Command]:
                 arg_hint="[on|off]"),
         Command("/files", "Files in the session directory", _files, arg_hint="[subdir]"),
         Command("/verbose", "Toggle verbose narration (Ctrl+O, also mid-turn)", _verbose),
-        Command("/cost", "LLM calls and tokens this session", _cost),
+        Command("/cost", "LLM calls, tokens and the dollar estimate this session", _cost),
         Command("/name", "Show or set this session's name", _name, arg_hint="[text]"),
         Command("/sessions", "Past sessions here that can be resumed", _sessions),
         Command("/resume", "Resume a past session", _resume, arg_hint="[id]"),
