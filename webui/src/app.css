@@ -100,6 +100,22 @@ label.field > span { display: block; margin-bottom: 4px; }
 .sidebar-section { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 10px; }
 .sidebar-section h3 { font-size: 13px; margin: 0 0 8px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
 
+/* The Workspace panel: one fact per line, its name on the left and its value
+   on the right, under small group heads. */
+.ws-panel { font-size: 13px; line-height: 1.7; }
+.ws-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.ws-label { color: var(--text-muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-row .ws-value { flex: none; font-variant-numeric: tabular-nums; }
+.ws-panel div.ws-label { white-space: normal; }
+.ws-state { margin-bottom: 2px; }
+.ws-busy { margin: 0 0 2px 16px; padding: 0; color: var(--text-muted); }
+.sidebar-section h4.ws-head {
+  font-size: 11px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase;
+  color: var(--text-dim); margin: 10px 0 2px;
+}
+.ws-bar { height: 4px; background: var(--border); border-radius: 2px; margin: 2px 0 4px; }
+.ws-bar > div { height: 100%; border-radius: 2px; }
+
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
 /* ── welcome screen ─────────────────────────────────────────── */
