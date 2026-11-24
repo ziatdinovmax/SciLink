@@ -12,7 +12,6 @@ NOT here — they come from ``scilink.ui.vocabulary``.
 from __future__ import annotations
 
 from scilink.auth import EDISON_KEY_ENV_VARS
-from scilink.auth import EDISON_KEY_ENV_VARS
 import argparse
 import json
 from pathlib import Path
