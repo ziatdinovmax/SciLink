@@ -15,7 +15,7 @@ from scilink.executors import SANDBOX_UTF8_ENV, ScriptExecutor, WarmScriptExecut
 SECRETS = {
     "ANTHROPIC_API_KEY": "sk-a", "OPENAI_API_KEY": "sk-o", "GOOGLE_API_KEY": "g",
     "GEMINI_API_KEY": "g2", "AWS_BEARER_TOKEN_BEDROCK": "bt", "AWS_SECRET_ACCESS_KEY": "s",
-    "AWS_ACCESS_KEY_ID": "id", "FUTUREHOUSE_API_KEY": "fh", "SCILINK_API_KEY": "proxy",
+    "AWS_ACCESS_KEY_ID": "id", "FUTUREHOUSE_API_KEY": "fh", "EDISON_PLATFORM_API_KEY": "ed", "SCILINK_API_KEY": "proxy",
     "SCILINK_WEB_TOKEN": "web", "HF_TOKEN": "hf", "DB_PASSWORD": "pw",
 }
 KEPT = {"PATH": "/bin", "HOME": "/h", "SCILINK_HOME": "/h/.scilink", "SCILINK_MODELS": "/m",

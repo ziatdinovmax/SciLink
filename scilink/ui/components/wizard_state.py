@@ -2,7 +2,7 @@
 fields (HPC env, SLURM settings, paths, etc.).
 
 Scientific fields (structure description, research goal) are deliberately
-not persisted -- they change per simulation. Secrets (FutureHouse key,
+not persisted -- they change per simulation. Secrets (Edison Scientific key,
 LLM API key) live in the sidebar config, not in wizard state, and are
 also not saved here. The state file is a plain JSON cache; corruption,
 schema drift, or missing files all fall back to widget defaults.

@@ -2025,14 +2025,14 @@ class OrchestratorTools:
         # --- LITERATURE SEARCH TOOL ---
         def search_literature(objective, search_type: str = "hypothesis_context"):
             """
-            Searches scientific literature using the FutureHouse Edison API.
+            Searches scientific literature using the Edison Scientific API.
             Call this BEFORE generate_initial_plan to enrich the plan with
             external literature context.
             """
             if not self.orch.lit_agent:
                 return json.dumps({
                     "status": "error",
-                    "message": "Literature search not available (no FutureHouse API key configured)"
+                    "message": "Literature search not available (no Edison Scientific API key configured)"
                 })
 
             search_methods = {
@@ -2423,7 +2423,7 @@ class OrchestratorTools:
             func=search_literature,
             name="search_literature",
             description=(
-                "Searches scientific literature via FutureHouse Edison API. "
+                "Searches scientific literature via Edison Scientific API. "
                 "A deep search takes ~10-15 minutes — tell the user before "
                 "calling so the wait is expected. "
                 "Call BEFORE generate_initial_plan() to enrich the plan with external context. "
@@ -2602,7 +2602,7 @@ class OrchestratorTools:
         # --- MOLECULES QUERY TOOL ---
         def query_molecules(objective: str):
             """
-            Queries the FutureHouse Molecules agent for molecular design,
+            Queries the Edison Scientific Molecules agent for molecular design,
             synthesis planning, or cheminformatics tasks.
             Call this BEFORE generate_initial_plan() when the objective
             involves molecular design or discovery.
@@ -2610,7 +2610,7 @@ class OrchestratorTools:
             if not self.orch.mol_agent:
                 return json.dumps({
                     "status": "error",
-                    "message": "Molecules agent not available (no FutureHouse API key configured)"
+                    "message": "Molecules agent not available (no Edison Scientific API key configured)"
                 })
 
             # Guard: only proceed for genuine molecule design objectives
@@ -2655,7 +2655,7 @@ class OrchestratorTools:
             func=query_molecules,
             name="query_molecules",
             description=(
-                "Queries the FutureHouse Molecules agent for molecular design, synthesis planning, "
+                "Queries the Edison Scientific Molecules agent for molecular design, synthesis planning, "
                 "or cheminformatics. Call BEFORE generate_initial_plan() when the objective involves "
                 "molecule design or discovery. Pass the returned file_path as molecule_context."
             ),

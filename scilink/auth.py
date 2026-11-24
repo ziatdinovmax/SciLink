@@ -26,6 +26,8 @@ from typing import Optional, Dict
 #   3. If unprefixed model names should also map (e.g. 'gpt-5' -> openai,
 #      'claude-opus-*' -> anthropic), add a startswith / substring check in
 #      `infer_provider`.
+EDISON_KEY_ENV_VARS = ('EDISON_PLATFORM_API_KEY', 'FUTUREHOUSE_API_KEY')
+
 ENV_VARS = {
     # LLM Providers
     'google': ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
@@ -37,9 +39,29 @@ ENV_VARS = {
     'bedrock': ['AWS_BEARER_TOKEN_BEDROCK'],
 
     # Other Services
-    'futurehouse': ['FUTUREHOUSE_API_KEY'],
+    # Edison Scientific (literature search), formerly FutureHouse: the
+    # variable Edison's own client reads first, then the name SciLink has
+    # always read, which keeps working.
+    'edison': list(EDISON_KEY_ENV_VARS),
     'materials_project': ['MP_API_KEY', 'MATERIALS_PROJECT_API_KEY'],
 }
+
+# A service's earlier name: accepted wherever a service is named.
+_SERVICE_ALIASES = {'futurehouse': 'edison'}
+
+
+def _service(name: str) -> str:
+    name = (name or '').lower()
+    return _SERVICE_ALIASES.get(name, name)
+
+
+def edison_api_key() -> Optional[str]:
+    """The Edison Scientific API key SciLink holds, or None: one set in code
+    (``scilink.set_api_key('edison', ...)``), else ``EDISON_PLATFORM_API_KEY``,
+    else ``FUTUREHOUSE_API_KEY``. Every reader of the key calls this, and it
+    is ``get_api_key('edison')``: the variables are named in ``ENV_VARS``
+    and nowhere else."""
+    return get_api_key('edison')
 
 # Internal proxy key (separate from provider keys)
 INTERNAL_PROXY_KEY = 'SCILINK_API_KEY'
@@ -127,12 +149,12 @@ def find_env_var(service: str) -> Optional[tuple]:
     value, so callers (e.g. the UI) can show which env var supplied a key.
 
     Args:
-        service: One of the keys in ``ENV_VARS`` (e.g. 'openai', 'futurehouse').
+        service: One of the keys in ``ENV_VARS`` (e.g. 'openai', 'edison').
 
     Returns:
         ``(env_var_name, value)`` for the first set variable, or None.
     """
-    for var_name in ENV_VARS.get(service, []):
+    for var_name in ENV_VARS.get(_service(service), []):
         value = os.getenv(var_name)
         if value:
             return var_name, value
@@ -192,7 +214,7 @@ class APIKeyManager:
     
     def get_key(self, service: str) -> Optional[str]:
         """Get API key for a service."""
-        service = service.lower()
+        service = _service(service)
         
         # First check if explicitly set
         if service in self._keys:
@@ -225,11 +247,11 @@ class APIKeyManager:
     
     def set_key(self, service: str, api_key: str):
         """Set API key for a service."""
-        self._keys[service.lower()] = api_key
+        self._keys[_service(service)] = api_key
     
     def clear_key(self, service: str):
         """Clear API key for a service."""
-        self._keys.pop(service.lower(), None)
+        self._keys.pop(_service(service), None)
     
     def show_status(self):
         """Show current API key status."""
@@ -250,7 +272,7 @@ class APIKeyManager:
             self._print_status(service)
         
         print("\n🔧 Other Services:")
-        for service in ['futurehouse', 'materials_project']:
+        for service in ['edison', 'materials_project']:
             self._print_status(service)
     
     def _print_status(self, service: str):
@@ -321,10 +343,10 @@ class APIKeyNotFoundError(Exception):
                 "Configure in code: scilink.set_api_key('anthropic', 'your-key')",
                 "Get your key at: https://console.anthropic.com/settings/keys"
             ],
-            'futurehouse': [
-                "Set environment variable: export FUTUREHOUSE_API_KEY='your-key'",
-                "Configure in code: scilink.set_api_key('futurehouse', 'your-key')",
-                "Get your key at: https://platform.futurehouse.org/"
+            'edison': [
+                "Set environment variable: export EDISON_PLATFORM_API_KEY='your-key'",
+                "Configure in code: scilink.set_api_key('edison', 'your-key')",
+                "Get your key at: https://platform.edisonscientific.com/profile"
             ],
             'materials_project': [
                 "Set environment variable: export MP_API_KEY='your-key'",
@@ -337,7 +359,7 @@ class APIKeyNotFoundError(Exception):
             ]
         }
         
-        tips = suggestions.get(service.lower(), [
+        tips = suggestions.get(_service(service), [
             f"Set environment variable for '{service}'",
             f"Configure in code: scilink.set_api_key('{service}', 'your-key')"
         ])

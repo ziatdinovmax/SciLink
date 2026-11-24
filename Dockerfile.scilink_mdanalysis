@@ -91,8 +91,7 @@ RUN pip install --no-cache-dir \
 RUN pip install --no-cache-dir \
     atomai>=0.8.1 \
     gdown>=5.2.0 \
-    atomate2>=0.0.21 \
-    edison-client>=0.7.6
+    atomate2>=0.0.21
 
 # Set environment variables
 ENV RUNNING_IN_CONTAINER=true \

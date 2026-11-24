@@ -205,7 +205,7 @@ scilink serve --help
 | `--session-dir` | auto-generated | Directory for session outputs |
 | `--api-key` | from env vars | Override API key |
 | `--base-url` | none | OpenAI-compatible endpoint |
-| `--futurehouse-key` | from env vars | FutureHouse/Edison API key |
+| `--edison-key` | from env vars | Edison Scientific API key |
 | `--hitl-timeout` | `1800` | Seconds a question waits for `scilink_respond` before its default answer |
 | `--print-mcp-json` | — | Print a ready-to-paste, secret-free `.mcp.json` entry and exit |
 
@@ -257,7 +257,7 @@ Long-running tools support an optional `background=true` parameter that returns 
 
 Tools that support background execution:
 - `run_analysis`, `run_optimization` — full agent analysis or Bayesian optimization
-- `assess_novelty` — FutureHouse literature search per scientific claim
+- `assess_novelty` — Edison Scientific literature search per scientific claim
 - `get_recommendations` — measurement recommendations over a full analysis record
 - `generate_initial_plan`, `generate_implementation_code` — RAG + LLM generation
 - `run_economic_analysis` — technoeconomic analysis with knowledge retrieval

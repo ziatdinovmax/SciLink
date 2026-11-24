@@ -228,7 +228,7 @@ class SimulationOrchestratorTools:
     def _get_input_validator(self):
         """Construct an InputValidator with the session's credentials.
 
-        Forwards the orchestrator's FutureHouse key so literature-grounded
+        Forwards the orchestrator's Edison Scientific key so literature-grounded
         review is available when one is configured (degrades gracefully
         when absent)."""
         from .critics import InputValidator
@@ -1038,7 +1038,7 @@ class SimulationOrchestratorTools:
             description=(
                 "Run the full DFT input pipeline as a one-shot: structure "
                 "generation → validation → refinement → VASP inputs (with "
-                "optional literature validation when FUTUREHOUSE_API_KEY is "
+                "optional literature validation when EDISON_PLATFORM_API_KEY is "
                 "set). Use when the user just wants 'a complete DFT setup' "
                 "without iterating on each step. For iterative work "
                 "(build → check → refine → inputs), use the granular tools "
@@ -1621,7 +1621,7 @@ class SimulationOrchestratorTools:
                 "Pre-run review of the generated input files for a structure, "
                 "engine-neutral. Routes to the InputValidator critic, which "
                 "combines the active engine skill's validation guidance, the "
-                "engine's deterministic syntax check, and — when a FutureHouse "
+                "engine's deterministic syntax check, and — when an Edison Scientific "
                 "key is configured — a literature-grounded review, returning "
                 "suggested adjustments. The engine is taken from the active "
                 "routing decision unless `software` is given. Use after "

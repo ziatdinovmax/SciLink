@@ -1,4 +1,4 @@
-import os
+from scilink.auth import edison_api_key
 import logging
 import json
 import time
@@ -6,32 +6,9 @@ from time import sleep
 from typing import Dict, Any, Optional
 
 
-try:
-    from edison_client import EdisonClient, JobNames
-    _EDISON_IMPORT_ERROR = None
-except Exception as _e:  # noqa: BLE001 - ImportError OR any transitive
-    # breakage inside the FutureHouse chain (edison-client -> ldp -> fhlmi;
-    # e.g. a mismatched fhlmi raising "No module named 'lmi.config'").
-    EdisonClient, JobNames = None, None
-    _EDISON_IMPORT_ERROR = _e
-    logging.warning(
-        "Literature stack unavailable (%s). Core analysis is unaffected; "
-        "literature tools will report this when invoked.", _e)
-
-
-def _require_edison():
-    """Fail at CONSTRUCTION, not import, when the optional literature stack
-    is broken or absent — a module-scope raise here used to brick the whole
-    agent initialization (UI startup) over an ancillary feature. Same
-    pattern as the meta agent's guarded `ase` import (see CLAUDE.md,
-    'guarded import inside the function')."""
-    if EdisonClient is None:
-        raise RuntimeError(
-            f"Literature features are unavailable: {_EDISON_IMPORT_ERROR}. "
-            "The literature stack is optional for core analysis. To enable "
-            "it, install a mutually consistent set: "
-            "pip install -U edison-client ldp fhlmi fhaviary"
-        )
+# Edison's platform is called over HTTP by SciLink's own small client: the
+# literature tools depend on no Edison package (see ``_edison_http``).
+from ._edison_http import EdisonClient, JobNames
 
 _TERMINAL_STATUS_MARKERS = ("fail", "error", "cancel", "crash", "timeout",
                             "abort", "kill", "reject")
@@ -54,7 +31,7 @@ def _is_terminal_failure(status: object) -> bool:
 class OwlLiteratureAgent:
     """
     Agent for querying scientific literature using the OWL system
-    through the FutureHouse (now knon as Edison) API client.
+    through the Edison Scientific API.
     """
 
     def __init__(self, api_key: str | None = None, max_wait_time: int = 300):
@@ -62,15 +39,14 @@ class OwlLiteratureAgent:
         Initialize the OWL literature agent.
         
         Args:
-            api_key: FutureHouse (Edison) API key
+            api_key: Edison Scientific API key
             max_wait_time: Maximum time to wait for response in seconds
         """
         if api_key is None:
-            api_key = os.environ.get("FUTUREHOUSE_API_KEY")
+            api_key = edison_api_key()
         if not api_key:
-            raise ValueError("API key not provided and FUTUREHOUSE_API_KEY environment variable is not set.")
+            raise ValueError("No Edison Scientific API key was given and EDISON_PLATFORM_API_KEY is not set.")
         
-        _require_edison()
         self.client = EdisonClient(api_key=api_key)
         self.max_wait_time = max_wait_time
         logging.info("OWLLiteratureAgent initialized with max wait time of %d seconds.", max_wait_time)
@@ -167,15 +143,14 @@ class OwlLiteratureAgent:
 
 
 class IncarLiteratureAgent:
-    """Agent for validating VASP INCAR parameters against literature using the FutureHouse CROW system."""
+    """Agent for validating VASP INCAR parameters against literature using the Edison Scientific CROW system."""
 
     def __init__(self, api_key: str = None, max_wait_time: int = 300):
         if not api_key:
-            api_key = os.environ.get("FUTUREHOUSE_API_KEY")
+            api_key = edison_api_key()
         if not api_key:
             raise ValueError("API key required")
         
-        _require_edison()
         self.client = EdisonClient(api_key=api_key)
         self.max_wait_time = max_wait_time
         self.logger = logging.getLogger(__name__)
@@ -290,16 +265,15 @@ class IncarLiteratureAgent:
 class FittingModelLiteratureAgent:
     """
     Agent for querying scientific literature for physical models and
-    analysis methods using the FutureHouse CROW system.
+    analysis methods using the Edison Scientific CROW system.
     """
 
     def __init__(self, api_key: str | None = None, max_wait_time: int = 300):
         if api_key is None:
-            api_key = os.environ.get("FUTUREHOUSE_API_KEY")
+            api_key = edison_api_key()
         if not api_key:
-            raise ValueError("API key not provided and FUTUREHOUSE_API_KEY env variable is not set.")
+            raise ValueError("No Edison Scientific API key was given and EDISON_PLATFORM_API_KEY is not set.")
         
-        _require_edison()
         self.client = EdisonClient(api_key=api_key)
         self.max_wait_time = max_wait_time
         self.logger = logging.getLogger(__name__)
@@ -359,11 +333,10 @@ class LiteratureSearchAgent:
     """
 
     def __init__(self, api_key: Optional[str] = None, max_wait_time: int = 300):
-        self.api_key = api_key or os.environ.get("FUTUREHOUSE_API_KEY")
+        self.api_key = api_key or edison_api_key()
         if not self.api_key:
             raise ValueError("API Key required for Literature Agent.")
         
-        _require_edison()
         self.client = EdisonClient(api_key=self.api_key)
         self.max_wait_time = max_wait_time
         self.logger = logging.getLogger("LitAgent")

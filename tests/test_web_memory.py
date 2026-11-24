@@ -555,6 +555,7 @@ def test_skill_builder_drafts_with_the_model_and_reports_grounding(mem_client, t
             "technique": ["XRD", "powder diffraction"], "sources_used": []}))
     session.agent.model.generate_content = fake_generate
     monkeypatch.delenv("FUTUREHOUSE_API_KEY", raising=False)
+    monkeypatch.delenv("EDISON_PLATFORM_API_KEY", raising=False)
     base = f"/api/v1/sessions/{session.id}/skills"
     opts = c.get(f"{base}/draft-options").json()
     assert opts["literature_available"] is False and isinstance(opts["knowledge_bases"], list)
@@ -569,7 +570,7 @@ def test_skill_builder_drafts_with_the_model_and_reports_grounding(mem_client, t
     res = job["result"]
     assert set(res["sections"]) == {"overview", "planning", "implementation", "interpretation"}
     assert res["description"] == "Powder XRD peak fitting" and res["technique"] == ["XRD", "powder diffraction"]
-    assert res["grounding"]["literature"] == "unavailable" and any("FutureHouse" in w for w in res["warnings"])
+    assert res["grounding"]["literature"] == "unavailable" and any("Edison Scientific" in w for w in res["warnings"])
     assert "Rwp below 8 %." in prompts[-1] and '"validation"' not in prompts[-1].split("Write these sections")[1].split("Rules")[0]
     # an unknown knowledge base degrades to a warning, the draft still happens
     r = c.post(f"{base}/draft", json={**body, "literature": False, "kb": "no_such_kb", "fill": "all"})

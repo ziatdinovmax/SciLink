@@ -124,7 +124,7 @@ def resolve_prefill(
          be supplied separately (the sidebar warns that one is still needed).
       4. Otherwise empty — no mismatched key is substituted.
 
-    ``base_url`` prefills from ``SCILINK_BASE_URL`` when set; FutureHouse /
+    ``base_url`` prefills from ``SCILINK_BASE_URL`` when set; Edison Scientific /
     Materials Project keys come from their own env vars, independent of the
     model.
     """

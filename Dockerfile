@@ -79,7 +79,7 @@ COPY --from=builder /usr/local/bin/scilink-web /usr/local/bin/scilink-web
 # Document the required API keys. You MUST provide these at runtime.
 # Example: docker run -e GOOGLE_API_KEY="your-key" ...
 ENV GOOGLE_API_KEY=""
-ENV FUTUREHOUSE_API_KEY=""
+ENV EDISON_PLATFORM_API_KEY=""
 ENV MP_API_KEY=""
 
 # Headless defaults: no display, unbuffered logs.

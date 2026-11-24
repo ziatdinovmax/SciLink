@@ -22,7 +22,7 @@ Steps:
                      in the engine's skill bundle).
     3. Validation  — InputValidator reviews the generated inputs (skill
                      guidance + deterministic syntax check + literature
-                     grounding when a FutureHouse key is present).
+                     grounding when an Edison Scientific key is present).
 
 Adding a new scale (e.g. molecular DFT) is a new foundation agent plus a
 skill bundle and one dispatch branch in ``_generate_inputs`` — no new
@@ -519,7 +519,7 @@ def _run_workflow_once(
             value always wins.
         output_dir: Directory for all generated files.
         api_key, base_url, model_name: LLM credentials.
-        futurehouse_api_key: Optional FutureHouse key enabling
+        futurehouse_api_key: Optional Edison Scientific key enabling
             literature-grounded validation.
         mp_api_key: Optional Materials Project key for structure lookups.
         max_refinement_cycles: Structure validator-guided refinement cap.

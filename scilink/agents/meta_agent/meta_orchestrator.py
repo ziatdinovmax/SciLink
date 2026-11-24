@@ -18,7 +18,7 @@ import json
 from scilink.utils.text_io import atomic_write_json
 import re
 import logging
-import os
+from scilink.auth import edison_api_key
 import time
 import threading
 from pathlib import Path
@@ -429,7 +429,7 @@ class MetaOrchestratorAgent:
         base_url: Base URL for an internal proxy endpoint (forwarded).
         embedding_model: Embedding model name (forwarded).
         embedding_api_key: API key for the embedding provider (forwarded).
-        futurehouse_api_key: Optional FutureHouse API key (forwarded).
+        futurehouse_api_key: Optional Edison Scientific API key (forwarded).
         restore_checkpoint: Whether to restore from a previous checkpoint.
         meta_mode: Autonomy level (AUTOPILOT or AUTONOMOUS). The meta has
             only these two — see MetaMode.
@@ -515,7 +515,7 @@ class MetaOrchestratorAgent:
         self.embedding_model = embedding_model
         self.embedding_api_key = embedding_api_key
         self.futurehouse_api_key = (
-            futurehouse_api_key or os.environ.get("FUTUREHOUSE_API_KEY")
+            futurehouse_api_key or edison_api_key()
         )
         # knowledge_dir accepts a directory path OR a named KB from the
         # persistent store ('scilink kb'); an existing path wins over a name.

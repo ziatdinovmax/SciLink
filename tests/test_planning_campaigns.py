@@ -1266,7 +1266,7 @@ def refine_plan_schema_has_context_params():
 def lit_search_then_plan_via_chat():
     """LLM orchestrator calls search_literature then generate_initial_plan (1 Edison lit call).
 
-    Requires FUTUREHOUSE_API_KEY. If absent, the LLM should still produce a plan
+    Requires EDISON_PLATFORM_API_KEY. If absent, the LLM should still produce a plan
     (falling back to generate_initial_plan without literature context).
     """
     d = _tmp()
@@ -1289,7 +1289,7 @@ def lit_search_then_plan_via_chat():
 def molecules_then_plan_via_chat():
     """LLM orchestrator calls query_molecules then generate_initial_plan (1 Edison mol call).
 
-    Requires FUTUREHOUSE_API_KEY. If absent, the LLM should still produce a plan.
+    Requires EDISON_PLATFORM_API_KEY. If absent, the LLM should still produce a plan.
     """
     d = _tmp()
     o = PlanningOrchestratorAgent(**_orch(d))
@@ -1312,7 +1312,7 @@ def molecules_then_refine_via_chat():
     """LLM orchestrator calls query_molecules then refine_plan_with_results (1 Edison mol call).
 
     Tests the full refinement path with molecule context from the orchestrator tool.
-    Requires FUTUREHOUSE_API_KEY. If absent, plan refinement should still succeed.
+    Requires EDISON_PLATFORM_API_KEY. If absent, plan refinement should still succeed.
     """
     d = _tmp()
     o = PlanningOrchestratorAgent(**_orch(d))
@@ -1380,7 +1380,7 @@ def constraint_adjustment_preserves_unrelated_steps():
 
 
 # ---------------------------------------------------------------------------
-# Test tags — Edison tests require FUTUREHOUSE_API_KEY and are slow (~30-60 min)
+# Test tags — Edison tests require EDISON_PLATFORM_API_KEY and are slow (~30-60 min)
 # ---------------------------------------------------------------------------
 
 _EDISON_TESTS = {
@@ -1422,7 +1422,7 @@ if __name__ == "__main__":
         print(f"Mode: --fast (skipping {len(_EDISON_TESTS)} Edison tests)")
     elif "--edison" in args:
         to_run = [t for t in TESTS if _is_edison(t)]
-        print(f"Mode: --edison ({len(to_run)} slow tests, requires FUTUREHOUSE_API_KEY)")
+        print(f"Mode: --edison ({len(to_run)} slow tests, requires EDISON_PLATFORM_API_KEY)")
     elif "--all" in args or not args:
         to_run = TESTS
         print(f"Mode: --all ({len(TESTS)} tests)")

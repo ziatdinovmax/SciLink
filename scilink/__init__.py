@@ -29,13 +29,14 @@ def configure(service: str, api_key: str):
     """Configure API key for a service
     
     Args:
-        service: 'google', 'futurehouse', or 'materials_project'
+        service: 'google', 'edison' (Edison Scientific; 'futurehouse', its
+            earlier name, is still taken), or 'materials_project'
         api_key: The API key
         
     Examples:
         import scilinkllm
         scilinkllm.configure('google', 'your-google-api-key')
-        scilinkllm.configure('futurehouse', 'your-futurehouse-key')
+        scilinkllm.configure('edison', 'your-edison-key')
     """
     set_api_key(service, api_key)
 
@@ -48,7 +49,7 @@ def configure_from_dict(config: dict):
     Example:
         scilinkllm.configure_from_dict({
             'google': 'your-google-key',
-            'futurehouse': 'your-futurehouse-key'
+            'edison': 'your-edison-key'
         })
     """
     for service, key in config.items():

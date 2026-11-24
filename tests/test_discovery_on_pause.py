@@ -132,7 +132,7 @@ def test_an_assessment_whose_analysis_failed_is_tried_once_deeper_and_never_call
 
 
 def test_the_literature_key_can_come_from_the_environment(tmp_path, monkeypatch):
-    """The literature agents read FUTUREHOUSE_API_KEY themselves; the chain must
+    """The literature agents read the Edison key from the environment themselves; the chain must
     not skip the literature just because no key was passed explicitly."""
     made = []
 
@@ -140,6 +140,7 @@ def test_the_literature_key_can_come_from_the_environment(tmp_path, monkeypatch)
         def __init__(self, api_key=None, max_wait_time=0):
             made.append(api_key)
 
+    monkeypatch.delenv("EDISON_PLATFORM_API_KEY", raising=False)
     monkeypatch.setenv("FUTUREHOUSE_API_KEY", "fh-from-env")
     monkeypatch.setattr("scilink.agents.lit_agents.OwlLiteratureAgent", FakeLit, raising=False)
     out = assess_change(str(tmp_path / "f.npy"), modality="image", system_info={}, what_changed=None,
@@ -148,4 +149,4 @@ def test_the_literature_key_can_come_from_the_environment(tmp_path, monkeypatch)
     monkeypatch.delenv("FUTUREHOUSE_API_KEY")
     out = assess_change(str(tmp_path / "f.npy"), modality="image", system_info={}, what_changed=None,
                         agent_kwargs={}, out_dir=str(tmp_path / "b"), agent_factory=Agent, scorer=Scorer())
-    assert out["literature"].startswith("not asked") and "FUTUREHOUSE_API_KEY" in out["literature"]
+    assert out["literature"].startswith("not asked") and "EDISON_PLATFORM_API_KEY" in out["literature"]

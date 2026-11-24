@@ -51,7 +51,7 @@ without errors, but sustained live loops on it are unmeasured.
 | `SCILINK_SANDBOX_MEM_MB`, `SCILINK_SANDBOX_FILE_MB`, `SCILINK_SANDBOX_PROCS` | rlimits for generated scripts, off by default |
 | `SCILINK_SANDBOX_ENV` | extra environment variables generated scripts may see (they get an allowlist, never the model keys) |
 | model credentials | `AWS_BEARER_TOKEN_BEDROCK` + `AWS_REGION_NAME`, or a task/pod role, or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY`; a key can also be given per session at creation. The role mode needs Bedrock model access in the hosting account (for Anthropic models, the use-case form) and was verified on ECS Fargate with Amazon Nova Pro; without it, a key from an account that has access is passed per session and the container holds no model secret |
-| `MP_API_KEY`, `FUTUREHOUSE_API_KEY` | optional: Materials Project, literature search |
+| `MP_API_KEY`, `EDISON_PLATFORM_API_KEY` | optional: Materials Project, literature search (Edison Scientific; `FUTUREHOUSE_API_KEY`, the key's earlier name, is still read) |
 
 ## Network
 

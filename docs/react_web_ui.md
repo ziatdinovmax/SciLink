@@ -233,7 +233,7 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
     before any login (501).
 - **Sidebar**: model + provider fields (e.g. Bedrock region), API key /
   base URL (with "✓ available from ENV" captions — the server reports
-  credential *availability*, never values), FutureHouse / Materials Project
+  credential *availability*, never values), Edison Scientific / Materials Project
   keys, embedding model (plan/meta), autonomy, the code-execution consent
   checkbox, session start/resume/rename, theme toggle.
 - **Chat**: markdown + LaTeX rendering, image attachments, HTML report
@@ -353,7 +353,7 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   redrafts all of them) from the description, the technique list and your
   notes, with your own text kept as authoritative context; it can be
   grounded on a named knowledge base (top chunks, dense or keyword
-  retrieval) and on one FutureHouse literature search (the session's key,
+  retrieval) and on one Edison Scientific literature search (the session's key,
   minutes) — the draft says what it was grounded on, lists the sources it
   was given and any grounding that could not be used, and nothing is saved
   until you choose to. It runs as a job (`POST

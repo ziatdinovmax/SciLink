@@ -1,7 +1,7 @@
 """Live: the adversarial literature leg surfaces the technique pitfalls an
 expert reviewer cited, and the critic then raises them.
 
-Needs FUTUREHOUSE_API_KEY (Edison; ~10-15 min per search) and Bedrock creds.
+Needs EDISON_PLATFORM_API_KEY or FUTUREHOUSE_API_KEY (Edison Scientific; ~10-15 min per search) and Bedrock creds.
 Run: python tests/test_technique_limitations_live.py
 """
 from __future__ import annotations
@@ -22,8 +22,8 @@ EXPECT = {"kpfm_electrolyte": r"kpfm.{0,200}(electrolyte|liquid|aqueous|screenin
           "h_inventory": r"(stored|trapped|absorbed|dissolved) (hydrogen|h2).{0,200}(release|desorb|inventory|transient)|inventory.{0,120}(transient|not.{0,20}equal product)"}
 
 if __name__ == "__main__":
-    if not os.getenv("FUTUREHOUSE_API_KEY"):
-        print("FUTUREHOUSE_API_KEY not set — skipping"); sys.exit(0)
+    if not (os.getenv("EDISON_PLATFORM_API_KEY") or os.getenv("FUTUREHOUSE_API_KEY")):
+        print("EDISON_PLATFORM_API_KEY not set — skipping"); sys.exit(0)
     from scilink.agents.planning_agents.planning_orchestrator import (PlanningOrchestratorAgent, AutonomyLevel)
     if RUN.exists(): shutil.rmtree(RUN)
     (RUN / "data").mkdir(parents=True)

@@ -27,7 +27,7 @@ _RELEVANT_VARS = [
     "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
     "GEMINI_API_KEY", "GOOGLE_API_KEY",
     "AWS_BEARER_TOKEN_BEDROCK",
-    "FUTUREHOUSE_API_KEY", "MP_API_KEY", "MATERIALS_PROJECT_API_KEY",
+    "EDISON_PLATFORM_API_KEY", "FUTUREHOUSE_API_KEY", "MP_API_KEY", "MATERIALS_PROJECT_API_KEY",
 ]
 
 
@@ -158,6 +158,9 @@ def test_service_keys_resolve_independently_of_model(clean_env):
     out = resolve_prefill("gpt-5.4")
     assert out["fh"] == ("fh-key", "FUTUREHOUSE_API_KEY")
     assert out["mp"] == ("mp-key", "MP_API_KEY")
+    # the name Edison's own client reads comes first; the earlier name is still read
+    clean_env.setenv("EDISON_PLATFORM_API_KEY", "edison-key")
+    assert resolve_prefill("gpt-5.4")["fh"] == ("edison-key", "EDISON_PLATFORM_API_KEY")
 
 
 def test_all_fields_empty_when_nothing_set(clean_env):

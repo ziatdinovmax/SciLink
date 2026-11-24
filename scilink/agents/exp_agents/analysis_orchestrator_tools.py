@@ -4907,7 +4907,7 @@ class AnalysisOrchestratorTools:
             if not self.orch.futurehouse_api_key:
                 return json.dumps({
                     "status": "error",
-                    "message": "No FutureHouse/Edison API Key provided in Orchestrator initialization."
+                    "message": "No Edison Scientific API key provided in Orchestrator initialization."
                 })
 
             try:
@@ -4972,7 +4972,7 @@ class AnalysisOrchestratorTools:
             func=search_literature,
             name="search_literature",
             description=(
-                "Search scientific literature via the FutureHouse Edison API to gather "
+                "Search scientific literature via the Edison Scientific API to gather "
                 "context that will inform an upcoming analysis. Call BEFORE run_analysis(); "
                 "pass the returned file_path as `literature_file` to run_analysis() so the "
                 "planner produces a literature-informed plan."
@@ -5006,7 +5006,7 @@ class AnalysisOrchestratorTools:
             if not self.orch.futurehouse_api_key:
                 return json.dumps({
                     "status": "error",
-                    "message": "No FutureHouse/Edison API Key provided in Orchestrator initialization."
+                    "message": "No Edison Scientific API key provided in Orchestrator initialization."
                 })
 
             # 1. Retrieve the analysis record (same contract as assess_novelty).
@@ -5443,7 +5443,7 @@ class AnalysisOrchestratorTools:
             if not self.orch.futurehouse_api_key:
                 return json.dumps({
                     "status": "error",
-                    "message": "No FutureHouse/Edison API Key provided in Orchestrator initialization."
+                    "message": "No Edison Scientific API key provided in Orchestrator initialization."
                 })
 
             # 1. Retrieve the analysis record

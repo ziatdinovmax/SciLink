@@ -26,6 +26,7 @@ and tolerant JSON parsing.
 """
 from __future__ import annotations
 
+from scilink.auth import edison_api_key
 import json
 import logging
 from pathlib import Path
@@ -89,9 +90,9 @@ class _CriticBase:
             base_url: Base URL for an OpenAI-compatible internal proxy.
                 When provided, requests are routed through the proxy
                 client; when ``None``, requests go through LiteLLM.
-            futurehouse_api_key: Optional FutureHouse (Edison) API key
+            futurehouse_api_key: Optional Edison Scientific API key
                 enabling literature-grounded review. Falls back to the
-                ``FUTUREHOUSE_API_KEY`` environment variable. When no key
+                ``EDISON_PLATFORM_API_KEY`` environment variable. When no key
                 is available, literature grounding is skipped and the
                 critic runs on baseline guidance and engine tools only.
             google_api_key: Deprecated. Use ``api_key`` instead.
@@ -105,9 +106,8 @@ class _CriticBase:
             f"{__name__}.{self.__class__.__name__}"
         )
 
-        import os as _os
         self.futurehouse_api_key = (
-            futurehouse_api_key or _os.environ.get("FUTUREHOUSE_API_KEY")
+            futurehouse_api_key or edison_api_key()
         )
 
         api_key, base_url = normalize_params(
@@ -553,7 +553,7 @@ class InputValidator(_CriticBase):
     ) -> str:
         """Return a literature-grounded review of the inputs, or ``""``.
 
-        Runs only when a FutureHouse key is configured. Builds an
+        Runs only when an Edison Scientific key is configured. Builds an
         engine-neutral query (the engine name is the active skill name)
         and returns the literature answer text for folding into the
         prompt and report. Failure-isolated: any error returns an empty
@@ -657,7 +657,7 @@ class InputValidator(_CriticBase):
         # reasons about physics rather than re-checking tag spellings.
         syntax_issues = _run_deterministic_syntax_check(input_files, skill)
 
-        # Ground the review in literature when a FutureHouse key is
+        # Ground the review in literature when an Edison Scientific key is
         # configured; otherwise this is an empty string and the review
         # proceeds on baseline guidance + the syntax check.
         literature = self._literature_review(input_files, system_description, skill)

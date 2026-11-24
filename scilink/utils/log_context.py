@@ -201,6 +201,23 @@ def raise_if_cancelled() -> None:
     raise_if_stopped_worker()
 
 
+def sleep_unless_cancelled(seconds: float) -> None:
+    """A backoff sleep that ends early when the worker is cancelled (a budget
+    or memory cancel, the turn's Stop): up to a minute would otherwise pass
+    before the cancel could land."""
+    import time
+    if not cancel_watched():           # nothing can cancel this thread: one plain sleep
+        time.sleep(max(0.0, seconds))
+        return
+    deadline = time.monotonic() + max(0.0, seconds)
+    while True:
+        raise_if_cancelled()
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return
+        time.sleep(min(1.0, left))
+
+
 # Longest worker chain resolved by ``effective_thread`` — a bound, not a
 # design limit: chat -> fan-out branch -> best-of-N candidate -> helper is
 # four hops, and a stale (thread-id reuse) entry must never spin forever.
