@@ -132,6 +132,10 @@ def ensure_sandbox_consent(*, assume_yes: bool, ask: Ask, console) -> bool:
         console.print(f"[dim]Sandbox detected ({indicators[0] if indicators else 'sandbox'}); "
                       "generated code runs inside it.[/]")
         return True
+    console.print(f"\n[bold]{V.DISCLAIMER['title']}[/]")
+    for paragraph in V.DISCLAIMER["paragraphs"]:
+        console.print(f"[dim]{paragraph}[/]")
+    console.print(f"[dim]{' · '.join(V.DISCLAIMER['attribution'])}[/]")
     console.print(f"\n[bold]{V.CONSENT_TEXT}[/]")
     console.print("[dim]No sandbox detected — a Docker container, VM or Colab is "
                   "recommended. Answer no to decide later, per run.[/]")
