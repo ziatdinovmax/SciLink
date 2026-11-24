@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { api, type OpsStatus, type UsageSummary } from "../api";
+import { sessionLabel, sessionLabels, modelLabels } from "../sessionLabel";
 
 function k(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
@@ -15,11 +16,24 @@ function ago(s: number): string {
 
 function reason(r: string): string {
   const [kind, id] = r.split(":", 2);
-  const short = id ? id.replace(/^[a-z_]+_session_/, "") : "";
-  if (kind === "turn") return `a turn in ${short}`;
-  if (kind === "live") return `a live run in ${short}`;
+  const where = id ? ` in session ${sessionLabel(id)}` : "";
+  if (kind === "turn") return `a turn${where}`;
+  if (kind === "live") return `a live run${where}`;
   if (kind === "memory_job") return `a memory job`;
   return r;
+}
+
+// Sessions listed by name; the rest are one row, so the rows add up.
+const MAX_SESSIONS = 8;
+
+/** One fact per line: what it is on the left, its value on the right. */
+function Row({ label, value, title }: { label: string; value: ReactNode; title?: string }) {
+  return (
+    <div className="ws-row" title={title}>
+      <span className="ws-label">{label}</span>
+      <span className="ws-value">{value}</span>
+    </div>
+  );
 }
 
 /** What the ops routes report about THIS workspace: whether the server is
@@ -45,8 +59,13 @@ export function WorkspacePanel() {
     return () => window.clearInterval(t);
   }, [open, load]);
 
-  const sessions = usage ? Object.entries(usage.by_session).sort((a, b) => b[1].calls - a[1].calls) : [];
-  const models = usage ? Object.entries(usage.by_model) : [];
+  const byCalls = (a: [string, { calls: number }], b: [string, { calls: number }]) => b[1].calls - a[1].calls;
+  const sessions = usage ? Object.entries(usage.by_session).sort(byCalls) : [];
+  const models = usage ? Object.entries(usage.by_model).sort(byCalls) : [];
+  const shown = sessions.slice(0, MAX_SESSIONS);
+  const rest = sessions.slice(MAX_SESSIONS);
+  const sessionNames = sessionLabels(shown.map(([sid]) => sid));
+  const modelNames = modelLabels(models.map(([m]) => m));
   const budgetPct = usage && usage.budget_tokens ? Math.min(100, Math.round((usage.total_tokens / usage.budget_tokens) * 100)) : null;
 
   return (
@@ -58,63 +77,67 @@ export function WorkspacePanel() {
         </button>
       </h3>
       {open && (
-        <div style={{ fontSize: 12, lineHeight: 1.5 }}>
-          {error && <div style={{ color: "var(--danger, #c33)" }}>{error}</div>}
+        <div className="ws-panel">
+          {error && <div style={{ color: "var(--danger)" }}>{error}</div>}
           {status && (
             <div>
-              <div>
+              <div className="ws-state">
                 <strong>{status.state === "busy" ? "Busy" : status.state === "draining" ? "Draining" : "Idle"}</strong>
-                {status.state === "idle" && ` for ${ago(status.idle_for_s)}`}
-                {status.state === "draining" && " — finishing running work, taking no new turns"}
-                {" · "}{status.sessions_live} live session{status.sessions_live === 1 ? "" : "s"}
-                {" · up "}{ago(status.uptime_s)}
+                {status.state === "idle" && <span className="ws-label"> for {ago(status.idle_for_s)}</span>}
               </div>
+              {status.state === "draining" && (
+                <div className="ws-label">Finishing running work, taking no new turns</div>
+              )}
               {status.busy.length > 0 && (
-                <ul style={{ margin: "2px 0 4px 16px", padding: 0 }}>
+                <ul className="ws-busy">
                   {status.busy.map((r) => <li key={r}>{reason(r)}</li>)}
                 </ul>
               )}
+              <Row label="Live sessions" value={status.sessions_live} />
+              <Row label="Server up" value={ago(status.uptime_s)} />
             </div>
           )}
           {usage && (
-            <div style={{ marginTop: 6 }}>
-              <div>
-                <strong>{usage.calls}</strong> model call{usage.calls === 1 ? "" : "s"} this period ·{" "}
-                {k(usage.prompt_tokens)} in / {k(usage.completion_tokens)} out
-                {usage.llm_seconds > 0 && ` · ${ago(usage.llm_seconds)} in the model`}
-              </div>
+            <div>
+              <h4 className="ws-head">This period</h4>
+              <Row label="Model calls" value={usage.calls} />
+              <Row label="Tokens in" value={k(usage.prompt_tokens)} />
+              <Row label="Tokens out" value={k(usage.completion_tokens)} />
+              {usage.llm_seconds > 0 && <Row label="Time in the model" value={ago(usage.llm_seconds)} />}
               {usage.budget_tokens !== null && (
                 <div title={`${k(usage.total_tokens)} of ${k(usage.budget_tokens)} tokens`}>
-                  Budget: {budgetPct}% used
-                  {usage.over_budget ? " — spent; new turns wait for a new period" : ` (${k(usage.remaining_tokens ?? 0)} left)`}
-                  <div style={{ height: 4, background: "var(--border)", borderRadius: 2, marginTop: 2 }}>
-                    <div style={{ width: `${budgetPct}%`, height: "100%", borderRadius: 2,
-                                  background: usage.over_budget ? "var(--danger, #c33)" : "var(--accent, #58a)" }} />
+                  <Row label="Budget used"
+                       value={usage.over_budget ? `${budgetPct}%, spent` : `${budgetPct}% (${k(usage.remaining_tokens ?? 0)} left)`} />
+                  <div className="ws-bar">
+                    <div style={{ width: `${budgetPct}%`, background: usage.over_budget ? "var(--danger)" : "var(--accent)" }} />
                   </div>
+                  {usage.over_budget && <div className="ws-label">New turns wait for a new period</div>}
                 </div>
               )}
               {models.length > 0 && (
-                <div style={{ color: "var(--text-muted)", marginTop: 4 }}>
-                  {models.map(([m, r]) => `${m.replace(/^[a-z_]+\//, "")}: ${r.calls}`).join(" · ")}
-                </div>
+                <>
+                  <h4 className="ws-head">Calls by model</h4>
+                  {models.map(([m, r]) => (
+                    <Row key={m} label={modelNames.get(m) ?? m} value={r.calls} title={m} />
+                  ))}
+                </>
               )}
               {sessions.length > 0 && (
-                <table style={{ width: "100%", marginTop: 4, borderCollapse: "collapse" }}>
-                  <tbody>
-                    {sessions.slice(0, 8).map(([sid, r]) => (
-                      <tr key={sid} title={sid}>
-                        <td style={{ color: "var(--text-muted)", paddingRight: 6, whiteSpace: "nowrap" }}>
-                          {sid === "unattributed" ? "unattributed" : sid.replace(/^[a-z_]+_session_/, "")}
-                        </td>
-                        <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>{r.calls} · {k(r.prompt_tokens + r.completion_tokens)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                <>
+                  <h4 className="ws-head">Calls by session</h4>
+                  {shown.map(([sid, r]) => (
+                    <Row key={sid} label={sessionNames.get(sid) ?? sid} value={r.calls}
+                         title={`${sid} · ${k(r.prompt_tokens + r.completion_tokens)} tokens`} />
+                  ))}
+                  {rest.length > 0 && (
+                    <Row label={`${rest.length} more`} value={rest.reduce((n, [, r]) => n + r.calls, 0)}
+                         title={`${rest.length} sessions with fewer calls, together`} />
+                  )}
+                </>
               )}
             </div>
           )}
-          {!status && !usage && !error && <div style={{ color: "var(--text-muted)" }}>Loading…</div>}
+          {!status && !usage && !error && <div className="ws-label">Loading…</div>}
         </div>
       )}
     </div>

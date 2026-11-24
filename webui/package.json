@@ -9,6 +9,7 @@
     "build:package": "npm run build && rsync -a --delete dist/ ../scilink/server/static/",
     "preview": "vite preview",
     "check:graph": "node --experimental-strip-types scripts/graph_check.ts",
+    "check:labels": "node --experimental-strip-types scripts/session_label_check.ts",
     "check:highlight": "node --experimental-strip-types scripts/highlight_check.ts",
     "check:markdown": "node --experimental-strip-types scripts/markdown_check.ts",
     "check:vocabulary": "node --experimental-strip-types scripts/vocabulary_check.ts"
