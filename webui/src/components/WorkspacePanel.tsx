@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { api, type OpsStatus, type UsageSummary } from "../api";
 import { sessionLabel, sessionLabels, modelLabels } from "../sessionLabel";
+import { VOCAB } from "../vocabulary";
 
 function k(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
@@ -27,11 +28,11 @@ function reason(r: string): string {
 const MAX_SESSIONS = 8;
 
 /** One fact per line: what it is on the left, its value on the right. */
-function Row({ label, value, title }: { label: string; value: ReactNode; title?: string }) {
+function Row({ label, value, title, strong }: { label: string; value: ReactNode; title?: string; strong?: boolean }) {
   return (
     <div className="ws-row" title={title}>
       <span className="ws-label">{label}</span>
-      <span className="ws-value">{value}</span>
+      <span className={strong ? "ws-value strong" : "ws-value"}>{value}</span>
     </div>
   );
 }
@@ -100,6 +101,12 @@ export function WorkspacePanel() {
           {usage && (
             <div>
               <h4 className="ws-head">This period</h4>
+              {/* The dollar estimate, worded by the server; absent when no
+                  call of the period had a known price. What it is an
+                  estimate of is on hover. */}
+              {usage.cost_text && (
+                <Row label="Spent" value={usage.cost_text} title={VOCAB.cost_words.note} strong />
+              )}
               <Row label="Model calls" value={usage.calls} />
               <Row label="Tokens in" value={k(usage.prompt_tokens)} />
               <Row label="Tokens out" value={k(usage.completion_tokens)} />

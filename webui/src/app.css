@@ -106,6 +106,7 @@ label.field > span { display: block; margin-bottom: 4px; }
 .ws-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
 .ws-label { color: var(--text-muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws-row .ws-value { flex: none; font-variant-numeric: tabular-nums; }
+.ws-row .ws-value.strong { font-weight: 600; }
 .ws-panel div.ws-label { white-space: normal; }
 .ws-state { margin-bottom: 2px; }
 .ws-busy { margin: 0 0 2px 16px; padding: 0; color: var(--text-muted); }

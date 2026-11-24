@@ -131,6 +131,23 @@ export function Sidebar({
   const [resumable, setResumable] = useState<ResumableSession[]>([]);
   const [resumeChoice, setResumeChoice] = useState("");
   const [nameDraft, setNameDraft] = useState("");
+  // What this session's model calls have cost so far, as the server words
+  // it ("≈ $0.36"; "" when the model has no known price). One row from the
+  // session's own route, read when the session or its status changes (a
+  // turn started or ended) and every 15 s while a turn runs.
+  const [spent, setSpent] = useState("");
+  const sessionId = session?.id ?? "";
+  useEffect(() => {
+    if (!sessionId) { setSpent(""); return; }
+    let live = true;
+    const load = () =>
+      api.sessionCost(sessionId)
+        .then((c) => { if (live) setSpent(c.cost_text ?? ""); })
+        .catch(() => {});
+    load();
+    const timer = status === "running" ? window.setInterval(load, 15000) : undefined;
+    return () => { live = false; if (timer !== undefined) window.clearInterval(timer); };
+  }, [sessionId, status]);
   const [providerInfo, setProviderInfo] = useState(config?.provider ?? null);
   const [credInfo, setCredInfo] = useState(config?.credentials ?? null);
 
@@ -561,6 +578,9 @@ export function Sidebar({
             <span className={`status-badge ${status}`}>
               {(VOCAB.status_labels as Record<string, string>)[status] ?? status}
             </span>
+            {spent && (
+              <strong title={VOCAB.cost_words.note} style={{ float: "right", fontSize: "0.85em" }}>{spent}</strong>
+            )}
           </p>
           <label className="field">
             <span>Session name</span>

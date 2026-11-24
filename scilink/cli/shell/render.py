@@ -280,5 +280,10 @@ class Renderer:
             p, c = int(tokens.get("prompt_tokens", 0)), int(tokens.get("completion_tokens", 0))
             if p or c:
                 parts.append(f"{p:,} tokens in · {c:,} out")
+            # the dollar estimate, where the route has a known price (``scilink.pricing``)
+            from ...pricing import cost_text
+            cost = cost_text(tokens.get("cost_usd"), tokens["calls"], tokens.get("priced_calls"))
+            if cost:
+                parts.append(cost)
         parts.append(f"{elapsed:.0f}s")
         return "· " + " · ".join(parts)

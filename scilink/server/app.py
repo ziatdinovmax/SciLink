@@ -360,6 +360,13 @@ def create_app(session_root: Path, serve_frontend: bool = True,
     def get_session(request: Request, session_id: str):
         return _mgr(request).snapshot(_session_or_404(request, session_id))
 
+    @app.get("/api/v1/sessions/{session_id}/cost")
+    def session_cost(request: Request, session_id: str):
+        """The dollar estimate of this session's model calls so far (one
+        row; the sidebar reads it, not the whole usage summary)."""
+        _session_or_404(request, session_id)
+        return usage.session_cost(session_id)
+
     @app.delete("/api/v1/sessions/{session_id}")
     def reset_session(request: Request, session_id: str):
         """Reset: stop and drop the live session (its dir stays resumable)."""

@@ -104,6 +104,9 @@ def disable_tracing() -> None:
 _counters: Dict[str, float] = {
     "calls": 0, "seconds": 0.0, "prompt_tokens": 0, "completion_tokens": 0,
     "off_path_calls": 0,
+    # The dollar estimate of the calls that had a known price (``pricing``),
+    # and how many calls that is: shown together, never the sum alone.
+    "cost_usd": 0.0, "priced_calls": 0,
 }
 _off_path = threading.local()
 
@@ -117,6 +120,7 @@ _off_path = threading.local()
 # per workspace.
 _usage_sink = None
 _usage_sink_takes_worker = False
+_usage_sink_takes_cost = False
 _session_tag = threading.local()
 # The worker (a fan-out branch) a call was made for, tagged on
 # the worker's thread next to its session (``attributed``).
@@ -131,16 +135,20 @@ _session_resolver = None
 def set_usage_sink(sink) -> None:
     """``sink(model, prompt_tokens, completion_tokens, latency_s, session)``
     for every completed call; ``None`` removes it. Never raises into a call.
-    A sink that also takes a ``worker`` keyword is told which worker made it."""
-    global _usage_sink, _usage_sink_takes_worker
+    A sink that also takes a ``worker`` keyword is told which worker made it,
+    and one that takes ``cost_usd`` the call's dollar estimate (None when its
+    route has no known price)."""
+    global _usage_sink, _usage_sink_takes_worker, _usage_sink_takes_cost
     _usage_sink = sink
-    _usage_sink_takes_worker = False
+    _usage_sink_takes_worker = _usage_sink_takes_cost = False
     if sink is not None:
         import inspect
         try:
-            params = inspect.signature(sink).parameters.values()
-            _usage_sink_takes_worker = any(
-                p.name == "worker" or p.kind is inspect.Parameter.VAR_KEYWORD for p in params)
+            params = list(inspect.signature(sink).parameters.values())
+            var_kw = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params)
+            names = {p.name for p in params}
+            _usage_sink_takes_worker = var_kw or "worker" in names
+            _usage_sink_takes_cost = var_kw or "cost_usd" in names
         except (TypeError, ValueError):
             pass
 
@@ -218,18 +226,34 @@ class off_path:
 def note_llm_call(latency_s: Optional[float] = None,
                   prompt_tokens: Optional[int] = None,
                   completion_tokens: Optional[int] = None,
-                  model: Optional[str] = None) -> None:
-    """Count one completed LLM call. Never raises."""
+                  model: Optional[str] = None,
+                  cost_usd: Optional[float] = None,
+                  proxied: bool = False) -> None:
+    """Count one completed LLM call. Never raises.
+
+    ``cost_usd`` is the call's dollar estimate when the caller has one (the
+    LiteLLM wrapper passes the cost LiteLLM put on the response); without
+    it the estimate is made here from the token counts
+    (``pricing.estimate_cost``). A route with no known price gets none, and
+    neither does a ``proxied`` call, one sent through a base URL."""
     try:
+        try:
+            from . import pricing
+            if not pricing.priced(model, proxied):
+                cost_usd = None
+            elif cost_usd is None:
+                cost_usd = pricing.estimate_cost(model, prompt_tokens, completion_tokens)
+        except Exception:
+            cost_usd = None
         sink = _usage_sink
         if sink is not None:
             try:
                 args = (model, int(prompt_tokens or 0), int(completion_tokens or 0),
                         float(latency_s or 0.0), current_session())
-                if _usage_sink_takes_worker:
-                    sink(*args, worker=current_worker())
-                else:
-                    sink(*args)
+                extra = {"worker": current_worker()} if _usage_sink_takes_worker else {}
+                if _usage_sink_takes_cost:
+                    extra["cost_usd"] = cost_usd
+                sink(*args, **extra)
             except Exception:
                 pass
         if getattr(_off_path, "depth", 0):
@@ -241,6 +265,9 @@ def note_llm_call(latency_s: Optional[float] = None,
             _counters["seconds"] += float(latency_s or 0.0)
             _counters["prompt_tokens"] += int(prompt_tokens or 0)
             _counters["completion_tokens"] += int(completion_tokens or 0)
+            if cost_usd is not None:
+                _counters["cost_usd"] += float(cost_usd)
+                _counters["priced_calls"] += 1
     except Exception:
         pass
 

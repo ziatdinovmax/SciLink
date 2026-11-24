@@ -73,8 +73,9 @@ def test_sink_receives_every_call_with_its_thread_session(tmp_path):
         tracing.note_llm_call(prompt_tokens=2, completion_tokens=2, model="m1")
     s = led.summary()
     assert seen["before"] is None
-    assert s["by_session"] == {"main-session": {"calls": 2, "prompt_tokens": 12, "completion_tokens": 7},
-                               "live-run": {"calls": 1, "prompt_tokens": 1, "completion_tokens": 1}}
+    no_price = {"cost_usd": 0.0, "priced_calls": 0, "cost_text": ""}      # no route here has a known price
+    assert s["by_session"] == {"main-session": {"calls": 2, "prompt_tokens": 12, "completion_tokens": 7, **no_price},
+                               "live-run": {"calls": 1, "prompt_tokens": 1, "completion_tokens": 1, **no_price}}
     assert set(s["by_model"]) == {"m1", "m2"}
 
 

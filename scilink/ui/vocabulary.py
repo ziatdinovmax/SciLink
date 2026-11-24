@@ -246,6 +246,16 @@ ACTIVITY_LABELS = {
 
 # ── Helpers ──────────────────────────────────────────────────────
 
+# The dollar estimate of model calls (``scilink.pricing``), as every surface
+# words it. The note is the web's tooltip on the figure; the terminal shows
+# the figure alone and its reference says what it is.
+COST_WORDS = {
+    "figure": "≈ {amount}",
+    "partial": "{figure} for {priced} of {calls} calls",
+    "note": "estimate at the provider's list prices, not a bill",
+}
+
+
 def mode_keys() -> list:
     return list(MODES)
 
@@ -304,4 +314,5 @@ def as_json() -> dict:
         "coordinator_mark": COORDINATOR_MARK,
         "handoff_prefixes": HANDOFF_PREFIXES,
         "activity_labels": ACTIVITY_LABELS,
+        "cost_words": COST_WORDS,
     })
