@@ -78,6 +78,12 @@ input:focus, textarea:focus, select:focus {
 label.field { display: block; margin-bottom: 10px; font-size: 13px; color: var(--text-muted); }
 label.field > span { display: block; margin-bottom: 4px; }
 .caption { font-size: 12px; color: var(--text-dim); }
+/* The disclaimer, folded under the consent checkbox. */
+details.disclaimer { margin: -4px 0 12px 22px; font-size: 12px; color: var(--text-dim); }
+details.disclaimer > summary { cursor: pointer; color: var(--text-muted); text-decoration: underline; text-underline-offset: 2px; }
+details.disclaimer > p { margin: 8px 0 0; line-height: 1.45; }
+.disclaimer-attribution { text-align: center; }
+.disclaimer-attribution > span { display: block; }
 
 /* ── layout ─────────────────────────────────────────────────── */
 

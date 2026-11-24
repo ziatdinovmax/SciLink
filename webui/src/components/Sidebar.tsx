@@ -533,6 +533,17 @@ export function Sidebar({
         />
         <span style={{ marginBottom: 0 }}>{config?.consent_text ?? ""}</span>
       </label>
+      <details className="disclaimer">
+        <summary>Read the {VOCAB.disclaimer.title.toLowerCase()} before starting</summary>
+        {VOCAB.disclaimer.paragraphs.map((p) => (
+          <p key={p.slice(0, 24)}>{p}</p>
+        ))}
+        <p className="disclaimer-attribution">
+          {VOCAB.disclaimer.attribution.map((line) => (
+            <span key={line}>{line}</span>
+          ))}
+        </p>
+      </details>
 
       {!locked && (
         <>

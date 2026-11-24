@@ -66,3 +66,19 @@ def test_question_labels_layering():
     assert "{pick}" not in vocabulary.question_labels("consensus_select")["accept"]
     assert vocabulary.question_labels("keep_or_revert", "consistency_result")["keep"] \
         == "Use the consensus result"
+
+
+def test_disclaimer_is_the_docs_text():
+    """The disclaimer the UI and the shell show is docs/disclaimer.md's,
+    word for word: every paragraph, and the attribution lines in order."""
+    import re
+
+    doc = (ROOT / "docs" / "disclaimer.md").read_text(encoding="utf-8")
+    flat = " ".join(re.sub(r"<[^>]+>", "\n", doc).split())
+    for paragraph in vocabulary.DISCLAIMER["paragraphs"]:
+        assert paragraph in flat
+    assert " ".join(vocabulary.DISCLAIMER["attribution"]) in flat
+    body = doc.split("\n", 1)[1]                      # past the "# Disclaimer" title
+    prose = [" ".join(p.split()) for p in body.split("\n\n")
+             if p.strip() and not p.lstrip().startswith("<")]
+    assert prose == vocabulary.DISCLAIMER["paragraphs"]
