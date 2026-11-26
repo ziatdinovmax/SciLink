@@ -2790,7 +2790,9 @@ class GenerateCurveFittingReportController:
         # fit as "Poor". The R² path is unchanged.
         gate_value = gate.extract(fit_quality) if (gate is not None and gate.metric != "r_squared") else None
         if gate_value is not None:
-            if gate.is_accept(gate_value):
+            if gate.declared_reject(fit_quality):
+                badge_class, label = "quality-poor", "Poor"
+            elif gate.is_accept(gate_value):
                 badge_class, label = "quality-good", "Good"
             elif gate.is_hard_reject(gate_value):
                 badge_class, label = "quality-poor", "Poor"
@@ -2799,6 +2801,10 @@ class GenerateCurveFittingReportController:
             html += f'<span class="quality-badge {badge_class}">{label}</span><strong>{gate.label} = {gate_value:.4f}</strong>'
             if r_squared is not None:
                 html += f" &nbsp;|&nbsp; <span>R² = {r_squared:.4f}</span>"
+        elif gate is not None and gate.declared_reject(fit_quality):
+            badge_class, label = "quality-poor", "Poor"
+            html += (f'<span class="quality-badge {badge_class}">{label}</span><strong>{gate.declared_reject(fit_quality)}</strong>'
+                     + (f" &nbsp;|&nbsp; <span>R² = {r_squared:.4f}</span>" if r_squared is not None else ""))
         elif r_squared is not None:
             if r_squared >= self.r2_threshold + 0.04:
                 badge_class, label = "quality-good", "Excellent"
@@ -5374,6 +5380,26 @@ Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2
         gate = _gate(state)
         if not gate.physical_review:
             value = gate.extract(fit_result.get("fit_quality"))
+            declared = gate.declared_reject(fit_result.get("fit_quality"))
+            if declared:
+                # the workflow tool rejected its own result: a hard reject,
+                # wherever its number falls in the band
+                return {
+                    "fit_acceptable": False,
+                    "overall_assessment": f"Skill workflow gate hard-rejects: {declared}.",
+                    "issues_found": [{
+                        "location": "Workflow scoring",
+                        "problem": declared,
+                        "suggested_fix": (
+                            "Re-plan the workflow — widen the database query, "
+                            "broaden the chemistry hypothesis, or verify the "
+                            "wavelength / experimental metadata."
+                        ),
+                    }],
+                    "recommended_action": "retry_fitting_attempt_with_changes",
+                    "physically_better_than_best": False,
+                    "comparison_note": "N/A — non-R² gate (no prior-best comparison)",
+                }
             # Canonical verdict schema — must match the keys downstream
             # consumers actually read (curve_fitting_controllers.py:2839, :3094
             # read `fit_acceptable`; :2871 reads `issues_found`; :2848 reads
@@ -8154,6 +8180,24 @@ Return JSON with:
             # statistics nor gets scored against them.
             return bool((r.get("quality_history") or {}).get("unverified"))
 
+        def _unscored_follower(r, center=None, scale=None):
+            # a FOLLOWER (verified by the recipe it replayed) whose WORKFLOW
+            # score is missing (the scorer found no candidate) is that gate's
+            # hard reject — never a unit that passes unflagged, however few
+            # units of the series were scored; an anchor answers to its own
+            # gate, and a goodness-of-fit metric left unreported is main's path
+            g = _gate_of(r)
+            if (not r.get("success") or _unverified(r) or _score(r) is not None or g is None
+                    or g.physical_review or (r.get("fit_quality") or {}).get("replay_misfit")
+                    or (r.get("fit_quality") or {}).get("pinned_at_bound")
+                    or (r.get("unit_verdict") or {}).get("decided_by") != "recipe"):
+                return None
+            return {"index": r["index"], "name": r["name"], "reason": "below_threshold",
+                    "r_squared": None, "series_mean": center, "series_std": scale, "deviation_sigma": None,
+                    "recommendation": (f"{g.label} was not reported for this unit, so its gate rejects it "
+                                       "(e.g. the scorer found no candidate): its values are not a result "
+                                       "the gate passed.")}
+
         r2_values = []
         for r in series_results:
             if r["success"] and not _unverified(r):
@@ -8162,7 +8206,8 @@ Return JSON with:
                     r2_values.append(r2)
 
         if len(r2_values) < 3:
-            return []
+            # too few scores for series statistics; the gate's own rejections still stand
+            return [f for f in (_unscored_follower(r) for r in series_results) if f]
 
         r2_array = np.array(r2_values)
         # Robust center/scale (median + MAD). A single bad fit can't mask itself
@@ -8233,14 +8278,19 @@ Return JSON with:
                 "deviation_sigma": None,
                 "recommendation": "Withheld: " + str(misfit[0]) + ". " + REPLAY_MISFIT_NOTE,
             } if misfit else None
+            g = _gate_of(r)
             if r2 is None:
                 if misfit_flag:
                     flagged.append(misfit_flag)
+                else:
+                    unscored = _unscored_follower(r, median_r2, robust_scale)
+                    if unscored:
+                        flagged.append(unscored)
                 continue
 
-            g = _gate_of(r)
+            declared = g.declared_reject(r.get("fit_quality")) if g is not None else None
             if g is not None:
-                below_threshold = not g.is_accept(r2)
+                below_threshold = (not g.is_accept(r2)) or bool(declared)
                 worse = (median_r2 - r2) if g.direction == "higher_is_better" else (r2 - median_r2)
             else:
                 below_threshold = r2 < self.r2_threshold
@@ -8259,10 +8309,13 @@ Return JSON with:
                     recommendation = "Fit quality significantly worse than series average. Possible causes: phase transition, sample change, or instrument artifact. Consider detailed inspection - may indicate interesting physics."
                 elif below_threshold and not is_outlier:
                     reason = "below_threshold"
-                    recommendation = "Fit quality below threshold but in line with the rest of the series (R² is not a statistical outlier) — the chosen model may be suboptimal for this data type."
+                    recommendation = (f"Rejected: {declared}; its {g.label} alone would have passed."
+                                      if declared and g is not None and g.is_accept(r2) else
+                                      "Fit quality below threshold but in line with the rest of the series (R² is not a statistical outlier) — the chosen model may be suboptimal for this data type.")
                 else:
                     reason = "outlier_and_below_threshold"
-                    recommendation = "Significant fit quality issue. This spectrum behaves differently from others in the series. Strongly recommend manual review - could indicate interesting physics, phase transition, or data quality issue."
+                    recommendation = ((f"Rejected: {declared}. " if declared else "")
+                                      + "Significant fit quality issue. This spectrum behaves differently from others in the series. Strongly recommend manual review - could indicate interesting physics, phase transition, or data quality issue.")
 
                 flagged.append({
                     "index": r["index"], "name": r["name"], "reason": reason,

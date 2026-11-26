@@ -67,6 +67,13 @@ class QualityGate:
     # fast-accept margin so a near-optimal accept_threshold can't demand an
     # unreachable value (reproduces the old R² `(1-accept)/2` cap).
     best_value: Optional[float] = None
+    # The ``fit_quality`` key, if any, that carries the workflow tool's OWN
+    # verdict ("accept" / "marginal" / "reject"): a tool that rejects its
+    # result is not overruled by where its number falls in this gate's band
+    # (the XRD scorers' ``verdict`` is their authoritative accept; their
+    # figure of merit can sit just above ``hard_reject_threshold`` on a
+    # match the scorer itself rejects).
+    verdict_key: Optional[str] = None
 
     @property
     def label(self) -> str:
@@ -132,6 +139,18 @@ class QualityGate:
         if f != f:  # NaN
             return None
         return f
+
+    def declared_reject(self, fit_quality: Optional[dict]) -> Optional[str]:
+        """The tool's own rejection, as a sentence, when the gate declares a
+        ``verdict_key`` and the result's ``fit_quality`` carries "reject"
+        there; else None. A caller treats it as a hard reject whatever the
+        metric's value."""
+        if not self.verdict_key or not isinstance(fit_quality, dict):
+            return None
+        v = fit_quality.get(self.verdict_key)
+        if isinstance(v, str) and v.strip().lower() == "reject":
+            return f"the scoring tool's own verdict is reject ({self.verdict_key} = {v!r})"
+        return None
 
     def is_accept(self, value: Optional[float]) -> bool:
         if value is None:
@@ -323,7 +342,8 @@ def gate_record(gate: Any) -> Optional[dict]:
     return {"metric": gate.metric, "accept_threshold": gate.accept_threshold,
             "hard_reject_threshold": gate.hard_reject_threshold, "direction": gate.direction,
             "physical_review": gate.physical_review, "value_source": gate.value_source,
-            **({"best_value": gate.best_value} if gate.best_value is not None else {})}
+            **({"best_value": gate.best_value} if gate.best_value is not None else {}),
+            **({"verdict_key": gate.verdict_key} if gate.verdict_key else {})}
 
 
 def from_mapping(data: dict) -> QualityGate:
@@ -342,6 +362,7 @@ def from_mapping(data: dict) -> QualityGate:
         physical_review=bool(data.get("physical_review", R_SQUARED_DEFAULT.physical_review)),
         best_value=(float(bv) if bv is not None else None),
         value_source=str(data.get("value_source", R_SQUARED_DEFAULT.value_source)),
+        verdict_key=(str(data["verdict_key"]) if data.get("verdict_key") else None),
     )
 
 
