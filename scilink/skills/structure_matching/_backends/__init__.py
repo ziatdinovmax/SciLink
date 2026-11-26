@@ -45,7 +45,7 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
-from ._base import QuerySpec, StructureBackend, StructureCandidate
+from ._base import QuerySkipped, QuerySpec, StructureBackend, StructureCandidate
 from .cod import CODBackend
 from .local_cif import LocalCIFBackend
 from .materials_project import MaterialsProjectBackend
@@ -165,6 +165,7 @@ __all__ = [
     "StructureBackend",
     "StructureCandidate",
     "QuerySpec",
+    "QuerySkipped",
     "BackendFactory",
     "MaterialsProjectBackend",
     "LocalCIFBackend",

@@ -881,6 +881,83 @@ def _has_fit_parameters(stdout: Optional[str]) -> bool:
     return isinstance(params, dict) and bool(params)
 
 
+def _search_outcome_summary(records: list) -> str:
+    """One line per backend outcome that is not a clean answer, from the
+    search tools' own records."""
+    parts = []
+    for rec in records:
+        for o in rec.get("outcomes") or []:
+            if not isinstance(o, dict):
+                continue
+            st = o.get("status")
+            what = f"{o.get('backend')} {o.get('chemistry') or ''}".strip()
+            if st == "failed":
+                parts.append(f"{what}: failed ({o.get('error')})")
+            elif st == "skipped":
+                parts.append(f"{what}: skipped ({o.get('reason')})")
+            else:
+                if o.get("dropped"):
+                    parts.append(f"{what}: {o['dropped']} matching entries could not be loaded")
+                if o.get("truncated"):
+                    parts.append(f"{what}: a row cap cut the matches before ranking")
+                if o.get("unparsed"):
+                    parts.append(f"{what}: {o['unparsed']} files could not be parsed")
+                if o.get("report") == "unknown":
+                    parts.append(f"{what}: reported nothing about what it dropped")
+    return "; ".join(dict.fromkeys(parts))
+
+
+def _workflow_reject_fix(gate, fit_result: Optional[dict], value: Optional[float],
+                         declared: bool = False) -> tuple:
+    """``(problem, suggested_fix)`` for a workflow gate's hard reject, from
+    the cause the record shows: a scored reject (a number below the band, or
+    the tool's own declared reject), no figure reported, a search that did not
+    run cleanly, candidates lost before scoring, or a clean empty search. No
+    cause points the retry at a different hypothesis of what the sample is:
+    that must come from the sample's own record, never from the absence of a
+    match."""
+    records = [r for r in ((fit_result or {}).get("search_records") or [])
+               if isinstance(r, dict) and isinstance(r.get("outcomes"), list)]
+    principle = ("A different hypothesis of what the sample is must come from the sample's own "
+                 "record, never from the absence of a match.")
+    if declared or value is not None:
+        return (f"{gate.metric} below acceptable range",
+                "Check the experimental metadata the workflow relies on (e.g. the wavelength). "
+                + principle)
+    if not records:
+        return (f"{gate.metric} was not reported",
+                f"Report {gate.metric} from the workflow's scoring tool; a tool call that fails "
+                "must raise, never be turned into an empty result.")
+
+    def _count(r):
+        try:
+            return int(r.get("n_candidates") or 0)
+        except (TypeError, ValueError):
+            return 0
+    n = sum(_count(r) for r in records)
+    if n > 0:
+        return (f"the search returned {n} candidate(s), but no {gate.metric} was reported",
+                "The candidates were lost between the search and the scoring: let scoring "
+                f"errors raise and report the best {gate.metric}.")
+    if not all(r.get("clean_empty") is True for r in records):
+        return (f"the structure search did not run cleanly: "
+                f"{_search_outcome_summary(records) or 'no backend answered'}",
+                "An empty result from a failed or partial search is not evidence that nothing "
+                "matches: report the failure. Do not change the hypothesis of what the sample is "
+                "because of it, and never score against a reference the databases did not return.")
+    asked = "; ".join(
+        f"chemistry {(r.get('query') or {}).get('chemistry')}"
+        + (f", filters {(r.get('query') or {}).get('filters')}" if (r.get("query") or {}).get("filters") else "")
+        for r in records)
+    skipped = "; ".join(dict.fromkeys(
+        f"{o.get('backend')} ({o.get('reason')})" for r in records for o in r["outcomes"]
+        if isinstance(o, dict) and o.get("status") == "skipped"))
+    return (f"the search ran cleanly and returned no candidate ({asked})"
+            + (f"; not asked: {skipped}" if skipped else ""),
+            "A deeper top_n or other entries of the same chemistry may be tried; if none "
+            "matches, no phase is identified from these databases for this query. " + principle)
+
+
 def _parse_script_markers(stdout: Optional[str]) -> dict:
     """Parse FIT_RESULTS_JSON and DB_MATCHES_JSON markers from script stdout.
 
@@ -895,11 +972,16 @@ def _parse_script_markers(stdout: Optional[str]) -> dict:
     ``TOOL_WARNINGS_JSON:`` lines (a JSON list of sentences a skill tool
     printed about the result the script reports, e.g. a match's fitted
     lattice scale, #775) are collected at ``fit_results['tool_warnings']``.
+    Each ``DB_MATCHES_JSON:`` line's ``search_record`` (what that search did,
+    per hypothesis and backend) is collected at
+    ``fit_results['search_records']``, one per search the script ran; a
+    key of that name in the script's own results is dropped.
     """
     fit_results: dict = {}
     fit_seen = False
     db_matches: Optional[dict] = None
     tool_warnings: list = []
+    search_records: list = []
     for line in (stdout or "").splitlines():
         if line.startswith("TOOL_WARNINGS_JSON:"):
             try:
@@ -914,15 +996,27 @@ def _parse_script_markers(stdout: Optional[str]) -> dict:
                 fit_results = json.loads(line.replace("FIT_RESULTS_JSON:", "").strip())
             except json.JSONDecodeError:
                 pass
-        elif line.startswith("DB_MATCHES_JSON:") and db_matches is None:
+        elif line.startswith("DB_MATCHES_JSON:"):
             try:
-                db_matches = json.loads(line.replace("DB_MATCHES_JSON:", "").strip())
+                got = json.loads(line.replace("DB_MATCHES_JSON:", "").strip())
             except json.JSONDecodeError:
-                pass
+                got = None
+            if db_matches is None and got is not None:
+                db_matches = got
+            # every search the script ran, not only the first: a null is read
+            # against all of them
+            if isinstance(got, dict) and isinstance(got.get("search_record"), dict):
+                search_records.append(got["search_record"])
     if db_matches is not None:
         fit_results.setdefault("db_matches", db_matches)
     if tool_warnings:
         fit_results.setdefault("tool_warnings", tool_warnings)
+    if isinstance(fit_results, dict):
+        # what a search did is read from the DB_MATCHES_JSON lines only: a
+        # key of that name in the script's own results is not it
+        fit_results.pop("search_records", None)
+        if search_records:
+            fit_results["search_records"] = search_records
     return fit_results
 
 
@@ -5118,6 +5212,10 @@ Your guidance: '''
         }
         if fit_results.get("bounds"):
             result["bounds"] = fit_results["bounds"]
+        if fit_results.get("search_records"):
+            # what each structure search the script ran did (the tool's record):
+            # the verifier reads a missing figure of merit against it
+            result["search_records"] = fit_results["search_records"]
         reported = _reported_warnings(fit_results)
         if reported:
             # what the script or a skill tool said about this result (a
@@ -5411,11 +5509,7 @@ Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2
                     "issues_found": [{
                         "location": "Workflow scoring",
                         "problem": declared,
-                        "suggested_fix": (
-                            "Re-plan the workflow — widen the database query, "
-                            "broaden the chemistry hypothesis, or verify the "
-                            "wavelength / experimental metadata."
-                        ),
+                        "suggested_fix": _workflow_reject_fix(gate, fit_result, value, declared=True)[1],
                     }],
                     "recommended_action": "retry_fitting_attempt_with_changes",
                     "physically_better_than_best": False,
@@ -5443,6 +5537,7 @@ Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2
                     "comparison_note": "N/A — non-R² gate (no prior-best comparison)",
                 }
             elif gate.is_hard_reject(value):
+                _cause = _workflow_reject_fix(gate, fit_result, value)
                 value_str = f"{value:.4f}" if isinstance(value, (int, float)) else "missing"
                 return {
                     "fit_acceptable": False,
@@ -5453,12 +5548,8 @@ Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2
                     ),
                     "issues_found": [{
                         "location": "Workflow scoring",
-                        "problem": f"{gate.metric} below acceptable range",
-                        "suggested_fix": (
-                            "Re-plan the workflow — widen the database query, "
-                            "broaden the chemistry hypothesis, or verify the "
-                            "wavelength / experimental metadata."
-                        ),
+                        "problem": _cause[0],
+                        "suggested_fix": _cause[1],
                     }],
                     "recommended_action": "retry_fitting_attempt_with_changes",
                     "physically_better_than_best": False,

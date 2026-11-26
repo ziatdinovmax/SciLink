@@ -77,6 +77,12 @@ class StructureCandidate:
     rank_score: float = 0.0
 
 
+class QuerySkipped(Exception):
+    """Raised by ``query`` when a backend cannot serve this kind of query at all
+    (e.g. a chemsys-keyed database asked a cell-only query). The dispatcher
+    records the backend as skipped, neither queried nor failed."""
+
+
 @runtime_checkable
 class StructureBackend(Protocol):
     """Protocol every backend must satisfy.
@@ -101,8 +107,16 @@ class StructureBackend(Protocol):
         """Return candidates matching ``spec``.
 
         Returned candidates are unsorted; ranking and dedup are the
-        dispatcher's responsibility. Implementation may raise on real
-        errors (network failure, malformed response) — the dispatcher
-        catches and continues with other backends.
+        dispatcher's responsibility. A real error (network failure,
+        malformed response) RAISES — the dispatcher records it and continues
+        with other backends; an empty list means the database answered and
+        holds nothing for this spec. ``QuerySkipped`` says the spec is not
+        one this backend serves.
+
+        A backend may also set ``last_report`` for the call: ``dropped`` (how
+        many entries that matched could not be loaded) with
+        ``drop_reasons``, ``truncated`` (a row cap cut the matches before
+        ranking) and ``unparsed`` (files read while searching that did not
+        parse). The dispatcher records it beside the call's outcome.
         """
         ...

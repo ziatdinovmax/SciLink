@@ -364,8 +364,10 @@ all candidates marginal-or-reject), the answer is often a phase that the tight
 retrieval simply did not return — a *polymorph-rich* chemistry (e.g. Ti-O has
 many TiO2 polymorphs plus Magnéli suboxides; the right one can be candidate #20,
 not #5). On such a re-plan you SHOULD widen the retrieval — `top_n` up to ~30
-(and/or relax symmetry/lattice filters, or try an alternate chemistry
-hypothesis) — and re-run. This widening is *expected and allowed* on a failed
+(and/or relax symmetry/lattice filters) — and re-run. A different chemistry
+hypothesis must come from the sample's own record (its stated composition,
+synthesis, a complementary measurement), never from the failed match alone.
+This widening is *expected and allowed* on a failed
 pass; do not stay capped at 10 while re-planning a search that returned no
 confident match. (For an in-situ *series*, keep it tight per frame — the
 establishing frame can widen once, then lock the identified phase.)
@@ -596,6 +598,13 @@ print("FIT_RESULTS_JSON: " + json.dumps({
 }))
 ```
 
+**A failed tool call is not an empty search.** Never wrap
+`search_structures`, `simulate_xrd_pattern` or a scorer in a `try/except`
+that substitutes an empty list: a search that failed and one that found
+nothing are different results, and the search's printed `search_record`
+says which. Let the error raise. A reference is a structure a database
+returned: never score the data against a pattern written into the script.
+
 **The identification IS the deliverable — emit the identity into
 `parameters`.** Downstream interpretation reads `parameters` and
 `fit_quality` from `FIT_RESULTS_JSON`; content anywhere else (including
@@ -804,9 +813,9 @@ to the robust-tier margin:
   List the top 3 candidates as "consistent with the experimental
   pattern" and recommend higher-resolution data or a complementary
   technique (EELS, EDS).
-- All FOMs below 0.40: report no confident match. Suggest broadening
-  the chemistry hypothesis, checking the experimental wavelength, or
-  running a peak-fit-first workflow.
+- All FOMs below 0.40: report no confident match. Suggest checking the
+  experimental wavelength, a peak-fit-first workflow, or a chemistry
+  hypothesis the sample's record supports.
 
 **What a good score cannot tell you.** A high FOM / low MIP cost
 confirms the phase is present; it does NOT confirm purity, sample
@@ -833,7 +842,8 @@ metal) explains a few experimental peaks by overlap but leaves most of its OWN
 strong peaks unobserved (`predicted_coverage` ≈ 0.1–0.4). **Treat an active
 phase with `predicted_coverage` below ~0.5 as a likely false match: do not
 report or lock it — widen the search (more candidates / the correct polymorph)
-to find a phase that explains those peaks with high predicted_coverage.** Low
+within the recorded chemistry to find a phase that explains those peaks with
+high predicted_coverage; a different chemistry needs the sample's record.** Low
 `coverage` AND low `predicted_coverage` together = the scorer latched onto a
 minority of correctly-positioned peaks while the phase is wrong. (A genuinely
 textured sample can suppress some reflections and lower `predicted_coverage`
@@ -856,8 +866,10 @@ legitimately — weigh it against the residuals and the alternatives.)
 
 **Cross-candidate sanity.** When 3+ candidates score "accept" in the
 robust tier, the chemistry hypothesis is too broad — narrow it. When 0
-candidates score above "reject", the chemistry hypothesis is wrong or
-the wavelength is mismatched.
+candidates score above "reject", the phase is not among the candidates
+(not in the databases searched, or beyond the retrieved `top_n`), the
+chemistry hypothesis is wrong, or the wavelength is mismatched: report no
+confident match rather than changing the chemistry until something scores.
 
 **Zero-shift sanity (MIP only).** A fitted zero-shift larger than 0.3°
 typically indicates either a sample-displacement problem on the

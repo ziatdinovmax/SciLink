@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import _cif_index
-from ._base import QuerySpec, StructureCandidate
+from ._base import QuerySkipped, QuerySpec, StructureCandidate
 
 try:
     from pymatgen.core import Structure
@@ -36,6 +36,8 @@ class LocalCIFBackend:
             env = os.getenv("SCILINK_LOCAL_CIF_DIR")
             if env:
                 self.root_dir = Path(env)
+        self.last_report: dict = {}
+        self._parse_failures: list[str] = []
 
     def is_available(self) -> bool:
         return (
@@ -46,7 +48,7 @@ class LocalCIFBackend:
 
     def query(self, spec: QuerySpec) -> list[StructureCandidate]:
         if not self.is_available():
-            return []
+            raise QuerySkipped("local CIF directory is not available")
 
         # First try the parquet index (fast filter on chemistry + symmetry +
         # lattice before any pymatgen parses). On small mirrors and when
@@ -58,6 +60,8 @@ class LocalCIFBackend:
         return self._query_via_walk(spec)
 
     def _query_via_index(self, index, spec: QuerySpec) -> list[StructureCandidate]:
+        self.last_report = {"dropped": 0, "drop_reasons": []}
+        self._parse_failures = []
         paths = _cif_index.filter_index(
             index,
             chemistry=list(spec.chemistry),
@@ -72,10 +76,16 @@ class LocalCIFBackend:
                 candidates.append(cand)
             if len(candidates) >= spec.top_n * 3:
                 break
+        # an indexed entry already matched the query: one that does not parse
+        # is a dropped match, not an absence
+        self.last_report["dropped"] = len(self._parse_failures)
+        self.last_report["drop_reasons"] = [f"{p}: CIF unparsable" for p in self._parse_failures[:5]]
         candidates.sort(key=lambda c: c.id)
         return candidates[:spec.top_n]
 
     def _query_via_walk(self, spec: QuerySpec) -> list[StructureCandidate]:
+        self.last_report = {"dropped": 0, "unparsed": 0}
+        self._parse_failures = []
         candidates: list[StructureCandidate] = []
         for cif_path in sorted(self.root_dir.rglob("*.cif")):  # type: ignore[union-attr]
             cand = self._build_candidate_from_cif(cif_path, spec)
@@ -83,6 +93,9 @@ class LocalCIFBackend:
                 candidates.append(cand)
             if len(candidates) >= spec.top_n * 3:
                 break
+        # a walk parses every file to learn its chemistry: one that does not
+        # parse is not known to match, so it is counted apart from drops
+        self.last_report["unparsed"] = len(self._parse_failures)
         candidates.sort(key=lambda c: c.id)
         return candidates[:spec.top_n]
 
@@ -95,6 +108,7 @@ class LocalCIFBackend:
             struct = Structure.from_file(str(cif_path))
         except Exception as e:
             _logger.debug("Skipping %s: parse failed (%s)", cif_path, e)
+            self._parse_failures.append(str(cif_path))
             return None
 
         present_elements = {str(el) for el in struct.composition.elements}
