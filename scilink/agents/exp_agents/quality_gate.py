@@ -158,14 +158,37 @@ class QualityGate:
             return f"the scoring tool's own verdict is reject ({self.verdict_key} = {v!r})"
         return None
 
+    def rejects(self, fit_quality: Optional[dict]) -> Optional[str]:
+        """Why this gate's own CODE rejects the result, as a sentence, else
+        None. No verifier is involved, so the answer is the same on an anchor
+        and on a follower that replays its recipe (which no verifier looks
+        at): the tool's declared reject (``declared_reject``), or, for a
+        workflow gate (``physical_review=False``: the score IS the
+        verification), a figure that was not reported or is past the hard
+        reject. A goodness-of-fit gate's band is its verifier's to judge and
+        is never answered here."""
+        declared = self.declared_reject(fit_quality)
+        if declared:
+            return declared
+        if self.physical_review or self.value_source != "result":
+            return None
+        value = self.extract(fit_quality)
+        if value is None:
+            return f"{self.label} was not reported, which its gate rejects (the score is the verification)"
+        if self.is_hard_reject(value):
+            return (f"{self.label} = {value:.4f} is past its gate's hard reject "
+                    f"({self.hard_reject_threshold:.4f})")
+        return None
+
     def uncertified(self, fit_quality: Optional[dict]) -> Optional[str]:
         """Why a result the gate does not reject is still not certified: the
-        tool's own verdict is not one of ``certifying_verdicts`` (a reject is
-        ``declared_reject``'s). None when it certifies or nothing is declared."""
+        tool's own verdict is not one of ``certifying_verdicts`` (a result the
+        gate rejects is ``rejects``'s: it is not "provisional"). None when it
+        certifies or nothing is declared."""
         if not self.verdict_key or not self.certifying_verdicts or not isinstance(fit_quality, dict):
             return None
         v = fit_quality.get(self.verdict_key)
-        if not isinstance(v, str) or self.declared_reject(fit_quality):
+        if not isinstance(v, str) or self.rejects(fit_quality):
             return None
         if v.strip().lower() in {str(c).lower() for c in self.certifying_verdicts}:
             return None

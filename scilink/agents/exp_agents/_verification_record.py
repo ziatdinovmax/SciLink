@@ -270,16 +270,23 @@ def nothing_measured(item: Optional[dict]) -> Optional[str]:
 def fit_check_withheld(item: Optional[dict]) -> Optional[str]:
     """Why a curve fit's own checks withhold it (#762), else None: it
     measured nothing asked for, it is a replay of a locked recipe whose
-    saved fit does not follow this unit's data, or its own scoring tool did
-    not certify it (``fit_quality.provisional``). Read by EVERY branch that can
-    verify a curve unit — its own gate, a follower's recipe, a reuse's replay
-    gate, the legacy reconstruction."""
+    saved fit does not follow this unit's data, its gate's own code rejects
+    it (``fit_quality.gate_rejected``: the scorer's declared reject, or a
+    workflow gate's figure missing or past the hard reject), or its own
+    scoring tool did not certify it (``fit_quality.provisional``). Read by
+    EVERY branch that can verify a curve unit — its own gate, a follower's
+    recipe, a reuse's replay gate, the legacy reconstruction."""
     nothing = nothing_measured(item)
     if nothing:
         return nothing
     misfit = ((item or {}).get("fit_quality") or {}).get("replay_misfit")
     if misfit:
         return str(misfit[0])
+    rejected = ((item or {}).get("fit_quality") or {}).get("gate_rejected")
+    if isinstance(rejected, list):
+        rejected = rejected[0] if rejected else None
+    if rejected:
+        return str(rejected)
     provisional = ((item or {}).get("fit_quality") or {}).get("provisional")
     if isinstance(provisional, list):
         provisional = provisional[0] if provisional else None

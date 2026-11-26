@@ -2883,8 +2883,13 @@ class GenerateCurveFittingReportController:
         # thresholds — a global-R² badge mislabels a verifier-approved low-SNR
         # fit as "Poor". The R² path is unchanged.
         gate_value = gate.extract(fit_quality) if (gate is not None and gate.metric != "r_squared") else None
+        # the gate's own rejection, as stamped where the unit was fitted (the
+        # recipe's gate on a replay, which this run's gate may not be)
+        _stamp = fit_quality.get("gate_rejected")
+        _rejected = (str(_stamp[0] if isinstance(_stamp, list) and _stamp else _stamp) if _stamp
+                     else gate.rejects(fit_quality) if gate is not None else None)
         if gate_value is not None:
-            if gate.declared_reject(fit_quality):
+            if _rejected:
                 badge_class, label = "quality-poor", "Poor"
             elif gate.uncertified(fit_quality) or fit_quality.get("provisional"):
                 badge_class, label = "quality-ok", "Provisional"
@@ -2897,10 +2902,14 @@ class GenerateCurveFittingReportController:
             html += f'<span class="quality-badge {badge_class}">{label}</span><strong>{gate.label} = {gate_value:.4f}</strong>'
             if r_squared is not None:
                 html += f" &nbsp;|&nbsp; <span>R² = {r_squared:.4f}</span>"
-        elif gate is not None and gate.declared_reject(fit_quality):
+        elif _rejected:
             badge_class, label = "quality-poor", "Poor"
-            html += (f'<span class="quality-badge {badge_class}">{label}</span><strong>{gate.declared_reject(fit_quality)}</strong>'
+            html += (f'<span class="quality-badge {badge_class}">{label}</span><strong>{_rejected}</strong>'
                      + (f" &nbsp;|&nbsp; <span>R² = {r_squared:.4f}</span>" if r_squared is not None else ""))
+        elif fit_quality.get("provisional"):
+            # stamped by the recipe's gate on a replay this run's gate scores by R²
+            html += ('<span class="quality-badge quality-ok">Provisional</span>'
+                     + (f"<strong>R² = {r_squared:.4f}</strong>" if r_squared is not None else ""))
         elif r_squared is not None:
             if r_squared >= self.r2_threshold + 0.04:
                 badge_class, label = "quality-good", "Excellent"
@@ -4646,7 +4655,11 @@ Your guidance: '''
         hold_recipe: bool = False,
         seed_targets: Optional[list] = None,
         anchor_saved_fit_r2: Optional[float] = None,
+        replays_recipe: bool = False,
     ) -> dict:
+        # ``replays_recipe``: this call replays a recorded recipe (a prior
+        # run's, by ``qc_try_reuse``), so the unit is held to the gate that
+        # recipe was approved under as well as the run's.
         # ``anchor_saved_fit_r2``: the offset-free R² of the saved fit of the
         # recipe's anchor against its own data — a replay of the recipe far
         # below it does not fit this unit's data and is withheld (#762).
@@ -5091,13 +5104,19 @@ Your guidance: '''
         # the marker is the gate's word, never the script's: a script that
         # writes its own "provisional" key would withhold any skill's unit
         fit_quality.pop("provisional", None)
-        _cert_gates = [_gate(state)]
-        if state.get("_reuse_gate"):
-            try:
-                _cert_gates.append(self._reuse_gate_decision(state, warn=False)[0])
-            except Exception:  # noqa: BLE001 - a malformed record is no record
-                pass
-        _provisional = next((w for w in (g.uncertified(fit_quality) for g in _cert_gates) if w), None)
+        fit_quality.pop("gate_rejected", None)
+        _cert_gates = self._gates_held_to(state, spectrum_idx, replays_recipe=replays_recipe)
+        # a result the gate's own code rejects (the scorer's declared reject;
+        # for a workflow gate a figure missing or past the hard reject) is
+        # never verified, on a follower as on its anchor: a follower is
+        # verified by the recipe it replayed and no verifier looks at it, so
+        # without this stamp a rejected follower was verified while a
+        # "marginal" one was withheld. The row stays, flagged; it is not refit.
+        _rejected = next((w for w in (g.rejects(fit_quality) for g in _cert_gates) if w), None)
+        _provisional = None if _rejected else next(
+            (w for w in (g.uncertified(fit_quality) for g in _cert_gates) if w), None)
+        if _rejected:
+            fit_quality["gate_rejected"] = [_rejected]
         if _provisional:
             fit_quality["provisional"] = [_provisional]
         if pinned:
@@ -6321,6 +6340,27 @@ Return JSON with:
                                     f"{rec.metric} {rec.accept_threshold}, which the replay is held to.")
         return rec, "recipe"
 
+    def _gates_held_to(self, state: dict, spectrum_idx: int, *, replays_recipe: bool = False) -> list:
+        """The gates whose own word is stamped on a unit's ``fit_quality``
+        (``gate_rejected``, ``provisional``): the run's, and the recorded gate
+        of the recipe the unit REPLAYED — this call is the replay, or the
+        unit's regime was anchored by one (``_replayed_regimes``, the one
+        predicate every reader of the recipe's gate keys on). Never the
+        recipe's gate on a unit fitted fresh: a reuse whose script could not
+        run and was re-derived is on the run's gate alone — a workflow
+        recipe's gate reads the ABSENCE of its figure as a reject, which
+        fresh code under another gate never reports."""
+        gates = [_gate(state)]
+        if not state.get("_reuse_gate"):
+            return gates
+        regime = self._get_regime_for_spectrum(state, spectrum_idx) or "default"
+        if replays_recipe or regime in (state.get("_replayed_regimes") or {}):
+            try:
+                gates.append(self._reuse_gate_decision(state, warn=False)[0])
+            except Exception:  # noqa: BLE001 - a malformed record is no record
+                pass
+        return gates
+
     def _series_gate(self, state: dict, regime: Any = None):
         """The gate a series UNIT is held to beyond the run's own, or None:
         the reuse decision's gate when the unit's regime was anchored by a
@@ -6625,6 +6665,7 @@ Return JSON with:
             spectrum_name=ctx.item_name, spectrum_idx=ctx.item_idx,
             base_script=script,
             anchor_saved_fit_r2=(reference or {}).get("saved_fit_r2") if isinstance(reference, dict) else None,
+            replays_recipe=True,
         )
 
     def _reuse_failed(self, ctx: QCItemContext, reuse_result: dict, source: Optional[str]) -> Optional[dict]:
@@ -8310,6 +8351,29 @@ Return JSON with:
                                        "(e.g. the scorer found no candidate): its values are not a result "
                                        "the gate passed.")}
 
+        def _stamped_reject(r):
+            # the gate's own rejection of this unit, stamped where it was
+            # fitted (``fit_quality.gate_rejected``): the reason, or None
+            got = (r.get("fit_quality") or {}).get("gate_rejected") if r.get("success") else None
+            if isinstance(got, list):
+                got = got[0] if got else None
+            return str(got) if got else None
+
+        def _rejected_unit(r, center=None, scale=None):
+            # any unit its gate's own code rejects is flagged, however few
+            # units of the series were scored and whoever verified it
+            why = _stamped_reject(r)
+            if (not why or _unverified(r) or (r.get("fit_quality") or {}).get("replay_misfit")
+                    or (r.get("fit_quality") or {}).get("pinned_at_bound")):
+                return None
+            # (the score is shown beside the series median, so only with one)
+            score = _score(r) if center is not None else None
+            return {"index": r["index"], "name": r["name"], "reason": "below_threshold",
+                    "r_squared": float(score) if score is not None else None,
+                    "series_mean": center, "series_std": scale, "deviation_sigma": None,
+                    "recommendation": (f"Rejected: {why}. Its values are not a result the gate passed; "
+                                       "the unit is not verified.")}
+
         r2_values = []
         for r in series_results:
             if r["success"] and not _unverified(r):
@@ -8322,6 +8386,11 @@ Return JSON with:
             # result its scoring tool did not certify, still stand
             early = [f for f in (_unscored_follower(r) for r in series_results) if f]
             seen = {f["index"] for f in early}
+            for r in series_results:
+                rejected = _rejected_unit(r) if r["index"] not in seen else None
+                if rejected:
+                    early.append(rejected)
+                    seen.add(r["index"])
             for r in series_results:
                 prov = (r.get("fit_quality") or {}).get("provisional") if r.get("success") else None
                 if prov and r["index"] not in seen:
@@ -8407,17 +8476,20 @@ Return JSON with:
                 if misfit_flag:
                     flagged.append(misfit_flag)
                 else:
-                    unscored = _unscored_follower(r, median_r2, robust_scale)
+                    unscored = (_unscored_follower(r, median_r2, robust_scale)
+                                or _rejected_unit(r, median_r2, robust_scale))
                     if unscored:
                         flagged.append(unscored)
                 continue
 
-            declared = g.declared_reject(r.get("fit_quality")) if g is not None else None
+            # the stamp first: it holds the rejection of the gate the unit was
+            # held to (its recipe's, on a replay), which ``g`` may not be
+            declared = _stamped_reject(r) or (g.declared_reject(r.get("fit_quality")) if g is not None else None)
             if g is not None:
                 below_threshold = (not g.is_accept(r2)) or bool(declared)
                 worse = (median_r2 - r2) if g.direction == "higher_is_better" else (r2 - median_r2)
             else:
-                below_threshold = r2 < self.r2_threshold
+                below_threshold = r2 < self.r2_threshold or bool(declared)
                 worse = median_r2 - r2
             # Robust z-score; only a fit *worse* than the series median can be an
             # outlier (a better-than-typical fit is never flagged).
@@ -8435,6 +8507,7 @@ Return JSON with:
                     reason = "below_threshold"
                     recommendation = (f"Rejected: {declared}; its {g.label} alone would have passed."
                                       if declared and g is not None and g.is_accept(r2) else
+                                      f"Rejected: {declared}." if declared else
                                       "Fit quality below threshold but in line with the rest of the series (R² is not a statistical outlier) — the chosen model may be suboptimal for this data type.")
                 else:
                     reason = "outlier_and_below_threshold"
