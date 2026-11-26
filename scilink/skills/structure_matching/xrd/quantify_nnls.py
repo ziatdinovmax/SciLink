@@ -61,13 +61,22 @@ def _pseudo_voigt(x: np.ndarray, center: float, fwhm: float, eta: float) -> np.n
 def _profile_column(structure_path: str, grid: np.ndarray, wavelength,
                     fwhm: float, eta: float) -> np.ndarray:
     """Simulated continuous profile for one structure on the measured 2θ grid:
-    broaden each kinematic reflection into a pseudo-Voigt and sum."""
-    from .simulate_xrd import simulate_xrd_pattern
+    broaden each kinematic reflection into a pseudo-Voigt and sum.
+
+    The reflections keep their ABSOLUTE per-unit-cell intensities
+    (|F|²·multiplicity·Lorentz-polarization, not rescaled to a strongest line of
+    100). The fitted NNLS coefficient of the column is then the phase's scale
+    factor S in the Hill–Howard sense, which is what makes w ∝ S·ZMV hold; a
+    column normalized to its own strongest line would fold an arbitrary
+    per-phase constant into S."""
+    from pymatgen.analysis.diffraction.xrd import XRDCalculator
+    from pymatgen.core import Structure
     tt_range = (float(grid[0]), float(grid[-1]))
-    sim = simulate_xrd_pattern(structure_path, wavelength=wavelength,
-                               two_theta_range=tt_range, engine="pymatgen")
+    structure = Structure.from_file(structure_path)
+    pattern = XRDCalculator(wavelength=wavelength).get_pattern(
+        structure, scaled=False, two_theta_range=tt_range)
     col = np.zeros_like(grid)
-    for c, inten in zip(sim["two_theta"], sim["intensities"]):
+    for c, inten in zip(pattern.x, pattern.y):
         if tt_range[0] <= c <= tt_range[1]:
             col += float(inten) * _pseudo_voigt(grid, float(c), fwhm, eta)
     return col
@@ -203,9 +212,13 @@ def quantify_phases_nnls(
     total = float(contrib.sum())
     inten_frac = contrib / total if total > 0 else np.zeros(n_phase)
 
-    # --- ZMV-corrected approximate weight fractions ---
+    # --- Hill–Howard weight fractions: w_i ∝ S_i·(ZMV)_i ---
+    # The columns carry absolute per-cell intensities, so each phase coefficient
+    # IS its scale factor S_i (the integrated-intensity share above is a
+    # screening quantity only — multiplying IT by ZMV double-counts the
+    # structure-factor differences between phases).
     zmv = np.array([_zmv(p) for p in structure_paths])
-    wraw = inten_frac * zmv
+    wraw = phase_coef * zmv
     wtot = float(wraw.sum())
     wfrac = wraw / wtot if wtot > 0 else inten_frac
 
