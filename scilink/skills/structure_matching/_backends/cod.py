@@ -33,11 +33,13 @@ import os
 import re
 import sqlite3
 import tempfile
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Optional
 
-from ._base import QuerySpec, StructureCandidate
+from ._base import QuerySkipped, QuerySpec, StructureCandidate
 from .local_cif import _lattice_within_ranges
 
 try:
@@ -53,6 +55,15 @@ _logger = logging.getLogger(__name__)
 # Counts can be fractional (occupancy/Z averaging), e.g. "H145.17", "Na0.67".
 _ELEMENT_TOKEN = re.compile(r"^([A-Z][a-z]?)[\d.]*$")
 _COD_CIF_URL = "https://www.crystallography.net/cod/{cid}.cif"
+# A REST request that broke off (a connection reset, a response cut short on
+# a large element query) is tried again after a pause, this many times in all;
+# one that still fails raises, and the dispatcher records the failure.
+_WEB_ATTEMPTS = 3
+_WEB_BACKOFF_S = 2.0
+# Row caps before ranking: the local db's SQL pre-filter, and the REST rows
+# kept. A query that hits one is recorded as truncated (``last_report``).
+_DB_ROW_CAP = 4000
+_WEB_ROW_CAP = 2000
 
 
 def _formula_elements(formula: Optional[str]) -> set[str]:
@@ -160,11 +171,12 @@ class CODBackend:
         return PYMATGEN_AVAILABLE and (self._has_local_db() or self.allow_web)
 
     def query(self, spec: QuerySpec) -> list[StructureCandidate]:
+        self.last_report = {"dropped": 0, "drop_reasons": [], "truncated": False}
         if not self.is_available():
-            return []
+            raise QuerySkipped("COD is not available (no local db and web access disabled)")
         wanted = {e for e in spec.chemistry}
         if not wanted and not spec.lattice_param_ranges:
-            return []
+            raise QuerySkipped("COD needs chemistry or a lattice filter")
 
         # Prefer the local db (fast, offline); fall back to COD's REST search
         # when there is no db. Cell-only (blind) queries ALWAYS use the REST
@@ -185,6 +197,10 @@ class CODBackend:
         for cid, formula, sg, sg_number in rows:
             struct = self._load_structure(int(cid))
             if struct is None:
+                # a match that could not be loaded is not an absence: counted
+                self.last_report["dropped"] += 1
+                if len(self.last_report["drop_reasons"]) < 5:
+                    self.last_report["drop_reasons"].append(f"COD {cid}: CIF not available or unparsable")
                 continue
             # Post-load lattice filter (exact, on the parsed structure). The
             # REST cell filter is a coarse pre-filter; the local db has none.
@@ -234,10 +250,13 @@ class CODBackend:
                 sql += " AND sgNumber IN (%s)" % ",".join("?" * len(spec.space_group_hints))
                 params += [int(s) for s in spec.space_group_hints]
             # Pull a generous pre-filter set; the exact-set filter prunes it.
-            sql += " LIMIT 4000"
+            sql += f" LIMIT {_DB_ROW_CAP}"
             raw = con.execute(sql, params).fetchall()
         finally:
             con.close()
+        if len(raw) == _DB_ROW_CAP:
+            # the cap cut the pre-filter before the exact-set filter and the ranking
+            self.last_report["truncated"] = True
 
         scored: list[tuple] = []
         for cid, formula, sg, sg_number in raw:
@@ -282,19 +301,36 @@ class CODBackend:
                 params += [("vmin", f"{float(lo):.2f}"), ("vmax", f"{float(hi):.2f}")]
         params.append(("format", "json"))
         url = "https://www.crystallography.net/cod/result?" + urllib.parse.urlencode(params)
-        try:
-            with urllib.request.urlopen(url, timeout=30) as resp:
-                data = json.load(resp)
-        except Exception as exc:
-            _logger.debug("COD REST search failed: %s", exc)
-            return []
+        data = None
+        for attempt in range(1, _WEB_ATTEMPTS + 1):
+            try:
+                with urllib.request.urlopen(url, timeout=30) as resp:
+                    data = json.load(resp)
+                break
+            except Exception as exc:
+                # a 4xx answer will not change on a retry, except a timeout or a throttle
+                client_error = (isinstance(exc, urllib.error.HTTPError) and 400 <= exc.code < 500
+                                and exc.code not in (408, 429))
+                if client_error:
+                    raise RuntimeError(f"COD REST search rejected (HTTP {exc.code}): {exc}") from exc
+                if attempt == _WEB_ATTEMPTS:
+                    # a failed request is not an empty database: the dispatcher records it
+                    raise RuntimeError(
+                        f"COD REST search failed after {attempt} attempts: {exc}") from exc
+                _logger.debug("COD REST search attempt %d failed (%s); retrying", attempt, exc)
+                time.sleep(_WEB_BACKOFF_S * attempt)
 
+        if not isinstance(data, list):
+            raise RuntimeError(f"COD REST search returned {type(data).__name__}, not a list of rows")
         scored: list[tuple] = []
         hints = set(int(s) for s in spec.space_group_hints) if spec.space_group_hints else None
         for row in data:
             try:
                 cid = int(row["file"])
             except (KeyError, TypeError, ValueError):
+                self.last_report["dropped"] += 1
+                if "a row without a COD id" not in self.last_report["drop_reasons"]:
+                    self.last_report["drop_reasons"].append("a row without a COD id")
                 continue
             formula = row.get("formula")
             els = _formula_elements(formula)
@@ -307,9 +343,11 @@ class CODBackend:
                         continue
                 except (TypeError, ValueError):
                     continue
-            scored.append((len(els - wanted), _formula_natoms(formula), cid, formula, row.get("sg"), sg_number))
-            if len(scored) >= 2000:
+            if len(scored) >= _WEB_ROW_CAP:
+                # a matching row past the cap: the rest are never ranked
+                self.last_report["truncated"] = True
                 break
+            scored.append((len(els - wanted), _formula_natoms(formula), cid, formula, row.get("sg"), sg_number))
         # Tightest composition, then simplest stoichiometry, then newest
         # deposition first (see _search_db for the Rietveld rationale).
         scored.sort(key=lambda t: (t[0], t[1], -_safe_int(t[2])))

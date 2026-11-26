@@ -6,7 +6,7 @@ import logging
 import os
 from typing import Any, Optional
 
-from ._base import QuerySpec, StructureCandidate
+from ._base import QuerySkipped, QuerySpec, StructureCandidate
 
 try:
     from mp_api.client import MPRester
@@ -62,13 +62,13 @@ class MaterialsProjectBackend:
         return MP_API_AVAILABLE and bool(self.api_key)
 
     def query(self, spec: QuerySpec) -> list[StructureCandidate]:
+        self.last_report = {}
         if not self.is_available():
-            return []
+            raise QuerySkipped("Materials Project is not available (mp-api or an API key missing)")
         if not spec.chemistry:
             # Cell-only (blind) queries are not supported here: mp-api searches
             # are chemsys-keyed. COD / local-CIF handle the cell-only path.
-            _logger.debug("MP backend skipping cell-only query (needs chemistry)")
-            return []
+            raise QuerySkipped("Materials Project needs chemistry (cell-only queries are not supported)")
 
         chemsys = "-".join(sorted(spec.chemistry))
         cache_key = (
@@ -103,8 +103,8 @@ class MaterialsProjectBackend:
             with MPRester(self.api_key) as mpr:
                 raw = mpr.materials.summary.search(**kwargs)
         except Exception as e:
-            _logger.warning("Materials Project query failed for %s: %s", chemsys, e)
-            return []
+            # a failed request is not an empty database: the dispatcher records it
+            raise RuntimeError(f"Materials Project query failed for {chemsys}: {e}") from e
 
         candidates: list[StructureCandidate] = []
         for r in raw:

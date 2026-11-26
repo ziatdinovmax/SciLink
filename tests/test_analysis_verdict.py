@@ -134,7 +134,7 @@ def test_series_verdicts_follow_the_agents_shapes():
     for u in relocked["individual_results"][1:]:
         u["fitted_from"] = "locked_script"
     assert analysis_verdict(relocked)["reason"] == (
-        "follower replays a recipe that was not approved (unit spectrum_0001): salvaged best-available "
+        "follower replays a recipe that is not verified (unit spectrum_0001): salvaged best-available "
         "result (recipe from unit spectrum_0000, since refit)")
     # ... but a follower that was itself refit (its own record) is judged on its own
     relocked["individual_results"][1].update({"adaptively_refitted": True, "quality_history": dict(ANCHOR_OK)})

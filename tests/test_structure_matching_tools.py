@@ -632,3 +632,168 @@ def test_score_fast_unknown_background_raises():
             sim_two_theta=[15.0], sim_intensity=[1.0],
             background="weird",
         )
+
+
+# --- the search record: what a call did, so an empty result can be read -------
+
+def _local(tmp_path, *cifs):
+    cif_dir = tmp_path / "cifs"
+    cif_dir.mkdir(exist_ok=True)
+    for name, s in cifs:
+        _write_cif(cif_dir / name, s)
+    return cif_dir
+
+
+def test_search_record_clean_empty_when_database_answered_nothing(tmp_path):
+    cif_dir = _local(tmp_path, ("si.cif", _silicon()))
+    with patch.dict("os.environ", {"SCILINK_LOCAL_CIF_DIR": str(cif_dir)}):
+        result = search_structures(query={"chemistry": ["Ge"]}, sources=["local"],
+                                   output_dir=str(tmp_path / "out"))
+    rec = result["search_record"]
+    assert result["candidates"] == [] and rec["clean_empty"] is True
+    assert rec["outcomes"] == [{"chemistry": ["Ge"], "backend": "local", "status": "ok", "n": 0}]
+    assert rec["query"]["chemistry"] == [["Ge"]]
+
+
+def test_search_record_failed_backend_is_not_an_empty_search(tmp_path):
+    cif_dir = _local(tmp_path, ("si.cif", _silicon()))
+    from scilink.skills.structure_matching._backends import LocalCIFBackend
+
+    def down(self, spec):
+        raise RuntimeError("connection refused")
+
+    with patch.object(LocalCIFBackend, "query", down), \
+         patch.dict("os.environ", {"SCILINK_LOCAL_CIF_DIR": str(cif_dir)}):
+        result = search_structures(query={"chemistry": ["Si"]}, sources=["local"],
+                                   output_dir=str(tmp_path / "out"))
+    rec = result["search_record"]
+    assert result["candidates"] == [] and rec["clean_empty"] is False
+    assert rec["outcomes"][0]["status"] == "failed" and "connection refused" in rec["outcomes"][0]["error"]
+    assert result["sources_queried"] == []
+
+
+def test_search_record_no_backend_is_not_an_empty_search(tmp_path):
+    with patch.dict("os.environ", {"SCILINK_LOCAL_CIF_DIR": str(tmp_path / "missing")}):
+        result = search_structures(query={"chemistry": ["Si"]}, sources=["local"],
+                                   output_dir=str(tmp_path / "out"))
+    rec = result["search_record"]
+    assert rec["clean_empty"] is False and rec["outcomes"][0]["status"] == "skipped"
+
+
+def test_search_record_one_hypothesis_failing_is_not_clean(tmp_path):
+    """Every hypothesis must have been answered: one that failed leaves its
+    chemistry unsearched, whatever the others returned."""
+    cif_dir = _local(tmp_path, ("si.cif", _silicon()))
+    from scilink.skills.structure_matching._backends import LocalCIFBackend
+    original = LocalCIFBackend.query
+
+    def half(self, spec):
+        if spec.chemistry == ["Ge"]:
+            raise RuntimeError("timeout")
+        return original(self, spec)
+
+    with patch.object(LocalCIFBackend, "query", half), \
+         patch.dict("os.environ", {"SCILINK_LOCAL_CIF_DIR": str(cif_dir)}):
+        result = search_structures(query={"chemistry": [["Sn"], ["Ge"]]}, sources=["local"],
+                                   output_dir=str(tmp_path / "out"))
+    assert result["candidates"] == [] and result["search_record"]["clean_empty"] is False
+
+
+def test_search_record_dropped_matches_are_not_clean(tmp_path):
+    cif_dir = _local(tmp_path)
+    from scilink.skills.structure_matching._backends import LocalCIFBackend
+
+    def dropped(self, spec):
+        self.last_report = {"dropped": 2, "drop_reasons": ["x: CIF unparsable"]}
+        return []
+
+    with patch.object(LocalCIFBackend, "query", dropped), \
+         patch.dict("os.environ", {"SCILINK_LOCAL_CIF_DIR": str(cif_dir)}):
+        result = search_structures(query={"chemistry": ["Si"]}, sources=["local"],
+                                   output_dir=str(tmp_path / "out"))
+    rec = result["search_record"]
+    assert rec["clean_empty"] is False and rec["outcomes"][0]["dropped"] == 2
+
+
+def test_search_record_a_folder_that_does_not_parse_is_not_clean(tmp_path):
+    """Files the backend could not read were never searched: an empty answer
+    over them says nothing about what the database holds."""
+    cif_dir = tmp_path / "cifs"
+    cif_dir.mkdir()
+    for i in range(3):
+        (cif_dir / f"bad{i}.cif").write_text("not a cif\n")
+    with patch.dict("os.environ", {"SCILINK_LOCAL_CIF_DIR": str(cif_dir)}):
+        result = search_structures(query={"chemistry": ["Si"]}, sources=["local"],
+                                   output_dir=str(tmp_path / "out"))
+    rec = result["search_record"]
+    assert result["candidates"] == [] and rec["outcomes"][0]["unparsed"] == 3
+    assert rec["clean_empty"] is False
+
+
+def test_search_record_rides_the_db_matches_marker(tmp_path):
+    cif_dir = _local(tmp_path, ("si.cif", _silicon()))
+    with patch.dict("os.environ", {"SCILINK_LOCAL_CIF_DIR": str(cif_dir)}):
+        _, captured = _capture_stdout(search_structures, query={"chemistry": ["Si"]},
+                                      sources=["local"], output_dir=str(tmp_path / "out"))
+    line = [l for l in captured.splitlines() if l.startswith("DB_MATCHES_JSON:")][0]
+    rec = json.loads(line[len("DB_MATCHES_JSON:"):])["search_record"]
+    assert rec["n_candidates"] == 1 and rec["clean_empty"] is False
+
+
+def test_search_record_a_skipped_backend_beside_an_answer_is_clean(tmp_path):
+    """MP cannot serve a cell-only query (skipped); a local answer of nothing
+    is still a clean empty search over what was searched."""
+    cif_dir = _local(tmp_path, ("si.cif", _silicon()))
+    from scilink.skills.structure_matching._backends import MaterialsProjectBackend
+    with patch.dict("os.environ", {"SCILINK_LOCAL_CIF_DIR": str(cif_dir)}), \
+         patch.object(MaterialsProjectBackend, "is_available", lambda self: True):
+        result = search_structures(query={"lattice_param_ranges": {"a": (9.0, 9.5)}},
+                                   sources=["mp", "local"], output_dir=str(tmp_path / "out"))
+    rec = result["search_record"]
+    assert {o["backend"]: o["status"] for o in rec["outcomes"]} == {"mp": "skipped", "local": "ok"}
+    assert rec["clean_empty"] is True
+
+
+def test_search_record_a_backend_that_reports_nothing_is_not_clean(tmp_path):
+    cif_dir = _local(tmp_path)
+    from scilink.skills.structure_matching._backends import LocalCIFBackend
+
+    def silent(self, spec):
+        return []
+
+    with patch.object(LocalCIFBackend, "query", silent), \
+         patch.dict("os.environ", {"SCILINK_LOCAL_CIF_DIR": str(cif_dir)}):
+        result = search_structures(query={"chemistry": ["Si"]}, sources=["local"],
+                                   output_dir=str(tmp_path / "out"))
+    rec = result["search_record"]
+    assert rec["outcomes"][0]["report"] == "unknown" and rec["clean_empty"] is False
+
+
+def test_search_record_a_report_cannot_overwrite_the_outcome(tmp_path):
+    cif_dir = _local(tmp_path)
+    from scilink.skills.structure_matching._backends import LocalCIFBackend
+
+    def forging(self, spec):
+        self.last_report = {"status": "ok", "n": 99, "backend": "x", "truncated": True}
+        return []
+
+    with patch.object(LocalCIFBackend, "query", forging), \
+         patch.dict("os.environ", {"SCILINK_LOCAL_CIF_DIR": str(cif_dir)}):
+        o = search_structures(query={"chemistry": ["Si"]}, sources=["local"],
+                              output_dir=str(tmp_path / "out"))["search_record"]["outcomes"][0]
+    assert o["n"] == 0 and o["backend"] == "local" and o["truncated"] is True
+
+
+def test_search_record_a_backend_that_fails_to_construct_is_failed(tmp_path):
+    from scilink.skills.structure_matching._backends import register_backend, unregister_backend
+
+    def broken():
+        raise RuntimeError("bad config")
+
+    register_backend("broken_test", broken)
+    try:
+        rec = search_structures(query={"chemistry": ["Si"]}, sources=["broken_test"],
+                                output_dir=str(tmp_path / "out"))["search_record"]
+    finally:
+        unregister_backend("broken_test")
+    assert rec["outcomes"][0]["status"] == "failed" and rec["clean_empty"] is False

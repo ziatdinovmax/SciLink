@@ -269,15 +269,28 @@ def nothing_measured(item: Optional[dict]) -> Optional[str]:
 
 def fit_check_withheld(item: Optional[dict]) -> Optional[str]:
     """Why a curve fit's own checks withhold it (#762), else None: it
-    measured nothing asked for, or it is a replay of a locked recipe whose
-    saved fit does not follow this unit's data. Read by EVERY branch that can
-    verify a curve unit — its own gate, a follower's recipe, a reuse's replay
-    gate, the legacy reconstruction."""
+    measured nothing asked for, it is a replay of a locked recipe whose
+    saved fit does not follow this unit's data, its gate's own code rejects
+    it (``fit_quality.gate_rejected``: the scorer's declared reject, or a
+    workflow gate's figure missing or past the hard reject), or its own
+    scoring tool did not certify it (``fit_quality.provisional``). Read by
+    EVERY branch that can verify a curve unit — its own gate, a follower's
+    recipe, a reuse's replay gate, the legacy reconstruction."""
     nothing = nothing_measured(item)
     if nothing:
         return nothing
     misfit = ((item or {}).get("fit_quality") or {}).get("replay_misfit")
-    return str(misfit[0]) if misfit else None
+    if misfit:
+        return str(misfit[0])
+    rejected = ((item or {}).get("fit_quality") or {}).get("gate_rejected")
+    if isinstance(rejected, list):
+        rejected = rejected[0] if rejected else None
+    if rejected:
+        return str(rejected)
+    provisional = ((item or {}).get("fit_quality") or {}).get("provisional")
+    if isinstance(provisional, list):
+        provisional = provisional[0] if provisional else None
+    return str(provisional) if provisional else None
 
 
 def _unit_verdict(item: dict, *, where: str) -> Optional[Dict[str, Any]]:
@@ -399,7 +412,7 @@ def unit_verdict_for(unit: Dict[str, Any], *, recipe: Optional[Dict[str, Any]] =
                               reason=f"replayed the locked recipe of unit {recipe.get('unit')}, whose gate passed")
     return verdict_record(verified=False, decided_by="recipe", regime=regime, recipe_of=recipe.get("unit"),
                           reason=f"replayed the locked recipe of unit {recipe.get('unit')}, which was "
-                                 f"not approved: {rv.get('reason')}")
+                                 f"not verified: {rv.get('reason')}")
 
 
 def stamp_unit_verdict(unit: Dict[str, Any], *, recipe: Optional[Dict[str, Any]] = None,
@@ -708,7 +721,7 @@ def legacy_series_verdict(full: Dict[str, Any]) -> Dict[str, Any]:
                     bad = _unit_verdict(recipe, where="")
                     if bad:
                         return {"verified": False, "reason": (
-                            f"follower replays a recipe that was not approved{where}: "
+                            f"follower replays a recipe that is not verified{where}: "
                             f"{bad['reason']} (recipe from unit {recipe.get('name')}, since refit)")}
         if anchors == 0 and not any("verified" in it for it in ok_items):
             return {"verified": False, "reason": "no unit carries a verification record"}
@@ -1007,7 +1020,7 @@ def prior_recipe_scripts(anchor_dir, *, single_name: str, named=None) -> List[Tu
             refit = unit_script.is_file() and unit_script.read_text(encoding="utf-8") != r["script"]
             notes = [f"regime {r.get('regime')!s}, {n} of {len(recipes)}" if len(recipes) > 1 else None,
                      "the anchor refit since" if refit else None,
-                     "its anchor's gate did not pass" if not r.get("verified") else None]
+                     "its anchor is not verified" if not r.get("verified") else None]
             label = (f"{unit_script_name(r.get('unit'))}.py (the series' locked recipe"
                      + "".join(f", {x}" for x in notes if x) + ")")
             out.append((r["script"], label))

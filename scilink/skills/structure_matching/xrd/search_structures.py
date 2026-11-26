@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from .._backends import (
+    QuerySkipped,
     QuerySpec,
     StructureBackend,
     StructureCandidate,
@@ -118,7 +119,13 @@ TOOL_SPEC = ToolSpec(
     returns=(
         "dict with 'candidates' (list of {id, source, formula, space_group, "
         "structure_path, rank_score, metadata}), 'sources_queried' (list of "
-        "backend names), 'warnings' (list of human-readable strings)."
+        "backend names), 'warnings' (list of human-readable strings), and "
+        "'search_record': the query as sent and, per hypothesis and backend, "
+        "what happened (ok with n / failed with the error / skipped, matches "
+        "dropped, a row cap hit), with 'clean_empty' true only when the "
+        "databases answered and hold nothing for this query. A failed or "
+        "partial search is never an empty one: do not turn a raised error "
+        "into an empty candidate list."
     ),
     when_to_use=(
         "Whenever a candidate-structure list is needed — pre-fit (chemistry "
@@ -137,12 +144,18 @@ def search_structures(
     """Query structure databases. See ``TOOL_SPEC`` for full contract."""
     specs = _coerce_query_specs(query)
     warnings: list[str] = []
+    # what this call did, per (hypothesis, backend): the record a reader holds
+    # an empty result to — a database that answered with nothing is a finding,
+    # one that failed, was skipped, dropped matches or was cut is not
+    outcomes: list[dict[str, Any]] = []
+    unavailable: list[dict[str, Any]] = []
 
-    backends = _build_backends(sources, warnings)
+    backends = _build_backends(sources, warnings, unavailable)
     if not backends:
         result = {
             "candidates": [], "sources_queried": [],
             "warnings": warnings or ["No backends available"],
+            "search_record": _search_record(query, specs, unavailable, 0),
         }
         _emit_db_matches_marker(result)
         return result
@@ -152,14 +165,31 @@ def search_structures(
     queried_set: set[str] = set()
     for spec in specs:
         for backend in backends:
+            outcome: dict[str, Any] = {"chemistry": list(spec.chemistry), "backend": backend.name}
+            try:
+                backend.last_report = None  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001 - a backend that takes no attribute reports nothing
+                pass
             try:
                 results = backend.query(spec)
+            except QuerySkipped as e:
+                outcomes.append({**outcome, "status": "skipped", "reason": str(e)[:200]})
+                continue
             except Exception as e:
                 warnings.append(
                     f"{backend.name} backend raised on chemistry={spec.chemistry}: {e}"
                 )
                 _logger.warning("Backend %s failed: %s", backend.name, e)
+                outcomes.append({**outcome, "status": "failed", "error": str(e)[:200]})
                 continue
+            report = getattr(backend, "last_report", None)
+            outcome.update(status="ok", n=len(results))
+            if isinstance(report, dict):
+                # only the report's own fields: never the dispatcher's status or count
+                outcome.update({k: report[k] for k in _REPORT_KEYS if report.get(k)})
+            else:
+                outcome["report"] = "unknown"
+            outcomes.append(outcome)
             if backend.name not in queried_set:
                 queried_set.add(backend.name)
                 sources_queried.append(backend.name)
@@ -180,9 +210,36 @@ def search_structures(
         "candidates": [_candidate_to_dict(c) for c in deduped],
         "sources_queried": sources_queried,
         "warnings": warnings,
+        "search_record": _search_record(query, specs, unavailable + outcomes, len(deduped)),
     }
     _emit_db_matches_marker(result)
     return result
+
+
+_REPORT_KEYS = ("dropped", "drop_reasons", "truncated", "unparsed")
+
+
+def _search_record(query: dict, specs: list[QuerySpec], outcomes: list[dict], n: int) -> dict[str, Any]:
+    """The call as asked (every hypothesis and filter) and what each backend
+    did with it. ``clean_empty`` is true only when at least one backend
+    answered every hypothesis, nothing failed, was dropped, truncated or left
+    unparsed, and nothing came back: the one empty result that says the
+    databases hold no match for this query."""
+    filters = {k: v for k, v in query.items() if k not in ("chemistry", "top_n") and v is not None}
+    served = {o["backend"] for o in outcomes if o.get("status") == "ok"}
+    answered_all = any(
+        all(any(o.get("backend") == b and o.get("status") == "ok" and o.get("chemistry") == list(sp.chemistry)
+                for o in outcomes) for sp in specs)
+        for b in served)
+    unclean = any(o.get("status") == "failed" or o.get("dropped") or o.get("truncated")
+                  or o.get("unparsed") or o.get("report") == "unknown" for o in outcomes)
+    return {
+        "query": {"chemistry": [list(sp.chemistry) for sp in specs], "filters": filters,
+                  "top_n": specs[0].top_n if specs else None},
+        "outcomes": outcomes,
+        "n_candidates": n,
+        "clean_empty": bool(n == 0 and answered_all and not unclean),
+    }
 
 
 # --- Helpers ------------------------------------------------------------------
@@ -266,6 +323,7 @@ def _coerce_query_specs(query: dict) -> list[QuerySpec]:
 def _build_backends(
     sources: Optional[list[str]],
     warnings: list[str],
+    unavailable: Optional[list[dict]] = None,
 ) -> list[StructureBackend]:
     """Construct backend instances for ``sources`` (or auto-detect).
 
@@ -280,16 +338,21 @@ def _build_backends(
     backends: list[StructureBackend] = []
     for name in sources:
         factory = get_backend_factory(name)
+        skipped = unavailable if unavailable is not None else []
         if factory is None:
             warnings.append(f"Unknown source '{name}' — skipping")
+            skipped.append({"backend": name, "status": "skipped", "reason": "unknown source"})
             continue
         try:
             b = factory()
         except Exception as e:
             warnings.append(f"Failed to construct {name} backend: {e}")
+            skipped.append({"backend": name, "status": "failed", "error": f"construction: {e}"[:200]})
             continue
         if not b.is_available():
             warnings.append(f"Backend '{name}' not available (missing key/dir/dependency)")
+            skipped.append({"backend": name, "status": "skipped",
+                            "reason": "not available (missing key/dir/dependency)"})
             continue
         backends.append(b)
     return backends
@@ -375,6 +438,7 @@ def _emit_db_matches_marker(result: dict[str, Any]) -> None:
         "candidates": result["candidates"],
         "sources_queried": result["sources_queried"],
         "warnings": result["warnings"],
+        "search_record": result.get("search_record"),
     }
     try:
         line = "DB_MATCHES_JSON: " + json.dumps(safe, default=str)

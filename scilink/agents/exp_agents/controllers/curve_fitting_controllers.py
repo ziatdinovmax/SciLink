@@ -174,7 +174,7 @@ def _canonical_r2(y, fit):
 
 
 # Flags that are caveats on a fit that stands, never failures or refit reasons.
-CAVEAT_FLAGS = frozenset({"secondary_pin", "not_measured", "withheld_values"})
+CAVEAT_FLAGS = frozenset({"secondary_pin", "not_measured", "withheld_values", "provisional"})
 
 # What a reader of a not-measured band is told. A value the script derived
 # from that band elsewhere (a ratio, a relative intensity, a total) cannot be
@@ -881,6 +881,83 @@ def _has_fit_parameters(stdout: Optional[str]) -> bool:
     return isinstance(params, dict) and bool(params)
 
 
+def _search_outcome_summary(records: list) -> str:
+    """One line per backend outcome that is not a clean answer, from the
+    search tools' own records."""
+    parts = []
+    for rec in records:
+        for o in rec.get("outcomes") or []:
+            if not isinstance(o, dict):
+                continue
+            st = o.get("status")
+            what = f"{o.get('backend')} {o.get('chemistry') or ''}".strip()
+            if st == "failed":
+                parts.append(f"{what}: failed ({o.get('error')})")
+            elif st == "skipped":
+                parts.append(f"{what}: skipped ({o.get('reason')})")
+            else:
+                if o.get("dropped"):
+                    parts.append(f"{what}: {o['dropped']} matching entries could not be loaded")
+                if o.get("truncated"):
+                    parts.append(f"{what}: a row cap cut the matches before ranking")
+                if o.get("unparsed"):
+                    parts.append(f"{what}: {o['unparsed']} files could not be parsed")
+                if o.get("report") == "unknown":
+                    parts.append(f"{what}: reported nothing about what it dropped")
+    return "; ".join(dict.fromkeys(parts))
+
+
+def _workflow_reject_fix(gate, fit_result: Optional[dict], value: Optional[float],
+                         declared: bool = False) -> tuple:
+    """``(problem, suggested_fix)`` for a workflow gate's hard reject, from
+    the cause the record shows: a scored reject (a number below the band, or
+    the tool's own declared reject), no figure reported, a search that did not
+    run cleanly, candidates lost before scoring, or a clean empty search. No
+    cause points the retry at a different hypothesis of what the sample is:
+    that must come from the sample's own record, never from the absence of a
+    match."""
+    records = [r for r in ((fit_result or {}).get("search_records") or [])
+               if isinstance(r, dict) and isinstance(r.get("outcomes"), list)]
+    principle = ("A different hypothesis of what the sample is must come from the sample's own "
+                 "record, never from the absence of a match.")
+    if declared or value is not None:
+        return (f"{gate.metric} below acceptable range",
+                "Check the experimental metadata the workflow relies on (e.g. the wavelength). "
+                + principle)
+    if not records:
+        return (f"{gate.metric} was not reported",
+                f"Report {gate.metric} from the workflow's scoring tool; a tool call that fails "
+                "must raise, never be turned into an empty result.")
+
+    def _count(r):
+        try:
+            return int(r.get("n_candidates") or 0)
+        except (TypeError, ValueError):
+            return 0
+    n = sum(_count(r) for r in records)
+    if n > 0:
+        return (f"the search returned {n} candidate(s), but no {gate.metric} was reported",
+                "The candidates were lost between the search and the scoring: let scoring "
+                f"errors raise and report the best {gate.metric}.")
+    if not all(r.get("clean_empty") is True for r in records):
+        return (f"the structure search did not run cleanly: "
+                f"{_search_outcome_summary(records) or 'no backend answered'}",
+                "An empty result from a failed or partial search is not evidence that nothing "
+                "matches: report the failure. Do not change the hypothesis of what the sample is "
+                "because of it, and never score against a reference the databases did not return.")
+    asked = "; ".join(
+        f"chemistry {(r.get('query') or {}).get('chemistry')}"
+        + (f", filters {(r.get('query') or {}).get('filters')}" if (r.get("query") or {}).get("filters") else "")
+        for r in records)
+    skipped = "; ".join(dict.fromkeys(
+        f"{o.get('backend')} ({o.get('reason')})" for r in records for o in r["outcomes"]
+        if isinstance(o, dict) and o.get("status") == "skipped"))
+    return (f"the search ran cleanly and returned no candidate ({asked})"
+            + (f"; not asked: {skipped}" if skipped else ""),
+            "A deeper top_n or other entries of the same chemistry may be tried; if none "
+            "matches, no phase is identified from these databases for this query. " + principle)
+
+
 def _parse_script_markers(stdout: Optional[str]) -> dict:
     """Parse FIT_RESULTS_JSON and DB_MATCHES_JSON markers from script stdout.
 
@@ -895,11 +972,16 @@ def _parse_script_markers(stdout: Optional[str]) -> dict:
     ``TOOL_WARNINGS_JSON:`` lines (a JSON list of sentences a skill tool
     printed about the result the script reports, e.g. a match's fitted
     lattice scale, #775) are collected at ``fit_results['tool_warnings']``.
+    Each ``DB_MATCHES_JSON:`` line's ``search_record`` (what that search did,
+    per hypothesis and backend) is collected at
+    ``fit_results['search_records']``, one per search the script ran; a
+    key of that name in the script's own results is dropped.
     """
     fit_results: dict = {}
     fit_seen = False
     db_matches: Optional[dict] = None
     tool_warnings: list = []
+    search_records: list = []
     for line in (stdout or "").splitlines():
         if line.startswith("TOOL_WARNINGS_JSON:"):
             try:
@@ -914,15 +996,27 @@ def _parse_script_markers(stdout: Optional[str]) -> dict:
                 fit_results = json.loads(line.replace("FIT_RESULTS_JSON:", "").strip())
             except json.JSONDecodeError:
                 pass
-        elif line.startswith("DB_MATCHES_JSON:") and db_matches is None:
+        elif line.startswith("DB_MATCHES_JSON:"):
             try:
-                db_matches = json.loads(line.replace("DB_MATCHES_JSON:", "").strip())
+                got = json.loads(line.replace("DB_MATCHES_JSON:", "").strip())
             except json.JSONDecodeError:
-                pass
+                got = None
+            if db_matches is None and got is not None:
+                db_matches = got
+            # every search the script ran, not only the first: a null is read
+            # against all of them
+            if isinstance(got, dict) and isinstance(got.get("search_record"), dict):
+                search_records.append(got["search_record"])
     if db_matches is not None:
         fit_results.setdefault("db_matches", db_matches)
     if tool_warnings:
         fit_results.setdefault("tool_warnings", tool_warnings)
+    if isinstance(fit_results, dict):
+        # what a search did is read from the DB_MATCHES_JSON lines only: a
+        # key of that name in the script's own results is not it
+        fit_results.pop("search_records", None)
+        if search_records:
+            fit_results["search_records"] = search_records
     return fit_results
 
 
@@ -2789,8 +2883,17 @@ class GenerateCurveFittingReportController:
         # thresholds — a global-R² badge mislabels a verifier-approved low-SNR
         # fit as "Poor". The R² path is unchanged.
         gate_value = gate.extract(fit_quality) if (gate is not None and gate.metric != "r_squared") else None
+        # the gate's own rejection, as stamped where the unit was fitted (the
+        # recipe's gate on a replay, which this run's gate may not be)
+        _stamp = fit_quality.get("gate_rejected")
+        _rejected = (str(_stamp[0] if isinstance(_stamp, list) and _stamp else _stamp) if _stamp
+                     else gate.rejects(fit_quality) if gate is not None else None)
         if gate_value is not None:
-            if gate.is_accept(gate_value):
+            if _rejected:
+                badge_class, label = "quality-poor", "Poor"
+            elif gate.uncertified(fit_quality) or fit_quality.get("provisional"):
+                badge_class, label = "quality-ok", "Provisional"
+            elif gate.is_accept(gate_value):
                 badge_class, label = "quality-good", "Good"
             elif gate.is_hard_reject(gate_value):
                 badge_class, label = "quality-poor", "Poor"
@@ -2799,6 +2902,14 @@ class GenerateCurveFittingReportController:
             html += f'<span class="quality-badge {badge_class}">{label}</span><strong>{gate.label} = {gate_value:.4f}</strong>'
             if r_squared is not None:
                 html += f" &nbsp;|&nbsp; <span>R² = {r_squared:.4f}</span>"
+        elif _rejected:
+            badge_class, label = "quality-poor", "Poor"
+            html += (f'<span class="quality-badge {badge_class}">{label}</span><strong>{_rejected}</strong>'
+                     + (f" &nbsp;|&nbsp; <span>R² = {r_squared:.4f}</span>" if r_squared is not None else ""))
+        elif fit_quality.get("provisional"):
+            # stamped by the recipe's gate on a replay this run's gate scores by R²
+            html += ('<span class="quality-badge quality-ok">Provisional</span>'
+                     + (f"<strong>R² = {r_squared:.4f}</strong>" if r_squared is not None else ""))
         elif r_squared is not None:
             if r_squared >= self.r2_threshold + 0.04:
                 badge_class, label = "quality-good", "Excellent"
@@ -4544,7 +4655,11 @@ Your guidance: '''
         hold_recipe: bool = False,
         seed_targets: Optional[list] = None,
         anchor_saved_fit_r2: Optional[float] = None,
+        replays_recipe: bool = False,
     ) -> dict:
+        # ``replays_recipe``: this call replays a recorded recipe (a prior
+        # run's, by ``qc_try_reuse``), so the unit is held to the gate that
+        # recipe was approved under as well as the run's.
         # ``anchor_saved_fit_r2``: the offset-free R² of the saved fit of the
         # recipe's anchor against its own data — a replay of the recipe far
         # below it does not fit this unit's data and is withheld (#762).
@@ -4979,6 +5094,31 @@ Your guidance: '''
         # of eyeballing a dynamic-range-crushed plot. Skipped silently if fit.npy
         # is absent (older/refit scripts) so this never breaks the fit path.
         fit_quality = dict(fit_results.get("fit_quality", {}) or {})
+        # a result its own scoring tool did not certify (an XRD match the
+        # scorer called "marginal") is acceptable — not retried — but
+        # provisional: it is never verified (``fit_check_withheld``)
+        # (the run's gate, and a replayed recipe's recorded gate: a replay is
+        # judged by the gate its recipe was approved under; either one not
+        # certifying is enough). A list, as every caveat in fit_quality: the
+        # feature table takes scalars only, so this adds no column.
+        # the marker is the gate's word, never the script's: a script that
+        # writes its own "provisional" key would withhold any skill's unit
+        fit_quality.pop("provisional", None)
+        fit_quality.pop("gate_rejected", None)
+        _cert_gates = self._gates_held_to(state, spectrum_idx, replays_recipe=replays_recipe)
+        # a result the gate's own code rejects (the scorer's declared reject;
+        # for a workflow gate a figure missing or past the hard reject) is
+        # never verified, on a follower as on its anchor: a follower is
+        # verified by the recipe it replayed and no verifier looks at it, so
+        # without this stamp a rejected follower was verified while a
+        # "marginal" one was withheld. The row stays, flagged; it is not refit.
+        _rejected = next((w for w in (g.rejects(fit_quality) for g in _cert_gates) if w), None)
+        _provisional = None if _rejected else next(
+            (w for w in (g.uncertified(fit_quality) for g in _cert_gates) if w), None)
+        if _rejected:
+            fit_quality["gate_rejected"] = [_rejected]
+        if _provisional:
+            fit_quality["provisional"] = [_provisional]
         if pinned:
             fit_quality["pinned_at_bound"] = pinned
         if secondary_pins:
@@ -5091,6 +5231,10 @@ Your guidance: '''
         }
         if fit_results.get("bounds"):
             result["bounds"] = fit_results["bounds"]
+        if fit_results.get("search_records"):
+            # what each structure search the script ran did (the tool's record):
+            # the verifier reads a missing figure of merit against it
+            result["search_records"] = fit_results["search_records"]
         reported = _reported_warnings(fit_results)
         if reported:
             # what the script or a skill tool said about this result (a
@@ -5374,6 +5518,22 @@ Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2
         gate = _gate(state)
         if not gate.physical_review:
             value = gate.extract(fit_result.get("fit_quality"))
+            declared = gate.declared_reject(fit_result.get("fit_quality"))
+            if declared:
+                # the workflow tool rejected its own result: a hard reject,
+                # wherever its number falls in the band
+                return {
+                    "fit_acceptable": False,
+                    "overall_assessment": f"Skill workflow gate hard-rejects: {declared}.",
+                    "issues_found": [{
+                        "location": "Workflow scoring",
+                        "problem": declared,
+                        "suggested_fix": _workflow_reject_fix(gate, fit_result, value, declared=True)[1],
+                    }],
+                    "recommended_action": "retry_fitting_attempt_with_changes",
+                    "physically_better_than_best": False,
+                    "comparison_note": "N/A — non-R² gate (no prior-best comparison)",
+                }
             # Canonical verdict schema — must match the keys downstream
             # consumers actually read (curve_fitting_controllers.py:2839, :3094
             # read `fit_acceptable`; :2871 reads `issues_found`; :2848 reads
@@ -5396,6 +5556,7 @@ Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2
                     "comparison_note": "N/A — non-R² gate (no prior-best comparison)",
                 }
             elif gate.is_hard_reject(value):
+                _cause = _workflow_reject_fix(gate, fit_result, value)
                 value_str = f"{value:.4f}" if isinstance(value, (int, float)) else "missing"
                 return {
                     "fit_acceptable": False,
@@ -5406,12 +5567,8 @@ Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2
                     ),
                     "issues_found": [{
                         "location": "Workflow scoring",
-                        "problem": f"{gate.metric} below acceptable range",
-                        "suggested_fix": (
-                            "Re-plan the workflow — widen the database query, "
-                            "broaden the chemistry hypothesis, or verify the "
-                            "wavelength / experimental metadata."
-                        ),
+                        "problem": _cause[0],
+                        "suggested_fix": _cause[1],
                     }],
                     "recommended_action": "retry_fitting_attempt_with_changes",
                     "physically_better_than_best": False,
@@ -6183,6 +6340,27 @@ Return JSON with:
                                     f"{rec.metric} {rec.accept_threshold}, which the replay is held to.")
         return rec, "recipe"
 
+    def _gates_held_to(self, state: dict, spectrum_idx: int, *, replays_recipe: bool = False) -> list:
+        """The gates whose own word is stamped on a unit's ``fit_quality``
+        (``gate_rejected``, ``provisional``): the run's, and the recorded gate
+        of the recipe the unit REPLAYED — this call is the replay, or the
+        unit's regime was anchored by one (``_replayed_regimes``, the one
+        predicate every reader of the recipe's gate keys on). Never the
+        recipe's gate on a unit fitted fresh: a reuse whose script could not
+        run and was re-derived is on the run's gate alone — a workflow
+        recipe's gate reads the ABSENCE of its figure as a reject, which
+        fresh code under another gate never reports."""
+        gates = [_gate(state)]
+        if not state.get("_reuse_gate"):
+            return gates
+        regime = self._get_regime_for_spectrum(state, spectrum_idx) or "default"
+        if replays_recipe or regime in (state.get("_replayed_regimes") or {}):
+            try:
+                gates.append(self._reuse_gate_decision(state, warn=False)[0])
+            except Exception:  # noqa: BLE001 - a malformed record is no record
+                pass
+        return gates
+
     def _series_gate(self, state: dict, regime: Any = None):
         """The gate a series UNIT is held to beyond the run's own, or None:
         the reuse decision's gate when the unit's regime was anchored by a
@@ -6487,6 +6665,7 @@ Return JSON with:
             spectrum_name=ctx.item_name, spectrum_idx=ctx.item_idx,
             base_script=script,
             anchor_saved_fit_r2=(reference or {}).get("saved_fit_r2") if isinstance(reference, dict) else None,
+            replays_recipe=True,
         )
 
     def _reuse_failed(self, ctx: QCItemContext, reuse_result: dict, source: Optional[str]) -> Optional[dict]:
@@ -8154,6 +8333,47 @@ Return JSON with:
             # statistics nor gets scored against them.
             return bool((r.get("quality_history") or {}).get("unverified"))
 
+        def _unscored_follower(r, center=None, scale=None):
+            # a FOLLOWER (verified by the recipe it replayed) whose WORKFLOW
+            # score is missing (the scorer found no candidate) is that gate's
+            # hard reject — never a unit that passes unflagged, however few
+            # units of the series were scored; an anchor answers to its own
+            # gate, and a goodness-of-fit metric left unreported is main's path
+            g = _gate_of(r)
+            if (not r.get("success") or _unverified(r) or _score(r) is not None or g is None
+                    or g.physical_review or (r.get("fit_quality") or {}).get("replay_misfit")
+                    or (r.get("fit_quality") or {}).get("pinned_at_bound")
+                    or (r.get("unit_verdict") or {}).get("decided_by") != "recipe"):
+                return None
+            return {"index": r["index"], "name": r["name"], "reason": "below_threshold",
+                    "r_squared": None, "series_mean": center, "series_std": scale, "deviation_sigma": None,
+                    "recommendation": (f"{g.label} was not reported for this unit, so its gate rejects it "
+                                       "(e.g. the scorer found no candidate): its values are not a result "
+                                       "the gate passed.")}
+
+        def _stamped_reject(r):
+            # the gate's own rejection of this unit, stamped where it was
+            # fitted (``fit_quality.gate_rejected``): the reason, or None
+            got = (r.get("fit_quality") or {}).get("gate_rejected") if r.get("success") else None
+            if isinstance(got, list):
+                got = got[0] if got else None
+            return str(got) if got else None
+
+        def _rejected_unit(r, center=None, scale=None):
+            # any unit its gate's own code rejects is flagged, however few
+            # units of the series were scored and whoever verified it
+            why = _stamped_reject(r)
+            if (not why or _unverified(r) or (r.get("fit_quality") or {}).get("replay_misfit")
+                    or (r.get("fit_quality") or {}).get("pinned_at_bound")):
+                return None
+            # (the score is shown beside the series median, so only with one)
+            score = _score(r) if center is not None else None
+            return {"index": r["index"], "name": r["name"], "reason": "below_threshold",
+                    "r_squared": float(score) if score is not None else None,
+                    "series_mean": center, "series_std": scale, "deviation_sigma": None,
+                    "recommendation": (f"Rejected: {why}. Its values are not a result the gate passed; "
+                                       "the unit is not verified.")}
+
         r2_values = []
         for r in series_results:
             if r["success"] and not _unverified(r):
@@ -8162,7 +8382,25 @@ Return JSON with:
                     r2_values.append(r2)
 
         if len(r2_values) < 3:
-            return []
+            # too few scores for series statistics; the gate's own rejections, and a
+            # result its scoring tool did not certify, still stand
+            early = [f for f in (_unscored_follower(r) for r in series_results) if f]
+            seen = {f["index"] for f in early}
+            for r in series_results:
+                rejected = _rejected_unit(r) if r["index"] not in seen else None
+                if rejected:
+                    early.append(rejected)
+                    seen.add(r["index"])
+            for r in series_results:
+                prov = (r.get("fit_quality") or {}).get("provisional") if r.get("success") else None
+                if prov and r["index"] not in seen:
+                    early.append({"index": r["index"], "name": r["name"], "reason": "provisional",
+                                  "r_squared": None, "series_mean": None, "series_std": None,
+                                  "deviation_sigma": None,
+                                  "recommendation": ("Provisional, not certified: "
+                                                     + str(prov[0] if isinstance(prov, list) else prov)
+                                                     + ". Acceptable as a result, never verified.")})
+            return early
 
         r2_array = np.array(r2_values)
         # Robust center/scale (median + MAD). A single bad fit can't mask itself
@@ -8233,17 +8471,25 @@ Return JSON with:
                 "deviation_sigma": None,
                 "recommendation": "Withheld: " + str(misfit[0]) + ". " + REPLAY_MISFIT_NOTE,
             } if misfit else None
+            g = _gate_of(r)
             if r2 is None:
                 if misfit_flag:
                     flagged.append(misfit_flag)
+                else:
+                    unscored = (_unscored_follower(r, median_r2, robust_scale)
+                                or _rejected_unit(r, median_r2, robust_scale))
+                    if unscored:
+                        flagged.append(unscored)
                 continue
 
-            g = _gate_of(r)
+            # the stamp first: it holds the rejection of the gate the unit was
+            # held to (its recipe's, on a replay), which ``g`` may not be
+            declared = _stamped_reject(r) or (g.declared_reject(r.get("fit_quality")) if g is not None else None)
             if g is not None:
-                below_threshold = not g.is_accept(r2)
+                below_threshold = (not g.is_accept(r2)) or bool(declared)
                 worse = (median_r2 - r2) if g.direction == "higher_is_better" else (r2 - median_r2)
             else:
-                below_threshold = r2 < self.r2_threshold
+                below_threshold = r2 < self.r2_threshold or bool(declared)
                 worse = median_r2 - r2
             # Robust z-score; only a fit *worse* than the series median can be an
             # outlier (a better-than-typical fit is never flagged).
@@ -8259,10 +8505,14 @@ Return JSON with:
                     recommendation = "Fit quality significantly worse than series average. Possible causes: phase transition, sample change, or instrument artifact. Consider detailed inspection - may indicate interesting physics."
                 elif below_threshold and not is_outlier:
                     reason = "below_threshold"
-                    recommendation = "Fit quality below threshold but in line with the rest of the series (R² is not a statistical outlier) — the chosen model may be suboptimal for this data type."
+                    recommendation = (f"Rejected: {declared}; its {g.label} alone would have passed."
+                                      if declared and g is not None and g.is_accept(r2) else
+                                      f"Rejected: {declared}." if declared else
+                                      "Fit quality below threshold but in line with the rest of the series (R² is not a statistical outlier) — the chosen model may be suboptimal for this data type.")
                 else:
                     reason = "outlier_and_below_threshold"
-                    recommendation = "Significant fit quality issue. This spectrum behaves differently from others in the series. Strongly recommend manual review - could indicate interesting physics, phase transition, or data quality issue."
+                    recommendation = ((f"Rejected: {declared}. " if declared else "")
+                                      + "Significant fit quality issue. This spectrum behaves differently from others in the series. Strongly recommend manual review - could indicate interesting physics, phase transition, or data quality issue.")
 
                 flagged.append({
                     "index": r["index"], "name": r["name"], "reason": reason,
@@ -8302,6 +8552,14 @@ Return JSON with:
                     "recommendation": ("Caveat, not a failure: a secondary component is pinned at its bound — "
                                        + describe_pinned(sec) + ". Those values are not measurements (no value); "
                                        "the declared targets' fit is unaffected.")})
+            prov = (r.get("fit_quality") or {}).get("provisional") if r.get("success") else None
+            if prov and r["index"] not in already:
+                already.add(r["index"])
+                flagged.append({
+                    "index": r["index"], "name": r["name"], "reason": "provisional",
+                    "r_squared": None, "series_mean": None, "series_std": None, "deviation_sigma": None,
+                    "recommendation": ("Provisional, not certified: " + str(prov[0] if isinstance(prov, list) else prov)
+                                       + ". Acceptable as a result, never verified.")})
             if wv and r["index"] not in already:
                 already.add(r["index"])
                 flagged.append({

@@ -67,6 +67,19 @@ class QualityGate:
     # fast-accept margin so a near-optimal accept_threshold can't demand an
     # unreachable value (reproduces the old R² `(1-accept)/2` cap).
     best_value: Optional[float] = None
+    # The ``fit_quality`` key, if any, that carries the workflow tool's OWN
+    # verdict ("accept" / "marginal" / "reject"): a tool that rejects its
+    # result is not overruled by where its number falls in this gate's band
+    # (the XRD scorers' ``verdict`` is their authoritative accept; their
+    # figure of merit can sit just above ``hard_reject_threshold`` on a
+    # match the scorer itself rejects).
+    verdict_key: Optional[str] = None
+    # The tool verdicts (under ``verdict_key``) that CERTIFY a result; any
+    # other non-reject verdict is acceptable (not retried) but provisional:
+    # never verified. None certifies whatever the band passes. Measured for
+    # XRD identification: matches the scorer called "marginal" were right in
+    # 1 of 21 checked against their data.
+    certifying_verdicts: Optional[tuple] = None
 
     @property
     def label(self) -> str:
@@ -132,6 +145,55 @@ class QualityGate:
         if f != f:  # NaN
             return None
         return f
+
+    def declared_reject(self, fit_quality: Optional[dict]) -> Optional[str]:
+        """The tool's own rejection, as a sentence, when the gate declares a
+        ``verdict_key`` and the result's ``fit_quality`` carries "reject"
+        there; else None. A caller treats it as a hard reject whatever the
+        metric's value."""
+        if not self.verdict_key or not isinstance(fit_quality, dict):
+            return None
+        v = fit_quality.get(self.verdict_key)
+        if isinstance(v, str) and v.strip().lower() == "reject":
+            return f"the scoring tool's own verdict is reject ({self.verdict_key} = {v!r})"
+        return None
+
+    def rejects(self, fit_quality: Optional[dict]) -> Optional[str]:
+        """Why this gate's own CODE rejects the result, as a sentence, else
+        None. No verifier is involved, so the answer is the same on an anchor
+        and on a follower that replays its recipe (which no verifier looks
+        at): the tool's declared reject (``declared_reject``), or, for a
+        workflow gate (``physical_review=False``: the score IS the
+        verification), a figure that was not reported or is past the hard
+        reject. A goodness-of-fit gate's band is its verifier's to judge and
+        is never answered here."""
+        declared = self.declared_reject(fit_quality)
+        if declared:
+            return declared
+        if self.physical_review or self.value_source != "result":
+            return None
+        value = self.extract(fit_quality)
+        if value is None:
+            return f"{self.label} was not reported, which its gate rejects (the score is the verification)"
+        if self.is_hard_reject(value):
+            return (f"{self.label} = {value:.4f} is past its gate's hard reject "
+                    f"({self.hard_reject_threshold:.4f})")
+        return None
+
+    def uncertified(self, fit_quality: Optional[dict]) -> Optional[str]:
+        """Why a result the gate does not reject is still not certified: the
+        tool's own verdict is not one of ``certifying_verdicts`` (a result the
+        gate rejects is ``rejects``'s: it is not "provisional"). None when it
+        certifies or nothing is declared."""
+        if not self.verdict_key or not self.certifying_verdicts or not isinstance(fit_quality, dict):
+            return None
+        v = fit_quality.get(self.verdict_key)
+        if not isinstance(v, str) or self.rejects(fit_quality):
+            return None
+        if v.strip().lower() in {str(c).lower() for c in self.certifying_verdicts}:
+            return None
+        return (f"the scoring tool's own verdict is {v.strip()!r}, not one that certifies "
+                f"({', '.join(self.certifying_verdicts)}): a provisional result")
 
     def is_accept(self, value: Optional[float]) -> bool:
         if value is None:
@@ -323,7 +385,9 @@ def gate_record(gate: Any) -> Optional[dict]:
     return {"metric": gate.metric, "accept_threshold": gate.accept_threshold,
             "hard_reject_threshold": gate.hard_reject_threshold, "direction": gate.direction,
             "physical_review": gate.physical_review, "value_source": gate.value_source,
-            **({"best_value": gate.best_value} if gate.best_value is not None else {})}
+            **({"best_value": gate.best_value} if gate.best_value is not None else {}),
+            **({"verdict_key": gate.verdict_key} if gate.verdict_key else {}),
+            **({"certifying_verdicts": list(gate.certifying_verdicts)} if gate.certifying_verdicts else {})}
 
 
 def from_mapping(data: dict) -> QualityGate:
@@ -342,6 +406,9 @@ def from_mapping(data: dict) -> QualityGate:
         physical_review=bool(data.get("physical_review", R_SQUARED_DEFAULT.physical_review)),
         best_value=(float(bv) if bv is not None else None),
         value_source=str(data.get("value_source", R_SQUARED_DEFAULT.value_source)),
+        verdict_key=(str(data["verdict_key"]) if data.get("verdict_key") else None),
+        certifying_verdicts=(tuple(str(v) for v in data["certifying_verdicts"])
+                             if data.get("certifying_verdicts") else None),
     )
 
 
