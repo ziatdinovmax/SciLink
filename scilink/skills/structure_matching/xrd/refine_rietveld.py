@@ -32,7 +32,8 @@ TOOL_SPEC = ToolSpec(
     signature=(
         "refine_rietveld(structure_path, two_theta, intensity, wavelength='CuKa', "
         "two_theta_range=None, refine_cell=True, refine_profile=True, "
-        "refine_atoms=False, n_background_terms=6, kalpha2_ratio=None) -> dict"
+        "refine_atoms=False, n_background_terms=6, kalpha2_ratio=None, "
+        "displacement='cif') -> dict"
     ),
     parameters={
         "structure_path": {"type": "str", "description": "CIF of the identified candidate phase (e.g. the best match from search_structures/score_xrd_match)."},
@@ -44,6 +45,7 @@ TOOL_SPEC = ToolSpec(
         "refine_profile": {"type": "bool", "description": "Refine isotropic sample broadening — microstrain (default True). This matches the peak WIDTHS and yields the microstrain output. Turn OFF only if the instrument profile already matches the data. Only microstrain is refined (not a separate crystallite size): the two are correlated broadening terms and refining both destabilizes sparse/high-symmetry patterns (a cubic pattern can collapse the cell)."},
         "refine_atoms": {"type": "bool", "description": "Also refine atomic coordinates + isotropic displacement parameters (default False). RISKY: on noisy or low-resolution data it can diverge or overfit. Enable ONLY for a high-quality pattern once the cell+profile fit is already good."},
         "n_background_terms": {"type": "int", "description": "Chebyshev background terms (default 6). RAISE (10–14) for a strongly curved or humped background; LOWER for a flat one."},
+        "displacement": {"type": "str | float", "description": "Atomic displacement (thermal) parameters used in the structure factors. Default \x27cif\x27: each element\x27s isotropic U from the structure file (multiplicity-weighted mean over its sites; anisotropic values converted to U_eq) wherever the file gives them, GSAS-II\x27s 0.01 Å² otherwise. \x27default\x27: 0.01 Å² for every atom. A number: that U (Å²) for every atom. Displacement parameters damp high-angle intensity, so values that do not fit the phase move weight between phases with different fall-off. The result\x27s \x27displacement_U\x27 lists the values used."},
         "kalpha2_ratio": {"type": "float | None", "description": "I(K-alpha2)/I(K-alpha1) to model. Default None = decided by wavelength: 0.5 (the natural, fixed ratio of an X-ray tube's K-alpha doublet) for an anode K-alpha name such as 'CuKa'; no K-alpha2 for 'CuKa1' or a number. Set 0 to force a single line (K-alpha2 stripped or monochromated although the source is labelled 'CuKa'); set a value to force the doublet at that ratio (e.g. the ratio stated in the data file header). A positive value needs a lab-anode wavelength."},
     },
     required=["structure_path", "two_theta", "intensity"],
@@ -87,6 +89,7 @@ def refine_rietveld(
     refine_atoms: bool = False,
     n_background_terms: int = 6,
     kalpha2_ratio: float = None,
+    displacement: Union[str, float] = "cif",
 ) -> dict[str, Any]:
     """Rietveld-refine a structure against a measured pattern. See ``TOOL_SPEC``.
 
@@ -98,4 +101,5 @@ def refine_rietveld(
         two_theta_range=two_theta_range, refine_cell=refine_cell,
         refine_profile=refine_profile, refine_atoms=refine_atoms,
         n_background_terms=n_background_terms, kalpha2_ratio=kalpha2_ratio,
+        displacement=displacement,
     )

@@ -186,3 +186,16 @@ def test_instrument_profile_stage_is_recorded(two_phase_cifs, tmp_path):
     assert len(st) == 1 and st[0]["terms"] == ["V", "W", "X"]
     off = ge.rietveld_refine_multiphase([si_cif, na_cif], x, y, wavelength=1.5406, refine_instrument=False)
     assert not [t for t in off["convergence_trace"] if t.get("stage") == "instrument_profile"]
+
+
+@pytest.mark.skipif(not (ge.gsas_available() and _pymatgen_available()), reason="needs GSAS-II + pymatgen")
+def test_displacement_setting_reaches_the_refinement(two_phase_cifs, tmp_path):
+    si_cif, na_cif = two_phase_cifs
+    x, y, _ = _forward_two_phase(si_cif, na_cif, 0.35, str(tmp_path))
+    fixed = ge.rietveld_refine_multiphase([si_cif, na_cif], x, y, wavelength=1.5406, displacement=0.02)
+    assert all(set(p["displacement_U"].values()) == {0.02} for p in fixed["phases"])
+    dflt = ge.rietveld_refine_multiphase([si_cif, na_cif], x, y, wavelength=1.5406, displacement="default")
+    assert all(p["displacement_U"] == {} for p in dflt["phases"])
+    assert fixed["profile_corr"] != dflt["profile_corr"]
+    with pytest.raises(ValueError):
+        ge.rietveld_refine_multiphase([si_cif, na_cif], x, y, wavelength=1.5406, displacement="nonsense")

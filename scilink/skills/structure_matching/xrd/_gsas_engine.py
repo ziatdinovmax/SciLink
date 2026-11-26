@@ -48,6 +48,7 @@ intensities, wavelength scaling) was independently verified before absorption.
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from typing import Any, Sequence
 
@@ -208,10 +209,151 @@ def _canonicalize_cif(structure_path: str, workdir: str, symprec: float = None) 
         # scattering factors are the standard for routine Rietveld.
         structure.remove_oxidation_states()
         out = os.path.join(workdir, "canonical.cif")
+        if symprec is not None:
+            symprec = _declared_symprec(structure_path, structure, symprec)
         CifWriter(structure, symprec=symprec).write_file(out)
         return out
     except Exception:
         return structure_path
+
+
+_SG_NUMBER_RE = re.compile(
+    r"^\s*_(?:space_group_IT_number|space_group\.IT_number|symmetry_Int_Tables_number)\s+(\d+)",
+    re.MULTILINE | re.IGNORECASE)
+
+
+def _declared_space_group(structure_path: str):
+    """The space-group number a CIF declares, or None."""
+    try:
+        with open(structure_path, encoding="utf-8", errors="ignore") as fh:
+            m = _SG_NUMBER_RE.search(fh.read())
+        return int(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
+def _declared_symprec(structure_path: str, structure, fallback: float) -> float:
+    """The tightest symmetry tolerance at which the parsed structure has the
+    space group its CIF declares; ``fallback`` when the CIF declares none or no
+    tolerance reproduces it. Re-detecting at a loose tolerance alone can
+    promote a slightly distorted structure to a higher symmetry (observed on
+    COD entries: a monoclinic C2/m superstructure became cubic Fm-3m, a Cmm2
+    phase Cmmm), and the refinement would then hold the wrong symmetry."""
+    declared = _declared_space_group(structure_path)
+    if not declared or declared == 1:
+        return fallback
+    try:
+        from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
+    except Exception:
+        return fallback
+    for tol in (1e-4, 1e-3, 1e-2, 3e-2, 0.1):
+        try:
+            if SpacegroupAnalyzer(structure, symprec=tol).get_space_group_number() == declared:
+                return tol
+        except Exception:
+            continue
+    return fallback
+
+
+_B_TO_U = 1.0 / (8.0 * np.pi ** 2)
+
+
+def _cif_displacements(structure_path: str) -> dict:
+    """Per-element isotropic displacement parameter U (Å^2) from a CIF's atom
+    sites: U_iso_or_equiv, else B_iso_or_equiv / 8 pi^2, else U_eq from the
+    anisotropic U11/U22/U33 (or B11..). Each element gets the mean over its
+    sites weighted by site multiplicity. Empty when the CIF carries none."""
+    try:
+        from pymatgen.io.cif import CifParser
+        blocks = CifParser(structure_path).as_dict()
+        blk = next(iter(blocks.values()))
+    except Exception:
+        return {}
+
+    def num(v):
+        try:
+            return float(re.sub(r"\(.*\)", "", str(v)))
+        except (TypeError, ValueError):
+            return None
+
+    def col(*keys):
+        for k in keys:
+            if k in blk:
+                v = blk[k]
+                return v if isinstance(v, list) else [v]
+        return None
+
+    labels = col("_atom_site_label") or []
+    types = col("_atom_site_type_symbol") or labels
+    u = col("_atom_site_U_iso_or_equiv")
+    b = col("_atom_site_B_iso_or_equiv")
+    per_label = {}
+    for i, lab in enumerate(labels):
+        val = num(u[i]) if u and i < len(u) else None
+        if val is None and b and i < len(b) and num(b[i]) is not None:
+            val = num(b[i]) * _B_TO_U
+        per_label[lab] = val
+    alab = col("_atom_site_aniso_label") or []
+    for key, scale in (("_atom_site_aniso_U_", 1.0), ("_atom_site_aniso_B_", _B_TO_U)):
+        diag = [col(key + d) for d in ("11", "22", "33")]
+        if alab and all(diag):
+            for i, lab in enumerate(alab):
+                vals = [num(c[i]) for c in diag if i < len(c)]
+                if per_label.get(lab) is None and len(vals) == 3 and None not in vals:
+                    per_label[lab] = scale * sum(vals) / 3.0
+
+    try:  # multiplicity weights: how many sites of the full cell carry each label
+        from pymatgen.core import Structure
+        counts = {}
+        for site in Structure.from_file(structure_path):
+            lab = getattr(site, "label", None)
+            if lab is not None:
+                counts[lab] = counts.get(lab, 0) + 1
+    except Exception:
+        counts = {}
+    acc = {}
+    for i, lab in enumerate(labels):
+        val = per_label.get(lab)
+        if val is None or not 0.0 < val < 0.25:
+            continue
+        el_m = re.match(r"[A-Z][a-z]?", str(types[i] if i < len(types) else lab))
+        if not el_m:
+            continue
+        w = counts.get(lab, 1)
+        s_, n_ = acc.get(el_m.group(0), (0.0, 0))
+        acc[el_m.group(0)] = (s_ + w * val, n_ + w)
+    return {el: s_ / n_ for el, (s_, n_) in acc.items() if n_}
+
+
+def _apply_displacements(phase, source_path: str, displacement) -> dict:
+    """Set the GSAS-II phase's atomic displacement parameters per
+    ``displacement``: 'cif' — each element's U from the source CIF where it
+    gives one (``_cif_displacements``), GSAS-II's default 0.01 Å^2 otherwise;
+    'default' — GSAS-II's default for every atom; a number — that U for every
+    atom. Returns {element: U} actually set (empty: nothing changed)."""
+    if displacement is None or (isinstance(displacement, str) and displacement.lower() == "default"):
+        return {}
+    if isinstance(displacement, str):
+        if displacement.lower() != "cif":
+            raise ValueError(f"displacement must be 'cif', 'default' or a number (Å^2), got {displacement!r}")
+        values = _cif_displacements(source_path)
+    else:
+        u = float(displacement)
+        if not 0.0 < u < 0.25:
+            raise ValueError(f"displacement U must be in (0, 0.25) Å^2, got {u}")
+        values = None
+    cx, ct, cs, cia = phase.data["General"]["AtomPtrs"]
+    used = {}
+    for atom in phase.data["Atoms"]:
+        el = re.sub(r"[^A-Za-z]", "", str(atom[ct]))[:2]
+        el = el[0].upper() + el[1:].lower() if el else el
+        val = float(displacement) if values is None else values.get(el)
+        if val is None:
+            continue
+        atom[cia] = "I"
+        atom[cia + 1] = float(val)
+        used[el] = round(float(val), 5)
+    return used
 
 
 def _load_g2sc():
@@ -370,6 +512,7 @@ def rietveld_refine(
     refine_atoms: bool = False,
     n_background_terms: int = 6,
     kalpha2_ratio: float = None,
+    displacement: Any = "cif",
 ) -> dict[str, Any]:
     """Rietveld-refine ``structure_path`` against a measured (two_theta, intensity)
     pattern with GSAS-II. Returns refined lattice + esd, fit metrics (Rwp and the
@@ -432,6 +575,7 @@ def rietveld_refine(
         gpx = G2sc.G2Project(newgpx=os.path.join(td, "riet.gpx"))
         hist = gpx.add_powder_histogram(xy, iparams=instf, fmthint="xye")
         phase = gpx.add_phase(cif, phasename="phase")
+        adp_used = _apply_displacements(phase, structure_path, displacement)
         gpx.link_histogram_phase(hist, phase)
         input_cell = dict(phase.get_cell())  # starting cell, to expose refinement drift
 
@@ -529,6 +673,7 @@ def rietveld_refine(
         "profile": prof,
         "wavelength": float(lam),
         "kalpha_doublet": _radiation_record(wavelength, kalpha2_ratio),
+        "displacement_U": adp_used,
         "structure_path": structure_path,
         "note": ("For arbitrary-unit data (no counting statistics) read 'profile_corr' "
                  "as the fit quality; 'Rwp' is inflated by nominal weights. If "
@@ -1196,6 +1341,8 @@ def rietveld_refine_multiphase(
     refine_instrument=True,
     instrument_terms=None,
     kalpha2_ratio=None,
+    displacement="cif",
+    _displacement_sources=None,
 ):
     """Multi-phase Rietveld: refine ALL phases against one measured pattern.
 
@@ -1216,7 +1363,13 @@ def rietveld_refine_multiphase(
     worse and the widths stay physical (see ``_instrument_profile_stage``).
     ``instrument_terms`` — which of U, V, W, X, Y (default ``_PROFILE_KEYS``).
 
-    ``kalpha2_ratio`` — override the K-alpha2 modelling (see ``_radiation``)."""
+    ``kalpha2_ratio`` — override the K-alpha2 modelling (see ``_radiation``).
+
+    ``displacement`` — atomic displacement parameters (see
+    ``_apply_displacements``): 'cif' (default) takes each element's U from the
+    structure file, 'default' leaves GSAS-II's 0.01 Å^2, a number sets that U.
+    ``_displacement_sources`` — internal: the original CIFs to read U from when
+    ``structure_paths`` are rewritten copies (the series warm start)."""
     import os
     import tempfile
 
@@ -1246,6 +1399,7 @@ def rietveld_refine_multiphase(
         gpx = G2sc.G2Project(newgpx=os.path.join(td, "riet.gpx"))
         hist = gpx.add_powder_histogram(xy, iparams=instf, fmthint="xye")
         phases = []
+        adp_used = {}
         input_cells = {}
         for i, p in enumerate(paths):
             # one canonicalization dir per phase: _canonicalize_cif writes a
@@ -1255,6 +1409,8 @@ def rietveld_refine_multiphase(
             cif = _canonicalize_cif(p, pd, symprec=0.1)
             name = f"phase{i}_{os.path.splitext(os.path.basename(p))[0][:24]}"
             ph = gpx.add_phase(cif, phasename=name)
+            adp_used[name] = _apply_displacements(
+                ph, (_displacement_sources or paths)[i], displacement)
             gpx.link_histogram_phase(hist, ph)
             if initial_fractions is not None:
                 ph.getHAPvalues(hist)["Scale"][0] = max(
@@ -1353,6 +1509,7 @@ def rietveld_refine_multiphase(
                                {k: float(v) for k, v in (cell_esd or {}).items()
                                 if isinstance(v, (int, float))},
                 "microstrain": mustrain,
+                "displacement_U": adp_used.get(ph.name, {}),
             })
 
         prof = {
@@ -1425,6 +1582,7 @@ def rietveld_refine_series(
     refine_instrument=True,
     instrument_terms=None,
     kalpha2_ratio=None,
+    displacement="cif",
 ):
     """Sequential multi-phase Rietveld across an in-situ series: a per-frame
     loop over the validated single-histogram staged protocol
@@ -1478,7 +1636,8 @@ def rietveld_refine_series(
                     n_background_terms=n_background_terms,
                     initial_fractions=prev_fracs if warm_start else None,
                     refine_instrument=refine_instrument,
-                    instrument_terms=instrument_terms, kalpha2_ratio=kalpha2_ratio)
+                    instrument_terms=instrument_terms, kalpha2_ratio=kalpha2_ratio,
+                    displacement=displacement, _displacement_sources=paths)
             except Exception as exc:
                 out_frames.append({"frame": k, "label": fr.get("label", k),
                                    "error": str(exc)[:200]})

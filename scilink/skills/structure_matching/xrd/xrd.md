@@ -398,6 +398,17 @@ say otherwise: 0 for a pattern whose K-alpha2 was stripped although it is
 labelled 'CuKa', or the ratio stated in the file header. A refinement's
 `kalpha_doublet` output records what was modelled.
 
+**Structure files for refinement.** `search_structures` saves a COD entry's
+own CIF, so the declared space group and the atomic displacement parameters
+reach the refinement tools; the engine keeps the declared space group (it no
+longer re-detects a higher symmetry at a loose tolerance). The refinement tools'
+`displacement` parameter (default `'cif'`) takes each element's U from the file
+where it gives one — about six in ten COD entries do; the rest, and computed
+structures, get GSAS-II's 0.01 Å². Pass `'default'` to use 0.01 Å² for every
+atom, or a number for a different fixed U (e.g. ~0.02–0.03 Å² for a soft or
+disordered phase whose file carries no values). The output's `displacement_U`
+lists the values used.
+
 **Narrowing the candidate list.** The `search_structures` `query` dict
 accepts three optional filters that often pay for themselves:
 

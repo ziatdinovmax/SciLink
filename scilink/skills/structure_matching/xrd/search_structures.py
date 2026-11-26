@@ -407,16 +407,33 @@ def _materialize_cifs(
     output_dir: Path,
     warnings: list[str],
 ) -> None:
-    """Write CIFs to ``output_dir`` for candidates that don't already have a path on disk."""
+    """Write CIFs to ``output_dir`` for candidates that don't already have a path on disk.
+
+    A candidate whose backend kept the database entry's own CIF (``_source_cif``,
+    e.g. COD) is copied VERBATIM: re-writing it from the parsed structure
+    (pymatgen's P1 output) drops the declared space group and the atomic
+    displacement parameters that refinement needs. Otherwise the parsed
+    structure is written (computed sources such as Materials Project)."""
+    import shutil
+
     output_dir.mkdir(parents=True, exist_ok=True)
     for cand in candidates:
         if cand.structure_path and Path(cand.structure_path).is_file():
             continue
+        path = output_dir / f"{cand.source}_{cand.id}.cif"
+        src = cand.metadata.get("_source_cif")
+        if src and Path(src).is_file():
+            try:
+                shutil.copyfile(src, path)
+                cand.structure_path = str(path)
+                continue
+            except Exception as e:
+                warnings.append(f"Could not copy the source CIF for {cand.source}:{cand.id} ({e}); "
+                                "writing it from the parsed structure")
         struct = cand.metadata.get("_structure")
         if struct is None:
             warnings.append(f"No structure object for {cand.source}:{cand.id} — cannot materialize CIF")
             continue
-        path = output_dir / f"{cand.source}_{cand.id}.cif"
         try:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(struct.to(fmt="cif"))

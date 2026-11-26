@@ -36,7 +36,7 @@ _SPEC_MULTI = ToolSpec(
         "wavelength='CuKa', two_theta_range=None, refine_cell=True, "
         "refine_profile=True, n_background_terms=6, "
         "initial_fractions=None, refine_instrument=True, instrument_terms=None, "
-        "kalpha2_ratio=None) -> dict"
+        "kalpha2_ratio=None, displacement='cif') -> dict"
     ),
     parameters={
         "structure_paths": {"type": "list[str]", "description": "CIFs of ALL phases in the mixture (≥2) — identify_mixture's structure_paths, or CIFs from search/simulate. Missing a real phase biases every fraction; include even minor confirmed phases."},
@@ -50,6 +50,7 @@ _SPEC_MULTI = ToolSpec(
         "refine_instrument": {"type": "bool", "description": "Refine the instrument profile (Caglioti V, W and Lorentzian X — the terms microstrain cannot mimic) after microstrain (default True) — the built-in profile is a generic lab template, and a profile that does not match the diffractometer moves intensity between overlapping phases. Guarded: kept only if the fit does not get worse and the widths stay physical (convergence_trace records it as instrument_profile, with rejected=True when undone). Turn OFF for an instrument whose profile is known to match the template."},
         "instrument_terms": {"type": "list[str]", "description": "Which instrument-profile terms refine_instrument refines. Default ['V','W','X']: Caglioti V and W (Gaussian width) and Lorentzian X — the terms isotropic microstrain cannot mimic. 'U' (Gaussian tan^2) and 'Y' (Lorentzian tan) duplicate microstrain broadening and can drive widths negative (the guard then undoes the stage); add them only with refine_profile=False."},
         "kalpha2_ratio": {"type": "float | None", "description": "I(K-alpha2)/I(K-alpha1) to model. Default None = decided by wavelength: 0.5 (the natural, fixed ratio of an X-ray tube's K-alpha doublet) for an anode K-alpha name such as 'CuKa'; no K-alpha2 for 'CuKa1' or a number. Set 0 to force a single line (K-alpha2 stripped or monochromated although the source is labelled 'CuKa'); set a value to force the doublet at that ratio (e.g. the ratio stated in the data file header). A positive value needs a lab-anode wavelength."},
+        "displacement": {"type": "str | float", "description": "Atomic displacement (thermal) parameters used in the structure factors. Default \x27cif\x27: each element\x27s isotropic U from the structure file (multiplicity-weighted mean over its sites; anisotropic values converted to U_eq) wherever the file gives them, GSAS-II\x27s 0.01 Å² otherwise. \x27default\x27: 0.01 Å² for every atom. A number: that U (Å²) for every atom. Displacement parameters damp high-angle intensity, so values that do not fit the phase move weight between phases with different fall-off. The result\x27s \x27displacement_U\x27 lists the values used."},
         "initial_fractions": {"type": "list[float]", "description": "Starting phase fractions aligned with structure_paths (default: all equal). SET THESE when abundances are very lopsided — a ~95% dominant phase with trace minors can diverge from an all-equal start (fractions pinned at 0/100, profile_corr well below a good fit's ~0.97). Seed from identify_mixture's intensity_share, or e.g. [1.0, 0.05, 0.05] for dominant-plus-traces, and RETRY with a corrected start on that signature."},
     },
     required=["structure_paths", "two_theta", "intensity"],
@@ -58,7 +59,7 @@ _SPEC_MULTI = ToolSpec(
         "{phase_name(str): fraction(float)} — read fractions from here; "
         "'phases' is a LIST of per-phase dicts (keys: phase_name, "
         "weight_fraction, lattice, input_lattice, lattice_esd, microstrain, "
-        "cell_runaway) — do NOT call .items() on it. Also: 'converged', "
+        "cell_runaway, displacement_U) — do NOT call .items() on it. Also: 'converged', "
         "'profile_corr' (READ THIS as fit quality for arbitrary-unit data; "
         "'Rwp' is inflated by nominal weights), 'gof', 'convergence_trace', "
         "'profile' (obs/calc/background/residual). QUANTITATIVE CAVEATS: "
@@ -95,7 +96,7 @@ _SPEC_SERIES = ToolSpec(
         "refine_rietveld_series(structure_paths, frames, wavelength='CuKa', "
         "two_theta_range=None, refine_cell=True, refine_profile=True, "
         "n_background_terms=6, warm_start=True, refine_instrument=True, "
-        "instrument_terms=None, kalpha2_ratio=None) -> dict"
+        "instrument_terms=None, kalpha2_ratio=None, displacement='cif') -> dict"
     ),
     parameters={
         "structure_paths": {"type": "list[str]", "description": "CIFs of the phase set present anywhere in the series (from the endpoints-first identification). Phases absent in a given frame refine to ~0 fraction there — include the union, not per-frame subsets."},
@@ -108,6 +109,7 @@ _SPEC_SERIES = ToolSpec(
         "refine_instrument": {"type": "bool", "description": "Refine the instrument profile per frame, guarded (default True; see refine_rietveld_multiphase)."},
         "instrument_terms": {"type": "list[str]", "description": "As refine_rietveld_multiphase (default ['V','W','X'])."},
         "kalpha2_ratio": {"type": "float | None", "description": "I(K-alpha2)/I(K-alpha1) to model. Default None = decided by wavelength: 0.5 (the natural, fixed ratio of an X-ray tube's K-alpha doublet) for an anode K-alpha name such as 'CuKa'; no K-alpha2 for 'CuKa1' or a number. Set 0 to force a single line (K-alpha2 stripped or monochromated although the source is labelled 'CuKa'); set a value to force the doublet at that ratio (e.g. the ratio stated in the data file header). A positive value needs a lab-anode wavelength."},
+        "displacement": {"type": "str | float", "description": "As refine_rietveld_multiphase (default 'cif': U from the structure files)."},
         "warm_start": {"type": "bool", "description": "Start each frame from the LAST CONVERGED frame's refined fractions and lattices (default True) — the standard sequential-refinement trick: cells evolve smoothly with T, so the warm start keeps the local optimizer in the right basin. Set False for non-contiguous or shuffled frames where carrying state across would mislead."},
     },
     required=["structure_paths", "frames"],
@@ -146,6 +148,7 @@ def refine_rietveld_multiphase(
     refine_instrument: bool = True,
     instrument_terms: Optional[Sequence[str]] = None,
     kalpha2_ratio: Optional[float] = None,
+    displacement: Union[str, float] = "cif",
 ) -> dict[str, Any]:
     """Multi-phase Rietveld → weight fractions. See ``_SPEC_MULTI``."""
     from ._gsas_engine import rietveld_refine_multiphase
@@ -157,7 +160,7 @@ def refine_rietveld_multiphase(
         initial_fractions=list(initial_fractions) if initial_fractions else None,
         refine_instrument=refine_instrument,
         instrument_terms=list(instrument_terms) if instrument_terms else None,
-        kalpha2_ratio=kalpha2_ratio)
+        kalpha2_ratio=kalpha2_ratio, displacement=displacement)
 
 
 def refine_rietveld_series(
@@ -172,6 +175,7 @@ def refine_rietveld_series(
     refine_instrument: bool = True,
     instrument_terms: Optional[Sequence[str]] = None,
     kalpha2_ratio: Optional[float] = None,
+    displacement: Union[str, float] = "cif",
 ) -> dict[str, Any]:
     """Sequential multi-phase Rietveld over a series. See ``_SPEC_SERIES``."""
     from ._gsas_engine import rietveld_refine_series
@@ -182,4 +186,4 @@ def refine_rietveld_series(
         n_background_terms=n_background_terms, warm_start=warm_start,
         refine_instrument=refine_instrument,
         instrument_terms=list(instrument_terms) if instrument_terms else None,
-        kalpha2_ratio=kalpha2_ratio)
+        kalpha2_ratio=kalpha2_ratio, displacement=displacement)

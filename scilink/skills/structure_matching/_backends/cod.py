@@ -215,6 +215,10 @@ class CODBackend:
                 space_group=sg,
                 metadata={
                     "_structure": struct,
+                    # the entry's own CIF (local archive or download cache):
+                    # materialized verbatim so the declared space group and the
+                    # atomic displacement parameters reach refinement
+                    "_source_cif": str(getattr(self, "_located", {}).get(int(cid), "")),
                     "spacegroup_number": sg_number,
                     "extra_elements": extra,
                 },
@@ -364,6 +368,17 @@ class CODBackend:
             return None
 
     def _locate_cif(self, cid: int) -> Optional[Path]:
+        """Path of COD entry ``cid``'s CIF (local archive, or the download
+        cache after fetching it), remembered in ``self._located`` so a query
+        can hand the file itself on without locating it twice."""
+        path = self._locate_cif_uncached(cid)
+        if path is not None:
+            if not hasattr(self, "_located"):
+                self._located = {}
+            self._located[int(cid)] = path
+        return path
+
+    def _locate_cif_uncached(self, cid: int) -> Optional[Path]:
         sid = str(cid)
         # 1. Local archive (preferred).
         if self.cif_dir:
