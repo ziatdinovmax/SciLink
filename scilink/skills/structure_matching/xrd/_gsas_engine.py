@@ -59,6 +59,8 @@ _ANODE_WAVELENGTHS = {
     "cuka": 1.5406, "cuka1": 1.54056, "cuka2": 1.54439,
     "moka": 0.71073, "moka1": 0.70930,
     "coka": 1.78897, "feka": 1.93604, "crka": 2.28970, "agka": 0.55941,
+    # K-alpha1 names resolve_wavelength returns for monochromated sources
+    "coka1": 1.788965, "feka1": 1.936042, "crka1": 2.289700, "agka1": 0.559421,
 }
 
 # GSAS-II instrument-parameter template (constant-wavelength lab diffractometer).
@@ -70,6 +72,74 @@ _INSTPRM_TEMPLATE = (
     "Type:PXC\nBank:1.0\nLam:{lam:.6f}\nPolariz.:0.7\nAzimuth:0.0\nZero:0.0\n"
     "U:2.0\nV:-2.0\nW:5.0\nX:0.0\nY:0.0\nZ:0.0\nSH/L:0.002\n"
 )
+
+
+# Characteristic K-alpha1 / K-alpha2 lines (Å) of the lab anodes. A sealed tube
+# or rotating anode without a K-alpha1 monochromator delivers BOTH lines, at the
+# fixed intensity ratio I(Ka2)/I(Ka1) = 0.5; refining such a pattern with one
+# wavelength leaves every reflection's Ka2 component unmodelled and biases the
+# phase scales (IUCr CPD QPA round robin, samples 1a-1h: MAE 1.87 -> 1.53 wt%).
+_KALPHA_DOUBLETS = {
+    "cu": (1.540593, 1.544414), "mo": (0.709300, 0.713590), "co": (1.788965, 1.792850),
+    "fe": (1.936042, 1.939980), "cr": (2.289700, 2.293606), "ag": (0.559421, 0.563813),
+}
+_KA2_KA1_RATIO = 0.5
+
+
+def _radiation(wavelength: Any, kalpha2_ratio: Any = None) -> tuple:
+    """(lambda1, lambda2 or None, I(L2)/I(L1)) for a refinement's instrument file.
+
+    An anode K-alpha alias ('CuKa', 'Mo Ka', ...) means the tube's K-alpha1 +
+    K-alpha2 doublet; a K-alpha1 alias ('CuKa1') or a number (a monochromated
+    lab line, a synchrotron wavelength) is a single line. ``resolve_wavelength``
+    returns 'CuKa1' when the metadata says K-alpha2 is absent (K-alpha1 /
+    primary monochromator).
+
+    ``kalpha2_ratio`` overrides that: 0 forces a single line, a positive value
+    the doublet at that I(Ka2)/I(Ka1) (needs a lab-anode wavelength)."""
+    l1, l2, ratio = _radiation_default(wavelength)
+    if kalpha2_ratio is None:
+        return l1, l2, ratio
+    r = float(kalpha2_ratio)
+    if r < 0:
+        raise ValueError(f"kalpha2_ratio must be >= 0, got {kalpha2_ratio!r}")
+    if r == 0:
+        return l1, None, 0.0
+    if l2 is None:
+        sym = next((k for k, (a, _) in _KALPHA_DOUBLETS.items() if abs(a - l1) < 0.002), None)
+        if sym is None:
+            raise ValueError(f"kalpha2_ratio={r} needs a lab-anode wavelength (CuKa, MoKa, ...); "
+                             f"{wavelength!r} is not one")
+        l1, l2 = _KALPHA_DOUBLETS[sym]
+    return l1, l2, r
+
+
+def _radiation_default(wavelength: Any) -> tuple:
+    if isinstance(wavelength, str):
+        key = wavelength.strip().lower().replace(" ", "").replace("-", "").replace("α", "a")
+        if key.endswith("ka") and key[:-2] in _KALPHA_DOUBLETS:
+            l1, l2 = _KALPHA_DOUBLETS[key[:-2]]
+            return l1, l2, _KA2_KA1_RATIO
+        if key.endswith("ka1") and key[:-3] in _KALPHA_DOUBLETS:
+            return _KALPHA_DOUBLETS[key[:-3]][0], None, 0.0
+    return _resolve_wavelength(wavelength), None, 0.0
+
+
+def _instprm(wavelength: Any, kalpha2_ratio: Any = None) -> str:
+    """GSAS-II instrument-parameter text for a refinement: the doublet keys
+    (Lam1/Lam2/I(L2)/I(L1)) for tube K-alpha radiation, Lam otherwise."""
+    l1, l2, ratio = _radiation(wavelength, kalpha2_ratio)
+    text = _INSTPRM_TEMPLATE.format(lam=l1)
+    if l2 is not None:
+        text = text.replace(f"Lam:{l1:.6f}\n",
+                            f"Lam1:{l1:.6f}\nLam2:{l2:.6f}\nI(L2)/I(L1):{ratio}\n")
+    return text
+
+
+def _radiation_record(wavelength: Any, kalpha2_ratio: Any = None):
+    """The K-alpha doublet a refinement modelled, or None for a single line."""
+    l1, l2, ratio = _radiation(wavelength, kalpha2_ratio)
+    return None if l2 is None else {"kalpha1": l1, "kalpha2": l2, "I(Ka2)/I(Ka1)": ratio}
 
 
 def _resolve_wavelength(wavelength: Any) -> float:
@@ -299,6 +369,7 @@ def rietveld_refine(
     refine_profile: bool = True,
     refine_atoms: bool = False,
     n_background_terms: int = 6,
+    kalpha2_ratio: float = None,
 ) -> dict[str, Any]:
     """Rietveld-refine ``structure_path`` against a measured (two_theta, intensity)
     pattern with GSAS-II. Returns refined lattice + esd, fit metrics (Rwp and the
@@ -356,7 +427,7 @@ def rietveld_refine(
         np.savetxt(xy, np.column_stack([x, y, esd]), fmt="%.6f")
         instf = os.path.join(td, "auto.instprm")
         with open(instf, "w", encoding="utf-8") as fh:
-            fh.write(_INSTPRM_TEMPLATE.format(lam=lam))
+            fh.write(_instprm(wavelength, kalpha2_ratio))
 
         gpx = G2sc.G2Project(newgpx=os.path.join(td, "riet.gpx"))
         hist = gpx.add_powder_histogram(xy, iparams=instf, fmthint="xye")
@@ -457,6 +528,7 @@ def rietveld_refine(
         "convergence_trace": trace,
         "profile": prof,
         "wavelength": float(lam),
+        "kalpha_doublet": _radiation_record(wavelength, kalpha2_ratio),
         "structure_path": structure_path,
         "note": ("For arbitrary-unit data (no counting statistics) read 'profile_corr' "
                  "as the fit quality; 'Rwp' is inflated by nominal weights. If "
@@ -565,6 +637,7 @@ def lebail_fit(
     extra_cycles: int = 2,
     observed_peaks: Sequence[float] = None,
     peak_tol_deg: float = 0.15,
+    kalpha2_ratio: float = None,
 ) -> dict[str, Any]:
     """Le Bail whole-pattern fit of a CANDIDATE CELL (no structure needed).
 
@@ -637,7 +710,7 @@ def lebail_fit(
         np.savetxt(xy, np.column_stack([x, y, np.sqrt(np.maximum(y, 1.0))]), fmt="%.6f")
         instf = os.path.join(td, "auto.instprm")
         with open(instf, "w", encoding="utf-8") as fh:
-            fh.write(_INSTPRM_TEMPLATE.format(lam=lam))
+            fh.write(_instprm(wavelength, kalpha2_ratio))
 
         gpx = G2sc.G2Project(newgpx=os.path.join(td, "lb.gpx"))
         hist = gpx.add_powder_histogram(xy, iparams=instf, fmthint="xye")
@@ -716,6 +789,7 @@ def lebail_fit(
         "convergence_trace": trace,
         "profile": prof,
         "wavelength": float(lam),
+        "kalpha_doublet": _radiation_record(wavelength, kalpha2_ratio),
         "note": (
             "Structure-free whole-pattern fit: profile_corr >= ~0.9 means the "
             "cell accounts for the pattern (cell_fits uses 0.8); <= ~0.6 means a "
@@ -1055,6 +1129,60 @@ def _wt_fractions(phases, hist) -> dict:
     return {k: (v / tot if tot > 0 else 0.0) for k, v in num.items()}
 
 
+# Instrument-profile terms refined: V, W (Gaussian) and X (Lorentzian, 1/cos)
+# — the ones isotropic microstrain cannot mimic. U (Gaussian tan^2) and Y
+# (Lorentzian tan) are degenerate with microstrain broadening; refining them
+# too drove U and Y negative on certified round-robin data (unphysical widths)
+# for no gain in accuracy.
+_PROFILE_KEYS = ("V", "W", "X")
+
+
+def _instrument_profile_stage(gpx, hist, two_theta, corr_fn, rwp_fn, trace,
+                              terms=_PROFILE_KEYS) -> bool:
+    """Refine the instrument profile (Caglioti V, W; Lorentzian X — see
+    ``_PROFILE_KEYS``) and keep it only if it helps: the whole-profile
+    correlation must not drop and the widths must stay physical (Gaussian
+    FWHM^2 = U tan^2(th) + V tan(th) + W > 0 over the measured range, X >= 0). Otherwise the template values are
+    restored and the refinement re-converged without them. Records the outcome
+    in ``trace``; returns whether the refined profile was kept."""
+    terms = [str(t).upper() for t in terms]
+    bad = [t for t in terms if t not in ("U", "V", "W", "X", "Y")]
+    if bad or not terms:
+        trace.append({"stage": "instrument_profile", "error": f"unknown instrument_terms {bad or terms}"})
+        return False
+    path = lambda k: ["Instrument Parameters", 0, k]  # noqa: E731
+    try:
+        before = {k: list(hist.getHistEntryValue(path(k))) for k in terms}
+    except Exception as exc:
+        trace.append({"stage": "instrument_profile", "error": str(exc)[:200]})
+        return False
+    c0, c1, kept = corr_fn(), float("nan"), False
+    try:
+        hist.set_refinements({"Instrument Parameters": list(terms)})
+        gpx.do_refinements([{}])
+        c1 = corr_fn()
+        v = {k: float(hist.getHistEntryValue(path(k))[1]) for k in ("U", "V", "W", "X", "Y")}
+        t = np.tan(np.radians(np.asarray(two_theta, dtype=float) / 2.0))
+        fwhm2 = v["U"] * t ** 2 + v["V"] * t + v["W"]
+        physical = bool(np.all(fwhm2 > 0) and v["X"] >= 0 and v["Y"] >= 0)
+        kept = bool(np.isfinite(c1) and physical and (not np.isfinite(c0) or c1 >= c0 - 1e-3))
+    except Exception as exc:
+        trace.append({"stage": "instrument_profile", "error": str(exc)[:200]})
+    if kept:
+        trace.append({"stage": "instrument_profile", "terms": list(terms), "Rwp": rwp_fn(), "profile_corr": c1})
+        return True
+    try:
+        hist.clear_refinements({"Instrument Parameters": list(terms)})
+        for k in terms:
+            hist.setHistEntryValue(path(k), before[k])
+        gpx.do_refinements([{}])
+    except Exception:
+        pass
+    trace.append({"stage": "instrument_profile", "terms": list(terms), "rejected": True, "profile_corr_tried": c1,
+                  "Rwp": rwp_fn(), "profile_corr": corr_fn()})
+    return False
+
+
 def rietveld_refine_multiphase(
     structure_paths,
     two_theta,
@@ -1065,18 +1193,30 @@ def rietveld_refine_multiphase(
     refine_profile=True,
     n_background_terms=6,
     initial_fractions=None,
+    refine_instrument=True,
+    instrument_terms=None,
+    kalpha2_ratio=None,
 ):
     """Multi-phase Rietveld: refine ALL phases against one measured pattern.
 
     Staged protocol mirroring ``rietveld_refine`` (background+scale -> zero ->
-    phase fractions -> mustrain -> cells), with per-phase HAP scale factors
+    phase fractions -> mustrain -> instrument profile -> cells), with per-phase HAP scale factors
     refined for every phase after the first (the first is absorbed by the
     histogram scale) and weight fractions computed from the GSAS convention
     w_i = f_i * M_cell,i / sum. Validated round-trip: fractions recovered to
     ~1e-3 and cells to <1e-4 A on a synthetic two-phase pattern.
 
     ``initial_fractions`` — optional starting HAP phase fractions aligned with
-    ``structure_paths`` (the series warm start); default all 1.0."""
+    ``structure_paths`` (the series warm start); default all 1.0.
+
+    ``refine_instrument`` — refine the instrument profile (V, W, X) after
+    microstrain; the template's generic values cannot match a given
+    diffractometer's peak shape, and a mis-shaped profile moves intensity
+    between overlapping phases. Guarded: kept only when the fit does not get
+    worse and the widths stay physical (see ``_instrument_profile_stage``).
+    ``instrument_terms`` — which of U, V, W, X, Y (default ``_PROFILE_KEYS``).
+
+    ``kalpha2_ratio`` — override the K-alpha2 modelling (see ``_radiation``)."""
     import os
     import tempfile
 
@@ -1101,7 +1241,7 @@ def rietveld_refine_multiphase(
                    fmt="%.6f")
         instf = os.path.join(td, "auto.instprm")
         with open(instf, "w", encoding="utf-8") as fh:
-            fh.write(_INSTPRM_TEMPLATE.format(lam=lam))
+            fh.write(_instprm(wavelength, kalpha2_ratio))
 
         gpx = G2sc.G2Project(newgpx=os.path.join(td, "riet.gpx"))
         hist = gpx.add_powder_histogram(xy, iparams=instf, fmthint="xye")
@@ -1155,6 +1295,9 @@ def rietveld_refine_multiphase(
         _stage("phase_fractions", hap={"Scale": True}, hap_phases=phases[1:])
         if refine_profile:
             _stage("mustrain", {"set": {"Mustrain": {"type": "isotropic", "refine": True}}})
+        if refine_instrument:
+            _instrument_profile_stage(gpx, hist, x, _corr, _rwp, trace,
+                                      terms=instrument_terms or _PROFILE_KEYS)
         if refine_cell:
             # cells ONE PHASE AT A TIME, dominant first: a joint cells stage
             # lets a weak phase's ill-determined cell run away on the other
@@ -1244,6 +1387,7 @@ def rietveld_refine_multiphase(
         "convergence_trace": trace,
         "profile": prof,
         "wavelength": float(lam),
+        "kalpha_doublet": _radiation_record(wavelength, kalpha2_ratio),
         "note": ("Weight fractions follow the GSAS convention w_i = f_i*M_cell,i/sum "
                  "— quantitative ONLY when all crystalline phases are included and "
                  "microabsorption is negligible; an amorphous component is invisible "
@@ -1278,6 +1422,9 @@ def rietveld_refine_series(
     refine_profile=True,
     n_background_terms=6,
     warm_start=True,
+    refine_instrument=True,
+    instrument_terms=None,
+    kalpha2_ratio=None,
 ):
     """Sequential multi-phase Rietveld across an in-situ series: a per-frame
     loop over the validated single-histogram staged protocol
@@ -1329,7 +1476,9 @@ def rietveld_refine_series(
                     wavelength=wavelength, two_theta_range=two_theta_range,
                     refine_cell=refine_cell, refine_profile=refine_profile,
                     n_background_terms=n_background_terms,
-                    initial_fractions=prev_fracs if warm_start else None)
+                    initial_fractions=prev_fracs if warm_start else None,
+                    refine_instrument=refine_instrument,
+                    instrument_terms=instrument_terms, kalpha2_ratio=kalpha2_ratio)
             except Exception as exc:
                 out_frames.append({"frame": k, "label": fr.get("label", k),
                                    "error": str(exc)[:200]})

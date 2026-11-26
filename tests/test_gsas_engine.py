@@ -443,3 +443,56 @@ def test_full_simulation_physics(tmp_path):
     assert np.min(np.abs(tt - 47.30)) < 0.15    # (220)
     i111 = int(np.argmin(np.abs(tt - 28.44)))
     assert r["d_spacings"][i111] == pytest.approx(3.1355, abs=0.01)
+
+
+def test_radiation_tube_kalpha_is_a_doublet():
+    # a lab-anode K-alpha name is the tube's K-alpha1 + K-alpha2 at 2:1
+    l1, l2, ratio = ge._radiation("CuKa")
+    assert l1 == pytest.approx(1.540593) and l2 == pytest.approx(1.544414) and ratio == 0.5
+    for name in ("Mo Ka", "co-ka", "FeKa", "CrKa", "AgKa"):
+        l1, l2, ratio = ge._radiation(name)
+        assert l2 is not None and l2 > l1 and ratio == 0.5
+
+
+def test_radiation_kalpha1_and_numbers_are_single_lines():
+    assert ge._radiation("CuKa1") == (pytest.approx(1.540593), None, 0.0)
+    assert ge._radiation("MoKa1")[1] is None
+    assert ge._radiation(0.49591) == (0.49591, None, 0.0)   # synchrotron
+    assert ge._radiation(1.5406)[1] is None                 # a bare number is taken as one line
+    for name in ("CoKa1", "FeKa1", "CrKa1", "AgKa1"):        # names resolve_wavelength can return
+        assert ge._resolve_wavelength(name) > 0
+
+
+def test_instprm_writes_the_doublet_keys_only_for_a_doublet():
+    d = ge._instprm("CuKa")
+    assert "Lam1:1.540593" in d and "Lam2:1.544414" in d and "I(L2)/I(L1):0.5" in d
+    assert "\nLam:" not in d
+    s = ge._instprm(0.7749)
+    assert "Lam:0.774900" in s and "Lam1" not in s and "Lam2" not in s
+    assert ge._radiation_record("CuKa1") is None
+    assert ge._radiation_record("CuKa")["I(Ka2)/I(Ka1)"] == 0.5
+
+
+def test_kalpha2_ratio_overrides_the_wavelength_default():
+    # 0 forces one line even for a tube K-alpha name
+    assert ge._radiation("CuKa", kalpha2_ratio=0) == (pytest.approx(1.540593), None, 0.0)
+    # a positive ratio forces the doublet, also from a K-alpha1 name or the anode's K-alpha1 number
+    assert ge._radiation("CuKa1", kalpha2_ratio=0.48)[1:] == (pytest.approx(1.544414), 0.48)
+    assert ge._radiation(1.5406, kalpha2_ratio=0.5)[1] == pytest.approx(1.544414)
+    assert "I(L2)/I(L1):0.45" in ge._instprm("MoKa", kalpha2_ratio=0.45)
+    with pytest.raises(ValueError):
+        ge._radiation(0.7749, kalpha2_ratio=0.5)     # no anode, no K-alpha2 line to model
+    with pytest.raises(ValueError):
+        ge._radiation("CuKa", kalpha2_ratio=-1)
+
+
+def test_instrument_profile_default_terms_exclude_microstrain_degenerate_ones():
+    # U (Gaussian tan^2) and Y (Lorentzian tan) duplicate isotropic microstrain
+    assert ge._PROFILE_KEYS == ("V", "W", "X")
+
+
+def test_instrument_profile_stage_rejects_unknown_terms():
+    trace = []
+    assert ge._instrument_profile_stage(None, None, [10.0, 20.0], lambda: 0.9, lambda: 10.0,
+                                        trace, terms=["Q"]) is False
+    assert "unknown instrument_terms" in trace[-1]["error"]

@@ -32,18 +32,19 @@ TOOL_SPEC = ToolSpec(
     signature=(
         "refine_rietveld(structure_path, two_theta, intensity, wavelength='CuKa', "
         "two_theta_range=None, refine_cell=True, refine_profile=True, "
-        "refine_atoms=False, n_background_terms=6) -> dict"
+        "refine_atoms=False, n_background_terms=6, kalpha2_ratio=None) -> dict"
     ),
     parameters={
         "structure_path": {"type": "str", "description": "CIF of the identified candidate phase (e.g. the best match from search_structures/score_xrd_match)."},
         "two_theta": {"type": "list[float]", "description": "Measured 2θ axis (degrees)."},
         "intensity": {"type": "list[float]", "description": "Measured intensity at each 2θ (raw, with background; do NOT background-subtract — Rietveld fits the background)."},
-        "wavelength": {"type": "str | float", "description": "Source ('CuKa','MoKa',…) or wavelength in Å. Must match how the pattern was collected."},
+        "wavelength": {"type": "str | float", "description": "Source ('CuKa','MoKa',…) or wavelength in Å. Must match how the pattern was collected. Pass resolve_wavelength(system_info) unchanged: an anode K-alpha name ('CuKa') is refined as the K-alpha1/K-alpha2 doublet, 'CuKa1' or a number as a single line."},
         "two_theta_range": {"type": "tuple", "description": "Optional (min,max) crop of the measured pattern before refining — exclude a noisy low-angle upturn or an empty high-angle tail. None = full range."},
         "refine_cell": {"type": "bool", "description": "Refine the unit-cell parameters (default True). Turn OFF to hold a trusted reference cell fixed, or when the data is too sparse to constrain it."},
         "refine_profile": {"type": "bool", "description": "Refine isotropic sample broadening — microstrain (default True). This matches the peak WIDTHS and yields the microstrain output. Turn OFF only if the instrument profile already matches the data. Only microstrain is refined (not a separate crystallite size): the two are correlated broadening terms and refining both destabilizes sparse/high-symmetry patterns (a cubic pattern can collapse the cell)."},
         "refine_atoms": {"type": "bool", "description": "Also refine atomic coordinates + isotropic displacement parameters (default False). RISKY: on noisy or low-resolution data it can diverge or overfit. Enable ONLY for a high-quality pattern once the cell+profile fit is already good."},
         "n_background_terms": {"type": "int", "description": "Chebyshev background terms (default 6). RAISE (10–14) for a strongly curved or humped background; LOWER for a flat one."},
+        "kalpha2_ratio": {"type": "float | None", "description": "I(K-alpha2)/I(K-alpha1) to model. Default None = decided by wavelength: 0.5 (the natural, fixed ratio of an X-ray tube's K-alpha doublet) for an anode K-alpha name such as 'CuKa'; no K-alpha2 for 'CuKa1' or a number. Set 0 to force a single line (K-alpha2 stripped or monochromated although the source is labelled 'CuKa'); set a value to force the doublet at that ratio (e.g. the ratio stated in the data file header). A positive value needs a lab-anode wavelength."},
     },
     required=["structure_path", "two_theta", "intensity"],
     returns=(
@@ -85,6 +86,7 @@ def refine_rietveld(
     refine_profile: bool = True,
     refine_atoms: bool = False,
     n_background_terms: int = 6,
+    kalpha2_ratio: float = None,
 ) -> dict[str, Any]:
     """Rietveld-refine a structure against a measured pattern. See ``TOOL_SPEC``.
 
@@ -95,5 +97,5 @@ def refine_rietveld(
         structure_path, two_theta, intensity, wavelength=wavelength,
         two_theta_range=two_theta_range, refine_cell=refine_cell,
         refine_profile=refine_profile, refine_atoms=refine_atoms,
-        n_background_terms=n_background_terms,
+        n_background_terms=n_background_terms, kalpha2_ratio=kalpha2_ratio,
     )

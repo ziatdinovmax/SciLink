@@ -386,6 +386,18 @@ The resolver reads structured `experiment.wavelength` / `source` /
 canonical source names. When metadata is silent it returns the default
 `'CuKa'`, so the call is safe even on patterns with no metadata at all.
 
+Pass the same value to the refinement tools (`refine_rietveld`,
+`refine_rietveld_multiphase`, `refine_rietveld_series`,
+`validate_cell_lebail`). There an anode K-alpha name (`'CuKa'`) is refined as
+the tube's K-alpha1 + K-alpha2 doublet at the natural 2:1 ratio, and
+`'CuKa1'` or a number in Å as a single line. The resolver returns `'CuKa1'`
+only when the metadata says K-alpha2 is out of the beam (K-alpha1, strictly
+monochromatic, primary/Johansson monochromator), and a bare number (e.g. a
+synchrotron wavelength) unchanged. Override with `kalpha2_ratio` when the data
+say otherwise: 0 for a pattern whose K-alpha2 was stripped although it is
+labelled 'CuKa', or the ratio stated in the file header. A refinement's
+`kalpha_doublet` output records what was modelled.
+
 **Narrowing the candidate list.** The `search_structures` `query` dict
 accepts three optional filters that often pay for themselves:
 

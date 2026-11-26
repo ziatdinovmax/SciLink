@@ -37,20 +37,21 @@ TOOL_SPEC = ToolSpec(
         "validate_cell_lebail(two_theta, intensity, cell, bravais='Cubic-P', "
         "wavelength='CuKa', two_theta_range=None, refine_cell=True, "
         "refine_zero=True, n_background_terms=6, extra_cycles=2, "
-        "observed_peaks=None, peak_tol_deg=0.15) -> dict"
+        "observed_peaks=None, peak_tol_deg=0.15, kalpha2_ratio=None) -> dict"
     ),
     parameters={
         "two_theta": {"type": "list[float]", "description": "Measured 2θ axis (degrees)."},
         "intensity": {"type": "list[float]", "description": "Measured intensity (raw, with background — the fit models the background)."},
         "cell": {"type": "dict | list", "description": "Candidate cell: an index_pattern candidate_cells entry (dict with a,b,c,alpha,beta,gamma) or a 6-sequence."},
         "bravais": {"type": "str", "description": "GSAS Bravais name from index_pattern ('Tetragonal-P', 'Cubic-F', …) — mapped to a generic space group carrying the lattice extinctions — or an explicit H-M space-group symbol when known ('P 42/m n m')."},
-        "wavelength": {"type": "str | float", "description": "Source ('CuKa','MoKa',…) or wavelength in Å; must match the measurement."},
+        "wavelength": {"type": "str | float", "description": "Source ('CuKa','MoKa',…) or wavelength in Å; must match the measurement. Pass resolve_wavelength(system_info) unchanged: an anode K-alpha name ('CuKa') is refined as the K-alpha1/K-alpha2 doublet, 'CuKa1' or a number as a single line."},
         "two_theta_range": {"type": "tuple", "description": "Optional (min,max) crop — exclude a noisy low-angle upturn or empty tail."},
         "refine_cell": {"type": "bool", "description": "Refine the cell during the fit (default True): a correct approximate cell polishes to the precise one, structure-free. Turn OFF to test a cell exactly as given."},
         "refine_zero": {"type": "bool", "description": "Refine the 2θ zero offset (default True)."},
         "n_background_terms": {"type": "int", "description": "Chebyshev background terms (default 6). RAISE (10–14) for strongly curved backgrounds."},
         "extra_cycles": {"type": "int", "description": "Extra intensity-extraction cycles after the staged fit (default 2) — Le Bail intensities converge iteratively; RAISE if profile_corr is still climbing in the convergence_trace."},
         "observed_peaks": {"type": "list[float]", "description": "Optional measured peak positions (extract_peaks' 'positions'). When given, each is checked against the reflections the fitted cell generates: the returned 'unaccounted_peaks' are direct evidence of an impurity phase (a few, on a good fit) or a wrong/subcell (many)."},
+        "kalpha2_ratio": {"type": "float | None", "description": "I(K-alpha2)/I(K-alpha1) to model. Default None = decided by wavelength: 0.5 (the natural, fixed ratio of an X-ray tube's K-alpha doublet) for an anode K-alpha name such as 'CuKa'; no K-alpha2 for 'CuKa1' or a number. Set 0 to force a single line (K-alpha2 stripped or monochromated although the source is labelled 'CuKa'); set a value to force the doublet at that ratio (e.g. the ratio stated in the data file header). A positive value needs a lab-anode wavelength."},
         "peak_tol_deg": {"type": "float", "description": "Match window for the peak accounting (default 0.15°). RAISE for broad peaks or residual zero error."},
     },
     required=["two_theta", "intensity", "cell"],
@@ -88,6 +89,7 @@ def validate_cell_lebail(
     extra_cycles: int = 2,
     observed_peaks=None,
     peak_tol_deg: float = 0.15,
+    kalpha2_ratio: float = None,
 ) -> dict[str, Any]:
     """Le Bail whole-pattern validation of a candidate cell. See ``TOOL_SPEC``.
 
@@ -99,5 +101,5 @@ def validate_cell_lebail(
         two_theta_range=two_theta_range, refine_cell=refine_cell,
         refine_zero=refine_zero, n_background_terms=n_background_terms,
         extra_cycles=extra_cycles, observed_peaks=observed_peaks,
-        peak_tol_deg=peak_tol_deg,
+        peak_tol_deg=peak_tol_deg, kalpha2_ratio=kalpha2_ratio,
     )
