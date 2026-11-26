@@ -560,10 +560,10 @@ def test_the_realtime_profile_and_the_loop_refuse_a_bare_script_and_a_reuse_name
     assert [r["unit"] for r in series_recipes(json.loads((run / "analysis_results.json").read_text()))] == ["T=300K", "T=500K"]
     assert prior_recipe_scripts(run, single_name="fitting_script.py") == [
         ("M1", "T_300K.py (the series' locked recipe, regime R1, 1 of 2, the anchor refit since)"),
-        ("M2", "T_500K.py (the series' locked recipe, regime R2, 2 of 2, its anchor's gate did not pass)")]
+        ("M2", "T_500K.py (the series' locked recipe, regime R2, 2 of 2, its anchor is not verified)")]
     assert [src for _, src in _prior_curve_fit_recipes({"prior_analysis_paths": [str(run)]})] == [
         "run: T_300K.py (the series' locked recipe, regime R1, 1 of 2, the anchor refit since)",
-        "run: T_500K.py (the series' locked recipe, regime R2, 2 of 2, its anchor's gate did not pass)"]
+        "run: T_500K.py (the series' locked recipe, regime R2, 2 of 2, its anchor is not verified)"]
 
 
 def test_a_multi_regime_prior_run_is_replayed_regime_by_regime(tmp_path, monkeypatch):

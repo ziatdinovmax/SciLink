@@ -7,6 +7,7 @@ quality_gate:
   direction: higher_is_better
   physical_review: false   # workflow-scoring gate: score_xrd_match_robust IS the verification
   verdict_key: verdict     # the scorer's own accept/marginal/reject: a reject is never passed by the band
+  certifying_verdicts: [accept]   # a "marginal" match is reported as provisional, never verified
 ---
 # XRD Structure Matching Skill
 

@@ -74,6 +74,12 @@ class QualityGate:
     # figure of merit can sit just above ``hard_reject_threshold`` on a
     # match the scorer itself rejects).
     verdict_key: Optional[str] = None
+    # The tool verdicts (under ``verdict_key``) that CERTIFY a result; any
+    # other non-reject verdict is acceptable (not retried) but provisional:
+    # never verified. None certifies whatever the band passes. Measured for
+    # XRD identification: matches the scorer called "marginal" were right in
+    # 1 of 21 checked against their data.
+    certifying_verdicts: Optional[tuple] = None
 
     @property
     def label(self) -> str:
@@ -151,6 +157,20 @@ class QualityGate:
         if isinstance(v, str) and v.strip().lower() == "reject":
             return f"the scoring tool's own verdict is reject ({self.verdict_key} = {v!r})"
         return None
+
+    def uncertified(self, fit_quality: Optional[dict]) -> Optional[str]:
+        """Why a result the gate does not reject is still not certified: the
+        tool's own verdict is not one of ``certifying_verdicts`` (a reject is
+        ``declared_reject``'s). None when it certifies or nothing is declared."""
+        if not self.verdict_key or not self.certifying_verdicts or not isinstance(fit_quality, dict):
+            return None
+        v = fit_quality.get(self.verdict_key)
+        if not isinstance(v, str) or self.declared_reject(fit_quality):
+            return None
+        if v.strip().lower() in {str(c).lower() for c in self.certifying_verdicts}:
+            return None
+        return (f"the scoring tool's own verdict is {v.strip()!r}, not one that certifies "
+                f"({', '.join(self.certifying_verdicts)}): a provisional result")
 
     def is_accept(self, value: Optional[float]) -> bool:
         if value is None:
@@ -343,7 +363,8 @@ def gate_record(gate: Any) -> Optional[dict]:
             "hard_reject_threshold": gate.hard_reject_threshold, "direction": gate.direction,
             "physical_review": gate.physical_review, "value_source": gate.value_source,
             **({"best_value": gate.best_value} if gate.best_value is not None else {}),
-            **({"verdict_key": gate.verdict_key} if gate.verdict_key else {})}
+            **({"verdict_key": gate.verdict_key} if gate.verdict_key else {}),
+            **({"certifying_verdicts": list(gate.certifying_verdicts)} if gate.certifying_verdicts else {})}
 
 
 def from_mapping(data: dict) -> QualityGate:
@@ -363,6 +384,8 @@ def from_mapping(data: dict) -> QualityGate:
         best_value=(float(bv) if bv is not None else None),
         value_source=str(data.get("value_source", R_SQUARED_DEFAULT.value_source)),
         verdict_key=(str(data["verdict_key"]) if data.get("verdict_key") else None),
+        certifying_verdicts=(tuple(str(v) for v in data["certifying_verdicts"])
+                             if data.get("certifying_verdicts") else None),
     )
 
 

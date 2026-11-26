@@ -174,7 +174,7 @@ def _canonical_r2(y, fit):
 
 
 # Flags that are caveats on a fit that stands, never failures or refit reasons.
-CAVEAT_FLAGS = frozenset({"secondary_pin", "not_measured", "withheld_values"})
+CAVEAT_FLAGS = frozenset({"secondary_pin", "not_measured", "withheld_values", "provisional"})
 
 # What a reader of a not-measured band is told. A value the script derived
 # from that band elsewhere (a ratio, a relative intensity, a total) cannot be
@@ -2792,6 +2792,8 @@ class GenerateCurveFittingReportController:
         if gate_value is not None:
             if gate.declared_reject(fit_quality):
                 badge_class, label = "quality-poor", "Poor"
+            elif gate.uncertified(fit_quality) or fit_quality.get("provisional"):
+                badge_class, label = "quality-ok", "Provisional"
             elif gate.is_accept(gate_value):
                 badge_class, label = "quality-good", "Good"
             elif gate.is_hard_reject(gate_value):
@@ -4985,6 +4987,25 @@ Your guidance: '''
         # of eyeballing a dynamic-range-crushed plot. Skipped silently if fit.npy
         # is absent (older/refit scripts) so this never breaks the fit path.
         fit_quality = dict(fit_results.get("fit_quality", {}) or {})
+        # a result its own scoring tool did not certify (an XRD match the
+        # scorer called "marginal") is acceptable — not retried — but
+        # provisional: it is never verified (``fit_check_withheld``)
+        # (the run's gate, and a replayed recipe's recorded gate: a replay is
+        # judged by the gate its recipe was approved under; either one not
+        # certifying is enough). A list, as every caveat in fit_quality: the
+        # feature table takes scalars only, so this adds no column.
+        # the marker is the gate's word, never the script's: a script that
+        # writes its own "provisional" key would withhold any skill's unit
+        fit_quality.pop("provisional", None)
+        _cert_gates = [_gate(state)]
+        if state.get("_reuse_gate"):
+            try:
+                _cert_gates.append(self._reuse_gate_decision(state, warn=False)[0])
+            except Exception:  # noqa: BLE001 - a malformed record is no record
+                pass
+        _provisional = next((w for w in (g.uncertified(fit_quality) for g in _cert_gates) if w), None)
+        if _provisional:
+            fit_quality["provisional"] = [_provisional]
         if pinned:
             fit_quality["pinned_at_bound"] = pinned
         if secondary_pins:
@@ -8206,8 +8227,20 @@ Return JSON with:
                     r2_values.append(r2)
 
         if len(r2_values) < 3:
-            # too few scores for series statistics; the gate's own rejections still stand
-            return [f for f in (_unscored_follower(r) for r in series_results) if f]
+            # too few scores for series statistics; the gate's own rejections, and a
+            # result its scoring tool did not certify, still stand
+            early = [f for f in (_unscored_follower(r) for r in series_results) if f]
+            seen = {f["index"] for f in early}
+            for r in series_results:
+                prov = (r.get("fit_quality") or {}).get("provisional") if r.get("success") else None
+                if prov and r["index"] not in seen:
+                    early.append({"index": r["index"], "name": r["name"], "reason": "provisional",
+                                  "r_squared": None, "series_mean": None, "series_std": None,
+                                  "deviation_sigma": None,
+                                  "recommendation": ("Provisional, not certified: "
+                                                     + str(prov[0] if isinstance(prov, list) else prov)
+                                                     + ". Acceptable as a result, never verified.")})
+            return early
 
         r2_array = np.array(r2_values)
         # Robust center/scale (median + MAD). A single bad fit can't mask itself
@@ -8355,6 +8388,14 @@ Return JSON with:
                     "recommendation": ("Caveat, not a failure: a secondary component is pinned at its bound — "
                                        + describe_pinned(sec) + ". Those values are not measurements (no value); "
                                        "the declared targets' fit is unaffected.")})
+            prov = (r.get("fit_quality") or {}).get("provisional") if r.get("success") else None
+            if prov and r["index"] not in already:
+                already.add(r["index"])
+                flagged.append({
+                    "index": r["index"], "name": r["name"], "reason": "provisional",
+                    "r_squared": None, "series_mean": None, "series_std": None, "deviation_sigma": None,
+                    "recommendation": ("Provisional, not certified: " + str(prov[0] if isinstance(prov, list) else prov)
+                                       + ". Acceptable as a result, never verified.")})
             if wv and r["index"] not in already:
                 already.add(r["index"])
                 flagged.append({
