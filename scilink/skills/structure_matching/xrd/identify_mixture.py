@@ -45,6 +45,24 @@ def _d_to_tt(d: np.ndarray, lam: float) -> np.ndarray:
     return 2.0 * np.degrees(np.arcsin(s))
 
 
+def _component_fom(df, source_id, tt, yy, lam: float, tol_deg: float) -> float:
+    """Candidate-side (component-mode) figure of merit of one library entry
+    against the FULL measured peak list."""
+    from .score_match_robust import score_xrd_match_robust
+    row = df[df["source_id"] == source_id].iloc[0]
+    ctt = _d_to_tt(np.asarray(row["ds"], dtype=float), lam)
+    cii = np.asarray(row["intensities"], dtype=float)
+    fin = np.isfinite(ctt)
+    try:
+        sc = score_xrd_match_robust(
+            ctt[fin].tolist(), cii[fin].tolist(),
+            exp_peaks={"positions": list(map(float, tt)), "intensities": list(map(float, yy))},
+            algorithm="hanawalt", tol_deg=tol_deg, mode="component")
+        return float(sc.get("figure_of_merit") or 0.0)
+    except Exception:  # noqa: BLE001 - an unscorable entry cannot pass the gate
+        return 0.0
+
+
 TOOL_SPEC = ToolSpec(
     name="identify_mixture",
     description=(
@@ -66,7 +84,8 @@ TOOL_SPEC = ToolSpec(
         "library_path=None, max_phases=3, fom_threshold=0.5, tol_deg=0.3, "
         "min_residual_peaks=4, shared_line_floor=0.3, absent_tiebreak_band=0.1, "
         "n_key_lines=3, n_query_lines=10, confirm=True, "
-        "materialize_dir='./fp_matches') -> dict"
+        "materialize_dir='./fp_matches', component_fom_min=0.0, "
+        "n_candidates=10) -> dict"
     ),
     parameters={
         "two_theta": {"type": "list[float]", "description": "Measured peak positions (2θ°) of the FULL mixture pattern — extract_peaks' 'positions'. Feed ALL confident peaks (lower extract_peaks' prominence_frac for mixtures — each phase's key lines hide among more peaks)."},
@@ -83,6 +102,8 @@ TOOL_SPEC = ToolSpec(
         "n_query_lines": {"type": "int", "description": "Query's strongest lines the key lines match against (default 10, higher than single-phase search's 8 — a mixture's phase key lines hide among more measured lines)."},
         "confirm": {"type": "bool", "description": "Run the joint multi-phase MILP confirmation over the accepted ensemble (default True; needs pulp). The MILP's verdict/coverage is the authoritative accept — a phase the joint solver leaves inactive or with low coverage is a subtraction artifact."},
         "materialize_dir": {"type": "str", "description": "Directory each accepted phase's full CIF is resolved into ('structure_path' — the bridge to simulation confirmation and multi-phase Rietveld)."},
+        "component_fom_min": {"type": "float", "description": "Optional full-pattern gate on every accepted phase (default 0 = off). When > 0, a candidate is accepted only if its OWN strong lines are present in the FULL measured peak list — score_xrd_match_robust mode='component' (candidate-side coverage × chance significance against the local measured line density, three-line rule). Aimed at dense-line library entries (organics, large cells) that cover a few residual peaks by coincidence. Measured effect at 0.7: on clean three-phase round-robin data it found more true phases with fewer spurious ones (14/19 vs 12/19 majors; 3 vs 6 spurious); on noisy lab scans with many noise peaks it did not help. Each accepted phase reports 'component_fom' either way."},
+        "n_candidates": {"type": "int", "description": "Residual search hits evaluated per iteration (default 10). RAISE (e.g. 25) with component_fom_min > 0 — the gate can reject the top few, so look past them."},
     },
     required=["two_theta", "intensity"],
     returns=(
@@ -131,6 +152,8 @@ def identify_mixture(
     n_query_lines: int = 10,
     confirm: bool = True,
     materialize_dir: str = "./fp_matches",
+    component_fom_min: float = 0.0,
+    n_candidates: int = 10,
 ) -> dict[str, Any]:
     """Sequential-subtraction mixture identification. See ``TOOL_SPEC``."""
     from .fingerprint import _load_library, _resolve_lam, search_match_pattern
@@ -159,12 +182,25 @@ def identify_mixture(
             res_tt.tolist(), res_yy.tolist(), wavelength=wavelength,
             library_path=library_path, tol_deg=float(tol_deg),
             n_key_lines=int(n_key_lines), n_query_lines=int(n_query_lines),
-            materialize_top=0)
+            top_n=int(n_candidates), materialize_top=0)
         cand = [m for m in r["matches"] if m["source_id"] not in accepted_ids]
+        # Component gate: a residual holds only a few peaks, which a dense-line
+        # entry (organics, large cells) covers by coincidence. The phase must
+        # ALSO show its own strong lines in the FULL measured pattern — scored
+        # candidate-side, chance-corrected, three-line rule
+        # (score_xrd_match_robust mode='component').
+        n_before = len(cand)
+        for m in cand:
+            m["component_fom"] = _component_fom(df, m["source_id"], tt, yy, lam, float(tol_deg))
+        if float(component_fom_min) > 0:
+            cand = [m for m in cand if m["component_fom"] >= float(component_fom_min)]
         if not cand or cand[0]["figure_of_merit"] < float(fom_threshold):
             best = cand[0]["figure_of_merit"] if cand else 0.0
-            stopped_because = (f"no convincing match on the residual (best "
-                               f"fom {best:.2f} < threshold {float(fom_threshold):.2f})")
+            stopped_because = (
+                f"no convincing match on the residual (best fom {best:.2f} < "
+                f"threshold {float(fom_threshold):.2f}; {n_before - len(cand)} of "
+                f"{n_before} candidates failed the full-pattern component gate "
+                f"component_fom_min={float(component_fom_min):.2f})")
             break
         # Absent-strong-lines tie-break (deterministic form of the skill's
         # near-tie rule): dense-line junk entries out-FOM a true minority
@@ -209,6 +245,7 @@ def identify_mixture(
             "space_group": best["space_group"],
             "cell": best["cell"],
             "figure_of_merit": best["figure_of_merit"],
+            "component_fom": round(float(best["component_fom"]), 3),
             "iteration": iteration,
             "n_lines_accounted": int(matched.sum()),
             "intensity_share": round(accounted / max(total_intensity, 1e-9), 3),

@@ -43,7 +43,11 @@ The skill ships five tools the analysis script chains together:
   search-match) or `'mip'` (mixed-integer linear programming for joint
   shift / scale / assignment optimization). Hundreds of milliseconds
   per candidate. Use for confident identification on real-lab patterns
-  after the fast tier narrows the candidate list.
+  after the fast tier narrows the candidate list. In a MIXTURE score each
+  candidate with `mode='component'`: it asks whether the candidate's OWN
+  strong lines are present (chance-corrected), not how much of the whole
+  pattern it explains — single-mode and fast-tier verdicts reject true
+  20–60 wt% components because other phases own most of the peaks.
 - `search_match_pattern` — **fingerprint search-match, the FIRST-choice
   blind route**. Identifies an unknown whose phase is probably known to
   science (the overwhelming majority of lab work) by Hanawalt-style
@@ -227,7 +231,10 @@ either-alone:
    `score_xrd_match_fast` on every candidate. Rank by correlation. This
    establishes which candidates are even plausible — typically 3-4
    survive the `verdict='accept'|'marginal'` filter; the others
-   (`verdict='reject'`) can be dropped.
+   (`verdict='reject'`) can be dropped. **Single-phase patterns only:**
+   the fast correlation compares the WHOLE pattern, so in a mixture it
+   rejects real components — never drop a mixture candidate on a fast-tier
+   verdict; use `score_xrd_match_robust(mode='component')` instead.
 
 2. **Confident identification** with the **robust tier**. Extract the
    experimental peak list once with `extract_peaks`. For each surviving
@@ -256,9 +263,11 @@ either-alone:
   chemistry form to get separate candidate lists per phase:
   `chemistry=[["Si"], ["Ge"]]` — NOT `chemistry=["Si", "Ge"]` which would
   ask the DB for Si-Ge *binary compounds* instead of Si and Ge
-  separately. For step 2 use **`score_xrd_match_multiphase` from the
-  start** (not the per-candidate `score_xrd_match_robust` with
-  `algorithm='mip'`). The multi-phase tool accepts the full list of
+  separately. Screen each candidate with
+  `score_xrd_match_robust(..., mode='component')` (accept/marginal keeps it
+  in play; its `missing_strong_lines` show why one fails), then for step 2
+  use **`score_xrd_match_multiphase`** on the surviving candidates (not the
+  per-candidate `score_xrd_match_robust` with `algorithm='mip'`). The multi-phase tool accepts the full list of
   candidate phase patterns and solves one joint MILP across them, with
   per-phase activation binaries that let the solver leave a phase out
   entirely. Output includes per-phase coverage and matched-peak lists
@@ -728,6 +737,7 @@ collapses all intensity into one phase and reports a fake 100 %):
    q = quantify_phases_nnls(two_theta, intensity, candidate_cif_paths,
                             wavelength=lam, fwhm_deg=0.15, background='snip')
    # q['phases']   -> [{'structure_path', 'intensity_fraction', 'weight_fraction_est'}, ...]
+   #                  sorted by intensity_fraction, NOT input order — match by structure_path
    # q['reliable'] -> False when the candidates can't explain the pattern
    #                  (a phase missing / off-database) -> report that, DON'T fake fractions.
    ```
@@ -845,8 +855,10 @@ confirms the phase is present; it does NOT confirm purity, sample
 preparation correctness, or absence of minor phases. Mention this
 caveat when reporting identifications.
 
-**Multi-phase samples.** Hanawalt is single-phase by construction. For
-suspected multi-phase mixtures, switch to `score_xrd_match_multiphase`
+**Multi-phase samples.** Hanawalt's default `mode='single'` is single-phase
+by construction; `mode='component'` scores one phase of a mixture from the
+candidate's side. For suspected multi-phase mixtures, screen candidates in
+component mode, then switch to `score_xrd_match_multiphase`
 and feed it the full candidate phase list — the joint MILP allocates
 peaks across phases with per-phase activation binaries and reports
 per-phase coverage. Increase `max_exp_peaks` (default 30) when the
