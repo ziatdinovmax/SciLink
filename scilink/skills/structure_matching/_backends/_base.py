@@ -6,6 +6,15 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol, runtime_checkable
 
 
+# How a backend without its own relevance score (COD, local CIFs) orders the
+# distinct phases (one per reduced formula + space group) of a chemistry query:
+#   'reported' — most often deposited first (default): a phase reported many
+#                times is the one a sample is most likely to contain;
+#   'simplest' — fewest atoms in the formula first;
+#   'newest'   — most recent deposition first.
+RANK_BY_CHOICES = ("reported", "simplest", "newest")
+
+
 @dataclass
 class QuerySpec:
     """Specification for a structure-database query.
@@ -23,6 +32,8 @@ class QuerySpec:
     - ``density_range``: bulk density in g/cm³.
     - ``anonymous_formula``: anonymized composition string ("AB2", "ABC3").
       Matches pymatgen's ``Composition.anonymized_formula``.
+    - ``rank_by``: ordering of distinct phases for backends with no relevance
+      score of their own (see ``RANK_BY_CHOICES``).
     """
 
     chemistry: list[str]
@@ -33,6 +44,7 @@ class QuerySpec:
     z_range: Optional[tuple[int, int]] = None
     density_range: Optional[tuple[float, float]] = None
     anonymous_formula: Optional[str] = None
+    rank_by: str = "reported"
 
     def __post_init__(self) -> None:
         # Chemistry-free (cell-only) queries are allowed when a lattice filter is
@@ -47,6 +59,9 @@ class QuerySpec:
             )
         if self.top_n <= 0:
             raise ValueError("QuerySpec.top_n must be positive")
+        if self.rank_by not in RANK_BY_CHOICES:
+            raise ValueError(
+                f"QuerySpec.rank_by must be one of {RANK_BY_CHOICES}; got {self.rank_by!r}")
         if self.z_range is not None:
             lo, hi = self.z_range
             if lo < 1 or hi < lo:

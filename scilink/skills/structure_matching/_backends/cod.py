@@ -60,9 +60,12 @@ _COD_CIF_URL = "https://www.crystallography.net/cod/{cid}.cif"
 # one that still fails raises, and the dispatcher records the failure.
 _WEB_ATTEMPTS = 3
 _WEB_BACKOFF_S = 2.0
-# Row caps before ranking: the local db's SQL pre-filter, and the REST rows
-# kept. A query that hits one is recorded as truncated (``last_report``).
-_DB_ROW_CAP = 4000
+# Row caps. The local db is ranked over EVERY entry with the exact element set
+# (a cap on the loose SQL pre-filter would cut the list arbitrarily before the
+# exact-set filter — for common oxides that dropped the common phase itself);
+# _DB_ROW_CAP bounds only the exact-set rows. The REST path keeps at most
+# _WEB_ROW_CAP rows. A query that hits a cap is recorded as truncated.
+_DB_ROW_CAP = 200000
 _WEB_ROW_CAP = 2000
 
 
@@ -148,6 +151,66 @@ def _formula_natoms(formula: Optional[str]) -> float:
     return total if total > 0 else float("inf")
 
 
+def _stoich_fractional(formula: Optional[str]) -> bool:
+    """True when a formula carries non-integer counts (doped, defective or
+    partially occupied variants such as 'Ti0.913 O0.7304')."""
+    for tok in (formula or "").replace("-", " ").split():
+        m = _ELEMENT_TOKEN.match(tok)
+        if m:
+            cnt = tok[len(m.group(1)):]
+            if cnt and abs(float(cnt) - round(float(cnt))) > 1e-6:
+                return True
+    return False
+
+
+def _phase_key(formula: Optional[str], sg, sg_number) -> tuple:
+    """One key per phase: reduced formula + space-group number (string fallback)."""
+    try:
+        from pymatgen.core import Composition
+        f = Composition(str(formula or "").replace("-", " ").replace(" ", "")).reduced_formula
+    except Exception:  # noqa: BLE001 - unparseable formulas key as written
+        f = str(formula or "").strip("- ").strip()
+    try:
+        n = int(sg_number)
+    except (TypeError, ValueError):
+        n = None
+    return (f, n if n and n > 0 else str(sg or "").replace(" ", ""))
+
+
+def _rank_rows(scored: list[tuple], rank_by: str = "reported") -> list[tuple]:
+    """Order ``(extra, natoms, cid, formula, sg, sg_number)`` rows by PHASE.
+
+    Rows are grouped per phase (reduced formula + space group). Groups are
+    ordered by fewest elements beyond those requested, then whole-number
+    before fractional stoichiometry, then by ``rank_by``:
+    'reported' — most entries in the database first (how often the phase has
+    been reported), then fewest atoms; 'simplest' — fewest atoms, then most
+    reported; 'newest' — most recent deposition. Within a group the newest
+    entry comes first (modern coordinates and displacement parameters make
+    better refinement starting models than early idealized entries). Returns
+    the rows group by group, so a caller taking one candidate per phase gets
+    the groups in rank order."""
+    groups: dict[tuple, list[tuple]] = {}
+    for row in scored:
+        groups.setdefault(_phase_key(row[3], row[4], row[5]), []).append(row)
+    for rows in groups.values():
+        rows.sort(key=lambda t: -_safe_int(t[2]))
+
+    def gkey(rows):
+        extra, natoms, cid, formula = rows[0][0], rows[0][1], rows[0][2], rows[0][3]
+        frac = _stoich_fractional(formula)
+        newest = -_safe_int(cid)
+        if rank_by == "simplest":
+            return (extra, frac, natoms, -len(rows), newest)
+        if rank_by == "newest":
+            return (extra, frac, newest)
+        return (extra, frac, -len(rows), natoms, newest)
+
+    ordered = sorted(groups.values(), key=gkey)
+    return [(cid, formula, sg, sgn) for rows in ordered
+            for _, _, cid, formula, sg, sgn in rows]
+
+
 class CODBackend:
     name = "cod"
 
@@ -194,7 +257,14 @@ class CODBackend:
         pool_cap = max(3 * int(spec.top_n), 30) if cell_only else int(spec.top_n)
 
         candidates: list[StructureCandidate] = []
+        phases_taken: set = set()
         for cid, formula, sg, sg_number in rows:
+            # top_n counts distinct PHASES: further entries of a phase that
+            # already has a loaded candidate are skipped (search_structures
+            # dedupes per phase anyway — they would only eat the budget).
+            pkey = _phase_key(formula, sg, sg_number)
+            if pkey in phases_taken:
+                continue
             struct = self._load_structure(int(cid))
             if struct is None:
                 # a match that could not be loaded is not an absence: counted
@@ -226,6 +296,7 @@ class CODBackend:
                 # match (fewest elements beyond those requested).
                 rank_score=1.0 / (1.0 + extra),
             ))
+            phases_taken.add(pkey)
             if len(candidates) >= pool_cap:
                 break
 
@@ -253,15 +324,11 @@ class CODBackend:
             if spec.space_group_hints:
                 sql += " AND sgNumber IN (%s)" % ",".join("?" * len(spec.space_group_hints))
                 params += [int(s) for s in spec.space_group_hints]
-            # Pull a generous pre-filter set; the exact-set filter prunes it.
-            sql += f" LIMIT {_DB_ROW_CAP}"
+            # No LIMIT here: the LIKE pre-filter is loose, and capping it before
+            # the exact-set filter drops arbitrary (often the most common) phases.
             raw = con.execute(sql, params).fetchall()
         finally:
             con.close()
-        if len(raw) == _DB_ROW_CAP:
-            # the cap cut the pre-filter before the exact-set filter and the ranking
-            self.last_report["truncated"] = True
-
         scored: list[tuple] = []
         for cid, formula, sg, sg_number in raw:
             els = _formula_elements(formula)
@@ -269,17 +336,20 @@ class CODBackend:
                 continue
             extra = len(els - wanted)
             scored.append((extra, _formula_natoms(formula), cid, formula, sg, sg_number))
-        # Tightest composition first (exact match before supersets), then
-        # simplest stoichiometry (common phase before complex same-composition),
-        # then NEWEST deposition first (id descending). COD ids are roughly
-        # chronological, and early-1900s entries carry idealized coordinates
-        # and no displacement parameters — kinematically fine for
-        # identification but catastrophically wrong as Rietveld starting
-        # models (observed: a 1911 zincite entry collapsed its phase to
-        # 0 wt% in a certified mixture where a modern entry refined to
-        # within 2 wt% of the weighed truth).
-        scored.sort(key=lambda t: (t[0], t[1], -_safe_int(t[2])))
-        return [(cid, formula, sg, sg_number) for _, _, cid, formula, sg, sg_number in scored]
+        if len(scored) > _DB_ROW_CAP:
+            self.last_report["truncated"] = True
+            scored.sort(key=lambda t: (t[0], t[1]))
+            scored = scored[:_DB_ROW_CAP]
+        # Rank by PHASE (see _rank_rows): tightest composition first, whole-
+        # number stoichiometry before doped/defective variants, then by
+        # spec.rank_by (default: most often reported). Each phase is
+        # represented by its NEWEST entry: COD ids are roughly chronological,
+        # and early-1900s entries carry idealized coordinates and no
+        # displacement parameters — kinematically fine for identification but
+        # catastrophically wrong as Rietveld starting models (observed: a 1911
+        # zincite entry collapsed its phase to 0 wt% in a certified mixture
+        # where a modern entry refined to within 2 wt% of the weighed truth).
+        return _rank_rows(scored, getattr(spec, "rank_by", "reported"))
 
     def _search_web(self, wanted: set[str], spec: QuerySpec) -> list[tuple]:
         """COD REST search (no local db, or cell-only). Same vetted domain;
@@ -352,10 +422,8 @@ class CODBackend:
                 self.last_report["truncated"] = True
                 break
             scored.append((len(els - wanted), _formula_natoms(formula), cid, formula, row.get("sg"), sg_number))
-        # Tightest composition, then simplest stoichiometry, then newest
-        # deposition first (see _search_db for the Rietveld rationale).
-        scored.sort(key=lambda t: (t[0], t[1], -_safe_int(t[2])))
-        return [(cid, formula, sg, sg_number) for _, _, cid, formula, sg, sg_number in scored]
+        # Same phase ranking as the local-db path (see _search_db).
+        return _rank_rows(scored, getattr(spec, "rank_by", "reported"))
 
     def _load_structure(self, cid: int):
         cif = self._locate_cif(cid)
