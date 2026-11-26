@@ -85,7 +85,8 @@ TOOL_SPEC = ToolSpec(
         "min_residual_peaks=4, shared_line_floor=0.3, absent_tiebreak_band=0.1, "
         "n_key_lines=3, n_query_lines=10, confirm=True, "
         "materialize_dir='./fp_matches', component_fom_min=0.0, "
-        "n_candidates=10) -> dict"
+        "n_candidates=10, exclude_organic=False, "
+        "prevalence_tiebreak_band=0.05) -> dict"
     ),
     parameters={
         "two_theta": {"type": "list[float]", "description": "Measured peak positions (2θ°) of the FULL mixture pattern — extract_peaks' 'positions'. Feed ALL confident peaks (lower extract_peaks' prominence_frac for mixtures — each phase's key lines hide among more peaks)."},
@@ -104,6 +105,8 @@ TOOL_SPEC = ToolSpec(
         "materialize_dir": {"type": "str", "description": "Directory each accepted phase's full CIF is resolved into ('structure_path' — the bridge to simulation confirmation and multi-phase Rietveld)."},
         "component_fom_min": {"type": "float", "description": "Optional full-pattern gate on every accepted phase (default 0 = off). When > 0, a candidate is accepted only if its OWN strong lines are present in the FULL measured peak list — score_xrd_match_robust mode='component' (candidate-side coverage × chance significance against the local measured line density, three-line rule). Aimed at dense-line library entries (organics, large cells) that cover a few residual peaks by coincidence. Measured effect at 0.7: on clean three-phase round-robin data it found more true phases with fewer spurious ones (14/19 vs 12/19 majors; 3 vs 6 spurious); on noisy lab scans with many noise peaks it did not help. Each accepted phase reports 'component_fom' either way."},
         "n_candidates": {"type": "int", "description": "Residual search hits evaluated per iteration (default 10). RAISE (e.g. 25) with component_fom_min > 0 — the gate can reject the top few, so look past them."},
+        "exclude_organic": {"type": "bool", "description": "Passed to every residual search: drop 'organic_like' library entries (organics and organometallics; carbonates and carbides are kept) before scoring. Default False. Set True when the sample is known to be inorganic — dense-line organic entries are the most common coincidental matches on a residual peak list."},
+        "prevalence_tiebreak_band": {"type": "float", "description": "Near-tie rule (default 0.05): among residual candidates within this figure-of-merit band of the best, single-report library phases (n_library_reports=1) give way to phases reported more than once, before the absent-lines tie-break is applied. Set 0 for novel or rarely studied materials."},
     },
     required=["two_theta", "intensity"],
     returns=(
@@ -154,6 +157,8 @@ def identify_mixture(
     materialize_dir: str = "./fp_matches",
     component_fom_min: float = 0.0,
     n_candidates: int = 10,
+    exclude_organic: bool = False,
+    prevalence_tiebreak_band: float = 0.05,
 ) -> dict[str, Any]:
     """Sequential-subtraction mixture identification. See ``TOOL_SPEC``."""
     from .fingerprint import _load_library, _resolve_lam, search_match_pattern
@@ -182,7 +187,9 @@ def identify_mixture(
             res_tt.tolist(), res_yy.tolist(), wavelength=wavelength,
             library_path=library_path, tol_deg=float(tol_deg),
             n_key_lines=int(n_key_lines), n_query_lines=int(n_query_lines),
-            top_n=int(n_candidates), materialize_top=0)
+            top_n=int(n_candidates), materialize_top=0,
+            exclude_organic=bool(exclude_organic),
+            prevalence_tiebreak_band=0.0)  # applied below on figure_of_merit
         cand = [m for m in r["matches"] if m["source_id"] not in accepted_ids]
         # Component gate: a residual holds only a few peaks, which a dense-line
         # entry (organics, large cells) covers by coincidence. The phase must
@@ -210,6 +217,14 @@ def identify_mixture(
         top_fom = cand[0]["figure_of_merit"]
         floor = max(top_fom - float(absent_tiebreak_band), float(fom_threshold))
         band = [m for m in cand if m["figure_of_merit"] >= floor]
+        # Prevalence near-tie: a single-report entry within the prevalence
+        # band of the best gives way when a multiply-reported phase is there.
+        pb = float(prevalence_tiebreak_band)
+        if pb > 0:
+            near = [m for m in band if m["figure_of_merit"] >= top_fom - pb]
+            if any((m.get("n_library_reports") or 1) > 1 for m in near):
+                band = [m for m in band
+                        if not (m in near and (m.get("n_library_reports") or 1) <= 1)]
         best = min(band, key=lambda m: (m.get("frac_strong_lines_absent") or 0.0,
                                         -m["figure_of_merit"]))
         row = df[df["source_id"] == best["source_id"]].iloc[0]
@@ -246,6 +261,8 @@ def identify_mixture(
             "cell": best["cell"],
             "figure_of_merit": best["figure_of_merit"],
             "component_fom": round(float(best["component_fom"]), 3),
+            "n_library_reports": best.get("n_library_reports"),
+            "organic_like": best.get("organic_like"),
             "iteration": iteration,
             "n_lines_accounted": int(matched.sum()),
             "intensity_share": round(accounted / max(total_intensity, 1e-9), 3),
