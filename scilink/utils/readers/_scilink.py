@@ -250,6 +250,15 @@ _ANODE_LINE = _re.compile(r"\b(Cu|Mo|Co|Fe|Cr|Ag)\s*-?\s*K\s*-?\s*(?:alpha|α|a)
 _KALPHA = _re.compile(r"(?<![a-z])k\s*-?\s*(?:alpha|α)(?![a-z])|kα", _re.I)
 _ANGSTROM = _re.compile(r"(\d*\.\d+|\d+)\s*(?:å|angstrom)", _re.I)
 _SYNCHROTRON = _re.compile(r"synchrotron|beamline", _re.I)
+# outside a wavelength-type key, a length in Å counts only when its clause names
+# the radiation (a lattice constant or d-spacing in the notes is not a wavelength)
+_RADIATION_CONTEXT = _re.compile(
+    r"wavelength|λ|lambda|radiation|k\s*-?\s*(?:alpha|α)\b|kα|synchrotron|beamline|"
+    r"\b(?:cu|mo|co|fe|cr|ag)\s*-?\s*k", _re.I)
+
+
+def _clause_before(text: str, start: int, span: int = 40) -> str:
+    return _re.split(r"[;,]|\.\s", text[max(0, start - span):start])[-1]
 _ANODE_WORDS = {"Cu": "copper", "Mo": "molybdenum", "Co": "cobalt", "Fe": "iron", "Cr": "chromium", "Ag": "silver"}
 _GEOM_TEXT = _re.compile(r"bragg|brentano|debye|scherrer|capillary|reflection|transmission|"
                          r"flat[- ]?plate", _re.I)
@@ -281,7 +290,8 @@ def _given_wavelength(given) -> Tuple[bool, List[float], List[str]]:
             continue
         text = str(v)
         found = [m.group(1).capitalize() for m in _ANODE_LINE.finditer(text)]
-        ang = [float(m.group(1)) for m in _ANGSTROM.finditer(text) if 0.1 < float(m.group(1)) < 5]
+        ang = [float(m.group(1)) for m in _ANGSTROM.finditer(text) if 0.1 < float(m.group(1)) < 5
+               and (wave_key or _RADIATION_CONTEXT.search(_clause_before(text, m.start())))]
         if wave_key:
             found += [a for a, w in _ANODE_WORDS.items() if _re.search(rf"\b(?:{a}|{w})\b", text, _re.I)]
             try:
@@ -289,7 +299,8 @@ def _given_wavelength(given) -> Tuple[bool, List[float], List[str]]:
                     ang.append(float(text.strip()))
             except ValueError:
                 pass
-        if found or ang or _KALPHA.search(text) or _SYNCHROTRON.search(text):
+        if found or ang or _KALPHA.search(text) or _SYNCHROTRON.search(text) or (
+                wave_key and _ANGSTROM.search(text)):
             said = True
             anodes += found
             nums += ang

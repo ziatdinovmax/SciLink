@@ -168,7 +168,7 @@ def resolve_wavelength(
         named = _scan_text_for_named_source(blob)
         if named is not None:
             return _arbitrate_lab_line(named, text)
-        angstroms = _scan_text_for_angstroms(blob)
+        angstroms = _scan_text_for_angstroms(blob, need_context=True)
         if angstroms is not None:
             return _arbitrate_lab_line(angstroms, text)
 
@@ -322,16 +322,32 @@ _ANGSTROM_RE = re.compile(
 )
 
 
-def _scan_text_for_angstroms(text: str) -> Union[float, None]:
-    """Pull a 'N.NNN Å' / 'N.NNN angstrom' style number from free text."""
-    match = _ANGSTROM_RE.search(text)
-    if not match:
-        return None
-    try:
-        v = float(match.group("value"))
-    except ValueError:
-        return None
-    if 0.1 < v < 5.0:
+# In free text a length in Å is a WAVELENGTH only when its clause says so:
+# 'λ = 0.4959 Å', 'wavelength 0.7093 Å', 'Cu Kα (1.5406 Å)', 'synchrotron ...'.
+# Lattice parameters and d-spacings ('anatase, a = 3.785 Å', 'd(200) = 2.82 Å')
+# are lengths in the same range and must not be read as the wavelength.
+_RADIATION_CONTEXT = re.compile(
+    r"wavelength|λ|lambda|radiation|k\s*-?\s*(?:alpha|α)\b|kα|synchrotron|beamline|"
+    r"\b(?:cu|mo|co|fe|cr|ag)\s*-?\s*k", re.IGNORECASE)
+
+
+def _clause_before(text: str, start: int, span: int = 40) -> str:
+    """The part of ``text`` just before ``start`` that belongs to the same clause."""
+    return re.split(r"[;,]|\.\s", text[max(0, start - span):start])[-1]
+
+
+def _scan_text_for_angstroms(text: str, need_context: bool = False) -> Union[float, None]:
+    """Pull a 'N.NNN Å' / 'N.NNN angstrom' style number from text. With
+    ``need_context`` (free text), only a value whose clause names the radiation."""
+    for match in _ANGSTROM_RE.finditer(text):
+        try:
+            v = float(match.group("value"))
+        except ValueError:
+            continue
+        if not 0.1 < v < 5.0:
+            continue
+        if need_context and not _RADIATION_CONTEXT.search(_clause_before(text, match.start())):
+            continue
         return v
     return None
 

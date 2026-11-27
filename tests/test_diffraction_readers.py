@@ -436,3 +436,22 @@ def test_bruker_raw_v4_padding_after_the_last_range(tmp_path):
     found = read_datasets(p)
     assert len(found) == 1 and any("not read" in n for n in found[0].metadata["notes"])
     np.testing.assert_allclose(found[0].data, Y)
+
+
+@pytest.mark.parametrize("given", [
+    {"sample": {"material": "TiO2 anatase, a = 3.785 Å"}},
+    {"notes": "expected phase NaCl, d(200) = 2.82 Å"},
+    {"notes": "Cu-free sample; anatase a = 3.785 Å, c = 9.514 Å"},
+])
+def test_a_length_in_the_notes_is_not_a_wavelength(tmp_path, given):
+    fmd = file_metadata(read_dataset(raw_v4(tmp_path / "m.raw", [(10.0, 1.0, Y, 4, 298.15)]), header_only=True))
+    merged, _, conflicts = merge_file_metadata(given, fmd)
+    assert resolve_wavelength(merged) == "MoKa" and conflicts == []
+
+
+def test_free_text_angstrom_needs_radiation_context():
+    assert resolve_wavelength({"notes": "anatase, a = 3.785 Å"}) == "CuKa"            # default, not 3.785
+    assert resolve_wavelength({"notes": "d(200) = 2.82 Å"}) == "CuKa"
+    assert resolve_wavelength({"notes": "synchrotron, λ = 0.4959 Å"}) == pytest.approx(0.4959)
+    assert resolve_wavelength({"notes": "wavelength 0.7093 Å"}) == pytest.approx(0.7093)
+    assert resolve_wavelength({"optics": "Kα (1.5406 Å); sample a = 3.785 Å"}) == pytest.approx(1.5406)
