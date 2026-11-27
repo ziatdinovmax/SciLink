@@ -450,6 +450,8 @@ def _raw_v4(b: bytes, path: str) -> List[Dataset]:
         datum, hdr = struct.unpack_from("<II", b, o + 136)
         d0 = o + 160 + hdr
         if datum < 4 or d0 + datum * steps > len(b) or not steps:
+            if out:     # padding or trailing bytes after the last good range
+                break
             raise UnsupportedContent(f"{Path(path).name}: range {len(out) + 1} header is inconsistent")
         t = struct.unpack_from("<f", b, d0 - 16)[0] if hdr >= 16 else 0.0
         if datum == 4:

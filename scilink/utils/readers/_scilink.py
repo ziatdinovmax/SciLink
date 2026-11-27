@@ -241,9 +241,16 @@ def _close(a, b) -> bool:
 
 import re as _re
 
-_WAVE_KEY = _re.compile(r"wavelength|lambda|radiation|anode|x_?ray_source|^source$|target", _re.I)
-_WAVE_TEXT = _re.compile(r"k\s*-?\s*(?:alpha|α|a)\b|kα|\d\.\d+\s*(?:å|angstrom)|synchrotron|"
-                         r"\b(?:cu|mo|co|fe|cr|ag)\s*k", _re.I)
+# The person states the radiation only when a value NAMES it: a number under a
+# wavelength-type key, an anode line ('Cu Kα', 'MoKa1'), an anode under an
+# anode / tube key, 'K-alpha', a value in Å, or a synchrotron. A key merely called
+# 'source' or 'target' (a supplier, an objective) says nothing about it.
+_WAVE_KEY = _re.compile(r"wavelength|lambda|radiation|anode|x_?ray_source|tube", _re.I)
+_ANODE_LINE = _re.compile(r"\b(Cu|Mo|Co|Fe|Cr|Ag)\s*-?\s*K\s*-?\s*(?:alpha|α|a)\s*-?\s*[12]?(?![a-z])", _re.I)
+_KALPHA = _re.compile(r"(?<![a-z])k\s*-?\s*(?:alpha|α)(?![a-z])|kα", _re.I)
+_ANGSTROM = _re.compile(r"(\d*\.\d+|\d+)\s*(?:å|angstrom)", _re.I)
+_SYNCHROTRON = _re.compile(r"synchrotron|beamline", _re.I)
+_ANODE_WORDS = {"Cu": "copper", "Mo": "molybdenum", "Co": "cobalt", "Fe": "iron", "Cr": "chromium", "Ag": "silver"}
 _GEOM_TEXT = _re.compile(r"bragg|brentano|debye|scherrer|capillary|reflection|transmission|"
                          r"flat[- ]?plate", _re.I)
 _LINES = {"Cu": 1.5406, "Mo": 0.7093, "Co": 1.7890, "Fe": 1.9360, "Cr": 2.2897, "Ag": 0.5594}
@@ -264,17 +271,29 @@ def _given_wavelength(given) -> Tuple[bool, List[float], List[str]]:
     """Whether the person's metadata states the radiation, and what it names."""
     said, nums, anodes = False, [], []
     for path, v in _walk(given or {}):
-        key = path[-1] if path else ""
-        text = str(v)
-        if _WAVE_KEY.search(key) or (isinstance(v, str) and _WAVE_TEXT.search(text)):
-            said = True
-            if isinstance(v, (int, float)) and not isinstance(v, bool) and 0.1 < v < 5:
+        wave_key = bool(_WAVE_KEY.search(path[-1] if path else ""))
+        if isinstance(v, bool) or v is None:
+            continue
+        if isinstance(v, (int, float)):
+            if wave_key and 0.1 < v < 5:
+                said = True
                 nums.append(float(v))
-            for m in _re.finditer(r"(\d\.\d+)\s*(?:å|angstrom|a\b)", text, _re.I):
-                if 0.1 < float(m.group(1)) < 5:
-                    nums.append(float(m.group(1)))
-            anodes += [a for a in _LINES if _re.search(rf"\b{a}\b|\b{a}\s*k", text)]
-    return said, nums, anodes
+            continue
+        text = str(v)
+        found = [m.group(1).capitalize() for m in _ANODE_LINE.finditer(text)]
+        ang = [float(m.group(1)) for m in _ANGSTROM.finditer(text) if 0.1 < float(m.group(1)) < 5]
+        if wave_key:
+            found += [a for a, w in _ANODE_WORDS.items() if _re.search(rf"\b(?:{a}|{w})\b", text, _re.I)]
+            try:
+                if 0.1 < float(text.strip()) < 5:
+                    ang.append(float(text.strip()))
+            except ValueError:
+                pass
+        if found or ang or _KALPHA.search(text) or _SYNCHROTRON.search(text):
+            said = True
+            anodes += found
+            nums += ang
+    return said, nums, sorted(set(anodes))
 
 
 def _diffraction_precedence(given, from_file) -> Tuple[Dict[str, Any], List[str]]:

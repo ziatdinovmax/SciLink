@@ -400,3 +400,39 @@ def test_agent_series_leaves_out_per_file_values(tmp_path):
     many = merge({"sample": "KNbO3"}, [str(p), str(p)])
     assert one["acquisition"]["temperature_C"] == 30.0
     assert "temperature_C" not in many["acquisition"] and resolve_wavelength(many) == "CuKa"
+
+
+# ------------------------------------------------------------- review fixes --
+@pytest.mark.parametrize("given", [
+    {"sample": {"material": "TiO2", "source": "Sigma-Aldrich"}},
+    {"notes": "We took a sample from batch 3"},
+    {"objective": {"target": "phase fractions"}},
+    {"notes": "Co kept in the furnace; pack a capillary later"},
+    {"radiation": "X-rays"},
+])
+def test_unrelated_metadata_does_not_hide_the_files_wavelength(tmp_path, given):
+    fmd = file_metadata(read_dataset(raw_v4(tmp_path / "m.raw", [(10.0, 1.0, Y, 4, 298.15)]), header_only=True))
+    merged, _, conflicts = merge_file_metadata(given, fmd)
+    assert resolve_wavelength(merged) == "MoKa" and conflicts == []
+
+
+@pytest.mark.parametrize("given, expect", [
+    ({"wavelength_angstrom": 0.49591}, 0.49591),
+    ({"instrument": "Bruker D8, Cu Kα radiation"}, "CuKa"),
+    ({"anode": "copper"}, "CuKa"),
+    ({"notes": "synchrotron beamline, λ = 0.4959 Å"}, 0.4959),
+])
+def test_stated_radiation_still_stands(tmp_path, given, expect):
+    fmd = file_metadata(read_dataset(raw_v4(tmp_path / "m.raw", [(10.0, 1.0, Y, 4, 298.15)]), header_only=True))
+    merged, _, conflicts = merge_file_metadata(given, fmd)
+    got = resolve_wavelength(merged)
+    assert got == (pytest.approx(expect) if isinstance(expect, float) else expect)
+    assert any(c.startswith("wavelength") for c in conflicts)      # Mo file, other radiation stated
+
+
+def test_bruker_raw_v4_padding_after_the_last_range(tmp_path):
+    p = raw_v4(tmp_path / "m.raw", [(10.0, 1.0, Y, 4, 298.15)])
+    p.write_bytes(p.read_bytes() + bytes(256))
+    found = read_datasets(p)
+    assert len(found) == 1 and any("not read" in n for n in found[0].metadata["notes"])
+    np.testing.assert_allclose(found[0].data, Y)
