@@ -497,14 +497,6 @@ def search_match_pattern(
 
 
 def _resolve_lam(wavelength: Any) -> float:
-    # mirror the gsas engine's alias table without importing it (keeps this
-    # module usable without the gsas extra)
-    if isinstance(wavelength, (int, float)):
-        return float(wavelength)
-    aliases = {"cuka": 1.5406, "cuka1": 1.54056, "cuka2": 1.54439,
-               "moka": 0.71073, "moka1": 0.70930, "coka": 1.78897,
-               "feka": 1.93604, "crka": 2.28970, "agka": 0.55941}
-    key = str(wavelength).strip().lower().replace(" ", "").replace("-", "")
-    if key in aliases:
-        return aliases[key]
-    raise ValueError(f"Unrecognized wavelength {wavelength!r}")
+    # the shared table (no gsas import, so this module works without the gsas extra)
+    from .wavelength import wavelength_angstrom
+    return wavelength_angstrom(wavelength)

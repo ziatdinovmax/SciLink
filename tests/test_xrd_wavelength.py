@@ -52,3 +52,23 @@ def test_defaults():
     assert R(None) == "CuKa"
     assert R({"x": "no source information"}) == "CuKa"
     assert R(None, default=1.0) == 1.0
+
+
+def test_every_returned_name_is_accepted_by_every_tool():
+    """resolve_wavelength's names ('CoKa1', 'MoKa1', ...) must resolve in every tool
+    that takes a wavelength: one shared table, so the tools cannot drift apart."""
+    from scilink.skills.structure_matching.xrd import (
+        _gsas_engine, calibrate_zero, determine_space_group, fingerprint)
+    from scilink.skills.structure_matching.xrd.wavelength import _ANODES, _ANODE_LINES
+
+    names = [f"{s}Ka{k}" for s in _ANODES for k in ("", "1")]
+    for meta in ({"experiment": {"source": "Co Kα1"}}, {"radiation": "Mo K-alpha, K-alpha2 stripped"},
+                 {"radiation": "Fe K-alpha1 only"}, {"radiation": "Ag Ka, primary monochromator"}):
+        names.append(R(meta))
+    resolvers = (fingerprint._resolve_lam, calibrate_zero._lam, determine_space_group._lam,
+                 _gsas_engine._resolve_wavelength)
+    for name in names:
+        values = {f.__module__: f(name) for f in resolvers}
+        assert len(set(values.values())) == 1, (name, values)
+    for sym, (ka1, _ka2, _mean) in _ANODE_LINES.items():
+        assert fingerprint._resolve_lam(f"{sym}Ka1") == pytest.approx(ka1, abs=1e-4)

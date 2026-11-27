@@ -54,15 +54,8 @@ from typing import Any, Sequence
 
 import numpy as np
 
-# Characteristic Kα1 wavelengths (Å) for the common lab anodes, so the engine
-# accepts the same string aliases as pymatgen's XRDCalculator ('CuKa', ...).
-_ANODE_WAVELENGTHS = {
-    "cuka": 1.5406, "cuka1": 1.54056, "cuka2": 1.54439,
-    "moka": 0.71073, "moka1": 0.70930,
-    "coka": 1.78897, "feka": 1.93604, "crka": 2.28970, "agka": 0.55941,
-    # K-alpha1 names resolve_wavelength returns for monochromated sources
-    "coka1": 1.788965, "feka1": 1.936042, "crka1": 2.289700, "agka1": 0.559421,
-}
+# Anode line names (Å): the table shared by every XRD tool ('CuKa', 'MoKa1', ...).
+from .wavelength import ANODE_ALIASES as _ANODE_WAVELENGTHS
 
 # GSAS-II instrument-parameter template (constant-wavelength lab diffractometer).
 # Only ``Lam`` varies with the requested wavelength; the U/V/W/X/Y/Z/SH-L profile
@@ -146,15 +139,8 @@ def _radiation_record(wavelength: Any, kalpha2_ratio: Any = None):
 def _resolve_wavelength(wavelength: Any) -> float:
     """Resolve a wavelength spec to Å. Accepts a float/int or an anode alias
     ('CuKa', 'MoKa', …) matching pymatgen's XRDCalculator vocabulary."""
-    if isinstance(wavelength, (int, float)):
-        return float(wavelength)
-    key = str(wavelength).strip().lower().replace(" ", "").replace("-", "")
-    if key in _ANODE_WAVELENGTHS:
-        return _ANODE_WAVELENGTHS[key]
-    raise ValueError(
-        f"Unrecognized wavelength {wavelength!r}. Pass a numeric wavelength in Å "
-        f"or one of {sorted(_ANODE_WAVELENGTHS)}."
-    )
+    from .wavelength import wavelength_angstrom
+    return wavelength_angstrom(wavelength)
 
 
 def gsas_available() -> bool:

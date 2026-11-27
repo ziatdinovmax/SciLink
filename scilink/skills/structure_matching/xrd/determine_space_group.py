@@ -27,8 +27,7 @@ from ..._shared._spec import ToolSpec
 
 _logger = logging.getLogger(__name__)
 
-_ALIASES = {"cuka": 1.5406, "cuka1": 1.54056, "moka": 0.71073, "coka": 1.78897,
-            "feka": 1.93604, "crka": 2.28970, "agka": 0.55941}
+from .wavelength import ANODE_ALIASES as _ALIASES, wavelength_angstrom
 
 # Reflection conditions (International Tables). Each: (name, class-selector,
 # parity rule). A condition is TESTABLE on a peak only when every plausible hkl
@@ -109,12 +108,7 @@ _COMMON_SGS = {
 
 
 def _lam(wavelength: Any) -> float:
-    if isinstance(wavelength, (int, float)):
-        return float(wavelength)
-    key = str(wavelength).strip().lower().replace(" ", "").replace("-", "")
-    if key in _ALIASES:
-        return _ALIASES[key]
-    raise ValueError(f"Unrecognized wavelength {wavelength!r}")
+    return wavelength_angstrom(wavelength)
 
 
 def _dhkl(cell: Sequence[float], hkls: np.ndarray) -> np.ndarray:

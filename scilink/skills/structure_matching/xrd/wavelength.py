@@ -20,6 +20,33 @@ from ..._shared._spec import ToolSpec
 
 _logger = logging.getLogger(__name__)
 
+# Anode line names -> Å, the ONE table every XRD tool resolves a named wavelength
+# with (refinement engine, search-match, zero calibration, space-group analysis),
+# so every name resolve_wavelength can return is accepted everywhere. 'XKa'
+# keeps the value the tools have always used; 'XKa1' / 'XKa2' are the lines.
+ANODE_ALIASES = {
+    "cuka": 1.5406, "cuka1": 1.54056, "cuka2": 1.54439,
+    "moka": 0.71073, "moka1": 0.70930, "moka2": 0.71359,
+    "coka": 1.78897, "coka1": 1.788965, "coka2": 1.79285,
+    "feka": 1.93604, "feka1": 1.936042, "feka2": 1.93998,
+    "crka": 2.28970, "crka1": 2.289700, "crka2": 2.293606,
+    "agka": 0.55941, "agka1": 0.559421, "agka2": 0.563813,
+}
+
+
+def wavelength_angstrom(wavelength: Any) -> float:
+    """A wavelength spec in Å: a number as given, or an anode line name
+    ('CuKa', 'MoKa1', 'Co K-a2', ...; case, spaces and hyphens ignored)."""
+    if isinstance(wavelength, (int, float)) and not isinstance(wavelength, bool):
+        return float(wavelength)
+    key = str(wavelength).strip().lower().replace(" ", "").replace("-", "")
+    if key in ANODE_ALIASES:
+        return ANODE_ALIASES[key]
+    raise ValueError(
+        f"Unrecognized wavelength {wavelength!r}. Pass a numeric wavelength in Å "
+        f"or one of {sorted(ANODE_ALIASES)}."
+    )
+
 
 # Recognized named sources. Keys are the canonical names accepted by
 # pymatgen's XRDCalculator; values are aliases that may appear in free text.
