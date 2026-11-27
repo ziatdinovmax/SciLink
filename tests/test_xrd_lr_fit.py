@@ -245,3 +245,50 @@ def test_tool_specs_document_new_parameters():
             assert k in spec.parameters and k in spec.signature
     from scilink.skills.structure_matching.xrd import wavelength
     assert any(s.name == "resolve_geometry" for s in wavelength.TOOL_SPECS)
+
+
+# ------------------------------------------------------------------ review fixes
+def test_title_without_a_number_does_not_break_the_query():
+    assert C._conditions({"title": "P = . GPa"}) == C._conditions({"title": "no conditions"})
+    assert C._conditions({"title": "Sample: P = 2.5 GPa"}) != C._conditions({"title": "no conditions"})
+    assert C._conditions({"title": "T = .5 K"}) != C._conditions({"title": "no conditions"})
+
+
+def test_newest_ranks_by_the_groups_latest_deposition():
+    # group A: consensus entry 10 (two agreeing papers) but a later outlier 99;
+    # group B: one entry, 50. 'newest' must rank A first (its latest is 99).
+    rows = [(0, 5.0, 10, "- O2 Ti -", "P 42/m n m", 136, {"vol": 62.4, "year": 1990, "authors": "a"}),
+            (0, 5.0, 11, "- O2 Ti -", "P 42/m n m", 136, {"vol": 62.4, "year": 1995, "authors": "b"}),
+            (0, 5.0, 99, "- O2 Ti -", "P 42/m n m", 136, {"vol": 58.0, "year": 2020, "authors": "c"}),
+            (0, 5.0, 50, "- O2 Ti -", "I 41/a m d :2", 141, {"vol": 136.0, "year": 2010, "authors": "d"})]
+    got = C._rank_rows(rows, rank_by="newest")
+    assert got[0][2] == "P 42/m n m" and got[0][0] != 99        # consensus still represents A
+    assert [r[0] for r in C._rank_rows(rows, rank_by="newest", representative="newest")][0] == 99
+
+
+@pytest.mark.skipif(not E.gsas_available(), reason="needs GSAS-II")
+def test_single_phase_preferred_orientation_runs_with_the_cell_held(tmp_path):
+    from scilink.skills.structure_matching.xrd.simulate_xrd import simulate_xrd_pattern
+    from tests.test_gsas_engine import _SI_CIF
+    cif = tmp_path / "Si.cif"
+    cif.write_text(_SI_CIF)
+    sim = simulate_xrd_pattern(str(cif), "CuKa", (20.0, 80.0), engine="gsas", crystallite_um=0.1)
+    out = E.rietveld_refine(str(cif), sim["profile_two_theta"], sim["profile_intensities"], "CuKa",
+                            two_theta_range=(20.0, 80.0), refine_cell=False,
+                            preferred_orientation={0: [0, 0, 1]})
+    assert out["preferred_orientation"], "requested correction was skipped"
+
+
+def test_codegen_metadata_stays_valid_json_when_long():
+    import json
+    from scilink.agents.exp_agents.controllers.curve_fitting_controllers import (
+        _SYSTEM_INFO_CODEGEN_CHARS, _bounded_json, _system_info_block)
+    si = {"wavelength_angstrom": 0.7093, "notes": "x" * 6000,
+          "experiment": {"optics": [f"slit {i}" for i in range(400)], "instrument": "D8"}}
+    txt = _bounded_json(si, _SYSTEM_INFO_CODEGEN_CHARS)
+    back = json.loads(txt)
+    assert len(txt) <= _SYSTEM_INFO_CODEGEN_CHARS
+    assert back["wavelength_angstrom"] == 0.7093 and back["experiment"]["instrument"] == "D8"
+    assert "omitted" in back["notes"]
+    block = _system_info_block({"system_info": si})
+    json.loads(block.split("```json\n", 1)[1].rsplit("\n```", 1)[0])

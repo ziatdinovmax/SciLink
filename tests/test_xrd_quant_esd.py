@@ -99,7 +99,9 @@ def test_system_info_block_reaches_codegen():
     assert "0.49591" in block and "system_info" in block and "None" in block
     assert C._system_info_block({}) == ""
     big = C._system_info_block({"system_info": {"notes": "x" * 20000}})
-    assert "truncated" in big and len(big) < C._SYSTEM_INFO_CODEGEN_CHARS + 1000
+    assert "omitted" in big and len(big) < C._SYSTEM_INFO_CODEGEN_CHARS + 1000
+    import json
+    json.loads(big.split("```json\n", 1)[1].rsplit("\n```", 1)[0])     # still valid JSON
     import inspect
     for fn in (C.UnifiedSeriesProcessingController._generate_fitting_script,
                C.UnifiedSeriesProcessingController._correct_script):

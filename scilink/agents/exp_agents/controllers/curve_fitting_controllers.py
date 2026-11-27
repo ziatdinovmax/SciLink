@@ -3907,6 +3907,48 @@ def _failed_plan_block(failed: dict) -> str:
 _SYSTEM_INFO_CODEGEN_CHARS = 4000
 
 
+def _bounded_json(obj, limit: int) -> str:
+    """``obj`` as indented JSON within ``limit`` characters, still VALID JSON:
+    the longest values (free text, long lists) are shortened first and marked,
+    so the script can define the dict verbatim. Cutting the text instead would
+    hand it a broken literal."""
+    try:
+        data = json.loads(json.dumps(obj, default=str))
+    except Exception:
+        data = {"description": str(obj)}
+    dump = lambda d: json.dumps(d, indent=2, ensure_ascii=False)
+    txt = dump(data)
+    for _ in range(200):
+        if len(txt) <= limit:
+            return txt
+        # the leaf (string / list) with the longest serialization
+        best, stack = None, [(data, None, None)]
+        while stack:
+            node, parent, key = stack.pop()
+            if isinstance(node, dict):
+                stack += [(v, node, k) for k, v in node.items()]
+            elif isinstance(node, list) and any(isinstance(v, (dict, list)) for v in node):
+                stack += [(v, node, i) for i, v in enumerate(node)]
+            elif parent is not None:
+                n = len(json.dumps(node, ensure_ascii=False))
+                if best is None or n > best[0]:
+                    best = (n, parent, key, node)
+        if best is None or best[0] <= 40:
+            break
+        n, parent, key, node = best
+        if isinstance(node, str) and n > 240:
+            parent[key] = node[:200] + f" …[{len(node) - 200} more characters omitted]"
+        elif isinstance(node, list) and len(node) > 3:
+            parent[key] = node[:3] + [f"…[{len(node) - 3} more items omitted]"]
+        else:
+            parent[key] = f"[omitted: {n} characters]"
+        txt = dump(data)
+    if len(txt) > limit:      # still too long (very many keys): keep the keys, mark the values
+        txt = dump({k: (v if len(json.dumps(v, default=str)) < 80 else "[omitted]")
+                    for k, v in (data.items() if isinstance(data, dict) else {"value": data}.items())})
+    return txt
+
+
 def _system_info_block(state: dict) -> str:
     """The record's metadata for the script-generation prompt: verbatim JSON,
     with the instruction to define it in the script rather than assume None.
@@ -3914,12 +3956,7 @@ def _system_info_block(state: dict) -> str:
     si = state.get("system_info")
     if not si:
         return ""
-    try:
-        txt = json.dumps(si, indent=2, default=str)
-    except Exception:
-        txt = str(si)
-    if len(txt) > _SYSTEM_INFO_CODEGEN_CHARS:
-        txt = txt[:_SYSTEM_INFO_CODEGEN_CHARS] + "\n…[truncated]"
+    txt = _bounded_json(si, _SYSTEM_INFO_CODEGEN_CHARS)
     return (
         "## Experiment metadata (system_info)\n"
         "The metadata supplied with this record, verbatim. Where a tool takes "

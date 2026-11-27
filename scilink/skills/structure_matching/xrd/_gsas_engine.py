@@ -890,6 +890,9 @@ def rietveld_refine(
 
         trace = []
         shift_rec, po_rec = {}, {}
+        # preferred orientation follows the cell stage, or the last stage before the
+        # atoms when the cell is held (it must run whenever it is requested)
+        po_anchor = "cell" if refine_cell else [lb for lb, _ in stages if lb != "atoms"][-1]
         for label, st in stages:
             try:
                 gpx.do_refinements([st])
@@ -898,7 +901,7 @@ def rietveld_refine(
                 trace.append({"stage": label, "error": str(exc)[:200]})
             if label == "zero_offset" and do_shift:
                 shift_rec = _sample_displacement_stage(gpx, hist, geom, _rwp, _corr, trace)
-            if label == "cell" and preferred_orientation:
+            if label == po_anchor and preferred_orientation:
                 po_rec = _preferred_orientation_stage(gpx, [phase], hist, preferred_orientation,
                                                       _rwp, trace)
 

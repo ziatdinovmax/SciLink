@@ -230,8 +230,9 @@ def _meta(row) -> dict:
 # Entries imported from the American Mineralogist Crystal Structure Database
 # (COD 9xxxxxx) leave the condition columns empty and state the conditions in
 # the title instead ('... Sample: P = 2.5 GPa', '... T = 400 C').
-_TITLE_P = re.compile(r"\bP\s*=\s*(-?[\d.]+)\s*(GPa|kbar|MPa|kPa|bar)\b", re.I)
-_TITLE_T = re.compile(r"\bT\s*=\s*(-?[\d.]+)\s*(?:°|deg(?:rees)?\.?\s*)?(C|K)\b")
+_NUMBER = r"(-?\d+(?:\.\d*)?|-?\.\d+)"          # a number, never a bare '.'
+_TITLE_P = re.compile(r"\bP\s*=\s*" + _NUMBER + r"\s*(GPa|kbar|MPa|kPa|bar)\b", re.I)
+_TITLE_T = re.compile(r"\bT\s*=\s*" + _NUMBER + r"\s*(?:°|deg(?:rees)?\.?\s*)?(C|K)\b")
 _TO_KPA = {"gpa": 1e6, "kbar": 1e5, "mpa": 1e3, "kpa": 1.0, "bar": 100.0}
 
 
@@ -379,10 +380,11 @@ def _rank_rows(scored: list[tuple], rank_by: str = "reported",
         groups[k] = _order_group(groups[k], representative)
 
     def gkey(rows):
-        natoms, cid, formula = rows[0][1], rows[0][2], rows[0][3]
+        natoms, formula = rows[0][1], rows[0][3]
         extra = min(r[0] for r in rows)
         frac = _stoich_fractional(formula)
-        newest = -_safe_int(cid)
+        # the group's most recent deposition, whichever entry represents it
+        newest = -max(_safe_int(r[2]) for r in rows)
         if rank_by == "simplest":
             return (extra, frac, natoms, -len(rows), newest)
         if rank_by == "newest":
