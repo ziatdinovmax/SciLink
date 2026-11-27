@@ -771,7 +771,8 @@ collapses all intensity into one phase and reports a fake 100 %):
    #                  (a phase missing / off-database) -> report that, DON'T fake fractions.
    ```
 2. `refine_rietveld_multiphase` — escalate to this only for RIGOROUS weight
-   fractions with esds on a small CONFIRMED phase set (typically 2–3 phases NNLS
+   fractions with esds (`weight_fraction_esds`, statistical; save them next to
+   the fractions in FIT_RESULTS_JSON) on a small CONFIRMED phase set (typically 2–3 phases NNLS
    already screened in). Do not run it as the first pass over a long candidate
    list, and do not run single-phase Rietveld to "quantify" a mixture.
 
@@ -954,6 +955,18 @@ library some exotic entry always scores well.
   composition; here are the candidates and why each is uncertain;
   EDS/XRF or the precursor list would resolve it" is a valid, complete
   answer. A confident list of exotic phases is not.
+
+**Weight-fraction uncertainties.** `refine_rietveld_multiphase` returns
+`weight_fraction_esds`: statistical esds from the refinement covariance.
+They measure precision, not accuracy; the real error of quantitative phase
+analysis is dominated by systematic effects (missing or wrong phases,
+preferred orientation, microabsorption) and is typically several times
+larger. Report each fraction with its refinement esd and say that the
+esd is statistical. A converged refinement with a complete phase set is a
+result: do not withhold its fractions because the esds are small or
+missing. Withhold them only when the refinement itself fails (not
+converged, a phase collapsed to zero — `weight_fraction_esd_note` says
+so — a cell ran away, or a phase is missing from the set).
 
 **Per-candidate sanity checks.**
 

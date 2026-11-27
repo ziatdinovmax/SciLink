@@ -57,9 +57,18 @@ _SPEC_MULTI = ToolSpec(
     returns=(
         "dict. EXACT SHAPES: 'weight_fractions' is a FLAT DICT "
         "{phase_name(str): fraction(float)} — read fractions from here; "
+        "'weight_fraction_esds' is the matching FLAT DICT {phase_name: esd "
+        "(fraction units) or None}, with 'weight_fraction_esd_note' saying why "
+        "an esd is None (e.g. a phase collapsed to zero). These esds are "
+        "STATISTICAL (counting noise, scaled by GOF): they measure precision, "
+        "not accuracy, and are typically several times smaller than the real "
+        "error, which is dominated by systematic effects. Report them as the "
+        "refinement esd alongside the fractions; do not reject a converged "
+        "refinement because an esd is small, and do not present them as the "
+        "total uncertainty. "
         "'phases' is a LIST of per-phase dicts (keys: phase_name, "
-        "weight_fraction, lattice, input_lattice, lattice_esd, microstrain, "
-        "cell_runaway, displacement_U) — do NOT call .items() on it. Also: 'converged', "
+        "weight_fraction, weight_fraction_esd, lattice, input_lattice, lattice_esd, "
+        "microstrain, cell_runaway, displacement_U) — do NOT call .items() on it. Also: 'converged', "
         "'profile_corr' (READ THIS as fit quality for arbitrary-unit data; "
         "'Rwp' is inflated by nominal weights), 'gof', 'convergence_trace', "
         "'profile' (obs/calc/background/residual). QUANTITATIVE CAVEATS: "
@@ -115,6 +124,7 @@ _SPEC_SERIES = ToolSpec(
     required=["structure_paths", "frames"],
     returns=(
         "dict: 'frames' — per frame {label, weight_fractions {phase: w}, "
+        "weight_fraction_esds {phase: statistical esd or None}, "
         "converged, profile_corr, Rwp, cells {phase: refined lattice}}. "
         "Smooth cell drift with T = thermal expansion; a frame with "
         "converged=False (or an 'error' entry) is poorly described by the "

@@ -1260,6 +1260,68 @@ def _wt_fractions(phases, hist) -> dict:
     return {k: (v / tot if tot > 0 else 0.0) for k, v in num.items()}
 
 
+# A HAP phase fraction below this share of the largest one is treated as
+# collapsed (GSAS-II floors a vanishing fraction at 1e-12, not 0).
+_COLLAPSED_FRACTION = 1e-9
+
+
+def _wt_fraction_esds(gpx, phases, hist) -> tuple:
+    """Least-squares esds of the weight fractions w_i = f_i M_i / sum_j f_j M_j,
+    propagated from GSAS-II's covariance of the refined HAP phase fractions f
+    (the last refinement's covariance; the first phase's f is held fixed and
+    absorbed by the histogram scale, so it contributes through the sum only).
+
+    Returns ({phase_name: esd or None}, note). These are statistical
+    (counting-noise) esds scaled by GSAS-II's goodness of fit; they do not
+    include systematic errors (wrong or missing phases, preferred orientation,
+    microabsorption), which usually dominate in quantitative phase analysis."""
+    names = [ph.name for ph in phases]
+    try:
+        cov = gpx["Covariance"]["data"]
+        vary = list(cov["varyList"])
+        C = np.asarray(cov["covMatrix"], dtype=float)
+    except Exception:
+        return {n: None for n in names}, "no covariance matrix from the last refinement"
+    if C.ndim != 2 or C.shape[0] != len(vary):
+        return {n: None for n in names}, "covariance matrix shape does not match the varied parameters"
+    hid = hist.id
+    raw = [float(ph.getHAPvalues(hist)["Scale"][0]) for ph in phases]
+    idx = []
+    for ph in phases:
+        key = f"{ph.id}:{hid}:Scale"
+        idx.append(vary.index(key) if key in vary else None)
+    # A phase collapsed when its fraction went to zero: GSAS-II pins it at a
+    # tiny floor (1e-12) with zero variance rather than at exactly 0. The
+    # linear propagation is meaningless then and would report a spurious
+    # +/-0 for every phase.
+    top = max([abs(v) for v in raw] + [1e-300])
+    collapsed = [n for n, v, j in zip(names, raw, idx)
+                 if not v > _COLLAPSED_FRACTION * top
+                 or (j is not None and not C[j, j] > 0)]
+    if collapsed:
+        return {n: None for n in names}, (
+            f"no esd: phase fraction(s) refined to zero for {collapsed} (phase collapsed; "
+            "the weight fractions are not a valid refinement result)")
+    f = np.array(raw)
+    M = np.array([_phase_cell_mass(ph) for ph in phases])
+    S = float(np.sum(f * M))
+    if S <= 0:
+        return {n: None for n in names}, "all phase fractions are zero"
+    refined = [k for k, j in enumerate(idx) if j is not None]
+    if not refined:
+        return {n: None for n in names}, "phase fractions were not varied in the last refinement"
+    sub = C[np.ix_([idx[k] for k in refined], [idx[k] for k in refined])]
+    J = np.zeros((len(phases), len(refined)))
+    for i in range(len(phases)):
+        for c, k in enumerate(refined):
+            J[i, c] = ((M[i] * S if i == k else 0.0) - f[i] * M[i] * M[k]) / S ** 2
+    var = np.einsum("ij,jk,ik->i", J, sub, J)
+    esd = {n: (float(np.sqrt(v)) if np.isfinite(v) and v >= 0 else None)
+           for n, v in zip(names, var)}
+    return esd, ("statistical esd from the refinement covariance (scaled by GOF); "
+                 "excludes systematic errors, which usually dominate")
+
+
 # Instrument-profile terms refined: V, W (Gaussian) and X (Lorentzian, 1/cos)
 # — the ones isotropic microstrain cannot mimic. U (Gaussian tan^2) and Y
 # (Lorentzian tan) are degenerate with microstrain broadening; refining them
@@ -1459,6 +1521,7 @@ def rietveld_refine_multiphase(
                 other.set_refinements({"Cell": False})
 
         wt = _wt_fractions(phases, hist)
+        wt_esd, wt_esd_note = _wt_fraction_esds(gpx, phases, hist)
         _ck = ("length_a", "length_b", "length_c", "angle_alpha", "angle_beta",
                "angle_gamma", "volume")
         per_phase = []
@@ -1485,6 +1548,8 @@ def rietveld_refine_multiphase(
                 "structure_path": p,
                 "phase_name": ph.name,
                 "weight_fraction": round(float(wt.get(ph.name, 0.0)), 4),
+                "weight_fraction_esd": (round(wt_esd[ph.name], 4)
+                                        if wt_esd.get(ph.name) is not None else None),
                 # raw HAP fraction (NOT weight fraction) — the series warm
                 # start feeds this back in as the next frame's initial value
                 "hap_fraction": float(ph.getHAPvalues(hist)["Scale"][0]),
@@ -1523,6 +1588,8 @@ def rietveld_refine_multiphase(
     return {
         "phases": per_phase,
         "weight_fractions": {p["phase_name"]: p["weight_fraction"] for p in per_phase},
+        "weight_fraction_esds": {p["phase_name"]: p["weight_fraction_esd"] for p in per_phase},
+        "weight_fraction_esd_note": wt_esd_note,
         "converged": converged,
         "Rwp": trace[-1].get("Rwp") if trace else None,
         "profile_corr": final_corr,
@@ -1634,6 +1701,8 @@ def rietveld_refine_series(
                 # phases follow structure_paths order — remap onto stable names
                 "weight_fractions": {phase_names[i]: p["weight_fraction"]
                                      for i, p in enumerate(r["phases"])},
+                "weight_fraction_esds": {phase_names[i]: p.get("weight_fraction_esd")
+                                         for i, p in enumerate(r["phases"])},
                 "converged": r["converged"],
                 "profile_corr": r["profile_corr"],
                 "Rwp": r["Rwp"],
