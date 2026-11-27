@@ -44,9 +44,14 @@ def _is_placeholder(v) -> bool:
 
 
 def is_native(path) -> bool:
-    """A format only the readers open (``.dm3``, ``.dm4``, ``.hspy``, ``.emd``)."""
-    from . import CALIBRATED_SUFFIXES
-    return Path(str(path)).suffix.lower() in CALIBRATED_SUFFIXES
+    """A format only the readers open (``.dm3``, ``.dm4``, ``.hspy``, ``.emd``, and
+    the diffraction instrument files when their content is one)."""
+    from . import CALIBRATED_SUFFIXES, DIFFRACTION_SUFFIXES
+    suffix = Path(str(path)).suffix.lower()
+    if suffix in DIFFRACTION_SUFFIXES:
+        from . import diffraction
+        return diffraction.sniff(path) is not None
+    return suffix in CALIBRATED_SUFFIXES
 
 
 def native_array(path, prefer: Sequence[str] = (),
@@ -106,8 +111,64 @@ def _num(v: float) -> float:
     return float(f"{float(v):.10g}")
 
 
+def _diffraction_metadata(ds: Dataset) -> Dict[str, Any]:
+    """An X-ray diffraction file's record in the schema the XRD tools read:
+    ``experiment.wavelength`` (the line dictionary), ``experiment.radiation``,
+    ``experiment.geometry`` (only when the file records the sample mode)."""
+    m = ds.metadata
+    exp: Dict[str, Any] = {"technique": "X-ray diffraction (XRD)"}
+    if m.get("instrument"):
+        exp["instrument"] = m["instrument"]
+    anode = m.get("anode")
+    w = m.get("wavelength_angstrom")
+    if w:
+        exp["wavelength"] = dict(w)
+    elif anode:
+        exp["wavelength"] = f"{anode}Ka"
+    if anode or w:
+        src = f"{anode} " if anode else ""
+        ratio = (w or {}).get("K-alpha2/K-alpha1")
+        if m.get("incident_monochromator"):
+            rad = f"{src}K-alpha1 (incident-beam monochromator: {m['incident_monochromator']})"
+        elif w and ratio == 0:
+            rad = f"{src}K-alpha1 (K-alpha1 only, as the file records)"
+        elif w and "K-alpha2" in w:
+            rad = f"{src}K-alpha1 + K-alpha2 (the tube's K-alpha doublet; no monochromator in the recorded beam path)"
+        else:
+            rad = f"{src}K-alpha".strip()
+        exp["radiation"] = rad
+    if m.get("sample_mode"):
+        exp["geometry"] = f"{str(m['sample_mode']).lower()} (sample mode recorded by the instrument)"
+    for k in ("goniometer", "sample_stage", "detector", "filters", "optics", "incident_monochromator"):
+        if m.get(k):
+            exp[k] = m[k]
+    md: Dict[str, Any] = {"experiment_type": "Diffraction", "experiment": exp,
+                          "sample": {"material": NOT_RECORDED}}
+    if m.get("sample_id"):
+        md["sample"]["id_in_file"] = m["sample_id"]
+    if m.get("file_memo"):
+        md["sample"]["memo_in_file"] = m["file_memo"]
+    ax = ds.axes[0] if ds.axes else None
+    if ax is not None:
+        md["xlabel"] = {"2theta": "2θ (deg)", "omega": "ω (deg)"}.get(ax.name, f"{ax.name} (deg)")
+    md["ylabel"] = f"Intensity ({m.get('intensity_units') or 'counts'})"
+    if m.get("scan"):
+        md["scan"] = dict(m["scan"])
+    acq = {k: m[k] for k in ("tube_kV", "tube_mA", "goniometer_radius_mm", "temperature_C",
+                              "measured_at", "scans_in_file") if m.get(k) is not None}
+    if acq:
+        md["acquisition"] = acq
+    if m.get("notes"):
+        md["file_notes"] = list(m["notes"])
+    md["metadata_source"] = (f"Read from the {ds.format} file: wavelength, optics and scan as the "
+                             "instrument recorded them.")
+    return md
+
+
 def file_metadata(ds: Dataset) -> Dict[str, Any]:
     """SciLink metadata from what the file itself records. Nothing is inferred."""
+    if ds.metadata.get("signal_type") == "xrd":
+        return _diffraction_metadata(ds)
     md: Dict[str, Any] = {}
     spectral = ds.kind in ("spectrum", "spectrum_series", "spectrum_image")
     md["experiment_type"] = "Spectroscopy" if spectral else "Microscopy"
@@ -178,6 +239,84 @@ def _close(a, b) -> bool:
         return str(a).strip().lower() == str(b).strip().lower()
 
 
+import re as _re
+
+_WAVE_KEY = _re.compile(r"wavelength|lambda|radiation|anode|x_?ray_source|^source$|target", _re.I)
+_WAVE_TEXT = _re.compile(r"k\s*-?\s*(?:alpha|α|a)\b|kα|\d\.\d+\s*(?:å|angstrom)|synchrotron|"
+                         r"\b(?:cu|mo|co|fe|cr|ag)\s*k", _re.I)
+_GEOM_TEXT = _re.compile(r"bragg|brentano|debye|scherrer|capillary|reflection|transmission|"
+                         r"flat[- ]?plate", _re.I)
+_LINES = {"Cu": 1.5406, "Mo": 0.7093, "Co": 1.7890, "Fe": 1.9360, "Cr": 2.2897, "Ag": 0.5594}
+
+
+def _walk(d, path=()):
+    if isinstance(d, dict):
+        for k, v in d.items():
+            yield from _walk(v, path + (str(k),))
+    elif isinstance(d, (list, tuple)):
+        for v in d:
+            yield from _walk(v, path)
+    else:
+        yield path, d
+
+
+def _given_wavelength(given) -> Tuple[bool, List[float], List[str]]:
+    """Whether the person's metadata states the radiation, and what it names."""
+    said, nums, anodes = False, [], []
+    for path, v in _walk(given or {}):
+        key = path[-1] if path else ""
+        text = str(v)
+        if _WAVE_KEY.search(key) or (isinstance(v, str) and _WAVE_TEXT.search(text)):
+            said = True
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and 0.1 < v < 5:
+                nums.append(float(v))
+            for m in _re.finditer(r"(\d\.\d+)\s*(?:å|angstrom|a\b)", text, _re.I):
+                if 0.1 < float(m.group(1)) < 5:
+                    nums.append(float(m.group(1)))
+            anodes += [a for a in _LINES if _re.search(rf"\b{a}\b|\b{a}\s*k", text)]
+    return said, nums, anodes
+
+
+def _diffraction_precedence(given, from_file) -> Tuple[Dict[str, Any], List[str]]:
+    """The person's radiation / geometry stand wherever in their metadata they are
+    given (top level or ``experiment``, any key name): the file's are then not filled
+    in beside them, and a disagreement is reported."""
+    exp = dict(from_file.get("experiment") or {})
+    conflicts: List[str] = []
+    said, nums, anodes = _given_wavelength(given)
+    w = exp.get("wavelength")
+    if said and w is not None:
+        f_ka1 = w.get("K-alpha1") if isinstance(w, dict) else None
+        f_anode = None
+        rad = str(exp.get("radiation") or w)
+        for a in _LINES:
+            if rad.startswith(a + " ") or rad.startswith(a + "K") or (
+                    f_ka1 is not None and abs(f_ka1 - _LINES[a]) < 0.003):
+                f_anode = a
+                break
+        disagree = (nums and f_ka1 is not None and not any(abs(n - f_ka1) < 0.01 or
+                                                         (f_anode and abs(n - _LINES[f_anode]) < 0.01)
+                                                         for n in nums)) \
+            or (anodes and f_anode and f_anode not in anodes)
+        if disagree:
+            conflicts.append(f"wavelength: given {', '.join(map(str, nums + anodes))}; "
+                             f"file records {exp.get('radiation') or w}")
+        for k in ("wavelength", "radiation"):
+            exp.pop(k, None)
+    g_text = " ".join(str(v) for _, v in _walk(given or {}) if isinstance(v, str))
+    if exp.get("geometry") and _GEOM_TEXT.search(g_text):
+        f_refl = exp["geometry"].startswith("reflection")
+        g_refl = bool(_re.search(r"bragg|brentano|reflection|flat[- ]?plate", g_text, _re.I))
+        g_trans = bool(_re.search(r"debye|scherrer|capillary|transmission", g_text, _re.I))
+        if (f_refl and g_trans and not g_refl) or (not f_refl and g_refl and not g_trans):
+            conflicts.append(f"geometry: given text says {'transmission' if g_trans else 'reflection'}; "
+                             f"file records {exp['geometry']}")
+        exp.pop("geometry", None)
+    out = dict(from_file)
+    out["experiment"] = exp
+    return out, conflicts
+
+
 def merge_file_metadata(given: Optional[Dict[str, Any]], from_file: Dict[str, Any]
                         ) -> Tuple[Dict[str, Any], List[str], List[str]]:
     """``(merged, filled, conflicts)``.
@@ -190,6 +329,9 @@ def merge_file_metadata(given: Optional[Dict[str, Any]], from_file: Dict[str, An
     the top level is still never covered by the file's "not recorded"
     placeholders, which are filled only into metadata that names neither.
     """
+    pre_conflicts: List[str] = []
+    if from_file.get("experiment_type") == "Diffraction":
+        from_file, pre_conflicts = _diffraction_precedence(given, from_file)
     merged: Dict[str, Any] = dict(given or {})
     filled: List[str] = []
     flat = {k.lower() for k in merged if merged.get(k) not in (None, "")}
@@ -213,7 +355,7 @@ def merge_file_metadata(given: Optional[Dict[str, Any]], from_file: Dict[str, An
             merged[key] = inner
     if filled:
         merged["metadata_filled_from_file"] = filled
-    conflicts: List[str] = []
+    conflicts: List[str] = list(pre_conflicts)
     for a, b in _CHECKED:
         g = (given or {}).get(a)
         f = from_file.get(a)

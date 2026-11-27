@@ -838,6 +838,8 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         # Extract series metadata from system_info if not provided explicitly
         handled_system_info = self._handle_system_info(system_info)
+        handled_system_info = self._merge_instrument_record(
+            handled_system_info, spectrum_paths if spectrum_stack is None else None)
         handled_system_info, series_metadata = self._extract_series_metadata(
             handled_system_info, series_metadata
         )
@@ -1282,6 +1284,52 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "y_std": float(np.nanstd(y)),
             "has_nans": bool(np.any(np.isnan(curve_data))),
         }
+
+    # Per-scan values that describe one file of a series, not the series.
+    _PER_FILE_KEYS = ("temperature_C", "measured_at", "scans_in_file")
+
+    def _merge_instrument_record(self, info: dict, paths) -> dict:
+        """Fill what the person did not give from a diffraction instrument file's
+        own record (.xrdml, Bruker .raw / .brml, Rigaku .ras / .rasx): wavelength,
+        K-alpha2 ratio, monochromator, sample mode, scan. The person's values
+        stand; a disagreement is written into ``metadata_conflicts_with_file``.
+        The orchestrator does the same before calling the agent, so an already
+        merged record is left as it is. For a series the first file's record is
+        used without its per-file values (temperature, time stamp)."""
+        if not paths or not isinstance(info, dict):
+            return info
+        if (str(info.get("metadata_source", "")).startswith("Read from the")
+                or info.get("metadata_filled_from_file")):
+            return info
+        try:
+            from ...utils.readers import (PREFER_CURVE, file_metadata, merge_file_metadata,
+                                          read_dataset, records_calibration)
+            first = str(paths[0])
+            if not records_calibration(first):
+                return info
+            ds = read_dataset(first, prefer=PREFER_CURVE, header_only=True)
+            if ds.metadata.get("signal_type") != "xrd":
+                return info
+            fmd = file_metadata(ds)
+        except Exception as e:  # noqa: BLE001 - the record is a convenience, never a blocker
+            self.logger.debug(f"instrument record not read from {paths[0]}: {e}")
+            return info
+        if len(paths) > 1:
+            acq = {k: v for k, v in (fmd.get("acquisition") or {}).items()
+                   if k not in self._PER_FILE_KEYS}
+            fmd["acquisition"] = acq
+            fmd.get("sample", {}).pop("id_in_file", None)
+            fmd["metadata_source"] += " (first file of the series; per-file values left out)"
+        merged, filled, conflicts = merge_file_metadata(info, fmd)
+        if conflicts:
+            merged["metadata_conflicts_with_file"] = conflicts
+            self.logger.warning("The metadata given disagrees with what the file records "
+                                "(the given values are used): " + "; ".join(conflicts))
+        if filled:
+            if not info:   # nothing given: the record is the whole metadata
+                merged["metadata_source"] = fmd["metadata_source"]
+            self.logger.info("📎 Filled from the instrument file's own record: " + ", ".join(filled))
+        return merged
 
     def _normalize_messy_file(self, path) -> str | None:
         """Split a combined data+metadata file the deterministic loader couldn't

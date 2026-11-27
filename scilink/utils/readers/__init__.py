@@ -16,6 +16,10 @@ suffix                          reader
 ``.h5``, ``.hdf5``, ``.nxs``    HyperSpy, EMD or Velox when the file says
                                 so, else NeXus / largest dataset
 ``.npy``                        the array as stored, no calibration
+``.xrdml``, ``.raw``, ``.brml``  X-ray diffraction instrument files
+``.ras``, ``.rasx``             (``diffraction``): Panalytical, Bruker,
+                                Rigaku; ``.raw`` / ``.ras`` only when the
+                                content is Bruker RAW / Rigaku RAS
 ==============================  =========================================
 
 Scope: one file is one dataset. A folder of these files is not yet read as
@@ -35,7 +39,7 @@ import numpy as np
 from ._model import Axis, Dataset, UnsupportedContent
 
 __all__ = ["Axis", "Dataset", "UnsupportedContent", "CALIBRATED_SUFFIXES",
-           "READABLE_SUFFIXES", "can_read", "pick", "read_dataset", "read_datasets",
+           "DIFFRACTION_SUFFIXES", "READABLE_SUFFIXES", "can_read", "pick", "read_dataset", "read_datasets",
            "is_native", "native_array", "calibrated_dataset", "file_metadata",
            "merge_file_metadata", "records_calibration", "PREFER_CURVE",
            "PREFER_IMAGE", "PREFER_CUBE"]
@@ -43,7 +47,10 @@ __all__ = ["Axis", "Dataset", "UnsupportedContent", "CALIBRATED_SUFFIXES",
 # Formats SciLink could not open before these readers.
 CALIBRATED_SUFFIXES = frozenset({".dm3", ".dm4", ".hspy", ".emd"})
 _HDF5_SUFFIXES = frozenset({".h5", ".hdf5", ".nxs"})
-READABLE_SUFFIXES = CALIBRATED_SUFFIXES | _HDF5_SUFFIXES | {".npy"}
+# Diffraction instrument files; ``.raw`` and ``.ras`` are shared with other
+# formats, so these are claimed by content (``diffraction.sniff``), not suffix.
+DIFFRACTION_SUFFIXES = frozenset({".xrdml", ".raw", ".brml", ".ras", ".rasx"})
+READABLE_SUFFIXES = CALIBRATED_SUFFIXES | _HDF5_SUFFIXES | DIFFRACTION_SUFFIXES | {".npy"}
 
 # Which dataset of a file each kind of analysis takes, in order of
 # preference; a loader and the metadata read for its run use the same one,
@@ -54,7 +61,11 @@ PREFER_CUBE = ("spectrum_image",)
 
 
 def can_read(path) -> bool:
-    return Path(str(path)).suffix.lower() in READABLE_SUFFIXES
+    suffix = Path(str(path)).suffix.lower()
+    if suffix in DIFFRACTION_SUFFIXES:
+        from . import diffraction
+        return diffraction.sniff(path) is not None
+    return suffix in READABLE_SUFFIXES
 
 
 def _read_hdf5_family(path: str, suffix: str, header_only: bool = False) -> List[Dataset]:
@@ -91,6 +102,10 @@ def read_datasets(path, header_only: bool = False) -> List[Dataset]:
         return hspy.read(path, header_only=header_only)
     if suffix == ".emd" or suffix in _HDF5_SUFFIXES:
         return _read_hdf5_family(path, suffix, header_only)
+    if suffix in DIFFRACTION_SUFFIXES:
+        from . import diffraction
+        if diffraction.sniff(path) is not None:
+            return diffraction.read(path, header_only=header_only)
     if suffix == ".npy":
         from ._layout import canonicalize
         data = np.load(path, mmap_mode="r" if header_only else None)

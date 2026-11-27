@@ -206,7 +206,7 @@ def _arbitrate_lab_line(value: Union[str, float], text: str) -> Union[str, float
     sym = _anode_of(value)
     if sym is None:
         return value
-    if _KA1_ONLY_RE.search(text):
+    if _affirmed(_KA1_ONLY_RE, text):
         return f"{sym}Ka1"
     if _DOUBLET_RE.search(text):
         return f"{sym}Ka"
@@ -216,6 +216,16 @@ def _arbitrate_lab_line(value: Union[str, float], text: str) -> Union[str, float
     if named in (f"{sym}Ka", f"{sym}Ka1"):
         return named
     return value
+
+
+_NEGATION_RE = re.compile(r"\b(?:no|not|without|non|absent|removed)\b[^.;,]{0,25}$", re.IGNORECASE)
+
+
+def _affirmed(pattern: "re.Pattern", text: str) -> bool:
+    """A match not negated just before it ('no incident-beam monochromator',
+    'without a primary monochromator' describe the doublet, not K-alpha1)."""
+    return any(not _NEGATION_RE.search(text[max(0, m.start() - 40):m.start()])
+               for m in pattern.finditer(text))
 
 
 def _coerce_field(value: Any) -> Union[str, float, None]:
@@ -368,7 +378,23 @@ def resolve_geometry(system_info: Union[dict, str, None]) -> Optional[str]:
     """'bragg-brentano', 'debye-scherrer' or None. See ``_SPEC_GEOMETRY``."""
     if system_info is None:
         return None
+    if isinstance(system_info, dict):
+        # an explicit geometry field (e.g. the sample mode an instrument file
+        # records) decides before free text, where stage or holder names such as
+        # 'reflection-transmission spinner' can name both
+        for block in (system_info, system_info.get("experiment")):
+            if not isinstance(block, dict):
+                continue
+            for key in ("geometry", "diffraction_geometry", "sample_mode"):
+                if isinstance(block.get(key), str):
+                    g = _geometry_from_text(block[key])
+                    if g is not None:
+                        return g
     text = " ".join(_collect_text(system_info)) if isinstance(system_info, dict) else str(system_info)
+    return _geometry_from_text(text)
+
+
+def _geometry_from_text(text: str) -> Optional[str]:
     refl, trans = bool(_REFLECTION_RE.search(text)), bool(_TRANSMISSION_RE.search(text))
     if refl and not trans:
         return "bragg-brentano"
