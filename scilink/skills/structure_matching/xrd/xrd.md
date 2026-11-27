@@ -43,7 +43,11 @@ The skill ships five tools the analysis script chains together:
   search-match) or `'mip'` (mixed-integer linear programming for joint
   shift / scale / assignment optimization). Hundreds of milliseconds
   per candidate. Use for confident identification on real-lab patterns
-  after the fast tier narrows the candidate list.
+  after the fast tier narrows the candidate list. In a MIXTURE score each
+  candidate with `mode='component'`: it asks whether the candidate's OWN
+  strong lines are present (chance-corrected), not how much of the whole
+  pattern it explains — single-mode and fast-tier verdicts reject true
+  20–60 wt% components because other phases own most of the peaks.
 - `search_match_pattern` — **fingerprint search-match, the FIRST-choice
   blind route**. Identifies an unknown whose phase is probably known to
   science (the overwhelming majority of lab work) by Hanawalt-style
@@ -51,7 +55,12 @@ The skill ships five tools the analysis script chains together:
   reference library (built once from a CIF collection, e.g. a COD
   mirror, via `build_fingerprint_library`). Deterministic, offline, no
   chemistry needed. Only when it returns no convincing match fall back
-  to the indexing route below (possible new phase).
+  to the indexing route below (possible new phase). Each match also
+  reports `n_library_reports` (independent library entries for that
+  phase; common materials have many, fingerprint coincidences are usually
+  single reports) and `organic_like`; pass `exclude_organic=True` when the
+  sample is known to be inorganic. See "Composition-free identification"
+  under validation before reporting any blind hit.
 - **Isostructural impostors — read the absent-lines evidence.** A high
   `figure_of_merit` proves the candidate's lines lie where measured peaks
   are; it does NOT prove the phase (isostructural and superlattice phases
@@ -77,9 +86,13 @@ The skill ships five tools the analysis script chains together:
   single-phase match leaves many strong measured peaks unmatched. Trust
   the `multiphase_confirmation` verdict over the per-iteration FOMs
   (those are computed against a residual that still contains other
-  phases); each phase carries a `confirmed` flag from the joint solver —
-  report `confirmed=False` phases as subtraction artifacts, not
-  components. `intensity_share` is a screening abundance proxy only —
+  phases); each phase carries a `confirmed` flag from the joint solver.
+  `confirmed=False` is a warning, not a verdict: it often marks a
+  subtraction artifact, but on real multi-phase samples the solver also
+  leaves genuine overlapping or minor components inactive. Keep such a
+  phase when it is chemically expected and the full-pattern refinement
+  supports it (non-trivial fraction, lower Rwp, its own lines fitted);
+  drop it when it is not. `intensity_share` is a screening abundance proxy only —
   quantify with Rietveld on the returned `structure_path`s. Strong peaks
   left in `residual_peaks` mean a phase missing from the library: run the
   indexing route on that residual list. Known limit: a sparse-line
@@ -227,7 +240,10 @@ either-alone:
    `score_xrd_match_fast` on every candidate. Rank by correlation. This
    establishes which candidates are even plausible — typically 3-4
    survive the `verdict='accept'|'marginal'` filter; the others
-   (`verdict='reject'`) can be dropped.
+   (`verdict='reject'`) can be dropped. **Single-phase patterns only:**
+   the fast correlation compares the WHOLE pattern, so in a mixture it
+   rejects real components — never drop a mixture candidate on a fast-tier
+   verdict; use `score_xrd_match_robust(mode='component')` instead.
 
 2. **Confident identification** with the **robust tier**. Extract the
    experimental peak list once with `extract_peaks`. For each surviving
@@ -256,9 +272,11 @@ either-alone:
   chemistry form to get separate candidate lists per phase:
   `chemistry=[["Si"], ["Ge"]]` — NOT `chemistry=["Si", "Ge"]` which would
   ask the DB for Si-Ge *binary compounds* instead of Si and Ge
-  separately. For step 2 use **`score_xrd_match_multiphase` from the
-  start** (not the per-candidate `score_xrd_match_robust` with
-  `algorithm='mip'`). The multi-phase tool accepts the full list of
+  separately. Screen each candidate with
+  `score_xrd_match_robust(..., mode='component')` (accept/marginal keeps it
+  in play; its `missing_strong_lines` show why one fails), then for step 2
+  use **`score_xrd_match_multiphase`** on the surviving candidates (not the
+  per-candidate `score_xrd_match_robust` with `algorithm='mip'`). The multi-phase tool accepts the full list of
   candidate phase patterns and solves one joint MILP across them, with
   per-phase activation binaries that let the solver leave a phase out
   entirely. Output includes per-phase coverage and matched-peak lists
@@ -269,7 +287,10 @@ either-alone:
   the per-phase decomposition isn't needed.
 
 - **Post-fit pattern (no chemistry hypothesis)** — no hint at all. This
-  is the blind / unknown-sample case. **Fingerprint first**: run
+  is the blind / unknown-sample case. Plan the composition-free checks up front
+  (validation: "Composition-free identification"): decide
+  `exclude_organic` from the sample description, and plan to separate
+  identified from tentative phases before any quantification. **Fingerprint first**: run
   `extract_peaks` then `search_match_pattern` against the reference
   library (with `calibrate_zero` first when an internal standard is
   present) — a convincing figure of merit identifies the phase in one
@@ -372,6 +393,19 @@ pass; do not stay capped at 10 while re-planning a search that returned no
 confident match. (For an in-situ *series*, keep it tight per frame — the
 establishing frame can widen once, then lock the identified phase.)
 
+**Instrument files.** When the data is an instrument file (Panalytical
+`.xrdml`, Bruker `.raw` / `.brml`, Rigaku `.ras` / `.rasx`), SciLink reads
+the pattern and fills `system_info` from the file's own record wherever the
+person gave nothing: `experiment.wavelength` (K-alpha1/K-alpha2 and the
+ratio; 0 when an incident-beam monochromator is in the recorded beam path),
+`experiment.radiation`, `experiment.geometry` (only when the file records
+the sample mode), optics, scan and tube settings;
+`metadata_filled_from_file` lists what came from the file. The person's
+values stand; `metadata_conflicts_with_file` lists disagreements — name
+them in the report. `resolve_wavelength` / `resolve_geometry` read these
+fields as they read any metadata. A file holding several scans arrives as
+its first scan (`scans_in_file`, `file_notes`).
+
 **Wavelength selection.** Default CuKa unless the experiment metadata
 says otherwise. MoKa is common for high-2θ work. A wavelength mismatch
 gives uniformly bad correlations / FOMs for all candidates with a
@@ -401,13 +435,19 @@ labelled 'CuKa', or the ratio stated in the file header. A refinement's
 **Structure files for refinement.** `search_structures` saves a COD entry's
 own CIF, so the declared space group and the atomic displacement parameters
 reach the refinement tools; the engine keeps the declared space group (it no
-longer re-detects a higher symmetry at a loose tolerance). The refinement tools'
-`displacement` parameter (default `'cif'`) takes each element's U from the file
-where it gives one — about six in ten COD entries do; the rest, and computed
-structures, get GSAS-II's 0.01 Å². Pass `'default'` to use 0.01 Å² for every
-atom, or a number for a different fixed U (e.g. ~0.02–0.03 Å² for a soft or
-disordered phase whose file carries no values). The output's `displacement_U`
-lists the values used.
+longer re-detects a higher symmetry at a loose tolerance). A phase with many
+COD entries is represented by an experimental, ambient-condition entry from the
+cluster of cell volumes most publications agree on (`representative='consensus'`,
+the default) — not a theoretical model or a member of a high-pressure /
+high-temperature series; each candidate's `cod_entry` shows the year, method
+and number of entries. The refinement tools' `displacement` parameter (default
+`'cif'`) takes each element's U from the file where it gives a plausible value
+(non-H 0.0005–0.025 Å²) — about six in ten COD entries do; the rest, implausible
+values (listed in `displacement_U_replaced`) and computed structures get
+GSAS-II's 0.01 Å². Pass `'default'` to use 0.01 Å² for every atom, `'cif_raw'`
+for the file's values unbounded, or a number for a different fixed U (e.g.
+~0.02–0.03 Å² for a soft or disordered phase whose file carries no values). The
+output's `displacement_U` lists the values used.
 
 **Narrowing the candidate list.** The `search_structures` `query` dict
 accepts three optional filters that often pay for themselves:
@@ -456,6 +496,23 @@ must follow this exact sequence:
    metadata. The `search_structures` tool already prints its own
    `DB_MATCHES_JSON:` marker; the framework's stdout parser lifts it
    into `fit_results['db_matches']` automatically.
+
+**Composition-free route in the script.** When the record gives no
+elements, precursors or EDS/XRF result (see "Composition-free
+identification" under validation; when composition IS given, skip this
+block and emit `identified_phases` as usual, with no tentative tier):
+- pass `exclude_organic=True` to `search_match_pattern` / `identify_mixture`
+  when the record describes an inorganic sample (oxides, minerals,
+  ceramics, inorganic synthesis from commercial reagents);
+- for every blind hit, record `n_library_reports`, `organic_like`, its
+  `score_xrd_match_robust(mode='component')` verdict and the joint
+  `confirmed` flag;
+- emit two lists in `FIT_RESULTS_JSON`: `identified_phases` (hits that pass
+  plausibility and prevalence; full-pattern verdicts recorded as
+  supporting evidence) and
+  `tentative_phases` (each with a one-line reason);
+- run NNLS / Rietveld on the identified phases only, and report the
+  unexplained intensity; tentative phases get no weight fraction.
 
 **Don't profile-fit for identification.** Two common over-builds to avoid:
 - The **fast tier needs no peak extraction** — it cross-correlates the
@@ -728,13 +785,45 @@ collapses all intensity into one phase and reports a fake 100 %):
    q = quantify_phases_nnls(two_theta, intensity, candidate_cif_paths,
                             wavelength=lam, fwhm_deg=0.15, background='snip')
    # q['phases']   -> [{'structure_path', 'intensity_fraction', 'weight_fraction_est'}, ...]
+   #                  sorted by intensity_fraction, NOT input order — match by structure_path
    # q['reliable'] -> False when the candidates can't explain the pattern
    #                  (a phase missing / off-database) -> report that, DON'T fake fractions.
    ```
 2. `refine_rietveld_multiphase` — escalate to this only for RIGOROUS weight
-   fractions with esds on a small CONFIRMED phase set (typically 2–3 phases NNLS
+   fractions with esds (`weight_fraction_esds`, statistical; save them next to
+   the fractions in FIT_RESULTS_JSON) on a small CONFIRMED phase set (typically 2–3 phases NNLS
    already screened in). Do not run it as the first pass over a long candidate
    list, and do not run single-phase Rietveld to "quantify" a mixture.
+   NNLS `reliable=False` does not by itself rule Rietveld out: NNLS fits fixed
+   simulated profiles, so a wrong peak shape, a slightly different cell or
+   preferred orientation also raise its residual. When every strong peak is
+   predicted by a chemically plausible candidate, run the Rietveld refinement
+   and judge the fractions by ITS fit; add candidates first only when the NNLS
+   residual shows peaks no candidate predicts.
+
+**Rietveld settings from the metadata.** Pass the record's metadata through,
+and keep the profile terms on:
+- `geometry=resolve_geometry(system_info)` (from `wavelength`): flat-plate
+  reflection (`'bragg-brentano'`) or capillary/transmission
+  (`'debye-scherrer'`). It decides whether the preferred-orientation
+  correction applies.
+- Keep `refine_profile=True` and `refine_instrument=True` (the defaults): the
+  starting profile is generic, and a profile that does not match moves
+  intensity between overlapping phases. The start is chosen by wavelength
+  (`instrument_preset`: lab anode line → `'lab'`, other wavelengths →
+  `'synchrotron'`); if the result lists phases in `negative_microstrain`, the
+  start was broader than the data — rerun with a narrower preset.
+- `preferred_orientation='auto'` (the multiphase default) corrects texture in
+  flat-plate reflection data with a March-Dollase term per phase, kept only
+  when it lowers Rwp by ≥ 3 %. Platy and needle phases (gypsum, micas, clays,
+  hydroxides, many carbonates) routinely need it; report each kept axis and
+  MD with the fractions. `refine_rietveld_series` leaves it off (the trials
+  would run on every frame): find the axis on one representative frame and
+  pass it as `preferred_orientation={phase_index: [h, k, l]}`. A residual dominated by one family of reflections
+  (one peak far too strong or weak) is the texture signature.
+- `sample_displacement=True` is opt-in: on flat-plate data with a peak-position
+  residual that grows toward low angle. Without an internal standard it trades
+  off against the cells.
 
 **In-situ / series — identify at ESTABLISHING frames, then track.** A
 series is not N independent identifications. Identify each phase where it
@@ -845,8 +934,10 @@ confirms the phase is present; it does NOT confirm purity, sample
 preparation correctness, or absence of minor phases. Mention this
 caveat when reporting identifications.
 
-**Multi-phase samples.** Hanawalt is single-phase by construction. For
-suspected multi-phase mixtures, switch to `score_xrd_match_multiphase`
+**Multi-phase samples.** Hanawalt's default `mode='single'` is single-phase
+by construction; `mode='component'` scores one phase of a mixture from the
+candidate's side. For suspected multi-phase mixtures, screen candidates in
+component mode, then switch to `score_xrd_match_multiphase`
 and feed it the full candidate phase list — the joint MILP allocates
 peaks across phases with per-phase activation binaries and reports
 per-phase coverage. Increase `max_exp_peaks` (default 30) when the
@@ -873,6 +964,61 @@ textured sample can suppress some reflections and lower `predicted_coverage`
 legitimately — weigh it against the residuals and the alternatives.)
 
 ## validation
+
+**Composition-free identification.** Scope: this applies ONLY when the
+record gives no elements, precursors, target compound or EDS/XRF result.
+When any of these is given, the element-filtered search already does the
+plausibility work: use the normal route, do not split phases into
+identified/tentative tiers, and report and quantify every expected phase
+the refinement supports. Without composition, a fingerprint hit is a
+HYPOTHESIS, not an identification: noisy or crowded peak lists match
+dense-line library entries by coincidence, and with ~370k phases in the
+library some exotic entry always scores well.
+
+- If you can ask the user, ask for the composition (elements, precursors
+  or an EDS/XRF result) BEFORE searching blind; it changes the answer more
+  than any search setting.
+- Use what the record does say. "Oxide ceramic", "mineral", "battery
+  cathode", "commercial reagents" for an inorganic synthesis →
+  `exclude_organic=True` in `search_match_pattern` / `identify_mixture`.
+- Before calling a blind hit a phase, check it on two counts:
+  (1) **chemical plausibility** for the sample as described; (2)
+  **prevalence**: `n_library_reports` > 1, a simple stoichiometry, and
+  ideally a known reagent or mineral (a single-report, many-element or
+  fractional-stoichiometry entry in a sample made from commercial reagents
+  is almost certainly a coincidence). These two are what separate real
+  phases from coincidences. Full-pattern evidence
+  (`score_xrd_match_robust(mode='component')`, the joint `confirmed`
+  flag, the refinement) is supporting: record it, but do not demote a
+  plausible, prevalent phase on it alone — on real mixtures these checks
+  also reject genuine overlapping or minor components. Drop a phase only
+  if the refinement gives it a negligible fraction.
+- Report in tiers. **Identified**: passes plausibility and prevalence.
+  **Tentative**: scores well but fails plausibility or prevalence. Name it
+  as a candidate, give no weight fraction, and say why it is doubtful.
+  **Unexplained peaks**: list their positions.
+- Quantify (NNLS / Rietveld) only the identified phases, and state how
+  much measured intensity they leave unexplained. Never put a weight
+  fraction on a phase you would not defend chemically.
+- "The phases cannot be identified reliably from this pattern without
+  composition; here are the candidates and why each is uncertain;
+  EDS/XRF or the precursor list would resolve it" is a valid, complete
+  answer. A confident list of exotic phases is not.
+
+**Weight-fraction uncertainties.** `refine_rietveld_multiphase` returns
+`weight_fraction_esds`: statistical esds from the refinement covariance.
+They measure precision, not accuracy; the real error of quantitative phase
+analysis is dominated by systematic effects (missing or wrong phases,
+preferred orientation, microabsorption) and is typically several times
+larger. Report each fraction with its refinement esd and say that the
+esd is statistical. A converged refinement with a complete phase set is a
+result: do not withhold its fractions because the esds are small or
+missing, or because Rwp is above a textbook value when the residual is a
+profile-shape or texture misfit of phases that are all present (correct
+the texture with `preferred_orientation` first and state the remaining
+misfit). Withhold them only when the refinement itself fails (not
+converged, a phase collapsed to zero — `weight_fraction_esd_note` says
+so — a cell ran away, or a phase is missing from the set).
 
 **Per-candidate sanity checks.**
 

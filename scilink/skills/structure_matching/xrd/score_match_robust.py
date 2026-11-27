@@ -95,6 +95,22 @@ _STRONG_SIM_FRAC = 0.15
 # reject threshold instead of scoring a false "marginal".
 _PRED_COV_FULL = 0.65
 
+# Component mode (one phase of a MIXTURE): verdict thresholds on the
+# chance-corrected, candidate-side figure of merit, and the default cap on the
+# experimental peak list (a mixture's minor phases sit below the 20 strongest
+# peaks of the whole pattern). Calibrated on the IUCr CPD QPA round robin
+# (corundum / zincite / fluorite mixtures) against decoy phases absent from it.
+_COMPONENT_ACCEPT_MIN = 0.70
+_COMPONENT_MARGINAL_MIN = 0.40
+_COMPONENT_MAX_EXP_PEAKS = 60
+_COMPONENT_MIN_LINES = 3
+# Half-width (2θ°) of the neighbourhood over which the LOCAL measured line
+# density sets each predicted line's chance-match probability. Local, because
+# measured peak lists are rarely uniform: noise ripples on a high low-angle
+# background can cover nearly every position in a few-degree band.
+_CHANCE_HALF_WINDOW_DEG = 5.0
+_SINGLE_MAX_EXP_PEAKS = 20
+
 
 TOOL_SPEC = ToolSpec(
     name="score_xrd_match_robust",
@@ -114,9 +130,10 @@ TOOL_SPEC = ToolSpec(
     signature=(
         "score_xrd_match_robust(exp_two_theta=None, exp_intensity=None, "
         "exp_peaks=None, sim_two_theta, sim_intensity, algorithm='hanawalt', "
-        "tol_deg=0.3, max_exp_peaks=20, max_sim_peaks=30, "
+        "tol_deg=0.3, max_exp_peaks=None, max_sim_peaks=30, "
         "scale_search=(0.96, 1.04, 0.002), shift_search=(-0.4, 0.4), "
-        "fit_lattice_scale=True) -> dict"
+        "fit_lattice_scale=None, reference_cell='unknown', mode='single', "
+        "chance_correction=True, strong_line_frac=0.15) -> dict"
     ),
     parameters={
         "exp_two_theta": {
@@ -149,7 +166,7 @@ TOOL_SPEC = ToolSpec(
         },
         "max_exp_peaks": {
             "type": "int",
-            "description": "Cap on experimental peaks considered (strongest kept). Default 20.",
+            "description": "Cap on experimental peaks considered (strongest kept). Default None = 20 in mode='single', 60 in mode='component' (a mixture's minor-phase lines sit below the 20 strongest peaks of the whole pattern).",
         },
         "max_sim_peaks": {
             "type": "int",
@@ -165,7 +182,19 @@ TOOL_SPEC = ToolSpec(
         },
         "fit_lattice_scale": {
             "type": "bool",
-            "description": "hanawalt only. Default True: fit a single lattice scale (over scale_search) before matching, adopted only if it aligns >=2 reflections so a wrong phase is not force-aligned. Set False to match at the reference lattice as-is (e.g. when the reference is already at experimental conditions).",
+            "description": "hanawalt only. Default None = True in mode='single'; in mode='component' True only for a computed reference (reference_cell 'computed' / 'mp'). Fits a single lattice scale (over scale_search) before matching, adopted only if it aligns >=2 reflections so a wrong phase is not force-aligned. Inside a mixture a free ±4 % scale lets a few-line phase slide onto OTHER phases' peaks, while a measured (COD) cell is already within tol_deg — set True explicitly for a solid solution or a strongly expanded/strained phase.",
+        },
+        "mode": {
+            "type": "str",
+            "description": "'single' (default): the pattern is one phase — the score is the share of the MEASURED intensity the candidate explains. 'component': the candidate is ONE PHASE OF A MIXTURE — the score asks whether the candidate's OWN strong lines (relative intensity >= strong_line_frac, inside the measured window) are present at consistent relative intensities; measured peaks it does not explain cost nothing, so a true 20-40 wt% component is not rejected because other phases own most of the pattern. FOM = coverage × significance × (0.6 + 0.25·position + 0.15·intensity consistency); verdict accept >= 0.70, marginal >= 0.40, capped at 'marginal' when fewer than 3 strong lines are testable (Hanawalt three-line rule). On the IUCr CPD round-robin mixtures it accepted 18/19 phases present at >=5 wt% (single mode: 6/19) and none of 312 unrelated decoys. Use it to decide which candidates of a mixture are present; then confirm the set jointly (score_xrd_match_multiphase) and quantify (quantify_phases_nnls / refine_rietveld_multiphase). hanawalt only.",
+        },
+        "chance_correction": {
+            "type": "bool",
+            "description": "mode='component' only. Default True: multiply the coverage by its significance, 1 − P(at least as many strong lines matching by chance), where each line's chance probability is the fraction of its ±5° neighbourhood within tol_deg of a measured peak. Guards against dense measured peak lists (many phases, noise ripples) in which any line forest finds partners. Set False to see the raw coverage.",
+        },
+        "strong_line_frac": {
+            "type": "float",
+            "description": "mode='component' only. A predicted line is tested when its relative intensity is >= this fraction of the candidate's strongest line (default 0.15). RAISE (e.g. 0.3) for strongly textured samples where medium lines may be suppressed; LOWER to test more lines on clean data.",
         },
         "reference_cell": {
             "type": "str",
@@ -186,14 +215,20 @@ TOOL_SPEC = ToolSpec(
         "reference_cell}: the transform the score was computed under — draw "
         "the overlay through register_overlay with it), 'warnings' (a fitted "
         "scale beyond the band for the reference cell), "
-        "'n_exp_peaks', 'n_sim_peaks'."
+        "'n_exp_peaks', 'n_sim_peaks'. mode='component' adds 'coverage' "
+        "(candidate-side), 'chance_level', 'chance_p_value', 'significance', "
+        "'position_score', 'intensity_consistency', 'missing_strong_lines' "
+        "(predicted strong lines with no measured partner) and "
+        "'n_strong_lines_tested'."
     ),
     when_to_use=(
         "After the fast tier narrows to a few candidates with promising "
         "correlation, run the robust tier for confident identification. "
-        "Use 'hanawalt' by default; switch to 'mip' for multi-phase or "
-        "constrained matching, or when zero-shift and lattice scale need "
-        "to be reported as fitted parameters."
+        "Use 'hanawalt' by default; switch to 'mip' for constrained "
+        "matching, or when zero-shift and lattice scale need to be reported "
+        "as fitted parameters. For a MIXTURE score each candidate with "
+        "mode='component' — single-mode (and fast-tier) verdicts reject true "
+        "components because the other phases own most of the pattern."
     ),
 )
 
@@ -211,19 +246,36 @@ def score_xrd_match_robust(
     exp_peaks: Optional[dict] = None,
     algorithm: str = "hanawalt",
     tol_deg: float = 0.3,
-    max_exp_peaks: int = 20,
+    max_exp_peaks: Optional[int] = None,
     max_sim_peaks: int = 30,
     scale_search: tuple = (0.96, 1.04, 0.002),
     shift_search: tuple = (-0.4, 0.4),
-    fit_lattice_scale: bool = True,
+    fit_lattice_scale: Optional[bool] = None,
     reference_cell: str = "unknown",
+    mode: str = "single",
+    chance_correction: bool = True,
+    strong_line_frac: float = _STRONG_SIM_FRAC,
 ) -> dict[str, Any]:
     """Robust peak-list scoring. See ``TOOL_SPEC`` for full contract."""
+    if mode not in ("single", "component"):
+        raise ValueError(f"mode must be 'single' or 'component'; got {mode!r}")
+    if mode == "component" and algorithm != "hanawalt":
+        raise ValueError("mode='component' is implemented for algorithm='hanawalt'; "
+                         "use score_xrd_match_multiphase for a joint MIP over several phases")
+    if max_exp_peaks is None:
+        max_exp_peaks = _COMPONENT_MAX_EXP_PEAKS if mode == "component" else _SINGLE_MAX_EXP_PEAKS
+    if fit_lattice_scale is None:
+        # Single-phase: fit (a DFT-relaxed reference sits a few % off). Component
+        # mode: only for a COMPUTED reference — inside a mixture a free ±4 %
+        # scale lets a few-line phase slide onto other phases' peaks, and a
+        # measured cell (COD) is already within the position tolerance.
+        fit_lattice_scale = (mode == "single") or str(reference_cell).lower() in ("computed", "mp")
     return _with_registration(_score_robust(
         sim_two_theta, sim_intensity, exp_two_theta=exp_two_theta, exp_intensity=exp_intensity,
         exp_peaks=exp_peaks, algorithm=algorithm, tol_deg=tol_deg, max_exp_peaks=max_exp_peaks,
         max_sim_peaks=max_sim_peaks, scale_search=scale_search, shift_search=shift_search,
-        fit_lattice_scale=fit_lattice_scale), reference_cell)
+        fit_lattice_scale=fit_lattice_scale, mode=mode, chance_correction=bool(chance_correction),
+        strong_line_frac=float(strong_line_frac)), reference_cell)
 
 
 def _with_registration(result: dict, reference_cell: str) -> dict:
@@ -244,7 +296,8 @@ def _with_registration(result: dict, reference_cell: str) -> dict:
 
 def _score_robust(sim_two_theta, sim_intensity, *, exp_two_theta, exp_intensity, exp_peaks, algorithm,
                   tol_deg, max_exp_peaks, max_sim_peaks, scale_search, shift_search,
-                  fit_lattice_scale) -> dict[str, Any]:
+                  fit_lattice_scale, mode="single", chance_correction=False,
+                  strong_line_frac=_STRONG_SIM_FRAC) -> dict[str, Any]:
     if algorithm not in {"hanawalt", "mip"}:
         raise ValueError(
             f"Unknown algorithm: {algorithm!r}. Must be 'hanawalt' or 'mip'."
@@ -258,6 +311,15 @@ def _score_robust(sim_two_theta, sim_intensity, *, exp_two_theta, exp_intensity,
     if not sim_pl.positions:
         return _empty_result(algorithm, exp_pl, sim_pl, "no simulated peaks")
 
+    window = None
+    if exp_two_theta is not None and len(exp_two_theta):
+        window = (float(np.min(exp_two_theta)), float(np.max(exp_two_theta)))
+    if algorithm == "hanawalt" and mode == "component":
+        return _score_component(
+            exp_pl, sim_pl, tol_deg=tol_deg,
+            scale_search=scale_search if fit_lattice_scale else None,
+            strong_frac=strong_line_frac, chance_correction=chance_correction,
+            window=window)
     if algorithm == "hanawalt":
         return _score_hanawalt(
             exp_pl, sim_pl, tol_deg=tol_deg,
@@ -455,6 +517,148 @@ def _weighted_cost(exp_pl: "_PeakList", unmatched_exp, total_residual: float, to
     return float(_COST_UNCOVERED_W * uncovered + _COST_RESIDUAL_W * min(mean_res, 1.0))
 
 
+def _covered_fraction(centers, tol_deg: float, lo: float, hi: float) -> float:
+    """Fraction of the 2θ window [lo, hi] lying within ±tol of any center — the
+    probability that a randomly placed line matches one of them by chance."""
+    if hi <= lo:
+        return 0.0
+    iv = sorted((max(lo, c - tol_deg), min(hi, c + tol_deg))
+                for c in np.asarray(centers, dtype=float) if lo - tol_deg <= c <= hi + tol_deg)
+    total, cur_lo, cur_hi = 0.0, None, None
+    for a, b in iv:
+        if b <= a:
+            continue
+        if cur_hi is None or a > cur_hi:
+            if cur_hi is not None:
+                total += cur_hi - cur_lo
+            cur_lo, cur_hi = a, b
+        else:
+            cur_hi = max(cur_hi, b)
+    if cur_hi is not None:
+        total += cur_hi - cur_lo
+    return float(min(1.0, total / (hi - lo)))
+
+
+def _poisson_binomial_tail(p, k: int) -> float:
+    """P(X >= k) for X = sum of independent Bernoulli(p_i)."""
+    dist = np.zeros(len(p) + 1)
+    dist[0] = 1.0
+    for pi in p:
+        dist[1:] = dist[1:] * (1.0 - pi) + dist[:-1] * pi
+        dist[0] *= (1.0 - pi)
+    return float(min(1.0, dist[int(k):].sum()))
+
+
+def _score_window(exp_pl: "_PeakList", window, tol_deg: float) -> tuple[float, float]:
+    if window is not None:
+        return float(window[0]), float(window[1])
+    ep = np.asarray(exp_pl.positions, dtype=float)
+    return float(ep.min() - tol_deg), float(ep.max() + tol_deg)
+
+
+def _score_component(
+    exp_pl: _PeakList,
+    sim_pl: _PeakList,
+    *,
+    tol_deg: float,
+    scale_search: tuple | None,
+    strong_frac: float,
+    chance_correction: bool,
+    window=None,
+) -> dict[str, Any]:
+    """Score ONE phase of a mixture from the candidate's side.
+
+    In a mixture most experimental peaks belong to OTHER phases, so the
+    single-phase figure of merit (share of the measured intensity explained)
+    is low for every true minor or mid-sized component. Here the question is
+    the converse: are the candidate's OWN strong lines (relative intensity >=
+    strong_frac, inside the measured window) present, at consistent relative
+    intensities? Unexplained measured peaks cost nothing.
+
+    Coverage is the predicted-intensity-weighted fraction of strong lines with a
+    measured peak within tol. Matches can be coincidences, the more so where
+    measured peaks are dense, so each strong line gets a chance-match
+    probability p_i = fraction of its ±5° neighbourhood lying within ±tol of a
+    measured peak, and ``chance_correction`` multiplies the score by the
+    significance 1 − P(at least as many lines matching by chance) (Poisson-
+    binomial over the p_i). Intensity
+    consistency: of the matched lines, the weighted share whose measured
+    intensity is not far BELOW what the candidate's own pattern predicts
+    (measured/predicted >= 1/3 of the median ratio); measured intensity ABOVE
+    prediction is allowed — another phase's line can overlap.
+    FOM = coverage * significance * (0.6 + 0.25 * position_score
+    + 0.15 * intensity_consistency)."""
+    fitted_scale = (
+        _fit_lattice_scale(exp_pl, sim_pl, tol_deg, scale_search, weight_by="sim")
+        if scale_search else 1.0
+    )
+    sp = np.asarray(_apply_lattice_scale(sim_pl.positions, fitted_scale), dtype=float)
+    rel = np.asarray(sim_pl.intensities_norm, dtype=float)
+    ep = np.asarray(exp_pl.positions, dtype=float)
+    ei = np.asarray(exp_pl.intensities, dtype=float)
+    lo, hi = _score_window(exp_pl, window, tol_deg)
+    testable = (sp >= lo) & (sp <= hi) & (rel >= float(strong_frac))
+    base = {"algorithm": "hanawalt", "mode": "component", "fitted_shift": 0.0,
+            "fitted_scale": float(fitted_scale), "n_exp_peaks": exp_pl.n, "n_sim_peaks": sim_pl.n}
+    if not testable.any():
+        return {**base, "figure_of_merit": 0.0, "verdict": "reject", "matched_peaks": [],
+                "unmatched_exp": list(range(exp_pl.n)), "missing_strong_lines": [],
+                "note": "no strong predicted line inside the measured window"}
+    d = np.abs(sp[:, None] - ep[None, :])
+    j = d.argmin(axis=1)
+    res = d[np.arange(sp.size), j]
+    hit = testable & (res <= tol_deg)
+    w = rel
+    coverage = float(w[hit].sum() / w[testable].sum())
+    hw = _CHANCE_HALF_WINDOW_DEG
+    p_line = np.array([_covered_fraction(ep, tol_deg, max(lo, c - hw), min(hi, c + hw))
+                       for c in sp[testable]])
+    chance = float(p_line.mean())
+    p_value = _poisson_binomial_tail(p_line, int(hit.sum()))
+    significance = (1.0 - p_value) if chance_correction else 1.0
+    cov_cc = coverage * significance
+    if hit.any():
+        pos = float(np.sum(w[hit] * (1.0 - res[hit] / tol_deg)) / np.sum(w[hit]))
+        ratio = ei[j[hit]] / np.maximum(rel[hit], 1e-9)
+        order = np.argsort(ratio)
+        cw = np.cumsum(w[hit][order])
+        k = float(ratio[order][np.searchsorted(cw, 0.5 * cw[-1])])
+        ok = ratio >= k / 3.0
+        consistency = float(np.sum(w[hit][ok]) / np.sum(w[hit]))
+    else:
+        pos, consistency = 0.0, 0.0
+    fom = cov_cc * (0.6 + 0.25 * pos + 0.15 * consistency)
+    verdict = ("accept" if fom >= _COMPONENT_ACCEPT_MIN
+               else "marginal" if fom >= _COMPONENT_MARGINAL_MIN else "reject")
+    n_testable = int(testable.sum())
+    few_lines = n_testable < _COMPONENT_MIN_LINES
+    if few_lines and verdict == "accept":
+        # Hanawalt's three-line rule: fewer than three strong lines in the
+        # window cannot establish a phase against chance coincidence.
+        verdict = "marginal"
+    matched = [{"exp_idx": int(j[i]), "sim_idx": int(i), "exp_pos": float(ep[j[i]]),
+                "sim_pos": float(sp[i]), "residual_deg": float(res[i])}
+               for i in np.flatnonzero(hit)]
+    used_exp = {m["exp_idx"] for m in matched}
+    return {**base,
+            "figure_of_merit": float(fom),
+            "verdict": verdict,
+            "coverage": coverage,
+            "chance_level": chance,
+            "chance_p_value": p_value,
+            "significance": float(significance),
+            "predicted_coverage": coverage,
+            "position_score": pos,
+            "intensity_consistency": consistency,
+            "matched_peaks": matched,
+            "unmatched_exp": [i for i in range(exp_pl.n) if i not in used_exp],
+            "missing_strong_lines": [round(float(v), 3) for v in sp[testable & ~hit]],
+            "n_strong_lines_tested": n_testable,
+            **({"note": f"only {n_testable} strong predicted line(s) in the window — "
+                        "verdict capped at 'marginal'"} if few_lines else {}),
+            }
+
+
 def _score_hanawalt(
     exp_pl: _PeakList,
     sim_pl: _PeakList,
@@ -561,6 +765,7 @@ def _score_hanawalt(
 
     return {
         "algorithm": "hanawalt",
+        "mode": "single",
         "figure_of_merit": float(fom),
         "coverage": float(coverage),
         "predicted_coverage": float(predicted_coverage),

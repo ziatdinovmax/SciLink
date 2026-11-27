@@ -72,7 +72,28 @@ TOOL_SPEC = ToolSpec(
                 "volume?: (min,max) Å³}, max_e_above_hull?: float, top_n?: int "
                 "(default 10, per chemistry hypothesis), z_range?: "
                 "(int, int), density_range?: (float, float) (g/cm³), "
-                "anonymous_formula?: str (e.g. 'AB2').\n\n"
+                "anonymous_formula?: str (e.g. 'AB2'), rank_by?: "
+                "'reported' | 'simplest' | 'newest', representative?: "
+                "'consensus' | 'newest'.\n\n"
+                "top_n counts DISTINCT phases (one entry per reduced formula + "
+                "space group). rank_by orders them for COD, which "
+                "carry no relevance score: 'reported' (default) puts the phases "
+                "deposited most often first — the common phase of a chemistry "
+                "(V2O5, anatase, hematite) ahead of rarely reported suboxides "
+                "and doped or defective variants (fractional formulas, which "
+                "always rank after whole-number ones); 'simplest' puts the "
+                "fewest atoms per formula first; 'newest' the most recent "
+                "deposition. representative picks the entry that stands for a "
+                "phase: 'consensus' (default) takes an experimental, ambient-"
+                "condition entry from the densest cluster of reported cell "
+                "volumes, the most recent publication within it — skipping "
+                "theoretical models and high-pressure / high-temperature "
+                "series, which make poor Rietveld starting models; 'newest' "
+                "takes the highest COD id. Each candidate's 'cod_entry' "
+                "metadata shows the chosen entry's year, method and how many "
+                "entries the phase has. Switch to "
+                "'simplest' or 'newest', or raise top_n, when a rare or newly "
+                "reported phase is the hypothesis.\n\n"
                 "CELL-ONLY (blind) query: when the sample chemistry is UNKNOWN, "
                 "omit chemistry and pass lattice_param_ranges from "
                 "index_pattern's recovered cell — the unit cell becomes the "
@@ -304,6 +325,8 @@ def _coerce_query_specs(query: dict) -> list[QuerySpec]:
     anonymous_formula = query.get("anonymous_formula")
     if anonymous_formula is not None:
         anonymous_formula = str(anonymous_formula)
+    rank_by = str(query.get("rank_by") or "reported")
+    representative = str(query.get("representative") or "consensus")
 
     return [
         QuerySpec(
@@ -315,6 +338,8 @@ def _coerce_query_specs(query: dict) -> list[QuerySpec]:
             z_range=z_range,
             density_range=density_range,
             anonymous_formula=anonymous_formula,
+            rank_by=rank_by,
+            representative=representative,
         )
         for c in chemistries
     ]

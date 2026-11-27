@@ -3904,6 +3904,68 @@ def _failed_plan_block(failed: dict) -> str:
         "parameterised model that converges is worth more than this one reworded.")
 
 
+_SYSTEM_INFO_CODEGEN_CHARS = 4000
+
+
+def _bounded_json(obj, limit: int) -> str:
+    """``obj`` as indented JSON within ``limit`` characters, still VALID JSON:
+    the longest values (free text, long lists) are shortened first and marked,
+    so the script can define the dict verbatim. Cutting the text instead would
+    hand it a broken literal."""
+    try:
+        data = json.loads(json.dumps(obj, default=str))
+    except Exception:
+        data = {"description": str(obj)}
+    dump = lambda d: json.dumps(d, indent=2, ensure_ascii=False)
+    txt = dump(data)
+    for _ in range(200):
+        if len(txt) <= limit:
+            return txt
+        # the leaf (string / list) with the longest serialization
+        best, stack = None, [(data, None, None)]
+        while stack:
+            node, parent, key = stack.pop()
+            if isinstance(node, dict):
+                stack += [(v, node, k) for k, v in node.items()]
+            elif isinstance(node, list) and any(isinstance(v, (dict, list)) for v in node):
+                stack += [(v, node, i) for i, v in enumerate(node)]
+            elif parent is not None:
+                n = len(json.dumps(node, ensure_ascii=False))
+                if best is None or n > best[0]:
+                    best = (n, parent, key, node)
+        if best is None or best[0] <= 40:
+            break
+        n, parent, key, node = best
+        if isinstance(node, str) and n > 240:
+            parent[key] = node[:200] + f" …[{len(node) - 200} more characters omitted]"
+        elif isinstance(node, list) and len(node) > 3:
+            parent[key] = node[:3] + [f"…[{len(node) - 3} more items omitted]"]
+        else:
+            parent[key] = f"[omitted: {n} characters]"
+        txt = dump(data)
+    if len(txt) > limit:      # still too long (very many keys): keep the keys, mark the values
+        txt = dump({k: (v if len(json.dumps(v, default=str)) < 80 else "[omitted]")
+                    for k, v in (data.items() if isinstance(data, dict) else {"value": data}.items())})
+    return txt
+
+
+def _system_info_block(state: dict) -> str:
+    """The record's metadata for the script-generation prompt: verbatim JSON,
+    with the instruction to define it in the script rather than assume None.
+    Empty when the record has no metadata."""
+    si = state.get("system_info")
+    if not si:
+        return ""
+    txt = _bounded_json(si, _SYSTEM_INFO_CODEGEN_CHARS)
+    return (
+        "## Experiment metadata (system_info)\n"
+        "The metadata supplied with this record, verbatim. Where a tool takes "
+        "the metadata (e.g. `resolve_wavelength(system_info)`), define "
+        "`system_info` in the script as this dict; do not set it to None or "
+        "substitute a default when the value is given here.\n"
+        f"```json\n{txt}\n```")
+
+
 def _write_series_fit_results(output_dir, state, series_results, quality_settings):
     """Write ``series_fit_results.json`` from the current ``series_results``.
 
@@ -4225,6 +4287,14 @@ Your guidance: '''
         if state.get("analysis_hints"):
             context_parts.append(
                 "## User Guidance\n" + str(state["analysis_hints"]))
+        # The record's metadata (wavelength, instrument, sample notes) reaches
+        # the script too. Without it, codegen only saw whatever the plan text
+        # restated, and scripts that call a tool taking the metadata
+        # (e.g. resolve_wavelength(system_info)) wrote `system_info = None`
+        # and fell back to a default wavelength.
+        _meta_block = _system_info_block(state)
+        if _meta_block:
+            context_parts.append(_meta_block)
         _ref_block = _reference_script_block(state, heading="##")
         if _ref_block:
             context_parts.append(_ref_block)
@@ -4481,6 +4551,10 @@ Your guidance: '''
                 min(level, len(self._SKILL_STRICTNESS_SCHEDULE) - 1)
             ].format(name=", ".join(n for n, _ in recipes))
             prompt += "\n\n" + preamble + _render_codegen_recipe(recipes)
+        # Same metadata as the first generation (see _system_info_block).
+        _meta_block = _system_info_block(state)
+        if _meta_block:
+            prompt += "\n\n" + _meta_block
 
         response = self.model.generate_content(prompt)
         result, error = parse_codegen_response(response, field="script", logger=self.logger)

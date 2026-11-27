@@ -35,8 +35,11 @@ def cifs(tmp_path_factory):
 
 def _mix(cifs, cA, cB, grid, fwhm=0.15, eta=0.5, noise=2.0, bg=40.0):
     from scilink.skills.structure_matching.xrd.quantify_nnls import _profile_column
+    # columns carry absolute per-cell intensities (~1e6); rescale each to a
+    # strongest line of 100 so the planted counts sit at a realistic SNR
     colA = _profile_column(cifs[0], grid, "CuKa", fwhm, eta)
     colB = _profile_column(cifs[1], grid, "CuKa", fwhm, eta)
+    colA, colB = 100 * colA / colA.max(), 100 * colB / colB.max()
     rng = np.random.default_rng(0)
     y = cA * colA + cB * colB + bg + 0.2 * (grid - grid[0])   # sloping background
     y = y + rng.normal(0, noise, grid.size)
@@ -89,3 +92,21 @@ def test_tool_spec_registered():
     # every meaningful knob is exposed to the LLM
     for knob in ("fwhm_deg", "background", "min_fraction", "residual_over_noise_max"):
         assert knob in TOOL_SPEC.parameters
+
+
+def test_weight_fractions_follow_hill_howard(cifs):
+    """weight_fraction_est = S_i·ZMV_i / Σ S_j·ZMV_j where S is the scale on the
+    ABSOLUTE per-cell pattern — plant known weights and recover them."""
+    from scilink.skills.structure_matching.xrd.quantify_nnls import (
+        _profile_column, _zmv, quantify_phases_nnls)
+    grid = np.arange(15.0, 80.0, 0.02)
+    colA = _profile_column(cifs[0], grid, "CuKa", 0.15, 0.5)
+    colB = _profile_column(cifs[1], grid, "CuKa", 0.15, 0.5)
+    zA, zB = _zmv(cifs[0]), _zmv(cifs[1])
+    for wA in (0.2, 0.5, 0.8):
+        sA, sB = wA / zA, (1 - wA) / zB              # w ∝ S·ZMV
+        ideal = sA * colA + sB * colB
+        y = 2000 * ideal / ideal.max() + 40 + np.random.default_rng(1).normal(0, 2, grid.size)
+        r = quantify_phases_nnls(list(grid), list(y), list(cifs), min_fraction=0.0)
+        got = {p["structure_path"]: p["weight_fraction_est"] for p in r["phases"]}
+        assert abs(got[cifs[0]] - wA) < 0.03, (wA, got)

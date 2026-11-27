@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Union
+from typing import Any, Optional, Union
 
 from ..._shared._spec import ToolSpec
 
@@ -168,7 +168,7 @@ def resolve_wavelength(
         named = _scan_text_for_named_source(blob)
         if named is not None:
             return _arbitrate_lab_line(named, text)
-        angstroms = _scan_text_for_angstroms(blob)
+        angstroms = _scan_text_for_angstroms(blob, need_context=True)
         if angstroms is not None:
             return _arbitrate_lab_line(angstroms, text)
 
@@ -206,7 +206,7 @@ def _arbitrate_lab_line(value: Union[str, float], text: str) -> Union[str, float
     sym = _anode_of(value)
     if sym is None:
         return value
-    if _KA1_ONLY_RE.search(text):
+    if _affirmed(_KA1_ONLY_RE, text):
         return f"{sym}Ka1"
     if _DOUBLET_RE.search(text):
         return f"{sym}Ka"
@@ -216,6 +216,16 @@ def _arbitrate_lab_line(value: Union[str, float], text: str) -> Union[str, float
     if named in (f"{sym}Ka", f"{sym}Ka1"):
         return named
     return value
+
+
+_NEGATION_RE = re.compile(r"\b(?:no|not|without|non|absent|removed)\b[^.;,]{0,25}$", re.IGNORECASE)
+
+
+def _affirmed(pattern: "re.Pattern", text: str) -> bool:
+    """A match not negated just before it ('no incident-beam monochromator',
+    'without a primary monochromator' describe the doublet, not K-alpha1)."""
+    return any(not _NEGATION_RE.search(text[max(0, m.start() - 40):m.start()])
+               for m in pattern.finditer(text))
 
 
 def _coerce_field(value: Any) -> Union[str, float, None]:
@@ -312,16 +322,32 @@ _ANGSTROM_RE = re.compile(
 )
 
 
-def _scan_text_for_angstroms(text: str) -> Union[float, None]:
-    """Pull a 'N.NNN Å' / 'N.NNN angstrom' style number from free text."""
-    match = _ANGSTROM_RE.search(text)
-    if not match:
-        return None
-    try:
-        v = float(match.group("value"))
-    except ValueError:
-        return None
-    if 0.1 < v < 5.0:
+# In free text a length in Å is a WAVELENGTH only when its clause says so:
+# 'λ = 0.4959 Å', 'wavelength 0.7093 Å', 'Cu Kα (1.5406 Å)', 'synchrotron ...'.
+# Lattice parameters and d-spacings ('anatase, a = 3.785 Å', 'd(200) = 2.82 Å')
+# are lengths in the same range and must not be read as the wavelength.
+_RADIATION_CONTEXT = re.compile(
+    r"wavelength|λ|lambda|radiation|k\s*-?\s*(?:alpha|α)\b|kα|synchrotron|beamline|"
+    r"\b(?:cu|mo|co|fe|cr|ag)\s*-?\s*k", re.IGNORECASE)
+
+
+def _clause_before(text: str, start: int, span: int = 40) -> str:
+    """The part of ``text`` just before ``start`` that belongs to the same clause."""
+    return re.split(r"[;,]|\.\s", text[max(0, start - span):start])[-1]
+
+
+def _scan_text_for_angstroms(text: str, need_context: bool = False) -> Union[float, None]:
+    """Pull a 'N.NNN Å' / 'N.NNN angstrom' style number from text. With
+    ``need_context`` (free text), only a value whose clause names the radiation."""
+    for match in _ANGSTROM_RE.finditer(text):
+        try:
+            v = float(match.group("value"))
+        except ValueError:
+            continue
+        if not 0.1 < v < 5.0:
+            continue
+        if need_context and not _RADIATION_CONTEXT.search(_clause_before(text, match.start())):
+            continue
         return v
     return None
 
@@ -348,3 +374,81 @@ def _collect_text(d: Any, _seen: set | None = None) -> list[str]:
         for item in d:
             blobs.extend(_collect_text(item, _seen))
     return blobs
+
+
+# --- diffractometer geometry -------------------------------------------------
+# Flat-plate reflection (Bragg-Brentano) and capillary / transmission
+# (Debye-Scherrer) differ in the sample-displacement term and in whether
+# crystallites lie preferentially (texture); refinement needs to know which.
+_REFLECTION_RE = re.compile(
+    r"bragg[- ]?brentano|reflection|flat[- ]?plate|theta\s*/\s*2\s*-?\s*theta|θ\s*/\s*2θ|"
+    r"theta[- ]2[- ]?theta|θ-2θ|front[- ]loaded|back[- ]loaded|rear[- ]loaded|"
+    r"zero[- ]background (?:holder|plate)|spinning (?:sample|stage)",
+    re.IGNORECASE)
+_TRANSMISSION_RE = re.compile(
+    r"debye[- ]?scherrer|capillary|transmission|kapton|foil|cylindrical sample",
+    re.IGNORECASE)
+
+
+def resolve_geometry(system_info: Union[dict, str, None]) -> Optional[str]:
+    """'bragg-brentano', 'debye-scherrer' or None. See ``_SPEC_GEOMETRY``."""
+    if system_info is None:
+        return None
+    if isinstance(system_info, dict):
+        # an explicit geometry field (e.g. the sample mode an instrument file
+        # records) decides before free text, where stage or holder names such as
+        # 'reflection-transmission spinner' can name both
+        for block in (system_info, system_info.get("experiment")):
+            if not isinstance(block, dict):
+                continue
+            for key in ("geometry", "diffraction_geometry", "sample_mode"):
+                if isinstance(block.get(key), str):
+                    g = _geometry_from_text(block[key])
+                    if g is not None:
+                        return g
+    text = " ".join(_collect_text(system_info)) if isinstance(system_info, dict) else str(system_info)
+    return _geometry_from_text(text)
+
+
+def _geometry_from_text(text: str) -> Optional[str]:
+    refl, trans = bool(_REFLECTION_RE.search(text)), bool(_TRANSMISSION_RE.search(text))
+    if refl and not trans:
+        return "bragg-brentano"
+    if trans and not refl:
+        return "debye-scherrer"
+    if trans and refl:
+        # 'transmission' can describe a Kapton window on a reflection stage;
+        # an explicit geometry name decides
+        if re.search(r"debye[- ]?scherrer|capillary", text, re.IGNORECASE):
+            return "debye-scherrer"
+        if re.search(r"bragg[- ]?brentano", text, re.IGNORECASE):
+            return "bragg-brentano"
+    return None
+
+
+_SPEC_GEOMETRY = ToolSpec(
+    name="resolve_geometry",
+    description=(
+        "Read the diffractometer geometry from experiment metadata: "
+        "'bragg-brentano' (flat-plate reflection, theta/2theta, spinning or "
+        "front/back-loaded holder) or 'debye-scherrer' (capillary, "
+        "transmission). None when the metadata does not say."
+    ),
+    import_line="from scilink.skills.structure_matching.xrd.wavelength import resolve_geometry",
+    signature="resolve_geometry(system_info: dict | str | None) -> str | None",
+    parameters={
+        "system_info": {"type": "dict | str | None",
+                        "description": "The record's metadata (searched as text) or a free-text string."},
+    },
+    required=["system_info"],
+    returns="'bragg-brentano', 'debye-scherrer', or None (unknown or contradictory).",
+    when_to_use=(
+        "Before Rietveld refinement: pass the result as geometry= to "
+        "refine_rietveld / refine_rietveld_multiphase / refine_rietveld_series. "
+        "It sets the sample-displacement term and whether the automatic "
+        "preferred-orientation correction applies (flat-plate reflection only). "
+        "None lets the refinement infer it from the wavelength."
+    ),
+)
+
+TOOL_SPECS = [_SPEC_GEOMETRY]
