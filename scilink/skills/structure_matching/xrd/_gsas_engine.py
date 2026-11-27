@@ -119,15 +119,279 @@ def _radiation_default(wavelength: Any) -> tuple:
     return _resolve_wavelength(wavelength), None, 0.0
 
 
-def _instprm(wavelength: Any, kalpha2_ratio: Any = None) -> str:
+# Starting instrument profiles. One lab template for every instrument started
+# synchrotron data with lab peak widths (about twice the observed width at
+# lambda = 0.5 A); microstrain then refines NEGATIVE to narrow the peaks, and the
+# fractions of overlapping phases are biased. 'synchrotron' is
+# GSAS-II's own default for a high-resolution beamline (APS 11-BM; its
+# defaultIparms), with the near-complete linear polarization of a synchrotron
+# beam. The refinement adapts either start (instrument_profile stage).
+INSTRUMENT_PRESETS = {
+    "lab": {"U": 2.0, "V": -2.0, "W": 5.0, "X": 0.0, "Y": 0.0, "SH/L": 0.002, "Polariz.": 0.7},
+    "synchrotron": {"U": 1.163, "V": -0.126, "W": 0.063, "X": 0.0, "Y": 0.0, "SH/L": 0.002,
+                    "Polariz.": 0.99},
+}
+GEOMETRIES = {"bragg-brentano": "Bragg-Brentano", "debye-scherrer": "Debye-Scherrer"}
+_GEOMETRY_ALIASES = {
+    "bragg-brentano": "bragg-brentano", "bb": "bragg-brentano", "reflection": "bragg-brentano",
+    "flat-plate": "bragg-brentano", "flat plate": "bragg-brentano", "theta-2theta": "bragg-brentano",
+    "debye-scherrer": "debye-scherrer", "ds": "debye-scherrer", "transmission": "debye-scherrer",
+    "capillary": "debye-scherrer", "cylinder": "debye-scherrer",
+}
+
+
+def _is_lab_line(wavelength: Any) -> bool:
+    """True for a lab-anode K-alpha wavelength (alias, or a number within
+    0.003 A of an anode's K-alpha1 / K-alpha2 / weighted mean)."""
+    if isinstance(wavelength, str):
+        key = wavelength.strip().lower().replace(" ", "").replace("-", "").replace("α", "a")
+        if re.match(r"^(cu|mo|co|fe|cr|ag)ka[12]?$", key):
+            return True
+    try:
+        lam = float(_resolve_wavelength(wavelength))
+    except Exception:  # noqa: BLE001
+        return False
+    lines = [v for pair in _KALPHA_DOUBLETS.values() for v in pair] + list(_ANODE_WAVELENGTHS.values())
+    return any(abs(lam - v) <= 0.003 for v in lines)
+
+
+def _resolve_instrument_preset(wavelength: Any, preset: Any = None) -> str:
+    """'lab' or 'synchrotron'. None/'auto': 'lab' for a lab-anode line,
+    'synchrotron' for any other wavelength."""
+    if preset is None or str(preset).lower() == "auto":
+        return "lab" if _is_lab_line(wavelength) else "synchrotron"
+    key = str(preset).strip().lower()
+    if key not in INSTRUMENT_PRESETS:
+        raise ValueError(f"instrument_preset must be 'auto' or one of {sorted(INSTRUMENT_PRESETS)}, "
+                         f"got {preset!r}")
+    return key
+
+
+def _resolve_geometry(wavelength: Any, geometry: Any = None) -> str:
+    """'bragg-brentano' or 'debye-scherrer'. None: Bragg-Brentano (flat-plate
+    reflection, the lab standard) for a lab-anode line, Debye-Scherrer
+    (capillary transmission) otherwise. Pass the geometry from the metadata
+    (``resolve_geometry``) when it is known."""
+    if geometry is None or str(geometry).lower() == "auto":
+        return "bragg-brentano" if _is_lab_line(wavelength) else "debye-scherrer"
+    key = _GEOMETRY_ALIASES.get(str(geometry).strip().lower())
+    if key is None:
+        raise ValueError(f"geometry must be 'bragg-brentano' or 'debye-scherrer' (or 'auto'), "
+                         f"got {geometry!r}")
+    return key
+
+
+def _instprm(wavelength: Any, kalpha2_ratio: Any = None, geometry: Any = None,
+             instrument_preset: Any = None) -> str:
     """GSAS-II instrument-parameter text for a refinement: the doublet keys
-    (Lam1/Lam2/I(L2)/I(L1)) for tube K-alpha radiation, Lam otherwise."""
+    (Lam1/Lam2/I(L2)/I(L1)) for tube K-alpha radiation, Lam otherwise; the
+    starting profile and polarization of ``instrument_preset`` and, when
+    ``geometry`` is given, the diffractometer geometry (which decides the
+    sample-displacement parameter GSAS-II offers)."""
     l1, l2, ratio = _radiation(wavelength, kalpha2_ratio)
-    text = _INSTPRM_TEMPLATE.format(lam=l1)
-    if l2 is not None:
-        text = text.replace(f"Lam:{l1:.6f}\n",
-                            f"Lam1:{l1:.6f}\nLam2:{l2:.6f}\nI(L2)/I(L1):{ratio}\n")
+    pr = INSTRUMENT_PRESETS[_resolve_instrument_preset(wavelength, instrument_preset)]
+    lam = (f"Lam:{l1:.6f}\n" if l2 is None else
+           f"Lam1:{l1:.6f}\nLam2:{l2:.6f}\nI(L2)/I(L1):{ratio}\n")
+    text = ("#GSAS-II instrument parameter file; do not add/delete items!\n"
+            f"Type:PXC\nBank:1.0\n{lam}Polariz.:{pr['Polariz.']}\nAzimuth:0.0\nZero:0.0\n"
+            f"U:{pr['U']}\nV:{pr['V']}\nW:{pr['W']}\nX:{pr['X']}\nY:{pr['Y']}\nZ:0.0\n"
+            f"SH/L:{pr['SH/L']}\n")
+    if geometry is not None:
+        text += f"Diff-type:{GEOMETRIES[_resolve_geometry(wavelength, geometry)]}\n"
     return text
+
+
+# ------------------------------------------------- refinement-stage helpers
+def _negative_mustrain(phases, hist) -> list:
+    """Phases whose refined isotropic microstrain is negative. Microstrain is a
+    physical broadening and cannot be negative: a negative value means the
+    starting instrument profile is broader than the data and the strain term
+    narrows the peaks to compensate. It is reported, not undone: holding the
+    term at a positive value made the fit worse on lab data whose peaks are
+    only slightly narrower than the lab start (the instrument stage could then
+    not absorb the difference). It is the signal to start from a narrower
+    profile (instrument_preset='synchrotron', or instrument_terms with 'U')."""
+    out = []
+    for ph in phases:
+        try:
+            if float(ph.getHAPvalues(hist)["Mustrain"][1][0]) < 0:
+                out.append(ph.name)
+        except Exception:  # noqa: BLE001 - a phase without the term is skipped
+            continue
+    return out
+
+
+def _sample_displacement_stage(gpx, hist, geometry, rwp_fn, corr_fn, trace) -> dict:
+    """Refine the flat-plate sample displacement (Bragg-Brentano 'Shift', um):
+    a sample surface off the goniometer axis shifts peaks by ~cos(theta), which
+    a constant zero offset cannot follow. Kept only when the fit improves."""
+    if geometry != "bragg-brentano":
+        return {}
+    sp = hist.data["Sample Parameters"]
+    if "Shift" not in sp:
+        return {}
+    before = list(sp["Shift"])
+    r0 = rwp_fn()
+    try:
+        hist.set_refinements({"Sample Parameters": ["Shift"]})
+        gpx.do_refinements([{}])
+        r1 = rwp_fn()
+    except Exception as exc:  # noqa: BLE001
+        trace.append({"stage": "sample_displacement", "error": str(exc)[:200]})
+        r1 = float("nan")
+    if np.isfinite(r1) and (not np.isfinite(r0) or r1 <= r0):
+        trace.append({"stage": "sample_displacement", "Rwp": r1, "profile_corr": corr_fn(),
+                      "shift_um": float(sp["Shift"][0])})
+        return {"shift_um": round(float(sp["Shift"][0]), 2), "refined": True}
+    try:
+        hist.clear_refinements({"Sample Parameters": ["Shift"]})
+        sp["Shift"] = before
+        gpx.do_refinements([{}])
+    except Exception:  # noqa: BLE001
+        pass
+    trace.append({"stage": "sample_displacement", "rejected": True, "Rwp": rwp_fn()})
+    return {"refined": False}
+
+
+# Preferred orientation (March-Dollase). Platy or needle crystallites packed in
+# a flat-plate holder lie preferentially; the intensities of reflections along
+# the preferred axis are scaled up (MD < 1, plates) or down (MD > 1). A platy
+# phase such as gypsum can show its (0k0) reflections several times their
+# calculated height; uncorrected, that one family dominates the misfit and
+# biases the fractions. 'auto' tries, per
+# phase above PO_MIN_FRACTION, the three axes and the normals of the phase's
+# two strongest reflections, and keeps the best only when it lowers Rwp by at
+# least PO_MIN_GAIN (relative) with MD inside PO_MD_RANGE — a correction that
+# does not earn its parameter is removed.
+PO_MIN_GAIN = 0.03
+PO_MD_RANGE = (0.4, 2.5)
+PO_MIN_FRACTION = 0.05
+
+
+def _po_axes_for(ph, hist, n_strong=2) -> list:
+    axes = [(0, 0, 1), (0, 1, 0), (1, 0, 0)]
+    try:
+        refl = np.asarray(hist.data["Reflection Lists"][ph.name]["RefList"], dtype=float)
+        inten = refl[:, 3] * refl[:, 9]           # multiplicity x Fc^2
+        for i in np.argsort(inten)[::-1]:
+            h = tuple(int(round(v)) for v in refl[i, :3])
+            g = int(np.gcd.reduce([abs(v) for v in h if v])) if any(h) else 1
+            h = tuple(v // g for v in h)
+            if h[0] < 0 or (h[0] == 0 and (h[1] < 0 or (h[1] == 0 and h[2] < 0))):
+                h = tuple(-v for v in h)
+            if any(h) and h not in axes:
+                axes.append(h)
+                n_strong -= 1
+            if n_strong <= 0:
+                break
+    except Exception:  # noqa: BLE001 - fall back to the three axes
+        pass
+    return axes
+
+
+def _snapshot(phases, hist) -> dict:
+    """Deep copy of everything a refinement cycle can move (per-phase HAP
+    values and cells; histogram sample, background and instrument
+    parameters) so a trial that diverges can be undone exactly."""
+    import copy
+    return {"hap": {ph.name: copy.deepcopy(ph.data["Histograms"][hist.name]) for ph in phases},
+            "cell": {ph.name: copy.deepcopy(ph.data["General"]["Cell"]) for ph in phases},
+            "hist": {k: copy.deepcopy(hist.data[k])
+                     for k in ("Sample Parameters", "Background", "Instrument Parameters")}}
+
+
+def _restore(snap, phases, hist):
+    import copy
+    for ph in phases:
+        ph.data["Histograms"][hist.name] = copy.deepcopy(snap["hap"][ph.name])
+        ph.data["General"]["Cell"] = copy.deepcopy(snap["cell"][ph.name])
+    for k, v in snap["hist"].items():
+        hist.data[k] = copy.deepcopy(v)
+
+
+def _set_po(ph, hist, axis, refine, md=1.0):
+    ph.getHAPvalues(hist)["Pref.Ori."] = ["MD", float(md), bool(refine),
+                                          [int(a) for a in axis], 0, {}, [""], 0.1]
+
+
+def _preferred_orientation_stage(gpx, phases, hist, spec, rwp_fn, trace, fractions=None) -> dict:
+    """``spec``: 'auto', or {phase index | phase name: [h, k, l]} for a fixed
+    axis (refined MD, kept unconditionally). Returns {phase_name: record}."""
+    out = {}
+    if not spec:
+        return out
+    if isinstance(spec, dict):
+        for k, axis in spec.items():
+            ph = (phases[int(k)] if str(k).lstrip("-").isdigit() and int(k) < len(phases)
+                  else next((p for p in phases if p.name == k or p.name.endswith(str(k))), None))
+            if ph is None:
+                trace.append({"stage": "preferred_orientation", "error": f"no phase {k!r}"})
+                continue
+            _set_po(ph, hist, axis, True)
+        try:
+            gpx.do_refinements([{}])
+        except Exception as exc:  # noqa: BLE001
+            trace.append({"stage": "preferred_orientation", "error": str(exc)[:200]})
+            return out
+        for ph in phases:
+            po = ph.getHAPvalues(hist)["Pref.Ori."]
+            if po[2]:
+                out[ph.name] = {"axis": list(po[3]), "MD": round(float(po[1]), 4), "mode": "given"}
+        trace.append({"stage": "preferred_orientation", "Rwp": rwp_fn(), "phases": out})
+        return out
+    if str(spec).lower() != "auto":
+        raise ValueError(f"preferred_orientation must be None, 'auto' or {{phase: [h, k, l]}}, got {spec!r}")
+    order = sorted(range(len(phases)), key=lambda i: -(fractions or {}).get(phases[i].name, 1.0))
+    for i in order:
+        ph = phases[i]
+        if fractions and fractions.get(ph.name, 1.0) < PO_MIN_FRACTION:
+            continue
+        base = rwp_fn()
+        snap = _snapshot(phases, hist)
+        tried, best = [], None
+        for axis in _po_axes_for(ph, hist):
+            try:
+                _set_po(ph, hist, axis, True)
+                gpx.do_refinements([{}])
+                r, md = rwp_fn(), float(ph.getHAPvalues(hist)["Pref.Ori."][1])
+            except Exception as exc:  # noqa: BLE001
+                r, md = float("nan"), float("nan")
+                tried.append({"axis": list(axis), "error": str(exc)[:120]})
+            else:
+                tried.append({"axis": list(axis), "MD": round(md, 4), "Rwp": round(r, 3)})
+            # every trial starts from the same state: a diverged one (Rwp 100,
+            # intensities ~1e22 observed) must not seed the next
+            _restore(snap, phases, hist)
+            ok = (np.isfinite(r) and r <= base * (1.0 - PO_MIN_GAIN)
+                  and PO_MD_RANGE[0] <= md <= PO_MD_RANGE[1])
+            if ok and (best is None or r < best[0]):
+                best = (r, axis, md)
+        if best is not None:
+            _set_po(ph, hist, best[1], True, best[2])
+            try:
+                gpx.do_refinements([{}])
+                if not (np.isfinite(rwp_fn()) and rwp_fn() <= base):
+                    best = None
+            except Exception as exc:  # noqa: BLE001
+                trace.append({"stage": f"preferred_orientation:{ph.name}", "error": str(exc)[:200]})
+                best = None
+        if best is None:
+            _restore(snap, phases, hist)
+            try:
+                gpx.do_refinements([{}])
+            except Exception as exc:  # noqa: BLE001
+                trace.append({"stage": f"preferred_orientation:{ph.name}", "error": str(exc)[:200]})
+                continue
+        rec = {"tried": tried, "Rwp_before": round(base, 3), "Rwp_after": round(rwp_fn(), 3)}
+        if best is not None:
+            po = ph.getHAPvalues(hist)["Pref.Ori."]
+            rec.update(axis=list(po[3]), MD=round(float(po[1]), 4), mode="auto")
+        else:
+            rec.update(axis=None, MD=None, mode="auto: none kept")
+        out[ph.name] = rec
+        trace.append({"stage": f"preferred_orientation:{ph.name}", "Rwp": rwp_fn(),
+                      "kept": best is not None})
+    return out
 
 
 def _radiation_record(wavelength: Any, kalpha2_ratio: Any = None):
@@ -311,18 +575,37 @@ def _cif_displacements(structure_path: str) -> dict:
     return {el: s_ / n_ for el, (s_, n_) in acc.items() if n_}
 
 
-def _apply_displacements(phase, source_path: str, displacement) -> dict:
+# Plausible isotropic U (Å^2) for a non-hydrogen atom of an ordered inorganic
+# solid at room temperature. A CIF value outside it is far more often a
+# transcription or refinement artefact (B entered as U, an unconstrained powder
+# refinement) than physics, and it biases quantification: a calcite entry with
+# U = 0.034-0.045 overstated calcite by ~6 wt% at short wavelength. Such values
+# fall back to the default; 'cif_raw' keeps them.
+CIF_U_RANGE = (0.0005, 0.025)
+
+
+def _apply_displacements(phase, source_path: str, displacement, replaced: dict = None) -> dict:
     """Set the GSAS-II phase's atomic displacement parameters per
     ``displacement``: 'cif' — each element's U from the source CIF where it
-    gives one (``_cif_displacements``), GSAS-II's default 0.01 Å^2 otherwise;
-    'default' — GSAS-II's default for every atom; a number — that U for every
-    atom. Returns {element: U} actually set (empty: nothing changed)."""
+    gives one inside ``CIF_U_RANGE`` (hydrogen: any), GSAS-II's default
+    0.01 Å^2 otherwise; 'cif_raw' — the CIF values unbounded; 'default' —
+    GSAS-II's default for every atom; a number — that U for every atom.
+    Returns {element: U} actually set (empty: nothing changed); CIF values
+    rejected by the range are added to ``replaced`` when given."""
     if displacement is None or (isinstance(displacement, str) and displacement.lower() == "default"):
         return {}
     if isinstance(displacement, str):
-        if displacement.lower() != "cif":
-            raise ValueError(f"displacement must be 'cif', 'default' or a number (Å^2), got {displacement!r}")
+        mode = displacement.lower()
+        if mode not in ("cif", "cif_raw"):
+            raise ValueError(f"displacement must be 'cif', 'cif_raw', 'default' or a number (Å^2), "
+                             f"got {displacement!r}")
         values = _cif_displacements(source_path)
+        if mode == "cif":
+            lo, hi = CIF_U_RANGE
+            bad = {el: u for el, u in values.items() if el not in ("H", "D") and not lo <= u <= hi}
+            values = {el: u for el, u in values.items() if el not in bad}
+            if replaced is not None:
+                replaced.update({el: round(float(u), 5) for el, u in bad.items()})
     else:
         u = float(displacement)
         if not 0.0 < u < 0.25:
@@ -499,6 +782,10 @@ def rietveld_refine(
     n_background_terms: int = 6,
     kalpha2_ratio: float = None,
     displacement: Any = "cif",
+    geometry: Any = None,
+    instrument_preset: Any = None,
+    sample_displacement: Any = None,
+    preferred_orientation: Any = None,
 ) -> dict[str, Any]:
     """Rietveld-refine ``structure_path`` against a measured (two_theta, intensity)
     pattern with GSAS-II. Returns refined lattice + esd, fit metrics (Rwp and the
@@ -532,12 +819,20 @@ def rietveld_refine(
     n_background_terms : int
         Chebyshev background terms (default 6). RAISE (10-14) for a strongly
         curved/humped background; LOWER for a flat one.
+    geometry, instrument_preset, sample_displacement, preferred_orientation
+        As in ``rietveld_refine_multiphase``; ``preferred_orientation`` defaults
+        to None here (one phase: texture and the structure model trade off).
     """
     import os
     import tempfile
 
     G2sc = _load_g2sc()
     lam = _resolve_wavelength(wavelength)
+    geom = _resolve_geometry(wavelength, geometry)
+    preset = _resolve_instrument_preset(wavelength, instrument_preset)
+    # opt-in: with no internal standard the displacement correlates with the
+    # cells (on a single phase it absorbed a uniform 0.5 % cell error)
+    do_shift = bool(sample_displacement) and geom == "bragg-brentano"
     x = np.asarray(two_theta, dtype=float)
     y = np.asarray(intensity, dtype=float)
     if two_theta_range is not None:
@@ -556,12 +851,13 @@ def rietveld_refine(
         np.savetxt(xy, np.column_stack([x, y, esd]), fmt="%.6f")
         instf = os.path.join(td, "auto.instprm")
         with open(instf, "w", encoding="utf-8") as fh:
-            fh.write(_instprm(wavelength, kalpha2_ratio))
+            fh.write(_instprm(wavelength, kalpha2_ratio, geom, preset))
 
         gpx = G2sc.G2Project(newgpx=os.path.join(td, "riet.gpx"))
         hist = gpx.add_powder_histogram(xy, iparams=instf, fmthint="xye")
         phase = gpx.add_phase(cif, phasename="phase")
-        adp_used = _apply_displacements(phase, structure_path, displacement)
+        adp_replaced = {}
+        adp_used = _apply_displacements(phase, structure_path, displacement, adp_replaced)
         gpx.link_histogram_phase(hist, phase)
         input_cell = dict(phase.get_cell())  # starting cell, to expose refinement drift
 
@@ -593,12 +889,18 @@ def rietveld_refine(
             stages.append(("atoms", {"set": {"Atoms": {"all": "XU"}}}))
 
         trace = []
+        shift_rec, po_rec = {}, {}
         for label, st in stages:
             try:
                 gpx.do_refinements([st])
                 trace.append({"stage": label, "Rwp": _rwp(), "profile_corr": _corr()})
             except Exception as exc:  # a stage that diverges is recorded, not fatal
                 trace.append({"stage": label, "error": str(exc)[:200]})
+            if label == "zero_offset" and do_shift:
+                shift_rec = _sample_displacement_stage(gpx, hist, geom, _rwp, _corr, trace)
+            if label == "cell" and preferred_orientation:
+                po_rec = _preferred_orientation_stage(gpx, [phase], hist, preferred_orientation,
+                                                      _rwp, trace)
 
         cell = phase.get_cell()
         cell_esd = {}
@@ -650,7 +952,7 @@ def rietveld_refine(
                         if isinstance(v, (int, float))},
         "input_lattice": input_lattice,
         "converged": converged,
-        "Rwp": trace[-1].get("Rwp") if trace else None,
+        "Rwp": _final_rwp(res, trace),
         "profile_corr": final_corr,
         "gof": _safe_gof(res),
         "crystallite_size_um": size_um,
@@ -660,6 +962,12 @@ def rietveld_refine(
         "wavelength": float(lam),
         "kalpha_doublet": _radiation_record(wavelength, kalpha2_ratio),
         "displacement_U": adp_used,
+        "displacement_U_replaced": adp_replaced,
+        "geometry": geom,
+        "instrument_preset": preset,
+        "sample_displacement": shift_rec,
+        "preferred_orientation": po_rec,
+        "negative_microstrain": microstrain is not None and microstrain < 0,
         "structure_path": structure_path,
         "note": ("For arbitrary-unit data (no counting statistics) read 'profile_corr' "
                  "as the fit quality; 'Rwp' is inflated by nominal weights. If "
@@ -672,6 +980,16 @@ def rietveld_refine(
                  "a low-symmetry result with the identification score and expected "
                  "cell, and treat a modest profile_corr with caution."),
     }
+
+
+def _final_rwp(res, trace):
+    """Rwp of the final state (the residuals after the last refinement), not
+    of whichever stage was recorded last."""
+    for k in ("Rwp", "wR"):
+        v = (res or {}).get(k)
+        if isinstance(v, (int, float)) and v == v:
+            return float(v)
+    return trace[-1].get("Rwp") if trace else None
 
 
 def _safe_gof(res):
@@ -1390,6 +1708,10 @@ def rietveld_refine_multiphase(
     instrument_terms=None,
     kalpha2_ratio=None,
     displacement="cif",
+    geometry=None,
+    instrument_preset=None,
+    sample_displacement=None,
+    preferred_orientation="auto",
     _displacement_sources=None,
 ):
     """Multi-phase Rietveld: refine ALL phases against one measured pattern.
@@ -1415,7 +1737,19 @@ def rietveld_refine_multiphase(
 
     ``displacement`` — atomic displacement parameters (see
     ``_apply_displacements``): 'cif' (default) takes each element's U from the
-    structure file, 'default' leaves GSAS-II's 0.01 Å^2, a number sets that U.
+    structure file within ``CIF_U_RANGE``, 'cif_raw' unbounded, 'default'
+    leaves GSAS-II's 0.01 Å^2, a number sets that U.
+
+    ``geometry`` — 'bragg-brentano' (flat-plate reflection) or
+    'debye-scherrer' (capillary / transmission); None infers Bragg-Brentano
+    for a lab-anode wavelength and Debye-Scherrer otherwise.
+    ``instrument_preset`` — starting profile: 'lab', 'synchrotron' or None
+    (by wavelength; see ``INSTRUMENT_PRESETS``).
+    ``sample_displacement`` — refine the Bragg-Brentano sample displacement
+    (default off; kept only if the fit improves).
+    ``preferred_orientation`` — March-Dollase: 'auto' (default; applied for
+    Bragg-Brentano only, see ``PO_MIN_GAIN``), None, or {phase: [h, k, l]}.
+
     ``_displacement_sources`` — internal: the original CIFs to read U from when
     ``structure_paths`` are rewritten copies (the series warm start)."""
     import os
@@ -1423,6 +1757,14 @@ def rietveld_refine_multiphase(
 
     G2sc = _load_g2sc()
     lam = _resolve_wavelength(wavelength)
+    geom = _resolve_geometry(wavelength, geometry)
+    preset = _resolve_instrument_preset(wavelength, instrument_preset)
+    # opt-in: with no internal standard the displacement correlates with the
+    # cells (on a single phase it absorbed a uniform 0.5 % cell error)
+    do_shift = bool(sample_displacement) and geom == "bragg-brentano"
+    po_spec = preferred_orientation
+    if isinstance(po_spec, str) and po_spec.lower() == "auto" and geom != "bragg-brentano":
+        po_spec = None   # capillary / transmission: texture is averaged out
     x = np.asarray(two_theta, dtype=float)
     y = np.asarray(intensity, dtype=float)
     if two_theta_range is not None:
@@ -1442,12 +1784,13 @@ def rietveld_refine_multiphase(
                    fmt="%.6f")
         instf = os.path.join(td, "auto.instprm")
         with open(instf, "w", encoding="utf-8") as fh:
-            fh.write(_instprm(wavelength, kalpha2_ratio))
+            fh.write(_instprm(wavelength, kalpha2_ratio, geom, preset))
 
         gpx = G2sc.G2Project(newgpx=os.path.join(td, "riet.gpx"))
         hist = gpx.add_powder_histogram(xy, iparams=instf, fmthint="xye")
         phases = []
         adp_used = {}
+        adp_replaced = {}
         input_cells = {}
         for i, p in enumerate(paths):
             # one canonicalization dir per phase: _canonicalize_cif writes a
@@ -1457,8 +1800,11 @@ def rietveld_refine_multiphase(
             cif = _canonicalize_cif(p, pd, symprec=0.1)
             name = f"phase{i}_{os.path.splitext(os.path.basename(p))[0][:24]}"
             ph = gpx.add_phase(cif, phasename=name)
+            _rep = {}
             adp_used[name] = _apply_displacements(
-                ph, (_displacement_sources or paths)[i], displacement)
+                ph, (_displacement_sources or paths)[i], displacement, _rep)
+            if _rep:
+                adp_replaced[name] = _rep
             gpx.link_histogram_phase(hist, ph)
             if initial_fractions is not None:
                 ph.getHAPvalues(hist)["Scale"][0] = max(
@@ -1494,6 +1840,8 @@ def rietveld_refine_multiphase(
                            "no. coeffs": int(n_background_terms)},
             "Sample Parameters": ["Scale"]}})
         _stage("zero_offset", {"set": {"Instrument Parameters": ["Zero"]}})
+        shift_rec = (_sample_displacement_stage(gpx, hist, geom, _rwp, _corr, trace)
+                     if do_shift else {})
         # phase fractions for all but the first phase (first absorbed by the
         # histogram scale — refining all N is rank-deficient)
         _stage("phase_fractions", hap={"Scale": True}, hap_phases=phases[1:])
@@ -1519,6 +1867,12 @@ def rietveld_refine_multiphase(
                 _stage(f"cell:{ph.name}")
             for other in phases:
                 other.set_refinements({"Cell": False})
+
+        po_rec = {}
+        if po_spec:
+            po_rec = _preferred_orientation_stage(gpx, phases, hist, po_spec, _rwp, trace,
+                                                  fractions=_wt_fractions(phases, hist))
+        neg_mu = _negative_mustrain(phases, hist)
 
         wt = _wt_fractions(phases, hist)
         wt_esd, wt_esd_note = _wt_fraction_esds(gpx, phases, hist)
@@ -1561,6 +1915,8 @@ def rietveld_refine_multiphase(
                                 if isinstance(v, (int, float))},
                 "microstrain": mustrain,
                 "displacement_U": adp_used.get(ph.name, {}),
+                "displacement_U_replaced": adp_replaced.get(ph.name, {}),
+                "preferred_orientation": po_rec.get(ph.name),
             })
 
         prof = {
@@ -1591,13 +1947,18 @@ def rietveld_refine_multiphase(
         "weight_fraction_esds": {p["phase_name"]: p["weight_fraction_esd"] for p in per_phase},
         "weight_fraction_esd_note": wt_esd_note,
         "converged": converged,
-        "Rwp": trace[-1].get("Rwp") if trace else None,
+        "Rwp": _final_rwp(res, trace),
         "profile_corr": final_corr,
         "gof": _safe_gof(res),
         "convergence_trace": trace,
         "profile": prof,
         "wavelength": float(lam),
         "kalpha_doublet": _radiation_record(wavelength, kalpha2_ratio),
+        "geometry": geom,
+        "instrument_preset": preset,
+        "sample_displacement": shift_rec,
+        "preferred_orientation": po_rec,
+        "negative_microstrain": neg_mu,
         "note": ("Weight fractions follow the GSAS convention w_i = f_i*M_cell,i/sum "
                  "— quantitative ONLY when all crystalline phases are included and "
                  "microabsorption is negligible; an amorphous component is invisible "
@@ -1636,6 +1997,10 @@ def rietveld_refine_series(
     instrument_terms=None,
     kalpha2_ratio=None,
     displacement="cif",
+    geometry=None,
+    instrument_preset=None,
+    sample_displacement=None,
+    preferred_orientation=None,
 ):
     """Sequential multi-phase Rietveld across an in-situ series: a per-frame
     loop over the validated single-histogram staged protocol
@@ -1654,7 +2019,10 @@ def rietveld_refine_series(
 
     ``frames``: list of {"two_theta": [...], "intensity": [...], "label": ...}
     in series order. ``warm_start=False`` restarts every frame from the input
-    CIFs (use for non-contiguous frames where carrying state would mislead)."""
+    CIFs (use for non-contiguous frames where carrying state would mislead).
+    ``preferred_orientation`` defaults to None here: the 'auto' axis trials
+    multiply the per-frame cost; pass {phase: [h, k, l]} (an axis found on one
+    frame with refine_rietveld_multiphase) to correct texture across frames."""
     paths = [str(p) for p in structure_paths]
     if not frames:
         raise ValueError("frames is empty")
@@ -1690,7 +2058,11 @@ def rietveld_refine_series(
                     initial_fractions=prev_fracs if warm_start else None,
                     refine_instrument=refine_instrument,
                     instrument_terms=instrument_terms, kalpha2_ratio=kalpha2_ratio,
-                    displacement=displacement, _displacement_sources=paths)
+                    displacement=displacement, geometry=geometry,
+                    instrument_preset=instrument_preset,
+                    sample_displacement=sample_displacement,
+                    preferred_orientation=preferred_orientation,
+                    _displacement_sources=paths)
             except Exception as exc:
                 out_frames.append({"frame": k, "label": fr.get("label", k),
                                    "error": str(exc)[:200]})

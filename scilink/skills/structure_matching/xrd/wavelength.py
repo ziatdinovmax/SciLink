@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Union
+from typing import Any, Optional, Union
 
 from ..._shared._spec import ToolSpec
 
@@ -348,3 +348,65 @@ def _collect_text(d: Any, _seen: set | None = None) -> list[str]:
         for item in d:
             blobs.extend(_collect_text(item, _seen))
     return blobs
+
+
+# --- diffractometer geometry -------------------------------------------------
+# Flat-plate reflection (Bragg-Brentano) and capillary / transmission
+# (Debye-Scherrer) differ in the sample-displacement term and in whether
+# crystallites lie preferentially (texture); refinement needs to know which.
+_REFLECTION_RE = re.compile(
+    r"bragg[- ]?brentano|reflection|flat[- ]?plate|theta\s*/\s*2\s*-?\s*theta|θ\s*/\s*2θ|"
+    r"theta[- ]2[- ]?theta|θ-2θ|front[- ]loaded|back[- ]loaded|rear[- ]loaded|"
+    r"zero[- ]background (?:holder|plate)|spinning (?:sample|stage)",
+    re.IGNORECASE)
+_TRANSMISSION_RE = re.compile(
+    r"debye[- ]?scherrer|capillary|transmission|kapton|foil|cylindrical sample",
+    re.IGNORECASE)
+
+
+def resolve_geometry(system_info: Union[dict, str, None]) -> Optional[str]:
+    """'bragg-brentano', 'debye-scherrer' or None. See ``_SPEC_GEOMETRY``."""
+    if system_info is None:
+        return None
+    text = " ".join(_collect_text(system_info)) if isinstance(system_info, dict) else str(system_info)
+    refl, trans = bool(_REFLECTION_RE.search(text)), bool(_TRANSMISSION_RE.search(text))
+    if refl and not trans:
+        return "bragg-brentano"
+    if trans and not refl:
+        return "debye-scherrer"
+    if trans and refl:
+        # 'transmission' can describe a Kapton window on a reflection stage;
+        # an explicit geometry name decides
+        if re.search(r"debye[- ]?scherrer|capillary", text, re.IGNORECASE):
+            return "debye-scherrer"
+        if re.search(r"bragg[- ]?brentano", text, re.IGNORECASE):
+            return "bragg-brentano"
+    return None
+
+
+_SPEC_GEOMETRY = ToolSpec(
+    name="resolve_geometry",
+    description=(
+        "Read the diffractometer geometry from experiment metadata: "
+        "'bragg-brentano' (flat-plate reflection, theta/2theta, spinning or "
+        "front/back-loaded holder) or 'debye-scherrer' (capillary, "
+        "transmission). None when the metadata does not say."
+    ),
+    import_line="from scilink.skills.structure_matching.xrd.wavelength import resolve_geometry",
+    signature="resolve_geometry(system_info: dict | str | None) -> str | None",
+    parameters={
+        "system_info": {"type": "dict | str | None",
+                        "description": "The record's metadata (searched as text) or a free-text string."},
+    },
+    required=["system_info"],
+    returns="'bragg-brentano', 'debye-scherrer', or None (unknown or contradictory).",
+    when_to_use=(
+        "Before Rietveld refinement: pass the result as geometry= to "
+        "refine_rietveld / refine_rietveld_multiphase / refine_rietveld_series. "
+        "It sets the sample-displacement term and whether the automatic "
+        "preferred-orientation correction applies (flat-plate reflection only). "
+        "None lets the refinement infer it from the wavelength."
+    ),
+)
+
+TOOL_SPECS = [_SPEC_GEOMETRY]

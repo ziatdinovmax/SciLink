@@ -39,6 +39,8 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
+
 from ._base import QuerySkipped, QuerySpec, StructureCandidate
 from .local_cif import _lattice_within_ranges
 
@@ -66,6 +68,10 @@ _WEB_BACKOFF_S = 2.0
 # _DB_ROW_CAP bounds only the exact-set rows. The REST path keeps at most
 # _WEB_ROW_CAP rows. A query that hits a cap is recorded as truncated.
 _DB_ROW_CAP = 200000
+# Entry metadata read alongside each row (when the snapshot / REST reply has
+# them) to choose the entry that represents a phase (see _order_group).
+_META_COLUMNS = ("vol", "year", "method", "celltemp", "cellpressure", "status", "doi",
+                 "authors", "title")
 _WEB_ROW_CAP = 2000
 
 
@@ -132,6 +138,183 @@ def _safe_int(v) -> int:
         return -1
 
 
+# COD's SQL dump writes a missing value as the literal string '\N' (MySQL's
+# NULL marker), not SQL NULL: ~3,400 entries carry sgNumber '\N'. Read
+# verbatim, such an entry keys its phase by the symbol string instead of the
+# number, so one phase splits into two groups (observed: alpha-quartz P3_221 as
+# 11 numbered + 19 symbol-only entries, the larger group led by a theoretical
+# model with a 1.6 % short c axis).
+_MISSING = {"", "\\n", "?", ".", "none", "null"}
+
+
+def _missing(v) -> bool:
+    return v is None or (isinstance(v, str) and v.strip().lower() in _MISSING)
+
+
+def _num(v) -> Optional[float]:
+    if _missing(v):
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+_SG_SYMBOL_CACHE: dict = {}
+
+
+def _sg_number_from_symbol(sg) -> Optional[int]:
+    """Space-group number for a COD H-M symbol ('P 32 2 1', 'R -3 c :H',
+    'I 1 2/c 1') via pymatgen; None when it cannot be resolved."""
+    if _missing(sg):
+        return None
+    key = str(sg)
+    if key in _SG_SYMBOL_CACHE:
+        return _SG_SYMBOL_CACHE[key]
+    num = None
+    try:
+        from pymatgen.symmetry.groups import SpaceGroup
+        sym = re.sub(r"\s*:\s*\w+$", "", key).strip()          # origin/axes choice
+        compact = sym.replace(" ", "")
+        # screw axes: COD writes '32' / '42' / '63' where pymatgen wants '3_2' ...
+        screw = " ".join(re.sub(r"^([2346])([1-5])$", r"\1_\2", tok) for tok in sym.split())
+        for cand in (sym, compact, screw, screw.replace(" ", "")):
+            try:
+                num = SpaceGroup(cand).int_number
+                break
+            except Exception:  # noqa: BLE001 - try the next spelling
+                continue
+    except Exception:  # noqa: BLE001 - pymatgen unavailable
+        num = None
+    _SG_SYMBOL_CACHE[key] = num
+    return num
+
+
+def _sg_number(sg, sg_number) -> Optional[int]:
+    """The entry's space-group number: the stored one when valid, else
+    pymatgen's reading of the H-M symbol."""
+    n = _num(sg_number)
+    if n is not None and n > 0:
+        return int(n)
+    return _sg_number_from_symbol(sg)
+
+
+# --- choosing the entry that represents a phase -----------------------------
+# A phase (reduced formula + space group) usually has many COD entries: ambient
+# determinations, but also high-pressure and high-temperature series, doped
+# samples and theoretical models, which the database rarely flags (its pressure
+# and temperature columns are mostly empty). Representing a phase by its
+# highest COD id picked such outliers as Rietveld starting models (e.g. a
+# theoretical quartz model with a 1.6 % short c axis, which misplaces every
+# quartz line and biases its refined fraction). 'consensus' (the default) takes the entry from the densest cluster
+# of cell volumes — independent ambient determinations agree to a few tenths of
+# a percent, while P/T series and models spread out. Support is counted in
+# PUBLICATIONS, not entries: each paper votes once, at the median volume of its
+# entries, since one variable-temperature or high-pressure paper can deposit
+# twenty entries and would otherwise outvote the ambient cluster (observed for
+# calcite and gypsum). Experimental, ambient-condition entries are preferred; within the
+# cluster the entry closest to its centre, then the most recent publication
+# (modern coordinates and displacement parameters). Without cell data it falls
+# back to the newest-first order.
+REPRESENTATIVE_CHOICES = ("consensus", "newest")
+_CONSENSUS_VOL_TOL = 0.01      # relative volume window of the consensus cluster
+_CLOSENESS_BIN = 0.001         # entries this close (relative) to the centre tie on closeness
+_AMBIENT_T_K = (273.0, 313.0)  # cell temperature counted as ambient (K)
+_AMBIENT_P_KPA = 500.0         # cell pressure above this (kPa) is non-ambient
+
+
+def _meta(row) -> dict:
+    return row[6] if len(row) > 6 and isinstance(row[6], dict) else {}
+
+
+# Entries imported from the American Mineralogist Crystal Structure Database
+# (COD 9xxxxxx) leave the condition columns empty and state the conditions in
+# the title instead ('... Sample: P = 2.5 GPa', '... T = 400 C').
+_TITLE_P = re.compile(r"\bP\s*=\s*(-?[\d.]+)\s*(GPa|kbar|MPa|kPa|bar)\b", re.I)
+_TITLE_T = re.compile(r"\bT\s*=\s*(-?[\d.]+)\s*(?:°|deg(?:rees)?\.?\s*)?(C|K)\b")
+_TO_KPA = {"gpa": 1e6, "kbar": 1e5, "mpa": 1e3, "kpa": 1.0, "bar": 100.0}
+
+
+def _conditions(meta: dict) -> tuple:
+    """(cell temperature K, cell pressure kPa) from the columns, else the title."""
+    t, p = _num(meta.get("celltemp")), _num(meta.get("cellpressure"))
+    title = str(meta.get("title") or "")
+    if p is None:
+        m = _TITLE_P.search(title)
+        if m:
+            p = float(m.group(1)) * _TO_KPA[m.group(2).lower()]
+    if t is None:
+        m = _TITLE_T.search(title)
+        if m:
+            t = float(m.group(1)) + (273.15 if m.group(2) == "C" else 0.0)
+    return t, p
+
+
+def _non_ambient(meta: dict) -> bool:
+    t, p = _conditions(meta)
+    return bool((t is not None and not _AMBIENT_T_K[0] <= t <= _AMBIENT_T_K[1])
+                or (p is not None and p > _AMBIENT_P_KPA))
+
+
+def _theoretical(meta: dict) -> bool:
+    return str(meta.get("method") or "").strip().lower() == "theoretical"
+
+
+def _order_group(rows: list, representative: str = "consensus") -> list:
+    """Order one phase's entries, representative first (see the comment above).
+    Rows are ``(extra, natoms, cid, formula, sg, sg_number[, meta])``."""
+    def newest(t):
+        return -_safe_int(t[2])
+    if representative == "newest" or len(rows) < 2:
+        return sorted(rows, key=newest)
+    vols = {t[2]: _num(_meta(t).get("vol")) for t in rows}
+    usable = [t for t in rows if vols[t[2]] and vols[t[2]] > 0
+              and not _theoretical(_meta(t)) and not _non_ambient(_meta(t))]
+    def year(t):
+        y = _num(_meta(t).get("year"))
+        return y if y is not None else -1.0
+
+    def publication(t):
+        # titles can carry per-entry notes (conditions), so a paper is keyed
+        # by its DOI, else its authors and year
+        m = _meta(t)
+        if m.get("doi"):
+            return str(m["doi"]).strip().lower()
+        if m.get("authors"):
+            return f"{str(m['authors']).strip().lower()}|{m.get('year')}"
+        return f"entry:{t[2]}"
+
+    center = None
+    by_pub: dict = {}
+    for t in usable:
+        by_pub.setdefault(publication(t), []).append(t)
+    votes = [(float(np.median([vols[t[2]] for t in ts])), max(year(t) for t in ts))
+             for ts in by_pub.values()]
+    if len(votes) >= 2:
+        def window(v):
+            return [w for w, _ in votes if abs(w - v) <= _CONSENSUS_VOL_TOL * v]
+        best = max(votes, key=lambda vy: (len(window(vy[0])), vy[1]))
+        if len(window(best[0])) >= 2:     # one publication is no consensus
+            center = float(np.median(window(best[0])))
+        elif len(votes) >= 3:             # no two papers agree: the middle one
+            center = float(np.median([w for w, _ in votes]))
+
+    def key(t):
+        m, v = _meta(t), vols[t[2]]
+        flagged = str(m.get("status") or "").strip().lower() in ("retracted", "errors")
+        if center is None:
+            off, close = False, 0
+        elif v is None:
+            off, close = True, 0
+        else:
+            rel = abs(v - center) / center
+            off, close = rel > _CONSENSUS_VOL_TOL, int(rel / _CLOSENESS_BIN)
+        # fewest elements beyond the request first: a partly deuterated or
+        # doped entry can share the reduced formula of the phase
+        return (t[0], flagged, _theoretical(m), _non_ambient(m), off, close, -year(t), newest(t))
+    return sorted(rows, key=key)
+
+
 def _formula_natoms(formula: Optional[str]) -> float:
     """Total atom count of a COD (reduced) formula string — a structural-
     simplicity proxy: TiO2 -> 3, Ti9O17 -> 26. Used as a RETRIEVAL tiebreaker so
@@ -170,34 +353,34 @@ def _phase_key(formula: Optional[str], sg, sg_number) -> tuple:
         f = Composition(str(formula or "").replace("-", " ").replace(" ", "")).reduced_formula
     except Exception:  # noqa: BLE001 - unparseable formulas key as written
         f = str(formula or "").strip("- ").strip()
-    try:
-        n = int(sg_number)
-    except (TypeError, ValueError):
-        n = None
-    return (f, n if n and n > 0 else str(sg or "").replace(" ", ""))
+    n = _sg_number(sg, sg_number)
+    return (f, n if n else str(sg or "").replace(" ", ""))
 
 
-def _rank_rows(scored: list[tuple], rank_by: str = "reported") -> list[tuple]:
-    """Order ``(extra, natoms, cid, formula, sg, sg_number)`` rows by PHASE.
+def _rank_rows(scored: list[tuple], rank_by: str = "reported",
+               representative: str = "consensus") -> list[tuple]:
+    """Order ``(extra, natoms, cid, formula, sg, sg_number[, meta])`` rows by PHASE.
 
     Rows are grouped per phase (reduced formula + space group). Groups are
     ordered by fewest elements beyond those requested, then whole-number
     before fractional stoichiometry, then by ``rank_by``:
     'reported' — most entries in the database first (how often the phase has
     been reported), then fewest atoms; 'simplest' — fewest atoms, then most
-    reported; 'newest' — most recent deposition. Within a group the newest
-    entry comes first (modern coordinates and displacement parameters make
-    better refinement starting models than early idealized entries). Returns
-    the rows group by group, so a caller taking one candidate per phase gets
-    the groups in rank order."""
+    reported; 'newest' — most recent deposition. Within a group the representative
+    entry comes first (``representative``: 'consensus' — see ``_order_group``
+    — or 'newest', the highest COD id). Returns ``(cid, formula, sg,
+    sg_number, meta)`` rows group by group, so a caller taking one candidate
+    per phase gets the groups in rank order; ``meta`` carries the entry's
+    database fields and the group size."""
     groups: dict[tuple, list[tuple]] = {}
     for row in scored:
         groups.setdefault(_phase_key(row[3], row[4], row[5]), []).append(row)
-    for rows in groups.values():
-        rows.sort(key=lambda t: -_safe_int(t[2]))
+    for k in list(groups):
+        groups[k] = _order_group(groups[k], representative)
 
     def gkey(rows):
-        extra, natoms, cid, formula = rows[0][0], rows[0][1], rows[0][2], rows[0][3]
+        natoms, cid, formula = rows[0][1], rows[0][2], rows[0][3]
+        extra = min(r[0] for r in rows)
         frac = _stoich_fractional(formula)
         newest = -_safe_int(cid)
         if rank_by == "simplest":
@@ -207,8 +390,13 @@ def _rank_rows(scored: list[tuple], rank_by: str = "reported") -> list[tuple]:
         return (extra, frac, -len(rows), natoms, newest)
 
     ordered = sorted(groups.values(), key=gkey)
-    return [(cid, formula, sg, sgn) for rows in ordered
-            for _, _, cid, formula, sg, sgn in rows]
+    out = []
+    for rows in ordered:
+        for t in rows:
+            meta = dict(_meta(t))
+            meta["group_entries"] = len(rows)
+            out.append((t[2], t[3], t[4], _sg_number(t[4], t[5]) or t[5], meta))
+    return out
 
 
 class CODBackend:
@@ -258,7 +446,9 @@ class CODBackend:
 
         candidates: list[StructureCandidate] = []
         phases_taken: set = set()
-        for cid, formula, sg, sg_number in rows:
+        for row in rows:
+            cid, formula, sg, sg_number = row[:4]
+            row_meta = row[4] if len(row) > 4 and isinstance(row[4], dict) else {}
             # top_n counts distinct PHASES: further entries of a phase that
             # already has a loaded candidate are skipped (search_structures
             # dedupes per phase anyway — they would only eat the budget).
@@ -291,6 +481,10 @@ class CODBackend:
                     "_source_cif": str(getattr(self, "_located", {}).get(int(cid), "")),
                     "spacegroup_number": sg_number,
                     "extra_elements": extra,
+                    # why this entry represents its phase (see _order_group)
+                    "cod_entry": {k: row_meta[k] for k in
+                                  ("year", "method", "vol", "group_entries")
+                                  if k in row_meta and not _missing(row_meta[k])},
                 },
                 # No formation energy in COD; prefer the tightest composition
                 # match (fewest elements beyond those requested).
@@ -318,24 +512,35 @@ class CODBackend:
         request for C does not leak Cl/Ca/Cu entries."""
         con = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
         try:
+            cols = {r[1] for r in con.execute("PRAGMA table_info(data)")}
+            extra_cols = [c for c in _META_COLUMNS if c in cols]
             where = " AND ".join("formula LIKE ?" for _ in wanted)
             params: list = [f"%{e}%" for e in wanted]
-            sql = f"SELECT file, formula, sg, sgNumber FROM data WHERE {where}"
+            select = ", ".join(["file", "formula", "sg", "sgNumber", *extra_cols])
+            sql = f"SELECT {select} FROM data WHERE {where}"
             if spec.space_group_hints:
-                sql += " AND sgNumber IN (%s)" % ",".join("?" * len(spec.space_group_hints))
+                # entries whose number is missing ('\N') are kept here and
+                # matched on the number their symbol resolves to below
+                sql += (" AND (sgNumber IN (%s) OR typeof(sgNumber) != 'integer')"
+                        % ",".join("?" * len(spec.space_group_hints)))
                 params += [int(s) for s in spec.space_group_hints]
             # No LIMIT here: the LIKE pre-filter is loose, and capping it before
             # the exact-set filter drops arbitrary (often the most common) phases.
             raw = con.execute(sql, params).fetchall()
         finally:
             con.close()
+        hints = {int(h) for h in spec.space_group_hints} if spec.space_group_hints else None
         scored: list[tuple] = []
-        for cid, formula, sg, sg_number in raw:
+        for rec in raw:
+            cid, formula, sg, sg_number = rec[:4]
             els = _formula_elements(formula)
             if not wanted.issubset(els):
                 continue
+            if hints is not None and _sg_number(sg, sg_number) not in hints:
+                continue
+            meta = {c: v for c, v in zip(extra_cols, rec[4:]) if not _missing(v)}
             extra = len(els - wanted)
-            scored.append((extra, _formula_natoms(formula), cid, formula, sg, sg_number))
+            scored.append((extra, _formula_natoms(formula), cid, formula, sg, sg_number, meta))
         if len(scored) > _DB_ROW_CAP:
             self.last_report["truncated"] = True
             scored.sort(key=lambda t: (t[0], t[1]))
@@ -349,7 +554,8 @@ class CODBackend:
         # catastrophically wrong as Rietveld starting models (observed: a 1911
         # zincite entry collapsed its phase to 0 wt% in a certified mixture
         # where a modern entry refined to within 2 wt% of the weighed truth).
-        return _rank_rows(scored, getattr(spec, "rank_by", "reported"))
+        return _rank_rows(scored, getattr(spec, "rank_by", "reported"),
+                          getattr(spec, "representative", "consensus"))
 
     def _search_web(self, wanted: set[str], spec: QuerySpec) -> list[tuple]:
         """COD REST search (no local db, or cell-only). Same vetted domain;
@@ -411,19 +617,18 @@ class CODBackend:
             if wanted and not wanted.issubset(els):
                 continue
             sg_number = row.get("sgNumber")
-            if hints is not None:
-                try:
-                    if int(sg_number) not in hints:
-                        continue
-                except (TypeError, ValueError):
-                    continue
+            if hints is not None and _sg_number(row.get("sg"), sg_number) not in hints:
+                continue
             if len(scored) >= _WEB_ROW_CAP:
                 # a matching row past the cap: the rest are never ranked
                 self.last_report["truncated"] = True
                 break
-            scored.append((len(els - wanted), _formula_natoms(formula), cid, formula, row.get("sg"), sg_number))
+            meta = {c: row.get(c) for c in _META_COLUMNS if not _missing(row.get(c))}
+            scored.append((len(els - wanted), _formula_natoms(formula), cid, formula,
+                           row.get("sg"), sg_number, meta))
         # Same phase ranking as the local-db path (see _search_db).
-        return _rank_rows(scored, getattr(spec, "rank_by", "reported"))
+        return _rank_rows(scored, getattr(spec, "rank_by", "reported"),
+                          getattr(spec, "representative", "consensus"))
 
     def _load_structure(self, cid: int):
         cif = self._locate_cif(cid)

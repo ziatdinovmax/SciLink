@@ -422,13 +422,19 @@ labelled 'CuKa', or the ratio stated in the file header. A refinement's
 **Structure files for refinement.** `search_structures` saves a COD entry's
 own CIF, so the declared space group and the atomic displacement parameters
 reach the refinement tools; the engine keeps the declared space group (it no
-longer re-detects a higher symmetry at a loose tolerance). The refinement tools'
-`displacement` parameter (default `'cif'`) takes each element's U from the file
-where it gives one — about six in ten COD entries do; the rest, and computed
-structures, get GSAS-II's 0.01 Å². Pass `'default'` to use 0.01 Å² for every
-atom, or a number for a different fixed U (e.g. ~0.02–0.03 Å² for a soft or
-disordered phase whose file carries no values). The output's `displacement_U`
-lists the values used.
+longer re-detects a higher symmetry at a loose tolerance). A phase with many
+COD entries is represented by an experimental, ambient-condition entry from the
+cluster of cell volumes most publications agree on (`representative='consensus'`,
+the default) — not a theoretical model or a member of a high-pressure /
+high-temperature series; each candidate's `cod_entry` shows the year, method
+and number of entries. The refinement tools' `displacement` parameter (default
+`'cif'`) takes each element's U from the file where it gives a plausible value
+(non-H 0.0005–0.025 Å²) — about six in ten COD entries do; the rest, implausible
+values (listed in `displacement_U_replaced`) and computed structures get
+GSAS-II's 0.01 Å². Pass `'default'` to use 0.01 Å² for every atom, `'cif_raw'`
+for the file's values unbounded, or a number for a different fixed U (e.g.
+~0.02–0.03 Å² for a soft or disordered phase whose file carries no values). The
+output's `displacement_U` lists the values used.
 
 **Narrowing the candidate list.** The `search_structures` `query` dict
 accepts three optional filters that often pay for themselves:
@@ -775,6 +781,36 @@ collapses all intensity into one phase and reports a fake 100 %):
    the fractions in FIT_RESULTS_JSON) on a small CONFIRMED phase set (typically 2–3 phases NNLS
    already screened in). Do not run it as the first pass over a long candidate
    list, and do not run single-phase Rietveld to "quantify" a mixture.
+   NNLS `reliable=False` does not by itself rule Rietveld out: NNLS fits fixed
+   simulated profiles, so a wrong peak shape, a slightly different cell or
+   preferred orientation also raise its residual. When every strong peak is
+   predicted by a chemically plausible candidate, run the Rietveld refinement
+   and judge the fractions by ITS fit; add candidates first only when the NNLS
+   residual shows peaks no candidate predicts.
+
+**Rietveld settings from the metadata.** Pass the record's metadata through,
+and keep the profile terms on:
+- `geometry=resolve_geometry(system_info)` (from `wavelength`): flat-plate
+  reflection (`'bragg-brentano'`) or capillary/transmission
+  (`'debye-scherrer'`). It decides whether the preferred-orientation
+  correction applies.
+- Keep `refine_profile=True` and `refine_instrument=True` (the defaults): the
+  starting profile is generic, and a profile that does not match moves
+  intensity between overlapping phases. The start is chosen by wavelength
+  (`instrument_preset`: lab anode line → `'lab'`, other wavelengths →
+  `'synchrotron'`); if the result lists phases in `negative_microstrain`, the
+  start was broader than the data — rerun with a narrower preset.
+- `preferred_orientation='auto'` (the multiphase default) corrects texture in
+  flat-plate reflection data with a March-Dollase term per phase, kept only
+  when it lowers Rwp by ≥ 3 %. Platy and needle phases (gypsum, micas, clays,
+  hydroxides, many carbonates) routinely need it; report each kept axis and
+  MD with the fractions. `refine_rietveld_series` leaves it off (the trials
+  would run on every frame): find the axis on one representative frame and
+  pass it as `preferred_orientation={phase_index: [h, k, l]}`. A residual dominated by one family of reflections
+  (one peak far too strong or weak) is the texture signature.
+- `sample_displacement=True` is opt-in: on flat-plate data with a peak-position
+  residual that grows toward low angle. Without an internal standard it trades
+  off against the cells.
 
 **In-situ / series — identify at ESTABLISHING frames, then track.** A
 series is not N independent identifications. Identify each phase where it
@@ -964,7 +1000,10 @@ preferred orientation, microabsorption) and is typically several times
 larger. Report each fraction with its refinement esd and say that the
 esd is statistical. A converged refinement with a complete phase set is a
 result: do not withhold its fractions because the esds are small or
-missing. Withhold them only when the refinement itself fails (not
+missing, or because Rwp is above a textbook value when the residual is a
+profile-shape or texture misfit of phases that are all present (correct
+the texture with `preferred_orientation` first and state the remaining
+misfit). Withhold them only when the refinement itself fails (not
 converged, a phase collapsed to zero — `weight_fraction_esd_note` says
 so — a cell ran away, or a phase is missing from the set).
 
