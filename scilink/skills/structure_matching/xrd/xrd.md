@@ -60,7 +60,7 @@ The skill ships five tools the analysis script chains together:
   phase; common materials have many, fingerprint coincidences are usually
   single reports) and `organic_like`; pass `exclude_organic=True` when the
   sample is known to be inorganic. See "Composition-free identification"
-  under interpretation before reporting any blind hit.
+  under validation before reporting any blind hit.
 - **Isostructural impostors — read the absent-lines evidence.** A high
   `figure_of_merit` proves the candidate's lines lie where measured peaks
   are; it does NOT prove the phase (isostructural and superlattice phases
@@ -283,7 +283,10 @@ either-alone:
   the per-phase decomposition isn't needed.
 
 - **Post-fit pattern (no chemistry hypothesis)** — no hint at all. This
-  is the blind / unknown-sample case. **Fingerprint first**: run
+  is the blind / unknown-sample case. Plan the composition-free checks up front
+  (validation: "Composition-free identification"): decide
+  `exclude_organic` from the sample description, and plan to separate
+  identified from tentative phases before any quantification. **Fingerprint first**: run
   `extract_peaks` then `search_match_pattern` against the reference
   library (with `calibrate_zero` first when an internal standard is
   present) — a convincing figure of merit identifies the phase in one
@@ -470,6 +473,21 @@ must follow this exact sequence:
    metadata. The `search_structures` tool already prints its own
    `DB_MATCHES_JSON:` marker; the framework's stdout parser lifts it
    into `fit_results['db_matches']` automatically.
+
+**Composition-free route in the script.** When the record gives no
+elements, precursors or EDS/XRF result (see "Composition-free
+identification" under validation):
+- pass `exclude_organic=True` to `search_match_pattern` / `identify_mixture`
+  when the record describes an inorganic sample (oxides, minerals,
+  ceramics, inorganic synthesis from commercial reagents);
+- for every blind hit, record `n_library_reports`, `organic_like`, its
+  `score_xrd_match_robust(mode='component')` verdict and the joint
+  `confirmed` flag;
+- emit two lists in `FIT_RESULTS_JSON`: `identified_phases` (hits that pass
+  plausibility, prevalence and full-pattern evidence) and
+  `tentative_phases` (each with a one-line reason);
+- run NNLS / Rietveld on the identified phases only, and report the
+  unexplained intensity; tentative phases get no weight fraction.
 
 **Don't profile-fit for identification.** Two common over-builds to avoid:
 - The **fast tier needs no peak extraction** — it cross-correlates the
@@ -855,38 +873,6 @@ to the robust-tier margin:
   experimental wavelength, a peak-fit-first workflow, or a chemistry
   hypothesis the sample's record supports.
 
-**Composition-free identification.** When the record gives no elements,
-precursors, target compound or EDS/XRF result, a fingerprint hit is a
-HYPOTHESIS, not an identification: noisy or crowded peak lists match
-dense-line library entries by coincidence, and with ~370k phases in the
-library some exotic entry always scores well.
-
-- If you can ask the user, ask for the composition (elements, precursors
-  or an EDS/XRF result) BEFORE searching blind; it changes the answer more
-  than any search setting.
-- Use what the record does say. "Oxide ceramic", "mineral", "battery
-  cathode", "commercial reagents" for an inorganic synthesis →
-  `exclude_organic=True` in `search_match_pattern` / `identify_mixture`.
-- Before calling a blind hit a phase, check it on three counts:
-  (1) **chemical plausibility** for the sample as described; (2)
-  **prevalence**: `n_library_reports` > 1, a simple stoichiometry, and
-  ideally a known reagent or mineral (a single-report, many-element or
-  fractional-stoichiometry entry in a sample made from commercial reagents
-  is almost certainly a coincidence); (3) **evidence in the full
-  pattern**: `score_xrd_match_robust(mode='component')` accept and
-  `confirmed=True` in the joint multiphase check.
-- Report in tiers. **Identified**: passes all three. **Tentative**:
-  scores well but fails plausibility or prevalence. Name it as a
-  candidate, give no weight fraction, and say why it is doubtful.
-  **Unexplained peaks**: list their positions.
-- Quantify (NNLS / Rietveld) only the identified phases, and state how
-  much measured intensity they leave unexplained. Never put a weight
-  fraction on a phase you would not defend chemically.
-- "The phases cannot be identified reliably from this pattern without
-  composition; here are the candidates and why each is uncertain;
-  EDS/XRF or the precursor list would resolve it" is a valid, complete
-  answer. A confident list of exotic phases is not.
-
 **What a good score cannot tell you.** A high FOM / low MIP cost
 confirms the phase is present; it does NOT confirm purity, sample
 preparation correctness, or absence of minor phases. Mention this
@@ -922,6 +908,38 @@ textured sample can suppress some reflections and lower `predicted_coverage`
 legitimately — weigh it against the residuals and the alternatives.)
 
 ## validation
+
+**Composition-free identification.** When the record gives no elements,
+precursors, target compound or EDS/XRF result, a fingerprint hit is a
+HYPOTHESIS, not an identification: noisy or crowded peak lists match
+dense-line library entries by coincidence, and with ~370k phases in the
+library some exotic entry always scores well.
+
+- If you can ask the user, ask for the composition (elements, precursors
+  or an EDS/XRF result) BEFORE searching blind; it changes the answer more
+  than any search setting.
+- Use what the record does say. "Oxide ceramic", "mineral", "battery
+  cathode", "commercial reagents" for an inorganic synthesis →
+  `exclude_organic=True` in `search_match_pattern` / `identify_mixture`.
+- Before calling a blind hit a phase, check it on three counts:
+  (1) **chemical plausibility** for the sample as described; (2)
+  **prevalence**: `n_library_reports` > 1, a simple stoichiometry, and
+  ideally a known reagent or mineral (a single-report, many-element or
+  fractional-stoichiometry entry in a sample made from commercial reagents
+  is almost certainly a coincidence); (3) **evidence in the full
+  pattern**: `score_xrd_match_robust(mode='component')` accept and
+  `confirmed=True` in the joint multiphase check.
+- Report in tiers. **Identified**: passes all three. **Tentative**:
+  scores well but fails plausibility or prevalence. Name it as a
+  candidate, give no weight fraction, and say why it is doubtful.
+  **Unexplained peaks**: list their positions.
+- Quantify (NNLS / Rietveld) only the identified phases, and state how
+  much measured intensity they leave unexplained. Never put a weight
+  fraction on a phase you would not defend chemically.
+- "The phases cannot be identified reliably from this pattern without
+  composition; here are the candidates and why each is uncertain;
+  EDS/XRF or the precursor list would resolve it" is a valid, complete
+  answer. A confident list of exotic phases is not.
 
 **Per-candidate sanity checks.**
 
