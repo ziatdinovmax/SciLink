@@ -393,6 +393,19 @@ pass; do not stay capped at 10 while re-planning a search that returned no
 confident match. (For an in-situ *series*, keep it tight per frame — the
 establishing frame can widen once, then lock the identified phase.)
 
+**Instrument files.** When the data is an instrument file (Panalytical
+`.xrdml`, Bruker `.raw` / `.brml`, Rigaku `.ras` / `.rasx`), SciLink reads
+the pattern and fills `system_info` from the file's own record wherever the
+person gave nothing: `experiment.wavelength` (K-alpha1/K-alpha2 and the
+ratio; 0 when an incident-beam monochromator is in the recorded beam path),
+`experiment.radiation`, `experiment.geometry` (only when the file records
+the sample mode), optics, scan and tube settings;
+`metadata_filled_from_file` lists what came from the file. The person's
+values stand; `metadata_conflicts_with_file` lists disagreements — name
+them in the report. `resolve_wavelength` / `resolve_geometry` read these
+fields as they read any metadata. A file holding several scans arrives as
+its first scan (`scans_in_file`, `file_notes`).
+
 **Wavelength selection.** Default CuKa unless the experiment metadata
 says otherwise. MoKa is common for high-2θ work. A wavelength mismatch
 gives uniformly bad correlations / FOMs for all candidates with a
