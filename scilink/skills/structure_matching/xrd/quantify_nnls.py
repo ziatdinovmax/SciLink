@@ -253,10 +253,15 @@ def quantify_phases_nnls(
             "screening estimate (intensity-based; escalate to refine_multiphase "
             "for rigorous weight-fraction QPA with esds)."
             if reliable else
-            "Fit residual exceeds the data noise — the candidate set does NOT "
-            "fully explain the pattern (a phase is likely missing or off-database). "
-            "Treat the fractions as unreliable; add candidates or run index_pattern "
-            "on the residual before quantifying.")
+            "Fit residual exceeds the data noise: either the candidate set does not "
+            "explain the pattern (a phase missing or off-database), or the candidates' "
+            "fixed simulated profiles do not match the data (peak shape, cell, "
+            "preferred orientation — NNLS refines none of these). Treat THESE "
+            "fractions as unreliable. Check the residual: peaks no candidate "
+            "predicts -> add candidates or run index_pattern on the residual; misfit "
+            "only in the widths or relative heights of the candidates' own peaks -> "
+            "the set is likely complete: run refine_rietveld_multiphase, which "
+            "refines profile, cells and texture, and judge the fractions by its fit.")
 
     return {
         "phases": phases,

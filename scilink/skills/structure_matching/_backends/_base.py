@@ -13,6 +13,8 @@ from typing import Any, Optional, Protocol, runtime_checkable
 #   'simplest' — fewest atoms in the formula first;
 #   'newest'   — most recent deposition first.
 RANK_BY_CHOICES = ("reported", "simplest", "newest")
+# which database entry represents a phase (COD; see cod._order_group)
+REPRESENTATIVE_CHOICES = ("consensus", "newest")
 
 
 @dataclass
@@ -34,6 +36,10 @@ class QuerySpec:
       Matches pymatgen's ``Composition.anonymized_formula``.
     - ``rank_by``: ordering of distinct phases for backends with no relevance
       score of their own (see ``RANK_BY_CHOICES``).
+    - ``representative``: which entry represents a phase with many entries
+      (see ``REPRESENTATIVE_CHOICES``): 'consensus' (default) — experimental,
+      ambient, from the densest cluster of cell volumes, newest publication
+      within it; 'newest' — the highest database id.
     """
 
     chemistry: list[str]
@@ -45,6 +51,7 @@ class QuerySpec:
     density_range: Optional[tuple[float, float]] = None
     anonymous_formula: Optional[str] = None
     rank_by: str = "reported"
+    representative: str = "consensus"
 
     def __post_init__(self) -> None:
         # Chemistry-free (cell-only) queries are allowed when a lattice filter is
@@ -62,6 +69,10 @@ class QuerySpec:
         if self.rank_by not in RANK_BY_CHOICES:
             raise ValueError(
                 f"QuerySpec.rank_by must be one of {RANK_BY_CHOICES}; got {self.rank_by!r}")
+        if self.representative not in REPRESENTATIVE_CHOICES:
+            raise ValueError(
+                f"QuerySpec.representative must be one of {REPRESENTATIVE_CHOICES}; "
+                f"got {self.representative!r}")
         if self.z_range is not None:
             lo, hi = self.z_range
             if lo < 1 or hi < lo:
