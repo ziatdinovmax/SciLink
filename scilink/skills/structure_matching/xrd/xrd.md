@@ -86,9 +86,13 @@ The skill ships five tools the analysis script chains together:
   single-phase match leaves many strong measured peaks unmatched. Trust
   the `multiphase_confirmation` verdict over the per-iteration FOMs
   (those are computed against a residual that still contains other
-  phases); each phase carries a `confirmed` flag from the joint solver —
-  report `confirmed=False` phases as subtraction artifacts, not
-  components. `intensity_share` is a screening abundance proxy only —
+  phases); each phase carries a `confirmed` flag from the joint solver.
+  `confirmed=False` is a warning, not a verdict: it often marks a
+  subtraction artifact, but on real multi-phase samples the solver also
+  leaves genuine overlapping or minor components inactive. Keep such a
+  phase when it is chemically expected and the full-pattern refinement
+  supports it (non-trivial fraction, lower Rwp, its own lines fitted);
+  drop it when it is not. `intensity_share` is a screening abundance proxy only —
   quantify with Rietveld on the returned `structure_path`s. Strong peaks
   left in `residual_peaks` mean a phase missing from the library: run the
   indexing route on that residual list. Known limit: a sparse-line
@@ -476,7 +480,8 @@ must follow this exact sequence:
 
 **Composition-free route in the script.** When the record gives no
 elements, precursors or EDS/XRF result (see "Composition-free
-identification" under validation):
+identification" under validation; when composition IS given, skip this
+block and emit `identified_phases` as usual, with no tentative tier):
 - pass `exclude_organic=True` to `search_match_pattern` / `identify_mixture`
   when the record describes an inorganic sample (oxides, minerals,
   ceramics, inorganic synthesis from commercial reagents);
@@ -484,7 +489,8 @@ identification" under validation):
   `score_xrd_match_robust(mode='component')` verdict and the joint
   `confirmed` flag;
 - emit two lists in `FIT_RESULTS_JSON`: `identified_phases` (hits that pass
-  plausibility, prevalence and full-pattern evidence) and
+  plausibility and prevalence; full-pattern verdicts recorded as
+  supporting evidence) and
   `tentative_phases` (each with a one-line reason);
 - run NNLS / Rietveld on the identified phases only, and report the
   unexplained intensity; tentative phases get no weight fraction.
@@ -909,8 +915,12 @@ legitimately — weigh it against the residuals and the alternatives.)
 
 ## validation
 
-**Composition-free identification.** When the record gives no elements,
-precursors, target compound or EDS/XRF result, a fingerprint hit is a
+**Composition-free identification.** Scope: this applies ONLY when the
+record gives no elements, precursors, target compound or EDS/XRF result.
+When any of these is given, the element-filtered search already does the
+plausibility work: use the normal route, do not split phases into
+identified/tentative tiers, and report and quantify every expected phase
+the refinement supports. Without composition, a fingerprint hit is a
 HYPOTHESIS, not an identification: noisy or crowded peak lists match
 dense-line library entries by coincidence, and with ~370k phases in the
 library some exotic entry always scores well.
@@ -921,17 +931,21 @@ library some exotic entry always scores well.
 - Use what the record does say. "Oxide ceramic", "mineral", "battery
   cathode", "commercial reagents" for an inorganic synthesis →
   `exclude_organic=True` in `search_match_pattern` / `identify_mixture`.
-- Before calling a blind hit a phase, check it on three counts:
+- Before calling a blind hit a phase, check it on two counts:
   (1) **chemical plausibility** for the sample as described; (2)
   **prevalence**: `n_library_reports` > 1, a simple stoichiometry, and
   ideally a known reagent or mineral (a single-report, many-element or
   fractional-stoichiometry entry in a sample made from commercial reagents
-  is almost certainly a coincidence); (3) **evidence in the full
-  pattern**: `score_xrd_match_robust(mode='component')` accept and
-  `confirmed=True` in the joint multiphase check.
-- Report in tiers. **Identified**: passes all three. **Tentative**:
-  scores well but fails plausibility or prevalence. Name it as a
-  candidate, give no weight fraction, and say why it is doubtful.
+  is almost certainly a coincidence). These two are what separate real
+  phases from coincidences. Full-pattern evidence
+  (`score_xrd_match_robust(mode='component')`, the joint `confirmed`
+  flag, the refinement) is supporting: record it, but do not demote a
+  plausible, prevalent phase on it alone — on real mixtures these checks
+  also reject genuine overlapping or minor components. Drop a phase only
+  if the refinement gives it a negligible fraction.
+- Report in tiers. **Identified**: passes plausibility and prevalence.
+  **Tentative**: scores well but fails plausibility or prevalence. Name it
+  as a candidate, give no weight fraction, and say why it is doubtful.
   **Unexplained peaks**: list their positions.
 - Quantify (NNLS / Rietveld) only the identified phases, and state how
   much measured intensity they leave unexplained. Never put a weight
