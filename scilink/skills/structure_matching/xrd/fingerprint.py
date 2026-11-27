@@ -49,6 +49,7 @@ _logger = logging.getLogger(__name__)
 _ENV_DB = "SCILINK_XRD_FINGERPRINT_DB"
 _TOP_K = 40          # strongest lines stored per entry
 _LIB_CACHE: dict[str, Any] = {}
+PREV_BAND = 0.05     # prevalence near-tie band (see search_match_pattern)
 
 
 # --- library construction ------------------------------------------------------
@@ -260,6 +261,50 @@ def _load_library(library_path: Optional[str]):
     return _LIB_CACHE[path]
 
 
+_PREVALENCE_CACHE: dict[int, Any] = {}
+
+
+def _phase_report_counts(df):
+    """Number of library entries per phase (reduced formula + space-group
+    number). The library collapses exact duplicates, so a count above 1 means
+    the phase was reported independently (different studies, temperatures,
+    refinements). Common materials have many; most of the ~370k phases in a
+    COD-scale library are single reports."""
+    hit = _PREVALENCE_CACHE.get(id(df))
+    if hit is None or hit[0] is not df:        # guard against id() reuse
+        hit = (df, df.groupby(["formula", "sg_number"]).size())
+        _PREVALENCE_CACHE[id(df)] = hit
+    return hit[1]
+
+
+def _organic_like(formula: str) -> Optional[bool]:
+    """Heuristic flag for organic / metal-organic / molecular-carbon entries.
+
+    True when either
+      * the formula has hydrogen and carbon that cannot all be carbonate
+        (O < 3C): organics, metal-organics, oxalates, acetates; or
+      * it has at least 4 non-carbonate carbons (C - O/3) per formula unit and
+        more of them than metal atoms: catches organometallics whose X-ray
+        structure omits hydrogen, while leaving carbides (Cr23C6, V6C5, Al4C3)
+        unflagged.
+    Carbonates and hydroxy-carbonates (calcite, dolomite, malachite,
+    hydromagnesite) are never flagged. None when the formula does not parse.
+    X-ray structures often omit H, so a hydroxide may appear as e.g. 'LaO3'."""
+    try:
+        from pymatgen.core import Composition
+        c = Composition(str(formula))
+    except Exception:
+        return None
+    n_c, n_h, n_o = c["C"], c["H"], c["O"]
+    if n_c <= 0:
+        return False
+    if n_h > 0 and n_o < 3 * n_c:
+        return True
+    free_c = n_c - n_o / 3.0
+    n_metal = sum(amt for el, amt in c.items() if getattr(el, "is_metal", False))
+    return bool(free_c >= 4 and free_c > n_metal)
+
+
 # --- search-match ---------------------------------------------------------------
 
 TOOL_SPEC = ToolSpec(
@@ -279,7 +324,10 @@ TOOL_SPEC = ToolSpec(
     signature=(
         "search_match_pattern(two_theta, intensity, wavelength='CuKa', "
         "library_path=None, top_n=10, tol_deg=0.3, n_key_lines=3, "
-        "n_query_lines=8, max_shortlist=500) -> dict"
+        "n_query_lines=8, max_shortlist=500, materialize_top=3, "
+        "materialize_dir='./fp_matches', strong_line_frac=0.25, "
+        "absent_lines_penalty=0.0, exclude_organic=False, "
+        f"prevalence_tiebreak_band={PREV_BAND}) -> dict"
     ),
     parameters={
         "two_theta": {"type": "list[float]", "description": "Measured peak positions (2θ°) — extract_peaks' 'positions' (NOT the raw profile)."},
@@ -295,6 +343,8 @@ TOOL_SPEC = ToolSpec(
         "materialize_dir": {"type": "str", "description": "Directory the fetched CIFs are written to (default './fp_matches')."},
         "strong_line_frac": {"type": "float", "description": "A candidate line counts as STRONG (and therefore testable for absence) when its relative intensity is ≥ this fraction of the candidate's max (default 0.25). LOWER to test more lines (stricter impostor rejection, but weak lines may be missing from a capped measured peak list); RAISE to test only the dominant lines."},
         "absent_lines_penalty": {"type": "float", "description": "Ranking penalty weight for a candidate whose strong predicted lines are ABSENT from the measurement: adjusted_score = figure_of_merit × (1 − penalty × frac_absent). DEFAULT 0 (evidence is reported, ranking unchanged): validated on real data the absent-fraction cleanly kills some impostors (FeAgS2 masquerading as fluorite: 0.86 absent vs truth 0.00) but INVERTS for phases with polytypes/polymorphs whose extra weak lines are legitimately missing (ZnS wurtzite-vs-sphalerite entries) — so a blind default is unsafe. Instead READ 'frac_strong_lines_absent' per match: among near-tied FOMs, a candidate with substantially MORE absent strong lines than its rivals is the impostor. RAISE the penalty (e.g. 0.5) only when the sample is untextured and single-polymorph candidates are expected."},
+        "exclude_organic": {"type": "bool", "description": "Drop library entries flagged 'organic_like' BEFORE scoring: H plus non-carbonate carbon (organics, metal-organics, oxalates, acetates), or ≥4 non-carbonate carbons outnumbering the metal atoms (organometallics stored without H; also cyanometallates and fullerides). Carbonates and carbides are kept. Default False. Set True when the sample is known to be inorganic (oxides, minerals, ceramics, metals, inorganic salts): dense-line organic entries are the most common coincidental matches on noisy peak lists. Leave False when organic or hybrid phases are possible."},
+        "prevalence_tiebreak_band": {"type": "float", "description": f"Near-tie rule using how often a phase is reported (default {PREV_BAND}). Among matches whose adjusted_score is within this band of the best, phases with more than one library entry rank ahead of single-report phases. Rationale: common materials are reported many times, while fingerprint coincidences are overwhelmingly single-report exotic entries. Validated on single-phase mineral patterns and certified round-robin mixtures. Set 0 to rank purely by score (e.g. novel or rarely studied materials); RAISE to lean harder on prevalence."},
     },
     required=["two_theta", "intensity"],
     returns=(
@@ -338,6 +388,8 @@ def search_match_pattern(
     materialize_dir: str = "./fp_matches",
     strong_line_frac: float = 0.25,
     absent_lines_penalty: float = 0.0,
+    exclude_organic: bool = False,
+    prevalence_tiebreak_band: float = PREV_BAND,
 ) -> dict[str, Any]:
     """Fingerprint search-match of measured peaks against the library.
 
@@ -359,9 +411,16 @@ def search_match_pattern(
     yy = np.asarray(intensity, dtype=float)
     if tt.size < 3:
         raise ValueError("search_match_pattern needs at least 3 measured peaks.")
-    df = _load_library(library_path)
-    if df is None or len(df) == 0:
+    df_all = _load_library(library_path)
+    if df_all is None or len(df_all) == 0:
         raise RuntimeError("Fingerprint library is empty.")
+    counts = _phase_report_counts(df_all)
+    df = df_all
+    n_excluded_organic = 0
+    if exclude_organic:
+        mask = _organic_mask(df_all)
+        df = df_all[~mask]
+        n_excluded_organic = int(mask.sum())
 
     # Query's strongest lines, in 2-theta.
     order = np.argsort(yy)[::-1][: int(n_query_lines)]
@@ -462,9 +521,12 @@ def search_match_pattern(
             "frac_strong_lines_absent": round(frac_absent, 3),
             "absent_strong_lines": absent_lines,
             "n_matched": int(sc.get("n_matched", 0)) if "n_matched" in sc else None,
+            "n_library_reports": int(counts.get((row["formula"], row["sg_number"]), 1)),
+            "organic_like": _organic_like(row["formula"]),
             "cif_path": row.get("cif_path"),
         })
     matches.sort(key=lambda r: -r["adjusted_score"])
+    matches = _prevalence_tiebreak(matches, float(prevalence_tiebreak_band))
 
     # Resolve full structures for the top hits — identification stores only
     # peak lists, so structure-level follow-up (simulate confirm, Rietveld)
@@ -484,27 +546,48 @@ def search_match_pattern(
 
     return {
         "matches": matches[: int(top_n)],
-        "n_library_entries": int(len(df)),
+        "n_library_entries": int(len(df_all)),
+        "n_excluded_organic": n_excluded_organic,
         "n_shortlisted": int(n_short),
         "note": (
             "figure_of_merit >= ~0.7 with the strong lines matched is a solid "
             "ID — confirm by simulating the hit (cif_path) against the pattern "
             "and refine_rietveld for the lattice. NO convincing match means the "
             "phase is likely not in the library: widen tol_deg / lower "
-            "n_key_lines (texture), or fall back to the indexing route."
+            "n_key_lines (texture), or fall back to the indexing route. "
+            "Without composition information treat every hit as a hypothesis: "
+            "a single-report (n_library_reports=1) or organic_like hit that "
+            "is chemically implausible for the sample is most likely a "
+            "fingerprint coincidence."
         ),
     }
 
 
+def _prevalence_tiebreak(matches: list, band: float, key: str = "adjusted_score") -> list:
+    """Within ``band`` of the best score, move phases with more than one
+    library report ahead of single-report phases (stable otherwise)."""
+    if band <= 0 or not matches:
+        return matches
+    top = matches[0][key]
+    head = [m for m in matches if m[key] >= top - band]
+    tail = [m for m in matches if m[key] < top - band]
+    head.sort(key=lambda m: (int(m.get("n_library_reports") or 1) <= 1, -m[key]))
+    return head + tail
+
+
+_ORGANIC_CACHE: dict[int, Any] = {}
+
+
+def _organic_mask(df):
+    hit = _ORGANIC_CACHE.get(id(df))
+    if hit is None or hit[0] is not df:        # guard against id() reuse
+        uniq = {f: bool(_organic_like(f)) for f in df["formula"].unique()}
+        hit = (df, df["formula"].map(uniq).to_numpy(dtype=bool))
+        _ORGANIC_CACHE[id(df)] = hit
+    return hit[1]
+
+
 def _resolve_lam(wavelength: Any) -> float:
-    # mirror the gsas engine's alias table without importing it (keeps this
-    # module usable without the gsas extra)
-    if isinstance(wavelength, (int, float)):
-        return float(wavelength)
-    aliases = {"cuka": 1.5406, "cuka1": 1.54056, "cuka2": 1.54439,
-               "moka": 0.71073, "moka1": 0.70930, "coka": 1.78897,
-               "feka": 1.93604, "crka": 2.28970, "agka": 0.55941}
-    key = str(wavelength).strip().lower().replace(" ", "").replace("-", "")
-    if key in aliases:
-        return aliases[key]
-    raise ValueError(f"Unrecognized wavelength {wavelength!r}")
+    # the shared table (no gsas import, so this module works without the gsas extra)
+    from .wavelength import wavelength_angstrom
+    return wavelength_angstrom(wavelength)

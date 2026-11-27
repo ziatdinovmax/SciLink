@@ -72,7 +72,28 @@ TOOL_SPEC = ToolSpec(
                 "volume?: (min,max) Å³}, max_e_above_hull?: float, top_n?: int "
                 "(default 10, per chemistry hypothesis), z_range?: "
                 "(int, int), density_range?: (float, float) (g/cm³), "
-                "anonymous_formula?: str (e.g. 'AB2').\n\n"
+                "anonymous_formula?: str (e.g. 'AB2'), rank_by?: "
+                "'reported' | 'simplest' | 'newest', representative?: "
+                "'consensus' | 'newest'.\n\n"
+                "top_n counts DISTINCT phases (one entry per reduced formula + "
+                "space group). rank_by orders them for COD, which "
+                "carry no relevance score: 'reported' (default) puts the phases "
+                "deposited most often first — the common phase of a chemistry "
+                "(V2O5, anatase, hematite) ahead of rarely reported suboxides "
+                "and doped or defective variants (fractional formulas, which "
+                "always rank after whole-number ones); 'simplest' puts the "
+                "fewest atoms per formula first; 'newest' the most recent "
+                "deposition. representative picks the entry that stands for a "
+                "phase: 'consensus' (default) takes an experimental, ambient-"
+                "condition entry from the densest cluster of reported cell "
+                "volumes, the most recent publication within it — skipping "
+                "theoretical models and high-pressure / high-temperature "
+                "series, which make poor Rietveld starting models; 'newest' "
+                "takes the highest COD id. Each candidate's 'cod_entry' "
+                "metadata shows the chosen entry's year, method and how many "
+                "entries the phase has. Switch to "
+                "'simplest' or 'newest', or raise top_n, when a rare or newly "
+                "reported phase is the hypothesis.\n\n"
                 "CELL-ONLY (blind) query: when the sample chemistry is UNKNOWN, "
                 "omit chemistry and pass lattice_param_ranges from "
                 "index_pattern's recovered cell — the unit cell becomes the "
@@ -304,6 +325,8 @@ def _coerce_query_specs(query: dict) -> list[QuerySpec]:
     anonymous_formula = query.get("anonymous_formula")
     if anonymous_formula is not None:
         anonymous_formula = str(anonymous_formula)
+    rank_by = str(query.get("rank_by") or "reported")
+    representative = str(query.get("representative") or "consensus")
 
     return [
         QuerySpec(
@@ -315,6 +338,8 @@ def _coerce_query_specs(query: dict) -> list[QuerySpec]:
             z_range=z_range,
             density_range=density_range,
             anonymous_formula=anonymous_formula,
+            rank_by=rank_by,
+            representative=representative,
         )
         for c in chemistries
     ]
@@ -407,16 +432,33 @@ def _materialize_cifs(
     output_dir: Path,
     warnings: list[str],
 ) -> None:
-    """Write CIFs to ``output_dir`` for candidates that don't already have a path on disk."""
+    """Write CIFs to ``output_dir`` for candidates that don't already have a path on disk.
+
+    A candidate whose backend kept the database entry's own CIF (``_source_cif``,
+    e.g. COD) is copied VERBATIM: re-writing it from the parsed structure
+    (pymatgen's P1 output) drops the declared space group and the atomic
+    displacement parameters that refinement needs. Otherwise the parsed
+    structure is written (computed sources such as Materials Project)."""
+    import shutil
+
     output_dir.mkdir(parents=True, exist_ok=True)
     for cand in candidates:
         if cand.structure_path and Path(cand.structure_path).is_file():
             continue
+        path = output_dir / f"{cand.source}_{cand.id}.cif"
+        src = cand.metadata.get("_source_cif")
+        if src and Path(src).is_file():
+            try:
+                shutil.copyfile(src, path)
+                cand.structure_path = str(path)
+                continue
+            except Exception as e:
+                warnings.append(f"Could not copy the source CIF for {cand.source}:{cand.id} ({e}); "
+                                "writing it from the parsed structure")
         struct = cand.metadata.get("_structure")
         if struct is None:
             warnings.append(f"No structure object for {cand.source}:{cand.id} — cannot materialize CIF")
             continue
-        path = output_dir / f"{cand.source}_{cand.id}.cif"
         try:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(struct.to(fmt="cif"))

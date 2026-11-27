@@ -465,10 +465,74 @@ def test_cod_db_cap_is_reported(monkeypatch, tmp_path):
     con = sqlite3.connect(db)
     con.execute("CREATE TABLE data (file INTEGER, formula TEXT, sg TEXT, sgNumber INTEGER)")
     con.executemany("INSERT INTO data VALUES (?,?,?,?)",
-                    [(1000000 + i, "- Si -", "F d -3 m", 227) for i in range(3)])
+                    [(1000000 + i, "- Si -", "F d -3 m", 227) for i in range(4)])
     con.commit(); con.close()
-    monkeypatch.setattr(cod_mod, "_DB_ROW_CAP", 3)
+    monkeypatch.setattr(cod_mod, "_DB_ROW_CAP", 3)   # 4 exact-set rows > cap
     b = CODBackend(db_path=str(db), cif_dir=None, allow_web=False)
     monkeypatch.setattr(b, "_load_structure", lambda cid: _silicon())
     b.query(QuerySpec(chemistry=["Si"]))
     assert b.last_report["truncated"] is True
+
+
+def _cod_db(tmp_path, rows):
+    import sqlite3
+    db = tmp_path / "cod.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE data (file INTEGER, formula TEXT, sg TEXT, sgNumber INTEGER)")
+    con.executemany("INSERT INTO data VALUES (?,?,?,?)", rows)
+    con.commit(); con.close()
+    return str(db)
+
+
+def test_cod_loose_prefilter_is_not_capped_before_exact_filter(monkeypatch, tmp_path):
+    """'%S%' also matches Si rows; a cap on that loose pre-filter must not
+    push the exact-S entry out before the exact-set filter runs."""
+    from scilink.skills.structure_matching._backends import cod as cod_mod
+    rows = [(1000000 + i, "- Si -", "F d -3 m", 227) for i in range(5)]
+    rows.append((2000000, "- S -", "F d d d", 70))
+    b = CODBackend(db_path=_cod_db(tmp_path, rows), cif_dir=None, allow_web=False)
+    monkeypatch.setattr(cod_mod, "_DB_ROW_CAP", 3)
+    got = b._search_db({"S"}, QuerySpec(chemistry=["S"]))
+    assert [r[0] for r in got] == [2000000]
+
+
+_V_O_ROWS = [
+    (1000001, "- O V -", "F m -3 m", 225),            # VO, reported once
+    (1000002, "- O0.03 V -", "I m -3 m", 229),        # fractional (defective) variant
+    (1000003, "- O5 V2 -", "P m m n", 59),            # V2O5, reported three times
+    (1500004, "- O5 V2 -", "P m m n", 59),
+    (2100005, "- O5 V2 -", "P m m n", 59),
+    (1000006, "- O2 V -", "P 42/m n m", 136),         # VO2
+]
+
+
+def test_cod_rank_by_reported_puts_common_phase_first(tmp_path):
+    b = CODBackend(db_path=_cod_db(tmp_path, _V_O_ROWS), cif_dir=None, allow_web=False)
+    b.last_report = {"truncated": False, "dropped": 0, "drop_reasons": []}
+    got = b._search_db({"V", "O"}, QuerySpec(chemistry=["V", "O"]))
+    ids = [r[0] for r in got]
+    assert ids[:3] == [2100005, 1500004, 1000003]      # V2O5 group, newest entry first
+    assert ids[-1] == 1000002                          # fractional variant last
+
+
+def test_cod_rank_by_simplest_and_newest(tmp_path):
+    b = CODBackend(db_path=_cod_db(tmp_path, _V_O_ROWS), cif_dir=None, allow_web=False)
+    b.last_report = {"truncated": False, "dropped": 0, "drop_reasons": []}
+    simple = [r[0] for r in b._search_db({"V", "O"}, QuerySpec(chemistry=["V", "O"], rank_by="simplest"))]
+    assert simple[0] == 1000001 and simple[-1] == 1000002   # VO first, fractional still last
+    newest = [r[0] for r in b._search_db({"V", "O"}, QuerySpec(chemistry=["V", "O"], rank_by="newest"))]
+    assert newest[0] == 2100005
+
+
+def test_cod_top_n_counts_distinct_phases(monkeypatch, tmp_path):
+    b = CODBackend(db_path=_cod_db(tmp_path, _V_O_ROWS), cif_dir=None, allow_web=False)
+    monkeypatch.setattr(b, "_load_structure", lambda cid: _silicon())
+    cands = b.query(QuerySpec(chemistry=["V", "O"], top_n=2))
+    # V2O5 (3 entries) then VO (1 entry, fewer atoms than VO2); the other V2O5
+    # entries do not consume the budget
+    assert [c.id for c in cands] == ["2100005", "1000001"]
+
+
+def test_queryspec_rejects_unknown_rank_by():
+    with pytest.raises(ValueError):
+        QuerySpec(chemistry=["Si"], rank_by="popular")

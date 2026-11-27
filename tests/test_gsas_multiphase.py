@@ -78,7 +78,7 @@ def two_phase_cifs(tmp_path_factory):
     return str(sp), str(np_)
 
 
-def _forward_two_phase(si_cif, na_cif, frac_na, workdir, a_si=None, seed=0):
+def _forward_two_phase(si_cif, na_cif, frac_na, workdir, a_si=None, seed=0, wavelength=1.5406):
     """Simulate a two-phase pattern with SET HAP fractions; return x, y(noisy),
     and the ground-truth weight fractions."""
     from pymatgen.core import Lattice, Structure
@@ -88,7 +88,7 @@ def _forward_two_phase(si_cif, na_cif, frac_na, workdir, a_si=None, seed=0):
         si_cif = os.path.join(workdir, f"si_{a_si}.cif")
         open(si_cif, "w").write(si.to(fmt="cif"))
     instf = os.path.join(workdir, "auto.instprm")
-    open(instf, "w").write(ge._INSTPRM_TEMPLATE.format(lam=1.5406))
+    open(instf, "w").write(ge._instprm(wavelength))   # 1.5406 -> one line; 'CuKa' -> the Ka1/Ka2 doublet
     d1 = os.path.join(workdir, "p1"); d2 = os.path.join(workdir, "p2")
     os.makedirs(d1, exist_ok=True); os.makedirs(d2, exist_ok=True)
     gpx = G2sc.G2Project(newgpx=os.path.join(workdir, "f.gpx"))
@@ -119,7 +119,7 @@ def _forward_two_phase(si_cif, na_cif, frac_na, workdir, a_si=None, seed=0):
 def test_multiphase_roundtrip(two_phase_cifs, tmp_path):
     si_cif, na_cif = two_phase_cifs
     x, y, truth = _forward_two_phase(si_cif, na_cif, 0.55, str(tmp_path))
-    r = ge.rietveld_refine_multiphase([si_cif, na_cif], x, y)
+    r = ge.rietveld_refine_multiphase([si_cif, na_cif], x, y, wavelength=1.5406)
     assert r["converged"]
     wf = list(r["weight_fractions"].values())
     # phase order follows structure_paths: si first
@@ -144,7 +144,7 @@ def test_series_roundtrip_fractions_and_expansion(two_phase_cifs, tmp_path):
         frames.append({"two_theta": x.tolist(), "intensity": y.tolist(),
                        "label": 300 + 10 * k})
         truths.append(truth)
-    r = ge.rietveld_refine_series([si_cif, na_cif], frames)
+    r = ge.rietveld_refine_series([si_cif, na_cif], frames, wavelength=1.5406)
     assert len(r["frames"]) == 3
     names = r["phase_names"]
     for k, fr in enumerate(r["frames"]):
@@ -159,3 +159,43 @@ def test_series_roundtrip_fractions_and_expansion(two_phase_cifs, tmp_path):
     # expansion is monotone across frames
     a_series = [fr["cells"][names[0]]["length_a"] for fr in r["frames"]]
     assert a_series[0] < a_series[1] < a_series[2]
+
+
+@pytest.mark.skipif(not (ge.gsas_available() and _pymatgen_available()), reason="needs GSAS-II + pymatgen")
+def test_multiphase_roundtrip_kalpha_doublet(two_phase_cifs, tmp_path):
+    """A pattern measured with a tube's K-alpha1 + K-alpha2 doublet, refined as
+    'CuKa' (the doublet), recovers the weight fractions; refining the same data
+    as one line fits measurably worse."""
+    si_cif, na_cif = two_phase_cifs
+    x, y, truth = _forward_two_phase(si_cif, na_cif, 0.35, str(tmp_path), wavelength="CuKa")
+    r = ge.rietveld_refine_multiphase([si_cif, na_cif], x, y, wavelength="CuKa")
+    wf = list(r["weight_fractions"].values())
+    assert r["converged"] and r["kalpha_doublet"]["I(Ka2)/I(Ka1)"] == 0.5
+    assert abs(wf[0] - truth["si"]) < 0.02 and abs(wf[1] - truth["nacl"]) < 0.02
+    single = ge.rietveld_refine_multiphase([si_cif, na_cif], x, y, wavelength="CuKa", kalpha2_ratio=0)
+    assert single["kalpha_doublet"] is None
+    assert r["profile_corr"] > single["profile_corr"]
+
+
+@pytest.mark.skipif(not (ge.gsas_available() and _pymatgen_available()), reason="needs GSAS-II + pymatgen")
+def test_instrument_profile_stage_is_recorded(two_phase_cifs, tmp_path):
+    si_cif, na_cif = two_phase_cifs
+    x, y, _ = _forward_two_phase(si_cif, na_cif, 0.35, str(tmp_path))
+    r = ge.rietveld_refine_multiphase([si_cif, na_cif], x, y, wavelength=1.5406)
+    st = [t for t in r["convergence_trace"] if t.get("stage") == "instrument_profile"]
+    assert len(st) == 1 and st[0]["terms"] == ["V", "W", "X"]
+    off = ge.rietveld_refine_multiphase([si_cif, na_cif], x, y, wavelength=1.5406, refine_instrument=False)
+    assert not [t for t in off["convergence_trace"] if t.get("stage") == "instrument_profile"]
+
+
+@pytest.mark.skipif(not (ge.gsas_available() and _pymatgen_available()), reason="needs GSAS-II + pymatgen")
+def test_displacement_setting_reaches_the_refinement(two_phase_cifs, tmp_path):
+    si_cif, na_cif = two_phase_cifs
+    x, y, _ = _forward_two_phase(si_cif, na_cif, 0.35, str(tmp_path))
+    fixed = ge.rietveld_refine_multiphase([si_cif, na_cif], x, y, wavelength=1.5406, displacement=0.02)
+    assert all(set(p["displacement_U"].values()) == {0.02} for p in fixed["phases"])
+    dflt = ge.rietveld_refine_multiphase([si_cif, na_cif], x, y, wavelength=1.5406, displacement="default")
+    assert all(p["displacement_U"] == {} for p in dflt["phases"])
+    assert fixed["profile_corr"] != dflt["profile_corr"]
+    with pytest.raises(ValueError):
+        ge.rietveld_refine_multiphase([si_cif, na_cif], x, y, wavelength=1.5406, displacement="nonsense")
